@@ -1,0 +1,247 @@
+\section{\texttt{annual\_production\_sim.cpp} 源码等价实现}
+\label{sec:annual-source-equivalent}
+
+本章逐项解释
+\srcpath{include/hacdcpf/time\_series/annual\_production\_sim.hpp} 与
+\srcpath{src/time\_series/annual\_production\_sim.cpp} 的现行行为。它不是年度生产模拟的理想化
+路线图；凡公共字段已声明但实现没有读取，均明确标为 ``未消费''。年度入口的顺序层级路径执行
+L0--L2--L3；\fld{enable\_parallel\_daily=true} 仅对无 UC、无储能的 DynamicOPF 日快照开放，
+任何会重置年度状态的组合在入口显式拒绝。
+
+\subsection{时间网格、块边界与 profile 切片}
+令输入步数为 $T$、步长为 $\Delta t$ h。\srcpath{checked\_step\_duration\_hr} 的前置条件是
+\begin{equation}
+ T\ge0,\qquad T>0\Longrightarrow \Delta t\in\mathbb R_{>0}\text{ 且有限}.
+\end{equation}
+$T<0$ 或正时域上的非法 $\Delta t$ 抛出 \texttt{invalid\_argument}；$T=0$ 返回零长度、
+\fld{feasible=false} 的默认结果。任意物理窗口 $H$ h 被离散为
+\begin{equation}
+ N(H)=\max\!\left(1,\operatorname{round}(H/\Delta t)\right),
+\end{equation}
+所以非整除步长采用四舍五入，不是向上取整。
+
+\srcpath{build\_block\_ranges} 的周模式最多产生 52 个块：前 51 个块长度为 $N(168)$，
+第 52 个块吸收余量。月模式使用固定非闰年日数
+$(31,28,31,30,31,30,31,31,30,31,30,31)$ 和 $N(24)$；第 12 月直接吸收全部剩余步。
+因此 ``Monthly'' 是日历近似，输入没有时区、夏令时、闰日或自然月时间戳语义。
+
+对子时域 $[a,b)$，\srcpath{slice\_ts\_data} 保留 profile 的 \fld{id}/\fld{name} 并定义
+\begin{equation}
+ \widehat v_{p,k}=\begin{cases}v_{p,a+k},&a+k<|v_p|,\\1,&a+k\ge |v_p|,
+ \end{cases}\qquad k=0,\ldots,b-a-1.
+\end{equation}
+长度不足不会在年度层失败，而是静默补 $1.0$；这一行为与时序核心对重复 ID/非有限值的拒绝
+共同构成输入契约。工业输入应在调用前要求每个已绑定 profile 长度等于 $T$，否则补值会改变能量。
+
+\subsection{公共选项：实际消费状态}
+\begin{longtable}{@{}L{4.2cm}L{2.4cm}L{7.0cm}@{}}
+\toprule
+字段 & 状态 & 源码等价含义\\ \midrule
+\fld{ts\_pf\_options} & 已消费 & 原样传入全年度 UC 与日 replay；会重置状态的并行日 UC 组合被入口拒绝。\\
+\fld{block\_type} & 已消费 & 仅顺序路径决定 L0 块；并行路径的汇总始终按月。\\
+\fld{weekly\_lookahead\_hours} & 已消费 & 转换为 $N(H)$ 后追加到周 UC 求解窗；$\le0$ 表示零前瞻。\\
+\fld{daily\_window\_hours} & 已消费 & 顺序路径的 replay 窗和并行路径的 ``日'' 长度；名称虽为 hour，类型为整数。\\
+\fld{enable\_parallel\_daily} & 已消费 & 仅选择无 UC、无储能的 DynamicOPF 日快照；其余组合显式拒绝。\\
+\fld{daily\_mode} & 已消费 & 选择 SCUC、DynamicSCED 或 DynamicOPF。\\
+\fld{parallel\_threads} & 已消费 & $0$ 交给 worker 解析器；结果记录请求数、解析数和实际并行数。\\
+\fld{enforce\_daily\_cyclic\_soc} & 已消费 & 映射到日问题的 \fld{enforce\_terminal\_soc\_cyclic}。\\
+\fld{sced\_reuse\_scuc\_commitment} & 已消费 & DynamicSCED 可先解一个代表峰日 SCUC 并复用 commitment。\\
+\fld{skip\_replay} & 已消费 & 顺序路径只保留 UC 日程并用 schedule-only 会计填充逐步结果。\\
+\fld{pf\_snapshot\_interval} & 已消费 & $>0$ 时只保存间隔整除且 PF 收敛的快照；$0$ 禁用。\\
+\fld{enforce\_cyclic\_soc} & 已消费 & 复制到下层；全年度 UC 的末端 SOC 与初始 SOC 对齐，并报告边界残差。\\
+\fld{generator\_energy\_budget\_mwh}、\fld{fuel\_budget\_mwh} & 已消费 & 进入全年度 UC MILP 积分不等式；燃料预算采用正发电量 MWh 代理。\\
+\fld{iterative\_feedback}、\fld{max\_feedback\_iterations} & 已消费 & 物理 replay 后按功率平衡残差更新 ENS/弃电 penalty 并重新求解。\\
+\fld{budget\_violation\_tol\_mwh} & 已消费 & 反馈收敛阈值，同时检查硬预算残差。\\
+\fld{curtailment\_penalty}、\fld{ens\_penalty} & 已消费 & 分别覆写下层 PV penalty 与经济 AC-OPF 的 VOLL；不是 L0 预算成本。\\
+\fld{verbose} & 未消费 & 年度实现不按该字段输出日志。\\
+\bottomrule
+\end{longtable}
+
+\subsection{L0：块预算与全年度约束}
+\srcpath{solve\_annual\_plan} 无求解器调用，固定
+\begin{align}
+ m_{g,b}&=0,\\
+ \overline E_{g,b}&=B_g\frac{e_b-s_b}{T}\ (B_g>0),\\
+ F_b&=B_F\frac{e_b-s_b}{T}\ (B_F>0),\\
+ SOC^{init}_{s,b}&=SOC^{terminal}_{s,b}=SOC^{authored}_s.
+\end{align}
+块负荷和平均边际成本为
+\begin{align}
+ E^{load}_b&=\sum_{t=s_b}^{e_b-1}\sum_{\ell\in\mathcal L_{AC}^{on}}
+ P_\ell\,scale_\ell\,profile_{\ell,t}\Delta t,\\
+ \bar c_1&=\frac{1}{|\mathcal G^{on}|}\sum_{g\in\mathcal G^{on}}c_{1,g},\\
+ C_b^{plan}&=E_b^{load}\bar c_1,
+ \qquad C^{plan}=\sum_b C_b^{plan}.
+\end{align}
+无在役机组时 $\bar c_1=0$。该估值不含启动、空载、二次成本、储能、外购电、弃电、ENS、
+DC 负荷或网络约束。块成本仍是估值，不进入最终运行成本；预算数组会被复制到 UC，形成
+\begin{equation}
+ \sum_t p_{g,t}\Delta t\le B_g,\qquad
+ \sum_{g,t}p_{g,t}\Delta t\le B_F .
+\end{equation}
+\fld{AnnualPlanResult} 的 \fld{feasible} 还要通过实际 UC 和预算证书。
+\par 求解器名固定为 \texttt{annual\_plan\_default}。
+\fld{total\_plan\_cost} 也不会进入最终年度运行成本。
+
+\srcpath{apply\_annual\_block\_controls} 仍执行维护和初始 SOC 投影；AC/DC 储能的 SOC 递推、终端
+循环、机组能量预算和燃料代理预算由全年度 UC 统一约束。
+
+\subsection{L2：全年度 UC 与周视图}
+对块内游标 $a$，绑定窗为 $[a,b)$，$b=\min(a+N(168),e_b)$；求解窗为
+\begin{equation}
+ [a,\ell),\qquad \ell=\min(b+N(H_{lookahead}),T).
+\end{equation}
+年度顺序路径先对 $[0,T)$ 调用一次 \srcpath{solve\_unit\_commitment}，再用
+\fld{slice\_uc\_schedule} 生成周对象。SOC、爬坡、最小开停机和预算均跨越周边界；周对象
+只是报告/回放视图，不是独立 UC。
+
+\fld{remaining\_energy\_budget\_mwh} 仅作为兼容报告字段；真实预算证书来自
+\fld{UCSchedule.generator\_energy\_mwh} 与 \fld{fuel\_consumption\_mwh}。
+
+\subsection{bottom-up feedback}
+启用 \fld{iterative\_feedback} 时，年度求解计算
+\begin{equation}
+ r=\max_t |P_t^{supply}-P_t^{demand}|\Delta t,
+\end{equation}
+若 $r$ 超过 \fld{budget\_violation\_tol\_mwh}，则把 ENS 与弃电 penalty 加倍并重新执行
+UC+replay，最多 \fld{max\_feedback\_iterations} 次。硬预算违约保持 infeasible；结果必须读取
+\fld{feedback\_converged}，不能只看最后一次 solver status。
+
+\subsection{L3：预计算日程的 OPF/PF replay}
+顺序路径且 \fld{skip\_replay=false} 时，绑定周再切成长度 $N(H_{day})$ 的日窗。
+\srcpath{solve\_daily\_replay} 从周 UC 复制以下二维行：常规机组 dispatch/commitment、AC/DC 储能
+dispatch/SOC、AC renewable、AC PV、AC 静态电源、外部电网、DC PV、DC 静态电源、DC 负荷、
+VSC 和 DC/DC。缺失的行尾补零。它只复制 \fld{feasible}/\fld{solver\_name}，没有复制
+\fld{solver\_status}、MIP gap、最优性证书、总成本，也没有复制 DR、VPP、微网、移动储能、
+EnergyRouter 和 DC 支路流等扩展轨迹。
+
+日 replay 设置 \fld{precomputed\_uc\_schedule} 指向上述切片，再调用
+\srcpath{solve\_time\_series\_pf}；因此不会重解 UC，但会执行 profile 快照、逐步 OPF/PF 与核心层的
+缺失行回退。报告中 ``replay'' 只对实际保留下来的预计算字段保持周 UC 一致，不能推广到被遗漏的扩展块。
+
+\subsection{并行日路径的准入边界}
+并行日只对无 UC、无储能的 DynamicOPF 快照开放。SCUC、DynamicSCED 或含 AC/DC/扩展储能时，
+入口返回参数错误并要求使用全年度耦合路径；这避免日边界重置启停、爬坡和 SOC 状态。\\
+\srcpath{make\_daily\_pf\_options} 的精确覆写如下（仅描述单日快照内部配置；年度并行准入仍受上文守卫约束）。
+\begin{center}\footnotesize
+\begin{tabular}{@{}L{3.0cm}cccL{5.6cm}@{}}
+\toprule
+模式 & \fld{skip\_uc} & \fld{run\_opf} & \fld{fix\_commitment} & 含义\\ \midrule
+SCUC & false & true & false & 每日重解 UC，再做 OPF/PF。\\
+DynamicSCED & false & false & true & 无逐步 OPF；默认把所有在役机组固定开机。\\
+DynamicOPF & true & true & false & 跳过 UC，仅做逐步 OPF/PF。\\
+\bottomrule
+\end{tabular}
+\end{center}
+三种模式都关闭系统快照、清空预计算日程指针，并将日循环开关传给核心 SOC 约束。
+请求并行时 AC OPF 后端强制为 \texttt{ParityIPM}。
+
+DynamicSCED 启用代表日复用时，只搜索 \fld{id=0} 的 profile，以该 profile 日内最大值最大的日为
+峰日；没有 ID 0 时默认第 0 日。峰日先运行无 OPF 的 SCUC。若其 commitment 可用，各日通过
+\fld{fixed\_commitment\_schedule} 复用同一按时位置矩阵；否则静默保留 all-on 的
+\fld{fix\_commitment=true} 回退。报告没有单独字段区分 ``代表日成功'' 与 ``all-on 回退''。
+
+并行安全由 UC 后端判定。DynamicOPF 不使用 MILP；Native B\&C/SCIP 可并发，显式 HiGHS/Gurobi
+等共享进程调度状态的后端退化为顺序日循环。每个 worker 只写自己的日期槽，主线程按日期拼接。
+\fld{parallel\_daily\_effective}、\fld{parallel\_execution.actual\_parallel\_evaluations} 和
+\fld{guard\_reason} 才是是否真正并行的证据。
+
+独立日问题没有跨日 commitment、爬坡、最小开停机或 SOC 连续性；开启日循环 SOC 只是令每个日窗
+能量中性。并行路径还不生成 \fld{annual\_plan}，却把每日结果存入名为
+\fld{weekly\_schedules} 的容器（此时 \fld{week\_id} 实际是 day id）。
+
+\subsection{逐步功率、损耗、外部电网与成本会计}
+\srcpath{fill\_step\_results} 先从 UC/OPF 轨迹和 profile 汇总经典资产。令 $p^{ess}>0$ 为放电，
+$p^{grid}>0$ 为进口。最终字段满足
+\begin{align}
+ P_t^{supply}&=P_t^{gen}+P_t^{ren}+P_t^{dis},\\
+ P_t^{demand}&=P_t^{load}+[P_t^{loss}]^++P_t^{ch}+[-P_t^{grid}]^+,\\
+ \epsilon_t&=P_t^{supply}-P_t^{demand}.
+\end{align}
+这里 \fld{total\_gen\_mw} 已包含 $[p_t^{grid}]^+$，所以进口不再在第一式单列。
+\fld{total\_load\_mw} 包含 AC load（若为空则退回 bus $p_d$）、DC load 和 flexible load 服务量。
+\fld{total\_renewable\_mw} 汇总 AC renewable、PV、可再生静态电源和 DC PV/可再生静态电源。
+
+PF 在同一 operating point 收敛时，支路两端有功和、VSC 损耗、DC/DC 损耗给出
+\begin{equation}
+ P_t^{loss}=\sum_{(i,j)}(P_{ij}+P_{ji})+\sum_c P_c^{loss,VSC}
+ +\sum_d P_d^{loss,DCDC},
+\end{equation}
+并用残差重算外部交换
+\begin{equation}
+ p_t^{grid}=P_t^{load}+[P_t^{loss}]^++P_t^{ch}
+ -(P_t^{conv}+P_t^{ren}+P_t^{dis}).
+\end{equation}
+这保证 PF 步的会计点一致。PF 虽收敛但前置 OPF 失败时，\fld{pf\_converged=false}，不把诊断
+fallback 计作完整 replay 成功。
+
+年度报告成本率不是 UC 的 \fld{total\_cost}，而是按逐步轨迹重算
+\begin{equation}
+ c_t=\sum_g(c_{0,g}u_{g,t}+c_{1,g}p_{g,t}+c_{2,g}p_{g,t}^2)
+ +c_t^{profile-assets}+c_t^{storage-bid}+c_t^{grid}.
+\end{equation}
+最终 $C^{yr}=\sum_t c_t\Delta t$。它不含 UC startup 变量、L0 plan cost、ENS penalty 或年度层的
+curtailment penalty。没有显式外部电网日程时，schedule-only 分支可为平衡缺口估算一个进口成本，
+但不会把该代理进口写回 \fld{external\_grid\_net\_mw}；此时电量平衡误差仍显式保留。
+
+\fld{total\_curtailment\_mw} 现在由各类可再生资源的可用功率与实际调度之差计算：
+\begin{equation}
+ P_t^{curt}=\max(0,P_t^{available}-P_t^{dispatch}).
+\end{equation}
+当资源行缺失或 profile 越界时，代码使用该资源的静态输入并保留
+\fld{curtailment\_known}。OPF 收敛时 \fld{load\_shed\_mw} 来自 \fld{dpd\_mw}；
+schedule-only 时只报告由显式日程缺口导出的 schedule ENS proxy，并由
+\fld{load\_shed\_known} 标明，失败物理 replay 不再伪装成 ENS=0。
+
+\subsection{块聚合与组件统计}
+对任意块 $B=[s,e)$，\srcpath{aggregate\_block} 对 MW 字段乘 $\Delta t$ 后求和，成本率同样乘
+$\Delta t$；PF/OPF 收敛数按布尔字段计数。年度标量是所有汇总块的再次求和。
+
+常规机组统计只为 AC \fld{generators} 建行，in-service vector position 映射到 UC row。能量、在线
+小时和块内 commitment 边沿分别为
+\begin{align}
+ E_g&=\sum_w\sum_{t<N_w}p_{g,w,t}\Delta t,\\
+ H_g&=\sum_w\sum_{t<N_w}u_{g,w,t}\Delta t,\\
+ CF_g&=E_g/(P_g^{max}T_{covered}).
+\end{align}
+每个周/日窗开始时前态重置为未知，所以跨窗启动/停机边沿不计数。离线机组仍保留零统计行。
+
+储能统计覆盖 AC \fld{storage}、DC \fld{storage} 和 \fld{dc\_storage}，分别按对应 UC row 累计
+\begin{equation}
+ E_s^{dis}=\sum[p_{s,t}]^+\Delta t,\quad
+ E_s^{ch}=\sum[-p_{s,t}]^+\Delta t,\quad
+ N_s^{FDE}=E_s^{dis}/E_s^{rated}.
+\end{equation}
+该循环数只按放电侧，不校正效率，也不是 rainflow 循环。
+
+可再生统计只覆盖 AC \fld{renewable\_gens}，不覆盖 PV、AC/DC 静态可再生或 DC PV。可用功率为
+$P_r^{rated}profile_{r,t}$，弃电取 $\max(0,P^{avail}-P^{dispatch})$；容量因子分母使用输入总时长。
+
+\subsection{完整结果结构与可行性语义}
+\begin{longtable}{@{}L{4.3cm}L{9.3cm}@{}}
+\toprule
+结构/字段族 & 索引空间、单位与语义\\ \midrule
+\texttt{AnnualPlanBlock}/\newline\texttt{AnnualPlanResult} & 块 id 为 0-based；步区间半开；预算 MWh，SOC pu，成本货币量。当前为默认计划。\\
+\texttt{WeeklySchedule} & 顺序路径是一周绑定窗，含前瞻 UC；并行路径实际是一日。\\
+\texttt{AnnualStepResult} & 长度 $T$，MW/货币每小时；PF/OPF 标志只表示完整前置链在该步成功。\\
+\texttt{PFSnapshot} & 仅收敛抽样步；\fld{vm}/\fld{vdc} 使用求解器母线结果空间，支路/换流器沿 PF 结果空间。\\
+\texttt{BlockSummary} & 半开步区间的 MWh/成本/成功计数；字段名 monthly 不保证输入块一定是自然月。\\
+\texttt{GenAnnualStats} & \fld{gen\_index} 是 authored AC generator stable id。\\
+\texttt{StorageAnnualStats} & \fld{storage\_index} 是各自 AC/DC 容器 stable id；必须结合 \fld{is\_dc} 消歧。\\
+\texttt{RenewableAnnualStats} & 仅 AC renewable generator stable id。\\
+\texttt{AnnualProductionSim}/\newline\texttt{Result} & 汇总步数、$\Delta t$、能量、成本、会计误差、收敛计数及并行证书。\\
+\bottomrule
+\end{longtable}
+
+顺序路径的 \fld{feasible} 现在要求 L0、所有周 UC 以及（未跳过 replay 时）每一步所需的
+OPF/PF 链均成功；并行路径同样要求每日 UC 和物理 replay 证书一致。\fld{schedule\_only=true}
+时，\fld{feasible} 只表示 UC schedule 可行，不是全年 AC 物理认证。调用方还应检查
+\fld{model\_scope}、\fld{physical\_replay\_complete}、\fld{ens\_complete}、收敛计数与平衡误差。
+\fld{summary()} 只是文本格式化，不增加验证。
+
+\begin{gapnote}
+源码等价结论是：年度模块已经具备可执行的全年度耦合 UC、日 replay、独立日并行、显式弃电/ENS provenance
+和丰富的能量/成本汇总；replay 已复制当前 UCSchedule 的全部二维行及 solver certificate。L0 能量/燃料预算、
+跨周状态连续和 feedback 迭代均有源码路径与结果证书。报告不得用
+公共结构中 ``已声明的字段'' 代替实际执行证据。
+\end{gapnote}

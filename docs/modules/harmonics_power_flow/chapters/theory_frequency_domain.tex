@@ -1,0 +1,72 @@
+\section{通用频域谐波潮流理论}
+\begin{theorynote}
+本章是通用理论推导，不是代码逐行转写。实现对应关系列于章末。
+\end{theorynote}
+
+\subsection{谐波节点方程}
+对线性时不变网络，不同整数频率正交，故每个次数独立满足
+\begin{equation}
+\mathbf Y_h\mathbf V_h=\mathbf I_h,\qquad h\in\mathcal H_{ac},
+\end{equation}
+其中 $\mathbf Y_h$ 包含频变线路、变压器、电源等值、无源滤波器与负荷等值；$\mathbf I_h$ 包含
+非线性负荷、变换器和用户指定的谱电流。若资源电流依赖多个次数电压，则必须求解
+\begin{equation}
+\mathbf F(\mathbf V)=\mathbf Y_B\mathbf V-\mathbf I(\mathbf V)=0,
+\quad \mathbf Y_B=\operatorname{blkdiag}(\mathbf Y_{h_1},\ldots,\mathbf Y_{h_H}).
+\end{equation}
+
+\subsection{频变无源元件}
+在基频参数 $R_1,X_1,B_1$ 已标幺化且磁性参数线性的条件下，常用近似为
+\begin{equation}
+Z_h=R(h)+jhX_1,\qquad Y_{sh,h}=jhB_1.
+\end{equation}
+集肤与邻近效应可由 $R(h)$ 经验律表示；精确模型应来自导体几何、温度和大地回路参数。负荷等值不是
+唯一的：串联、并联、CIGRE/IEC 组合和测量辨识模型可给出不同的谐振点，因此必须把负荷模型作为
+研究假设报告。
+
+\subsection{诺顿源与工作点}
+若基频复功率采用“注入网络为正”，则
+\begin{equation}
+\hat I_1=\frac{\overline{S_1}}{\overline{V_1}},\qquad
+\hat I_h=\alpha_h e^{j\theta_h}|\hat I_1|.
+\end{equation}
+直流端稳态电流为 $I_{dc,0}=P_{dc}/V_{dc,0}$，纹波谱同样由幅值比与相角描述。AC 与 DC 谱若由同一
+变换器产生，幅值与相角应来自开关拓扑、调制与控制；经验六脉动谱只能作为明确标注的缺省值。
+
+\subsection{三相与对称分量}
+令 $a=e^{j2\pi/3}$，相序变换为
+\begin{equation}
+\begin{bmatrix}V_a\\V_b\\V_c\end{bmatrix}=
+\begin{bmatrix}1&1&1\\1&a^2&a\\1&a&a^2\end{bmatrix}
+\begin{bmatrix}V_0\\V_1\\V_2\end{bmatrix}.
+\end{equation}
+六脉动特征次数遵循 $h=6k-1$ 为负序、$h=6k+1$ 为正序，三倍频为零序。线路相矩阵不对称时，
+序网络不再解耦，应在 abc 域直接求解。变压器零序通路取决于中性点接地、三角形闭合回路、曲折形
+接线和独立 $Z_0$，不能只凭正序短路电压推定。
+
+\subsection{谐波平衡 Newton 法}
+Newton 迭代为
+\begin{equation}
+\mathbf J(\mathbf V^k)\Delta\mathbf V=-\mathbf F(\mathbf V^k),\qquad
+\mathbf V^{k+1}=\mathbf V^k+\Delta\mathbf V.
+\end{equation}
+对非全纯的恒功率项 $\overline S/\overline V$，复解析导数不成立，必须展开为实部/虚部或采用 Wirtinger
+微分。工程求解还可包含阻尼、线搜索、信赖域、尺度化和延续法。
+
+\begin{gapnote}
+本模块实现逐阶复 Newton、$2N$ 实 Newton、跨阶双线性和三相对应形式；未实现通用自动微分设备库、
+间谐波网格、换相时刻方程、全局化线搜索或 EMT 波形重构。这些不在本模块当前声明范围内。
+\end{gapnote}
+
+\subsection{与实现的对应}
+\begin{center}\footnotesize
+\begin{tabular}{@{}L{5.2cm}L{9.3cm}@{}}\toprule
+理论条目 & 实现状态\\ \midrule
+逐阶 $Y_hV_h=I_h$ & \implfull{harmonics\_power\_flow.cpp:build\_ac\_ybus/solve\_harmonic\_power\_flow}\\
+$R(h),hX,hB$ & \implfull{harmonics\_power\_flow.cpp:skin\_r/ac\_branch\_stamp}\\
+abc/序分量与变压器零序 & \implfull{harmonics\_power\_flow.cpp:build\_3ph\_ac\_ybus/transformer\_blocks}\\
+非全纯恒功率 Newton & \implfull{harmonics\_power\_flow.cpp:solve\_harmonic\_power\_flow\_newton\_real}\\
+通用设备自动微分、全局化与间谐波 & \implnone\\
+\bottomrule\end{tabular}
+\end{center}
+

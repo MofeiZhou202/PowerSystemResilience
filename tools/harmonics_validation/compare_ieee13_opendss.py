@@ -92,13 +92,17 @@ def main() -> int:
     ap.add_argument("--bus", type=str, default="675")
     ap.add_argument("--i-ref-amps", type=float, default=100.0)
     ap.add_argument("--out", type=Path, default=None)
+    ap.add_argument("--cpp-bin", type=Path, default=CPP_BIN)
+    ap.add_argument("--tolerance", type=float, default=2e-3)
     args = ap.parse_args()
     args.dss = args.dss.resolve()  # loader requires an absolute master path
+    if args.out is not None:
+        args.out = args.out.resolve()
 
     with tempfile.TemporaryDirectory(prefix="feeder_hpf_") as tmp:
         hy_path = Path(tmp) / "hy.json"
         subprocess.run(
-            [str(CPP_BIN), str(args.dss), args.bus, str(args.i_ref_amps),
+            [str(args.cpp_bin.resolve()), str(args.dss), args.bus, str(args.i_ref_amps),
              str(hy_path)], check=True)
         hy = json.loads(hy_path.read_text())
         dss.Basic.DataPath(tmp)
@@ -141,11 +145,14 @@ def main() -> int:
               "i_ref_amps": args.i_ref_amps,
               "orders": ORDERS,
               "n_points": len(rows),
+              "tolerance_pu": args.tolerance,
+              "passed": bool(rows) and max_err <= args.tolerance,
               "max_complex_voltage_error_pu": max_err,
               "worst": sorted(rows, key=lambda r: -r["err_pu"])[:10],
               "opendss_version": dss.Basic.Version()}
     text = json.dumps(report, indent=2)
     if args.out:
+        args.out.parent.mkdir(parents=True, exist_ok=True)
         args.out.write_text(text + "\n")
         print(f"wrote {args.out}")
     print(f"{args.dss.name} harmonic penetration vs OpenDSS: n={len(rows)} points, "
@@ -154,7 +161,9 @@ def main() -> int:
         print(f"  {r['bus']:>10}.{r['node']} h{r['order']:>2}: "
               f"hy={r['hy_mag']:.6f}∠{r['hy_ang']:8.2f}  "
               f"od={r['od_mag']:.6f}∠{r['od_ang']:8.2f}  err={r['err_pu']:.2e}")
-    return 0
+    if not rows:
+        raise SystemExit("IEEE13 comparison produced no common bus/phase/order points")
+    return 0 if max_err <= args.tolerance else 1
 
 
 if __name__ == "__main__":

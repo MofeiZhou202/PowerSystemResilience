@@ -102,6 +102,15 @@ struct UCSchedule {
   int network_constraints_activated{0};
   int network_constraint_remaining_violations{0};
   double network_constraint_worst_violation_mw{0.0};
+  // Energy-budget certificates. Values are MWh on the schedule horizon;
+  // generation is indexed in the active-generator order used by gen_dispatch.
+  std::vector<double> generator_energy_mwh;
+  std::vector<double> generator_energy_budget_mwh;
+  double fuel_consumption_mwh{0.0};
+  double fuel_budget_mwh{0.0};
+  double max_energy_budget_violation_mwh{0.0};
+  double fuel_budget_violation_mwh{0.0};
+  bool budget_constraints_applied{false};
 };
 
 // ═══════════════════════════════════════════════════════════════════════
@@ -198,6 +207,14 @@ struct TimeSeriesPFOptions {
   // Enabled by default because an ExternalGrid is a physical source, matching
   // its treatment in power flow and dynamic simulation.
   bool enable_external_grid{true};
+  // Optional cumulative energy limits for the UC horizon. Entries are in
+  // authored generator-vector order; non-positive entries mean unconstrained.
+  // The MILP enforces sum_t p_g,t*dt <= cap_g and reports a residual.
+  std::vector<double> generator_energy_budget_mwh;
+  // Fuel budget in MWh-equivalent. No fuel-consumption curve is present in the
+  // component model, so this contract uses positive generator output as the
+  // explicit fuel proxy and exposes that scope in UCSchedule.
+  double fuel_budget_mwh{0.0};
   // Big-M cap on |external-grid exchange| (MW) when no explicit limit exists.
   double external_grid_cap_mw{1.0e5};
   // Demand response on FlexibleLoad: served demand may deviate from baseline by

@@ -540,6 +540,75 @@ static DCBranch dc_branch_from_json(const json& j) {
   return br;
 }
 
+static json dc_capacitor_to_json(const DCCapacitor& c) {
+  return json{{"index", c.index}, {"bus", c.bus},
+              {"in_service", c.in_service}, {"name", c.name},
+              {"capacitance_f", c.capacitance_f}, {"esr_ohm", c.esr_ohm},
+              {"esl_h", c.esl_h},
+              {"leakage_conductance_s", c.leakage_conductance_s},
+              {"rated_voltage_kv", c.rated_voltage_kv}};
+}
+
+static DCCapacitor dc_capacitor_from_json(const json& j) {
+  DCCapacitor c;
+  c.index = j.at("index").get<int>();
+  c.bus = j.at("bus").get<int>();
+  c.in_service = jget(j, "in_service", true);
+  c.name = jget<std::string>(j, "name", "");
+  c.capacitance_f = jget(j, "capacitance_f", 0.0);
+  c.esr_ohm = jget(j, "esr_ohm", 0.0);
+  c.esl_h = jget(j, "esl_h", 0.0);
+  c.leakage_conductance_s = jget(j, "leakage_conductance_s", 0.0);
+  c.rated_voltage_kv = jget(j, "rated_voltage_kv", 0.0);
+  return c;
+}
+
+static json dc_reactor_to_json(const DCReactor& r) {
+  return json{{"index", r.index}, {"from_bus", r.from_bus},
+              {"to_bus", r.to_bus}, {"in_service", r.in_service},
+              {"name", r.name}, {"inductance_h", r.inductance_h},
+              {"resistance_ohm", r.resistance_ohm},
+              {"rated_current_a", r.rated_current_a}};
+}
+
+static DCReactor dc_reactor_from_json(const json& j) {
+  DCReactor r;
+  r.index = j.at("index").get<int>();
+  r.from_bus = j.at("from_bus").get<int>();
+  r.to_bus = j.at("to_bus").get<int>();
+  r.in_service = jget(j, "in_service", true);
+  r.name = jget<std::string>(j, "name", "");
+  r.inductance_h = jget(j, "inductance_h", 0.0);
+  r.resistance_ohm = jget(j, "resistance_ohm", 0.0);
+  r.rated_current_a = jget(j, "rated_current_a", 0.0);
+  return r;
+}
+
+static json harmonic_filter_to_json(const HarmonicFilter& f) {
+  return json{{"index", f.index}, {"from_bus", f.from_bus},
+              {"to_bus", f.to_bus}, {"in_service", f.in_service},
+              {"name", f.name}, {"resistance_ohm", f.resistance_ohm},
+              {"inductance_h", f.inductance_h},
+              {"capacitance_f", f.capacitance_f},
+              {"rated_voltage_kv", f.rated_voltage_kv},
+              {"tuning_frequency_hz", f.tuning_frequency_hz}};
+}
+
+static HarmonicFilter harmonic_filter_from_json(const json& j) {
+  HarmonicFilter f;
+  f.index = j.at("index").get<int>();
+  f.from_bus = j.at("from_bus").get<int>();
+  f.to_bus = jget(j, "to_bus", 0);
+  f.in_service = jget(j, "in_service", true);
+  f.name = jget<std::string>(j, "name", "");
+  f.resistance_ohm = jget(j, "resistance_ohm", 0.0);
+  f.inductance_h = jget(j, "inductance_h", 0.0);
+  f.capacitance_f = jget(j, "capacitance_f", 0.0);
+  f.rated_voltage_kv = jget(j, "rated_voltage_kv", 0.0);
+  f.tuning_frequency_hz = jget(j, "tuning_frequency_hz", 0.0);
+  return f;
+}
+
 static json dc_load_to_json(const DCLoad& l) {
   json j;
   j["index"] = l.index;
@@ -1092,6 +1161,80 @@ static RenewableGen renewable_gen_from_json(const json& j) {
   return r;
 }
 
+static const char* vsc_harmonic_topology_str(VSCHarmonicTopology topology) {
+  switch (topology) {
+    case VSCHarmonicTopology::TwoLevel: return "two_level";
+    case VSCHarmonicTopology::MMC: return "mmc";
+    default: return "disabled";
+  }
+}
+
+static VSCHarmonicTopology vsc_harmonic_topology_from_str(
+    const std::string& value) {
+  if (value == "two_level") return VSCHarmonicTopology::TwoLevel;
+  if (value == "mmc") return VSCHarmonicTopology::MMC;
+  return VSCHarmonicTopology::Disabled;
+}
+
+static json harmonic_pi_to_json(const HarmonicPIController& c) {
+  return json{{"kp", c.kp}, {"ki", c.ki}, {"delay_s", c.delay_s}};
+}
+
+static HarmonicPIController harmonic_pi_from_json(const json& j) {
+  HarmonicPIController c;
+  c.kp = jget(j, "kp", 0.0);
+  c.ki = jget(j, "ki", 0.0);
+  c.delay_s = jget(j, "delay_s", 0.0);
+  return c;
+}
+
+static json vsc_harmonic_model_to_json(const VSCHarmonicModel& h) {
+  return json{{"topology", vsc_harmonic_topology_str(h.topology)},
+              {"switching_frequency_hz", h.switching_frequency_hz},
+              {"modulation_index", h.modulation_index},
+              {"modulation_phase_deg", h.modulation_phase_deg},
+              {"transfer_conductance_pu", h.transfer_conductance_pu},
+              {"filter_resistance_ohm", h.filter_resistance_ohm},
+              {"filter_inductance_h", h.filter_inductance_h},
+              {"filter_capacitance_f", h.filter_capacitance_f},
+              {"dc_link_capacitance_f", h.dc_link_capacitance_f},
+              {"dc_link_esr_ohm", h.dc_link_esr_ohm},
+              {"current_controller", harmonic_pi_to_json(h.current_controller)},
+              {"dc_voltage_controller", harmonic_pi_to_json(h.dc_voltage_controller)},
+              {"submodules_per_arm", h.submodules_per_arm},
+              {"submodule_capacitance_f", h.submodule_capacitance_f},
+              {"arm_inductance_h", h.arm_inductance_h},
+              {"arm_resistance_ohm", h.arm_resistance_ohm},
+              {"circulating_current_kp", h.circulating_current_kp},
+              {"circulating_current_ki", h.circulating_current_ki}};
+}
+
+static VSCHarmonicModel vsc_harmonic_model_from_json(const json& j) {
+  VSCHarmonicModel h;
+  h.topology = vsc_harmonic_topology_from_str(
+      jget<std::string>(j, "topology", "disabled"));
+  h.switching_frequency_hz = jget(j, "switching_frequency_hz", 0.0);
+  h.modulation_index = jget(j, "modulation_index", 0.0);
+  h.modulation_phase_deg = jget(j, "modulation_phase_deg", 0.0);
+  h.transfer_conductance_pu = jget(j, "transfer_conductance_pu", 0.0);
+  h.filter_resistance_ohm = jget(j, "filter_resistance_ohm", 0.0);
+  h.filter_inductance_h = jget(j, "filter_inductance_h", 0.0);
+  h.filter_capacitance_f = jget(j, "filter_capacitance_f", 0.0);
+  h.dc_link_capacitance_f = jget(j, "dc_link_capacitance_f", 0.0);
+  h.dc_link_esr_ohm = jget(j, "dc_link_esr_ohm", 0.0);
+  if (j.contains("current_controller"))
+    h.current_controller = harmonic_pi_from_json(j["current_controller"]);
+  if (j.contains("dc_voltage_controller"))
+    h.dc_voltage_controller = harmonic_pi_from_json(j["dc_voltage_controller"]);
+  h.submodules_per_arm = jget(j, "submodules_per_arm", 0);
+  h.submodule_capacitance_f = jget(j, "submodule_capacitance_f", 0.0);
+  h.arm_inductance_h = jget(j, "arm_inductance_h", 0.0);
+  h.arm_resistance_ohm = jget(j, "arm_resistance_ohm", 0.0);
+  h.circulating_current_kp = jget(j, "circulating_current_kp", 0.0);
+  h.circulating_current_ki = jget(j, "circulating_current_ki", 0.0);
+  return h;
+}
+
 static json vsc_to_json(const VSCConverter& c) {
   json j;
   j["index"] = c.index;
@@ -1146,6 +1289,7 @@ static json vsc_to_json(const VSCConverter& c) {
   j["coordination_group_id"] = c.coordination_group_id;
   j["is_master"] = c.is_master;
   j["participation_factor"] = c.participation_factor;
+  j["harmonic_model"] = vsc_harmonic_model_to_json(c.harmonic_model);
   add_dynamic_model_if_present(j, c.dynamic_model);
   return j;
 }
@@ -1208,6 +1352,8 @@ static VSCConverter vsc_from_json(const json& j) {
   c.coordination_group_id = jget<std::string>(j, "coordination_group_id", "");
   c.is_master = jget(j, "is_master", false);
   c.participation_factor = jget(j, "participation_factor", 0.0);
+  if (j.contains("harmonic_model"))
+    c.harmonic_model = vsc_harmonic_model_from_json(j["harmonic_model"]);
   read_dynamic_model_if_present(j, c.dynamic_model);
   return c;
 }
@@ -1247,6 +1393,13 @@ static json lcc_to_json(const LCCConverter& c) {
   j["transformer_tap_winding"] = c.transformer_tap_winding;
   j["model_scope"] = c.model_scope;
   j["model_limitations"] = c.model_limitations;
+  j["harmonic_model_enabled"] = c.harmonic_model_enabled;
+  j["harmonic_transfer_conductance_pu"] =
+      c.harmonic_transfer_conductance_pu;
+  j["harmonic_transfer_conductance_pu"] =
+      c.harmonic_transfer_conductance_pu;
+  j["dc_filter_capacitance_f"] = c.dc_filter_capacitance_f;
+  j["dc_filter_esr_ohm"] = c.dc_filter_esr_ohm;
   return j;
 }
 
@@ -1288,6 +1441,13 @@ static LCCConverter lcc_from_json(const json& j) {
   c.transformer_tap_winding = jget(j, "transformer_tap_winding", 0);
   c.model_scope = jget<std::string>(j, "model_scope", "");
   c.model_limitations = jget<std::string>(j, "model_limitations", "");
+  c.harmonic_model_enabled = jget(j, "harmonic_model_enabled", false);
+  c.harmonic_transfer_conductance_pu =
+      jget(j, "harmonic_transfer_conductance_pu", 0.0);
+  c.harmonic_transfer_conductance_pu =
+      jget(j, "harmonic_transfer_conductance_pu", 0.0);
+  c.dc_filter_capacitance_f = jget(j, "dc_filter_capacitance_f", 0.0);
+  c.dc_filter_esr_ohm = jget(j, "dc_filter_esr_ohm", 0.0);
   return c;
 }
 
@@ -1558,6 +1718,8 @@ static json external_grid_to_json(const ExternalGrid& e) {
   j["vn_kv"] = e.vn_kv;
   j["controllable"] = e.controllable;
   j["emission_factor_tco2_mwh"] = e.emission_factor_tco2_mwh;
+  if (e.emission_factor_profile_id >= 0)
+    j["emission_factor_profile_id"] = e.emission_factor_profile_id;
   j["cost_c2"] = e.cost_c2;
   j["cost_c1"] = e.cost_c1;
   j["cost_c0"] = e.cost_c0;
@@ -1587,6 +1749,7 @@ static ExternalGrid external_grid_from_json(const json& j) {
   e.controllable = jget(j, "controllable", true);
   e.emission_factor_tco2_mwh =
       jget_alias(j, "emission_factor_tco2_mwh", "co2_emission_rate", 0.0);
+  e.emission_factor_profile_id = jget(j, "emission_factor_profile_id", -1);
   e.cost_c2 = jget(j, "cost_c2", 0.0);
   e.cost_c1 = jget(j, "cost_c1", 0.0);
   e.cost_c0 = jget(j, "cost_c0", 0.0);
@@ -2721,6 +2884,15 @@ static json dcdc_to_json(const DCDCConverter& c) {
   j["d_min"] = c.d_min;
   j["d_max"] = c.d_max;
   j["n_ratio"] = c.n_ratio;
+  j["f_switching_hz"] = c.f_switching_hz;
+  j["harmonic_model_enabled"] = c.harmonic_model_enabled;
+  j["duty_ratio"] = c.duty_ratio;
+  j["inductance_h"] = c.inductance_h;
+  j["inductor_resistance_ohm"] = c.inductor_resistance_ohm;
+  j["input_capacitance_f"] = c.input_capacitance_f;
+  j["output_capacitance_f"] = c.output_capacitance_f;
+  j["capacitor_esr_ohm"] = c.capacitor_esr_ohm;
+  j["voltage_controller"] = harmonic_pi_to_json(c.voltage_controller);
   j["mtbf_hours"] = c.mtbf_hours;
   j["mttr_hours"] = c.mttr_hours;
   add_dynamic_model_if_present(j, c.dynamic_model);
@@ -2749,6 +2921,16 @@ static DCDCConverter dcdc_from_json(const json& j) {
   c.d_min = jget(j, "d_min", 0.05);
   c.d_max = jget(j, "d_max", 0.95);
   c.n_ratio = jget(j, "n_ratio", 1.0);
+  c.f_switching_hz = jget(j, "f_switching_hz", 0.0);
+  c.harmonic_model_enabled = jget(j, "harmonic_model_enabled", false);
+  c.duty_ratio = jget(j, "duty_ratio", 0.0);
+  c.inductance_h = jget(j, "inductance_h", 0.0);
+  c.inductor_resistance_ohm = jget(j, "inductor_resistance_ohm", 0.0);
+  c.input_capacitance_f = jget(j, "input_capacitance_f", 0.0);
+  c.output_capacitance_f = jget(j, "output_capacitance_f", 0.0);
+  c.capacitor_esr_ohm = jget(j, "capacitor_esr_ohm", 0.0);
+  if (j.contains("voltage_controller"))
+    c.voltage_controller = harmonic_pi_from_json(j["voltage_controller"]);
   c.mtbf_hours = jget_alias(j, "mtbf_hr", "mtbf_hours", 0.0);
   c.mttr_hours = jget_alias(j, "mttr_hr", "mttr_hours", 0.0);
   read_dynamic_model_if_present(j, c.dynamic_model);
@@ -3262,6 +3444,10 @@ json to_json_dom(const HybridPowerSystem& sys) {
   ac["motors"] = json::array();
   for (const auto& m : sys.ac.motors) ac["motors"].push_back(asynchronous_motor_to_json(m));
 
+  ac["harmonic_filters"] = json::array();
+  for (const auto& f : sys.ac.harmonic_filters)
+    ac["harmonic_filters"].push_back(harmonic_filter_to_json(f));
+
   root["ac"] = ac;
 
   // DC system
@@ -3292,6 +3478,18 @@ json to_json_dom(const HybridPowerSystem& sys) {
 
   dc["pv_arrays"] = json::array();
   for (const auto& p : sys.dc.pv_arrays) dc["pv_arrays"].push_back(pv_array_dc_to_json(p));
+
+  dc["capacitors"] = json::array();
+  for (const auto& c : sys.dc.capacitors)
+    dc["capacitors"].push_back(dc_capacitor_to_json(c));
+
+  dc["reactors"] = json::array();
+  for (const auto& r : sys.dc.reactors)
+    dc["reactors"].push_back(dc_reactor_to_json(r));
+
+  dc["harmonic_filters"] = json::array();
+  for (const auto& f : sys.dc.harmonic_filters)
+    dc["harmonic_filters"].push_back(harmonic_filter_to_json(f));
 
   dc["dcdc_converters"] = json::array();
   for (const auto& c : sys.dc.dcdc_converters) dc["dcdc_converters"].push_back(dcdc_to_json(c));
@@ -3396,6 +3594,9 @@ HybridPowerSystem from_json(const std::string& json_str) {
       for (const auto& j : ac["chargers"]) sys.ac.chargers.push_back(charger_from_json(j));
     if (ac.contains("motors"))
       for (const auto& j : ac["motors"]) sys.ac.motors.push_back(asynchronous_motor_from_json(j));
+    if (ac.contains("harmonic_filters"))
+      for (const auto& j : ac["harmonic_filters"])
+        sys.ac.harmonic_filters.push_back(harmonic_filter_from_json(j));
 
     tag_legacy_bpa_numerical_ties(root, sys);
   }
@@ -3421,6 +3622,15 @@ HybridPowerSystem from_json(const std::string& json_str) {
       for (const auto& j : dc["dc_static_generators"]) sys.dc.dc_static_generators.push_back(dc_static_generator_from_json(j));
     if (dc.contains("pv_arrays"))
       for (const auto& j : dc["pv_arrays"]) sys.dc.pv_arrays.push_back(pv_array_dc_from_json(j));
+    if (dc.contains("capacitors"))
+      for (const auto& j : dc["capacitors"])
+        sys.dc.capacitors.push_back(dc_capacitor_from_json(j));
+    if (dc.contains("reactors"))
+      for (const auto& j : dc["reactors"])
+        sys.dc.reactors.push_back(dc_reactor_from_json(j));
+    if (dc.contains("harmonic_filters"))
+      for (const auto& j : dc["harmonic_filters"])
+        sys.dc.harmonic_filters.push_back(harmonic_filter_from_json(j));
     if (dc.contains("dcdc_converters"))
       for (const auto& j : dc["dcdc_converters"]) sys.dc.dcdc_converters.push_back(dcdc_from_json(j));
     if (dc.contains("dc_circuit_breakers"))

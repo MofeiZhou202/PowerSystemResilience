@@ -1,5 +1,7 @@
 #include <algorithm>
 #include <cmath>
+#include <stdexcept>
+#include <string>
 #include <vector>
 
 #include <catch2/catch_approx.hpp>
@@ -10,6 +12,7 @@
 #include "hacdcpf/io/json_io.hpp"
 #include "hacdcpf/model/standard_parameter_library.hpp"
 #include "hacdcpf/time_series/annual_production_sim.hpp"
+#include "hacdcpf/time_series/lifecycle_simulation.hpp"
 #include "hacdcpf/time_series/time_series_pf.hpp"
 
 using Catch::Approx;
@@ -338,6 +341,10 @@ TEST_CASE("Multiscale comprehensive AC/DC case runs from milliseconds to a year"
           sys, annual_input, annual_options);
   INFO(annual.summary());
   REQUIRE(annual.feasible);
+  CHECK(annual.schedule_only);
+  CHECK_FALSE(annual.physical_replay_complete);
+  CHECK(annual.model_scope.find("schedule-only") != std::string::npos);
+  CHECK(annual.ens_complete);
   REQUIRE(annual.num_steps == 365);
   CHECK(annual.step_duration_hr * annual.num_steps ==
         Approx(8760.0).margin(1e-9));
@@ -352,4 +359,79 @@ TEST_CASE("Multiscale comprehensive AC/DC case runs from milliseconds to a year"
   CHECK(std::isfinite(annual.total_cost));
   CHECK(std::isfinite(annual.power_balance_error_mwh));
   CHECK(annual.total_ens_mwh == Approx(0.0).margin(1e-9));
+}
+
+TEST_CASE("Time-series public options reject unsupported or inconsistent contracts",
+          "[integration][time_series][contracts]") {
+  HybridPowerSystem empty;
+  TimeSeriesData ts;
+  ts.num_steps = 1;
+  ts.step_duration_hr = 1.0;
+
+  analysis::AnnualProductionSimOptions annual_opts;
+  annual_opts.iterative_feedback = true;
+  const auto feedback = analysis::solve_annual_production_simulation(empty, ts, annual_opts);
+  CHECK(feedback.feedback_iterations >= 1);
+  CHECK(feedback.feedback_converged);
+  annual_opts.skip_replay = true;
+  REQUIRE_THROWS_AS(
+      analysis::solve_annual_production_simulation(empty, ts, annual_opts),
+      std::invalid_argument);
+
+  analysis::LifecycleSimOptions lifecycle_opts;
+  lifecycle_opts.num_years = -1;
+  REQUIRE_THROWS_AS(
+      analysis::run_lifecycle_simulation(empty, ts, lifecycle_opts),
+      std::invalid_argument);
+
+  lifecycle_opts.num_years = 1;
+  lifecycle_opts.step_duration_hr = 6.0;
+  REQUIRE_THROWS_AS(
+      analysis::run_lifecycle_simulation(empty, ts, lifecycle_opts),
+      std::invalid_argument);
+}
+
+TEST_CASE("Annual budgets, coupled SOC and lifecycle sampled PF are evidenced",
+          "[integration][time_series][closure]") {
+  HybridPowerSystem sys = io::build_ieee14_acdc();
+  TimeSeriesData ts = daily_profiles();
+  ts.num_steps = 4;
+  for (auto& p : ts.profiles) p.values.resize(4, p.values.empty() ? 1.0 : p.values.front());
+  bind_profiles(sys);
+
+  analysis::AnnualProductionSimOptions aopts;
+  aopts.skip_replay = true;
+  aopts.ts_pf_options.uc_solver = UCSolverChoice::HiGHS;
+  aopts.ts_pf_options.run_opf = false;
+  aopts.generator_energy_budget_mwh.resize(sys.ac.generators.size(), 1.0e6);
+  aopts.fuel_budget_mwh = 1.0e6;
+  const auto annual = analysis::solve_annual_production_simulation(sys, ts, aopts);
+  REQUIRE(annual.feasible);
+  CHECK(annual.annual_plan.budget_residual_mwh.size() == sys.ac.generators.size());
+  CHECK(annual.max_energy_budget_violation_mwh <= 1e-8);
+  CHECK(annual.fuel_budget_violation_mwh <= 1e-8);
+  CHECK(annual.max_soc_boundary_residual <= 1e-8);
+
+  analysis::LifecycleSimOptions lopts;
+  lopts.num_years = 1;
+  lopts.tier2_samples_per_stratum = 1;
+  lopts.run_physical_replay = true;
+  lopts.run_sampled_pf_correction = true;
+  const auto lifecycle = analysis::run_lifecycle_simulation(sys, ts, lopts);
+  REQUIRE(lifecycle.year_results.size() == 1);
+  CHECK_FALSE(lifecycle.year_results.front().schedule_only);
+  CHECK(lifecycle.year_results.front().sampled_pf_requested >= 1);
+  CHECK(lifecycle.year_results.front().sampled_pf_converged <=
+        lifecycle.year_results.front().sampled_pf_requested);
+  CHECK(lifecycle.year_results.front().sampled_pf_correction_complete);
+  CHECK(lifecycle.year_results.front().physical_replay_complete);
+  CHECK(lifecycle.year_results.front().carbon_known);
+
+  analysis::AnnualProductionSimOptions parallel_opts;
+  parallel_opts.enable_parallel_daily = true;
+  parallel_opts.daily_mode = analysis::DailySimMode::SCUC;
+  parallel_opts.skip_replay = true;
+  REQUIRE_THROWS_AS(
+      analysis::solve_annual_production_simulation(sys, ts, parallel_opts),
+      std::invalid_argument);
 }

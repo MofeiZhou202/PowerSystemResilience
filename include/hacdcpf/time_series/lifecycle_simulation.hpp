@@ -70,6 +70,7 @@ struct BoundCrossValidation {
   double dispatch_bound_pct{0.0};
   double sampling_bound_pct{0.0};
   double storage_bound_pct{0.0};
+  bool bound_passed{false};
 };
 
 // ═══════════════════════════════════════════════════════════════════════
@@ -92,12 +93,14 @@ struct ReplacementEvent {
 struct StorageYearState {
   int storage_index{0};
   std::string name;
+  bool is_dc{false};
   double soh{1.0};
   double soh_cycle{1.0};
   double soh_calendar{1.0};
   double effective_capacity_mwh{0.0};
   double cycles_this_year{0.0};
   double cumulative_cycles{0.0};
+  double age_since_replacement_years{0.0};
   bool replaced{false};
 };
 
@@ -124,10 +127,25 @@ struct YearResult {
   double annual_ens_mwh{0.0};
   double annual_loss_mwh{0.0};
   bool feasible{false};
+  bool schedule_only{true};
+  bool physical_replay_complete{false};
+  bool sampled_pf_correction_complete{false};
+  int sampled_pf_converged{0};
+  int sampled_pf_requested{0};
+  double sampled_pf_correction_tco2{0.0};
 
   // Carbon results (Tier 2 + 3)
   double annual_carbon_tco2{0.0};
   double avg_carbon_intensity{0.0};
+  // Carbon is reported only for authored assets with an emission factor.
+  // External-grid imports and unmodelled carriers are excluded explicitly.
+  std::string carbon_scope{"ac_generators+ac_static_generators"};
+  std::string carbon_factor_source{"asset_factors"};
+  bool carbon_known{false};
+  double carbon_external_grid_tco2{0.0};
+  double carbon_storage_inventory_tco2{0.0};
+  double carbon_dc_assets_tco2{0.0};
+  double carbon_expanded_assets_tco2{0.0};
 
   // Lifecycle states
   std::vector<StorageYearState> storage_states;
@@ -187,8 +205,16 @@ struct LifecycleSimOptions {
   // Loss proxy for dispatch error bound
   double loss_proxy_fraction{0.03};    // estimated system loss fraction
 
+  // Physical validation is part of the lifecycle contract by default. A
+  // false value explicitly requests schedule-only output and propagates that
+  // limitation into YearResult.
+  bool run_physical_replay{true};
+  bool run_sampled_pf_correction{true};
+
   // Annual simulation sub-options
-  double step_duration_hr{6.0};        // time resolution (6h default for speed)
+  // 0 means use TimeSeriesData::step_duration_hr.  A positive value is a
+  // contract check against the input cadence; it is not silently substituted.
+  double step_duration_hr{0.0};
 
   bool verbose{false};
 };

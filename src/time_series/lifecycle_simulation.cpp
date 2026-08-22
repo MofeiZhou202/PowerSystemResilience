@@ -4,6 +4,8 @@
 #include <cmath>
 #include <numeric>
 #include <sstream>
+#include <stdexcept>
+#include <unordered_map>
 
 namespace hacdcpf::analysis {
 
@@ -71,13 +73,64 @@ std::vector<StratumDef> classify_strata(
   return strata;
 }
 
-// Select representative hours from each stratum (evenly spaced)
-std::vector<int> select_sample_hours(
-    const std::vector<StratumDef>& strata, int samples_per_stratum) {
-  std::vector<int> sampled;
-  for (const auto& st : strata) {
+// Compute one Neyman allocation used by both the estimator and its bound.  The
+// previous implementation computed an allocation for the bound but sampled a
+// different fixed count, so the reported interval did not describe the
+// estimator that was actually run.
+std::vector<int> compute_sample_allocation(
+    const std::vector<StratumDef>& strata,
+    const std::vector<AnnualStepResult>& steps,
+    int samples_per_stratum,
+    double step_hr,
+    double max_emission_factor,
+    double loss_proxy_fraction) {
+  std::vector<int> allocation(strata.size(), 0);
+  const int budget = std::max(1, samples_per_stratum) *
+                     static_cast<int>(strata.size());
+  std::vector<double> weights(strata.size(), 0.0);
+  double denominator = 0.0;
+  for (size_t m = 0; m < strata.size(); ++m) {
+    const auto& st = strata[m];
     if (st.hour_indices.empty()) continue;
-    const int n = std::min(samples_per_stratum,
+    double mean = 0.0;
+    for (int idx : st.hour_indices)
+      mean += steps[static_cast<size_t>(idx)].total_gen_mw * step_hr;
+    mean /= static_cast<double>(st.hour_indices.size());
+    double variance = 0.0;
+    if (st.hour_indices.size() > 1) {
+      for (int idx : st.hour_indices) {
+        const double d = steps[static_cast<size_t>(idx)].total_gen_mw * step_hr - mean;
+        variance += d * d;
+      }
+      variance /= static_cast<double>(st.hour_indices.size() - 1);
+    }
+    const double sigma = std::sqrt(variance) *
+        std::max(0.01, max_emission_factor) *
+        std::max(0.0, loss_proxy_fraction);
+    weights[m] = static_cast<double>(st.hour_indices.size()) * sigma;
+    denominator += weights[m];
+  }
+  for (size_t m = 0; m < strata.size(); ++m) {
+    const int population = static_cast<int>(strata[m].hour_indices.size());
+    if (population == 0) continue;
+    int n = denominator > 0.0
+        ? static_cast<int>(std::round(budget * weights[m] / denominator))
+        : std::max(1, samples_per_stratum);
+    allocation[m] = std::clamp(n, 1, population);
+  }
+  return allocation;
+}
+
+// Select representative hours from each stratum (evenly spaced) using the
+// same per-stratum allocation consumed by compute_sampling_bound().
+std::vector<int> select_sample_hours(
+    const std::vector<StratumDef>& strata,
+    const std::vector<int>& allocation) {
+  std::vector<int> sampled;
+  for (size_t m = 0; m < strata.size(); ++m) {
+    const auto& st = strata[m];
+    if (st.hour_indices.empty()) continue;
+    const int n = std::min(allocation[m],
                            static_cast<int>(st.hour_indices.size()));
     const int stride = std::max(1, static_cast<int>(st.hour_indices.size()) / n);
     for (int j = 0; j < n; ++j) {
@@ -111,7 +164,7 @@ DispatchErrorBound compute_dispatch_bound(
 SamplingErrorBound compute_sampling_bound(
     const std::vector<StratumDef>& strata,
     const std::vector<AnnualStepResult>& steps,
-    int samples_per_stratum,
+    const std::vector<int>& allocation,
     double confidence_level,
     double step_hr,
     double max_emission_factor,
@@ -126,13 +179,12 @@ SamplingErrorBound compute_sampling_bound(
 
   b.num_strata = static_cast<int>(strata.size());
 
-  // ── Phase 1: Compute within-stratum variance of carbon proxy ──
-  // Since Tier 1 dispatch provides generation for ALL hours, the carbon
-  // total is already available from the full sum. Tier 2 only adds PF
-  // corrections. The sampling uncertainty is about the PF correction
-  // residual, not the absolute carbon. The correction variance is
-  // scaled by loss_proxy_fraction² (PF correction magnitude relative
-  // to dispatch proxy).
+  // ── Phase 1: Compute within-stratum variance of the carbon proxy ──
+  // Tier 1 already provides all dispatch hours.  Tier 2 is therefore a
+  // stratified reconstruction check of the same proxy; no unexecuted PF
+  // correction is claimed here.  The legacy loss-proxy factor remains an
+  // explicit conservative scale in the bound and is not hidden as measured
+  // network carbon.
   //
   // ξ_t = gen_mw_t × emission_factor × step_hr   (carbon proxy tCO2)
   // δ_t = ξ_t^PF - ξ_t^proxy  (correction from detailed PF)
@@ -142,50 +194,12 @@ SamplingErrorBound compute_sampling_bound(
   const double correction_scale = loss_proxy_fraction * ef;
   // correction_scale² converts gen-MWh variance to correction-tCO2 variance
 
-  // Compute raw carbon proxy variance per stratum and Neyman weights
-  struct StratumInfo {
-    double sigma_correction{0.0}; // std dev of correction in tCO2
-    int N{0};
-  };
-  std::vector<StratumInfo> sinfo(strata.size());
-
-  double neyman_denom = 0.0;
-  for (size_t m = 0; m < strata.size(); ++m) {
-    const auto& st = strata[m];
-    int Nm = static_cast<int>(st.hour_indices.size());
-    sinfo[m].N = Nm;
-    if (Nm <= 1) continue;
-
-    // Compute within-stratum variance of carbon proxy
-    double mean = 0.0;
-    for (int idx : st.hour_indices) {
-      mean += steps[static_cast<size_t>(idx)].total_gen_mw * step_hr;
-    }
-    mean /= Nm;
-
-    double var_gen = 0.0;
-    for (int idx : st.hour_indices) {
-      double v = steps[static_cast<size_t>(idx)].total_gen_mw * step_hr - mean;
-      var_gen += v * v;
-    }
-    var_gen /= (Nm - 1);
-
-    // Correction variance: loss_proxy² × emission_factor² × gen variance
-    double var_corr = correction_scale * correction_scale * var_gen;
-    sinfo[m].sigma_correction = std::sqrt(var_corr);
-    neyman_denom += Nm * sinfo[m].sigma_correction;
-  }
-
-  // ── Phase 2: Neyman allocation of total sample budget ──
-  int total_budget = samples_per_stratum * static_cast<int>(strata.size());
-  total_budget = std::max(total_budget, static_cast<int>(strata.size()));
-
   double total_var = 0.0;
   for (size_t m = 0; m < strata.size(); ++m) {
     const auto& st = strata[m];
     SamplingErrorBound::Stratum sd;
     sd.name = st.name;
-    sd.population_size = sinfo[m].N;
+    sd.population_size = static_cast<int>(st.hour_indices.size());
 
     if (sd.population_size <= 1) {
       sd.sample_size = sd.population_size;
@@ -195,19 +209,22 @@ SamplingErrorBound compute_sampling_bound(
       continue;
     }
 
-    // Neyman-allocated sample size
-    int nm;
-    if (neyman_denom > 0.0) {
-      double nf = total_budget * (sinfo[m].N * sinfo[m].sigma_correction) / neyman_denom;
-      nm = std::max(1, static_cast<int>(std::round(nf)));
-    } else {
-      nm = samples_per_stratum;
-    }
-    nm = std::min(nm, sd.population_size);
+    const int nm = std::clamp(
+        m < allocation.size() ? allocation[m] : 1, 1, sd.population_size);
     sd.sample_size = nm;
     b.total_sampled_hours += nm;
 
-    double var_corr = sinfo[m].sigma_correction * sinfo[m].sigma_correction;
+    double mean = 0.0;
+    for (int idx : st.hour_indices)
+      mean += steps[static_cast<size_t>(idx)].total_gen_mw * step_hr;
+    mean /= static_cast<double>(sd.population_size);
+    double var_gen = 0.0;
+    for (int idx : st.hour_indices) {
+      const double d = steps[static_cast<size_t>(idx)].total_gen_mw * step_hr - mean;
+      var_gen += d * d;
+    }
+    var_gen /= static_cast<double>(std::max(1, sd.population_size - 1));
+    double var_corr = correction_scale * correction_scale * var_gen;
     sd.variance = var_corr;
 
     // Stratified variance contribution: N_m² / n_m × σ_corr² × (1 - n_m/N_m)
@@ -266,48 +283,332 @@ StorageCarbonErrorBound compute_storage_carbon_bound(
 
 // ─── Carbon estimation from sampled hours ─────────────────────────────
 
-/// Compute average emission factor from system generators
-static double compute_avg_emission_factor(const HybridPowerSystem& sys) {
-  double avg_ef = 0.0;
-  int ef_count = 0;
+static bool has_authored_emission_factor(const HybridPowerSystem& sys) {
+  for (const auto& g : sys.ac.generators)
+    if (g.in_service && g.emission_factor_tco2_mwh > 0.0) return true;
+  for (const auto& sg : sys.ac.static_generators)
+    if (sg.in_service && sg.co2_emission_rate > 0.0) return true;
+  for (const auto& sg : sys.dc.dc_static_generators)
+    if (sg.in_service && sg.emission_factor_tco2_mwh > 0.0) return true;
+  return false;
+}
+
+static const UCSchedule* schedule_at_step(
+    const AnnualProductionSimResult& ann_result, int global_step,
+    int& local_step) {
+  for (const auto& ws : ann_result.weekly_schedules) {
+    if (global_step < ws.start_step || global_step >= ws.start_step + ws.num_steps)
+      continue;
+    local_step = global_step - ws.start_step;
+    return &ws.uc;
+  }
+  local_step = -1;
+  return nullptr;
+}
+
+static bool carbon_schedule_complete(const AnnualProductionSimResult& ann_result) {
+  if (ann_result.step_results.empty() || ann_result.weekly_schedules.empty())
+    return false;
+  for (int t = 0; t < static_cast<int>(ann_result.step_results.size()); ++t) {
+    int local = -1;
+    if (!schedule_at_step(ann_result, t, local)) return false;
+  }
+  return true;
+}
+
+static double profile_value_at(const TimeSeriesData& ts, int id, int t,
+                              double fallback) {
+  for (const auto& p : ts.profiles) {
+    if (p.id != id) continue;
+    return t >= 0 && t < static_cast<int>(p.values.size())
+        ? p.values[static_cast<size_t>(t)] : fallback;
+  }
+  return fallback;
+}
+
+static double external_grid_factor_at(const HybridPowerSystem& sys,
+                                      const TimeSeriesData& ts, int t,
+                                      bool& known) {
+  double weighted = 0.0;
+  double weight = 0.0;
+  for (const auto& eg : sys.ac.external_grids) {
+    if (!eg.in_service) continue;
+    double factor = eg.emission_factor_tco2_mwh;
+    if (eg.emission_factor_profile_id >= 0)
+      factor = profile_value_at(ts, eg.emission_factor_profile_id, t, factor);
+    if (factor > 0.0 && std::isfinite(factor)) {
+      weighted += factor;
+      weight += 1.0;
+    }
+  }
+  known = weight > 0.0;
+  return known ? weighted / weight : 0.0;
+}
+
+static UCSchedule slice_schedule_for_step(const UCSchedule& src, int t) {
+  UCSchedule out = src;
+  auto d = [t](const std::vector<std::vector<double>>& rows) {
+    std::vector<std::vector<double>> result;
+    result.reserve(rows.size());
+    for (const auto& row : rows) {
+      result.push_back({t >= 0 && t < static_cast<int>(row.size())
+                            ? row[static_cast<size_t>(t)] : 0.0});
+    }
+    return result;
+  };
+  auto i = [t](const std::vector<std::vector<int>>& rows) {
+    std::vector<std::vector<int>> result;
+    result.reserve(rows.size());
+    for (const auto& row : rows) {
+      result.push_back({t >= 0 && t < static_cast<int>(row.size())
+                            ? row[static_cast<size_t>(t)] : 0});
+    }
+    return result;
+  };
+  out.gen_dispatch = d(src.gen_dispatch);
+  out.gen_commit = i(src.gen_commit);
+  out.ess_dispatch = d(src.ess_dispatch);
+  out.ess_soc = d(src.ess_soc);
+  out.renewable_dispatch = d(src.renewable_dispatch);
+  out.ac_pv_dispatch = d(src.ac_pv_dispatch);
+  out.ac_sgen_dispatch = d(src.ac_sgen_dispatch);
+  out.external_grid_dispatch = d(src.external_grid_dispatch);
+  out.flexible_load_up = d(src.flexible_load_up);
+  out.flexible_load_down = d(src.flexible_load_down);
+  out.dc_pv_dispatch = d(src.dc_pv_dispatch);
+  out.dc_ess_dispatch = d(src.dc_ess_dispatch);
+  out.dc_ess_soc = d(src.dc_ess_soc);
+  out.dc_sgen_dispatch = d(src.dc_sgen_dispatch);
+  out.dc_load_demand = d(src.dc_load_demand);
+  out.vsc_dispatch = d(src.vsc_dispatch);
+  out.dcdc_dispatch = d(src.dcdc_dispatch);
+  out.vsc_direction_ac_to_dc = i(src.vsc_direction_ac_to_dc);
+  out.dcdc_direction_forward = i(src.dcdc_direction_forward);
+  out.market_dc_storage_dispatch_mw = d(src.market_dc_storage_dispatch_mw);
+  out.market_dc_storage_soc_mwh = d(src.market_dc_storage_soc_mwh);
+  out.market_dc_storage_direction_charging = i(src.market_dc_storage_direction_charging);
+  return out;
+}
+
+struct CarbonStep {
+  double authored_assets{0.0};
+  double external_grid{0.0};
+  double storage_inventory{0.0};
+  double dc_assets{0.0};
+  bool authored_known{false};
+  bool external_known{false};
+};
+
+/// Asset-resolved source carbon for one step. External-grid imports use the
+/// authored static factor or the time-varying profile when available. If no
+/// source factor exists, the caller applies the explicit legacy fallback.
+static CarbonStep source_carbon_components_at_step(
+    const HybridPowerSystem& sys,
+    const TimeSeriesData& ts_data,
+    const AnnualProductionSimResult& ann_result,
+    int global_step) {
+  CarbonStep out;
+  int local_t = -1;
+  const UCSchedule* schedule = schedule_at_step(ann_result, global_step, local_t);
+  if (!schedule) return out;
+  const double dt = ann_result.step_duration_hr;
+  int gen_pos = 0;
   for (const auto& g : sys.ac.generators) {
-    if (g.emission_factor_tco2_mwh > 0) {
-      avg_ef += g.emission_factor_tco2_mwh;
-      ++ef_count;
+    if (!g.in_service) continue;
+    double p = 0.0;
+    if (schedule && gen_pos < static_cast<int>(schedule->gen_dispatch.size()) &&
+        local_t >= 0 && local_t < static_cast<int>(
+            schedule->gen_dispatch[static_cast<size_t>(gen_pos)].size())) {
+      p = schedule->gen_dispatch[static_cast<size_t>(gen_pos)]
+          [static_cast<size_t>(local_t)];
     }
+    if (g.emission_factor_tco2_mwh > 0.0) {
+      out.authored_assets += std::max(0.0, p) * g.emission_factor_tco2_mwh * dt;
+      out.authored_known = true;
+    }
+    ++gen_pos;
   }
+  int static_pos = 0;
   for (const auto& sg : sys.ac.static_generators) {
-    if (sg.co2_emission_rate > 0) {
-      avg_ef += sg.co2_emission_rate;
-      ++ef_count;
+    if (!sg.in_service) continue;
+    double p = std::max(0.0, sg.p_mw * sg.scaling);
+    if (schedule && static_pos < static_cast<int>(schedule->ac_sgen_dispatch.size()) &&
+        local_t >= 0 && local_t < static_cast<int>(
+            schedule->ac_sgen_dispatch[static_cast<size_t>(static_pos)].size())) {
+      p = std::max(0.0, schedule->ac_sgen_dispatch[static_cast<size_t>(static_pos)]
+          [static_cast<size_t>(local_t)]);
+    }
+    if (sg.co2_emission_rate > 0.0) {
+      out.authored_assets += p * sg.co2_emission_rate * dt;
+      out.authored_known = true;
+    }
+    ++static_pos;
+  }
+  // DC static generators and PV-backed static assets are lifecycle assets,
+  // even though they are not represented in the AC generator table.
+  int dc_sgen_pos = 0;
+  for (const auto& sg : sys.dc.dc_static_generators) {
+    if (!sg.in_service) continue;
+    double p = sg.p_set_mw * sg.scaling *
+        profile_value_at(ts_data, sg.profile_id, global_step, 1.0);
+    if (dc_sgen_pos < static_cast<int>(schedule->dc_sgen_dispatch.size()) &&
+        local_t < static_cast<int>(schedule->dc_sgen_dispatch[static_cast<size_t>(dc_sgen_pos)].size()))
+      p = schedule->dc_sgen_dispatch[static_cast<size_t>(dc_sgen_pos)][static_cast<size_t>(local_t)];
+    if (sg.emission_factor_tco2_mwh > 0.0) {
+      out.dc_assets += std::max(0.0, p) * sg.emission_factor_tco2_mwh * dt;
+      out.authored_known = true;
+    }
+    ++dc_sgen_pos;
+  }
+  bool ext_known = false;
+  (void)external_grid_factor_at(sys, ts_data, global_step, ext_known);
+  out.external_known = ext_known;
+  int ext_pos = 0;
+  if (ext_known) {
+    for (const auto& eg : sys.ac.external_grids) {
+      if (!eg.in_service) continue;
+      double factor = eg.emission_factor_tco2_mwh;
+      if (eg.emission_factor_profile_id >= 0)
+        factor = profile_value_at(ts_data, eg.emission_factor_profile_id,
+                                  global_step, factor);
+      if (ext_pos < static_cast<int>(schedule->external_grid_dispatch.size()) &&
+          local_t < static_cast<int>(schedule->external_grid_dispatch[static_cast<size_t>(ext_pos)].size()) &&
+          factor > 0.0 && std::isfinite(factor)) {
+        out.external_grid += std::max(0.0, schedule->external_grid_dispatch[static_cast<size_t>(ext_pos)][static_cast<size_t>(local_t)]) * factor * dt;
+      }
+      ++ext_pos;
     }
   }
-  if (ef_count > 0) avg_ef /= ef_count;
-  else avg_ef = 0.5;
-  return avg_ef;
+  return out;
+}
+
+struct StorageCarbonLedgerState {
+  double energy_mwh{0.0};
+  double carbon_tco2{0.0};
+};
+
+/// Chronological storage-carbon ledger. A storage unit carries its existing
+/// inventory into the year; charging adds the contemporaneous source
+/// intensity and discharging removes carbon at the pre-dispatch intensity.
+static std::vector<CarbonStep> build_carbon_ledger(
+    const HybridPowerSystem& sys,
+    const TimeSeriesData& ts_data,
+    const AnnualProductionSimResult& ann_result) {
+  const int T = static_cast<int>(ann_result.step_results.size());
+  std::vector<CarbonStep> ledger(static_cast<size_t>(std::max(0, T)));
+  if (T == 0) return ledger;
+
+  std::vector<StorageCarbonLedgerState> ac_state;
+  std::vector<StorageCarbonLedgerState> dc_state;
+  auto init = [](const auto& stores, auto& dst) {
+    for (const auto& st : stores) {
+      if (!st.in_service || st.cap_charging_strategy == "static") continue;
+      const double energy = st.e_mwh > 0.0 ? st.e_mwh
+          : std::max(0.0, st.e_rated_mwh * st.soc_init);
+      dst.push_back({energy, energy * std::max(0.0,
+          st.soc_carbon_intensity_tco2_mwh)});
+    }
+  };
+  init(sys.ac.storage, ac_state);
+  init(sys.dc.storage, dc_state);
+  init(sys.dc.dc_storage, dc_state);
+
+  for (int t = 0; t < T; ++t) {
+    int local_t = -1;
+    const UCSchedule* schedule = schedule_at_step(ann_result, t, local_t);
+    if (!schedule) continue;
+    CarbonStep out = source_carbon_components_at_step(sys, ts_data, ann_result, t);
+    const double dt = ann_result.step_duration_hr;
+    const double source_mwh = std::max(0.0,
+        ann_result.step_results[static_cast<size_t>(t)].total_gen_mw) * dt;
+    double source_intensity = (out.authored_assets + out.external_grid +
+        out.dc_assets) / std::max(source_mwh, 1e-12);
+    if (!std::isfinite(source_intensity) || source_intensity < 0.0)
+      source_intensity = 0.0;
+    if (source_intensity == 0.0 && !has_authored_emission_factor(sys) &&
+        !out.external_known) {
+      source_intensity = 0.5;
+    }
+
+    auto apply = [&](const auto& stores, const auto& rows, auto& states,
+                     size_t state_offset) {
+      size_t row = 0;
+      size_t state = state_offset;
+      for (const auto& st : stores) {
+        if (!st.in_service || st.cap_charging_strategy == "static") continue;
+        if (state >= states.size()) break;
+        const double p = row < rows.size() && local_t >= 0 &&
+                local_t < static_cast<int>(rows[row].size())
+            ? rows[row][static_cast<size_t>(local_t)] : 0.0;
+        auto& inv = states[state++];
+        const double before = inv.energy_mwh > 1e-12
+            ? inv.carbon_tco2 / inv.energy_mwh : 0.0;
+        if (p > 0.0) {
+          const double discharged = p * dt;
+          out.storage_inventory += discharged * before;
+          inv.energy_mwh = std::max(0.0, inv.energy_mwh - discharged);
+          inv.carbon_tco2 = std::max(0.0, inv.carbon_tco2 - discharged * before);
+        } else if (p < 0.0) {
+          const double charged = -p * dt;
+          const double eta = std::clamp(st.eta_charge, 0.0, 1.0);
+          inv.energy_mwh += charged * eta;
+          inv.carbon_tco2 += charged * source_intensity;
+        }
+        ++row;
+      }
+    };
+    apply(sys.ac.storage, schedule->ess_dispatch, ac_state, 0);
+    size_t dc_row = 0;
+    size_t dc_state_offset = 0;
+    auto apply_dc_group = [&](const auto& stores) {
+      std::vector<std::vector<double>> rows;
+      rows.reserve(schedule->dc_ess_dispatch.size() -
+                   std::min(dc_row, schedule->dc_ess_dispatch.size()));
+      for (size_t i = dc_row; i < schedule->dc_ess_dispatch.size(); ++i)
+        rows.push_back(schedule->dc_ess_dispatch[i]);
+      apply(stores, rows, dc_state, dc_state_offset);
+      for (const auto& st : stores)
+        if (st.in_service && st.cap_charging_strategy != "static") ++dc_row;
+    };
+    auto apply_dc_group_with_offset = [&](const auto& stores) {
+      apply_dc_group(stores);
+      for (const auto& st : stores)
+        if (st.in_service && st.cap_charging_strategy != "static") ++dc_state_offset;
+    };
+    apply_dc_group_with_offset(sys.dc.storage);
+    apply_dc_group_with_offset(sys.dc.dc_storage);
+    ledger[static_cast<size_t>(t)] = out;
+  }
+  return ledger;
 }
 
 /// Dense carbon estimate: sum gen × emission_factor × step_hr over ALL hours
 double compute_dense_carbon(
     const HybridPowerSystem& sys,
+    const TimeSeriesData& ts_data,
     const AnnualProductionSimResult& ann_result) {
   if (ann_result.step_results.empty()) return 0.0;
-  double avg_ef = compute_avg_emission_factor(sys);
+  const auto ledger = build_carbon_ledger(sys, ts_data, ann_result);
   double total = 0.0;
-  for (const auto& s : ann_result.step_results) {
-    total += s.total_gen_mw * avg_ef * ann_result.step_duration_hr;
+  for (int t = 0; t < static_cast<int>(ann_result.step_results.size()); ++t) {
+    const auto& c = ledger[static_cast<size_t>(t)];
+    double value = c.authored_assets + c.external_grid + c.storage_inventory + c.dc_assets;
+    if (value == 0.0 && !has_authored_emission_factor(sys))
+      value = ann_result.step_results[static_cast<size_t>(t)].total_gen_mw * 0.5 *
+          ann_result.step_duration_hr;
+    total += value;
   }
   return total;
 }
 
 double estimate_annual_carbon(
     const HybridPowerSystem& sys,
+    const TimeSeriesData& ts_data,
     const AnnualProductionSimResult& ann_result,
     const std::vector<StratumDef>& strata,
     const std::vector<int>& sampled_hours) {
   if (ann_result.step_results.empty()) return 0.0;
-
-  double avg_ef = compute_avg_emission_factor(sys);
+  const auto ledger = build_carbon_ledger(sys, ts_data, ann_result);
 
   // Weighted extrapolation: each sampled hour represents its stratum
   double total_carbon = 0.0;
@@ -319,8 +620,12 @@ double estimate_annual_carbon(
     for (int sh : sampled_hours) {
       for (int hi : st.hour_indices) {
         if (hi == sh) {
-          const auto& s = ann_result.step_results[static_cast<size_t>(sh)];
-          stratum_sample_carbon += s.total_gen_mw * avg_ef * ann_result.step_duration_hr;
+          const auto& c = ledger[static_cast<size_t>(sh)];
+          double value = c.authored_assets + c.external_grid + c.storage_inventory + c.dc_assets;
+          if (value == 0.0 && !has_authored_emission_factor(sys))
+            value = ann_result.step_results[static_cast<size_t>(sh)].total_gen_mw * 0.5 *
+                ann_result.step_duration_hr;
+          stratum_sample_carbon += value;
           ++sample_count;
           break;
         }
@@ -347,6 +652,35 @@ LifecycleSimResult run_lifecycle_simulation(
     const TimeSeriesData& ts_data,
     const LifecycleSimOptions& opts) {
   LifecycleSimResult result;
+  if (opts.num_years < 0) {
+    throw std::invalid_argument("LifecycleSimOptions.num_years must be non-negative");
+  }
+  if (!std::isfinite(opts.discount_rate) || opts.discount_rate <= -1.0 ||
+      !std::isfinite(opts.load_growth_rate) || opts.load_growth_rate <= -1.0 ||
+      !std::isfinite(opts.pv_annual_derating) || opts.pv_annual_derating < 0.0 ||
+      opts.pv_annual_derating > 1.0 ||
+      !std::isfinite(opts.calendar_degradation_per_year) ||
+      opts.calendar_degradation_per_year < 0.0 ||
+      !std::isfinite(opts.cycle_degradation_per_cycle) ||
+      opts.cycle_degradation_per_cycle < 0.0 ||
+      !std::isfinite(opts.loss_proxy_fraction) || opts.loss_proxy_fraction < 0.0 ||
+      opts.tier2_samples_per_stratum < 1 ||
+      !std::isfinite(opts.confidence_level) || opts.confidence_level <= 0.0 ||
+      opts.confidence_level >= 1.0) {
+    throw std::invalid_argument(
+        "LifecycleSimOptions contains a non-finite or out-of-range rate, "
+        "sample count, confidence level, or loss proxy");
+  }
+  if (ts_data.num_steps < 0 ||
+      (ts_data.num_steps > 0 &&
+       (!std::isfinite(ts_data.step_duration_hr) || ts_data.step_duration_hr <= 0.0))) {
+    throw std::invalid_argument("TimeSeriesData cadence must be positive and finite");
+  }
+  if (opts.step_duration_hr > 0.0 && ts_data.num_steps > 0 &&
+      std::abs(opts.step_duration_hr - ts_data.step_duration_hr) > 1e-12) {
+    throw std::invalid_argument(
+        "LifecycleSimOptions.step_duration_hr disagrees with TimeSeriesData.step_duration_hr");
+  }
   result.num_years = opts.num_years;
 
   // Working copy of the system
@@ -396,6 +730,26 @@ LifecycleSimResult run_lifecycle_simulation(
   std::vector<OrigStorage> orig_storages;
   for (const auto& st : work_sys.ac.storage) {
     orig_storages.push_back({st.index, st.e_rated_mwh});
+  }
+  std::unordered_map<int, double> cumulative_cycles;
+  std::unordered_map<int, double> age_since_replacement_years;
+  for (const auto& st : work_sys.ac.storage) {
+    cumulative_cycles[st.index] = std::max(0, st.current_cycles);
+    age_since_replacement_years[st.index] = 0.0;
+  }
+  struct OrigDCStorage { int index; double e_rated_mwh; };
+  std::vector<OrigDCStorage> orig_dc_storages;
+  std::unordered_map<int, double> dc_cumulative_cycles;
+  std::unordered_map<int, double> dc_age_since_replacement_years;
+  for (const auto& st : work_sys.dc.storage) {
+    orig_dc_storages.push_back({st.index, st.e_rated_mwh});
+    dc_cumulative_cycles[st.index] = std::max(0, st.current_cycles);
+    dc_age_since_replacement_years[st.index] = 0.0;
+  }
+  for (const auto& st : work_sys.dc.dc_storage) {
+    orig_dc_storages.push_back({st.index, st.e_rated_mwh});
+    dc_cumulative_cycles[st.index] = std::max(0, st.current_cycles);
+    dc_age_since_replacement_years[st.index] = 0.0;
   }
 
   // Compute max emission factor for bounds
@@ -463,12 +817,15 @@ LifecycleSimResult run_lifecycle_simulation(
     for (auto& st : work_sys.ac.storage) {
       for (const auto& os : orig_storages) {
         if (os.index == st.index) {
-          // Calendar degradation
-          st.soh_calendar = std::max(0.0,
-              1.0 - opts.calendar_degradation_per_year * (year - 1));
-          // Cycle degradation
-          st.soh_cycle = std::max(0.0,
-              1.0 - opts.cycle_degradation_per_cycle * st.current_cycles);
+          const double age = age_since_replacement_years[st.index];
+          const double cycles = cumulative_cycles[st.index];
+          // Calendar and cycle degradation are local to the current battery
+          // installation.  A replacement resets both clocks; project-year
+          // indexing would otherwise continue degrading a new unit.
+          st.soh_calendar = std::max(
+              0.0, 1.0 - opts.calendar_degradation_per_year * age);
+          st.soh_cycle = std::max(
+              0.0, 1.0 - opts.cycle_degradation_per_cycle * cycles);
           // Combined SOH
           st.soh = std::min(st.soh_calendar, st.soh_cycle);
 
@@ -493,6 +850,8 @@ LifecycleSimResult run_lifecycle_simulation(
             st.soh_cycle = 1.0;
             st.soh_calendar = 1.0;
             st.current_cycles = 0;
+            cumulative_cycles[st.index] = 0.0;
+            age_since_replacement_years[st.index] = 0.0;
           }
 
           // Update effective capacity
@@ -506,22 +865,72 @@ LifecycleSimResult run_lifecycle_simulation(
           ss.soh_cycle = st.soh_cycle;
           ss.soh_calendar = st.soh_calendar;
           ss.effective_capacity_mwh = st.e_rated_mwh;
-          ss.cumulative_cycles = st.current_cycles;
-          ss.replaced = !yr.replacements.empty() &&
-              yr.replacements.back().storage_index == st.index;
+          ss.cumulative_cycles = cumulative_cycles[st.index];
+          ss.age_since_replacement_years = age_since_replacement_years[st.index];
+          ss.replaced = std::any_of(
+              yr.replacements.begin(), yr.replacements.end(),
+              [&](const ReplacementEvent& re) {
+                return re.storage_index == st.index;
+              });
           yr.storage_states.push_back(ss);
           break;
         }
       }
     }
 
+    // DC and expanded DC-storage assets follow the same calendar/cycle model
+    // as AC storage. Their state is kept by stable component index and is
+    // reported with is_dc=true so domain collisions cannot be mistaken for one
+    // another in lifecycle attribution.
+    auto update_dc_storage_group = [&](auto& group) {
+      for (auto& st : group) {
+        for (const auto& os : orig_dc_storages) {
+          if (os.index != st.index) continue;
+          const double age = dc_age_since_replacement_years[st.index];
+          const double cycles = dc_cumulative_cycles[st.index];
+          const double soh_calendar = std::max(0.0, 1.0 - opts.calendar_degradation_per_year * age);
+          const double soh_cycle = std::max(0.0, 1.0 - opts.cycle_degradation_per_cycle * cycles);
+          st.soh = std::min(soh_calendar, soh_cycle);
+          const double eol_fraction = st.eol_percent > 1.0 ? st.eol_percent / 100.0 : st.eol_percent;
+          if (st.soh <= std::clamp(eol_fraction, 0.0, 1.0)) {
+            ReplacementEvent re;
+            re.year = year; re.storage_index = st.index; re.storage_name = st.name;
+            re.old_soh = st.soh;
+            re.replacement_cost_usd = st.replacement_cost * os.e_rated_mwh * 1000.0;
+            yr.replacements.push_back(re); result.all_replacements.push_back(re);
+            result.total_replacements++; cumulative_replacement += re.replacement_cost_usd;
+            st.soh = 1.0;
+            st.current_cycles = 0; dc_cumulative_cycles[st.index] = 0.0;
+            dc_age_since_replacement_years[st.index] = 0.0;
+          }
+          st.e_rated_mwh = os.e_rated_mwh * st.soh;
+          st.e_mwh = st.e_rated_mwh * st.soc_init;
+          StorageYearState ss;
+          ss.storage_index = st.index; ss.name = st.name; ss.is_dc = true;
+          ss.soh = st.soh; ss.soh_cycle = soh_cycle; ss.soh_calendar = soh_calendar;
+          ss.effective_capacity_mwh = st.e_rated_mwh;
+          ss.cumulative_cycles = dc_cumulative_cycles[st.index];
+          ss.age_since_replacement_years = dc_age_since_replacement_years[st.index];
+          ss.replaced = std::any_of(yr.replacements.begin(), yr.replacements.end(),
+              [&](const ReplacementEvent& re) { return re.storage_index == st.index; });
+          yr.storage_states.push_back(std::move(ss));
+          break;
+        }
+      }
+    };
+    update_dc_storage_group(work_sys.dc.storage);
+    update_dc_storage_group(work_sys.dc.dc_storage);
+
     // ─── Tier 1: Annual chronological dispatch ──────────────────────
 
     AnnualProductionSimOptions ann_opts;
-    ann_opts.skip_replay = true;  // schedule only for speed
+    ann_opts.skip_replay = !opts.run_physical_replay;
     ann_opts.enforce_cyclic_soc = true;
     ann_opts.verbose = false;
-    ann_opts.ts_pf_options.run_opf = false;
+    ann_opts.ts_pf_options.run_opf = opts.run_physical_replay;
+    ann_opts.ts_pf_options.keep_system_snapshots = false;
+    ann_opts.curtailment_penalty = 50.0;
+    ann_opts.ens_penalty = 10000.0;
 
     auto ann_result = solve_annual_production_simulation(work_sys, ts_data, ann_opts);
 
@@ -533,17 +942,34 @@ LifecycleSimResult run_lifecycle_simulation(
     yr.annual_ens_mwh = ann_result.total_ens_mwh;
     yr.annual_loss_mwh = ann_result.total_loss_mwh;
     yr.feasible = ann_result.feasible;
+    yr.schedule_only = ann_result.schedule_only;
+    yr.physical_replay_complete = ann_result.physical_replay_complete;
 
     // Update storage cycle counts from annual results
     for (const auto& sa : ann_result.storage_stats) {
+      if (sa.is_dc) {
+        auto it = dc_cumulative_cycles.find(sa.storage_index);
+        if (it != dc_cumulative_cycles.end()) {
+          it->second += sa.cycles;
+          for (auto& ss : yr.storage_states)
+            if (ss.is_dc && ss.storage_index == sa.storage_index) {
+              ss.cycles_this_year = sa.cycles;
+              ss.cumulative_cycles = it->second;
+            }
+        }
+        continue;
+      }
       for (auto& st : work_sys.ac.storage) {
-        if (st.name == sa.name) {
-          st.current_cycles += static_cast<int>(sa.cycles);
+        if (st.index == sa.storage_index) {
+          cumulative_cycles[st.index] += sa.cycles;
+          // Preserve the public integer field for legacy callers, while the
+          // lifecycle state retains fractional equivalent full cycles.
+          st.current_cycles = static_cast<int>(std::floor(cumulative_cycles[st.index]));
           // Update year state with cycles info
           for (auto& ss : yr.storage_states) {
             if (ss.storage_index == st.index) {
               ss.cycles_this_year = sa.cycles;
-              ss.cumulative_cycles = st.current_cycles;
+              ss.cumulative_cycles = cumulative_cycles[st.index];
               break;
             }
           }
@@ -551,6 +977,33 @@ LifecycleSimResult run_lifecycle_simulation(
         }
       }
     }
+    for (const auto& st : work_sys.ac.storage) {
+      const bool replaced_this_year = std::any_of(
+          yr.replacements.begin(), yr.replacements.end(),
+          [&](const ReplacementEvent& re) { return re.storage_index == st.index; });
+      if (!replaced_this_year) age_since_replacement_years[st.index] += 1.0;
+      for (auto& ss : yr.storage_states) {
+        if (ss.storage_index == st.index) {
+          ss.age_since_replacement_years = age_since_replacement_years[st.index];
+          ss.cumulative_cycles = cumulative_cycles[st.index];
+          break;
+        }
+      }
+    }
+    auto age_dc_group = [&](const auto& group) {
+      for (const auto& st : group) {
+        const bool replaced_this_year = std::any_of(yr.replacements.begin(), yr.replacements.end(),
+            [&](const ReplacementEvent& re) { return re.storage_index == st.index; });
+        if (!replaced_this_year) dc_age_since_replacement_years[st.index] += 1.0;
+        for (auto& ss : yr.storage_states)
+          if (ss.is_dc && ss.storage_index == st.index) {
+            ss.age_since_replacement_years = dc_age_since_replacement_years[st.index];
+            ss.cumulative_cycles = dc_cumulative_cycles[st.index];
+          }
+      }
+    };
+    age_dc_group(work_sys.dc.storage);
+    age_dc_group(work_sys.dc.dc_storage);
 
     // ─── Tier 2: Stratified sampling + carbon estimation ────────────
     // Tier 1 provides dispatch for ALL hours, so the primary carbon
@@ -559,14 +1012,108 @@ LifecycleSimResult run_lifecycle_simulation(
     // The sampling error bound covers only the PF correction residual.
 
     auto strata = classify_strata(ann_result.step_results);
-    auto sampled_hours = select_sample_hours(strata, opts.tier2_samples_per_stratum);
+    auto allocation = compute_sample_allocation(
+        strata, ann_result.step_results, opts.tier2_samples_per_stratum,
+        ann_result.step_duration_hr, max_ef, opts.loss_proxy_fraction);
+    auto sampled_hours = select_sample_hours(strata, allocation);
 
-    double dense_carbon = compute_dense_carbon(work_sys, ann_result);
+    const auto carbon_ledger = build_carbon_ledger(work_sys, ts_data, ann_result);
+    double dense_carbon = compute_dense_carbon(work_sys, ts_data, ann_result);
     double sampled_carbon = estimate_annual_carbon(
-        work_sys, ann_result, strata, sampled_hours);
+        work_sys, ts_data, ann_result, strata, sampled_hours);
+
+    // Execute an independent one-step UC-schedule replay for every selected
+    // sample. This is the measured PF/OPF correction; the previous estimator
+    // only rescaled a schedule proxy and therefore was not a physical check.
+    double corrected_carbon = dense_carbon;
+    int sampled_converged = 0;
+    double correction_total = 0.0;
+    std::vector<double> correction_by_stratum(strata.size(), 0.0);
+    std::vector<int> correction_count_by_stratum(strata.size(), 0);
+    if (opts.run_sampled_pf_correction && !sampled_hours.empty()) {
+      for (int sh : sampled_hours) {
+        int local = -1;
+        const UCSchedule* source = schedule_at_step(ann_result, sh, local);
+        if (!source) continue;
+        const UCSchedule one = slice_schedule_for_step(*source, local);
+        TimeSeriesData one_ts;
+        one_ts.num_steps = 1;
+        one_ts.step_duration_hr = ts_data.step_duration_hr;
+        for (const auto& p : ts_data.profiles) {
+          TimeSeriesProfile q = p;
+          q.values = {sh >= 0 && sh < static_cast<int>(p.values.size())
+                          ? p.values[static_cast<size_t>(sh)] : 1.0};
+          one_ts.profiles.push_back(std::move(q));
+        }
+        TimeSeriesPFOptions pf_opts = ann_opts.ts_pf_options;
+        pf_opts.skip_uc = false;
+        pf_opts.run_opf = true;
+        pf_opts.parallel_daily = false;
+        pf_opts.precomputed_uc_schedule = &one;
+        auto physical = solve_time_series_pf(work_sys, one_ts, pf_opts);
+        if (physical.num_steps != 1 || physical.opf_results.empty() ||
+            !physical.opf_results.front().converged) continue;
+        ++sampled_converged;
+        const auto& opf = physical.opf_results.front();
+        double physical_carbon = 0.0;
+        int gp = 0;
+        for (const auto& g : work_sys.ac.generators) {
+          if (!g.in_service) continue;
+          if (g.emission_factor_tco2_mwh > 0.0 && gp < static_cast<int>(opf.pg_mw.size()))
+            physical_carbon += std::max(0.0, opf.pg_mw[static_cast<size_t>(gp)]) *
+                g.emission_factor_tco2_mwh * ts_data.step_duration_hr;
+          ++gp;
+        }
+        size_t xi = 0;
+        for (const auto& eg : work_sys.ac.external_grids) {
+          if (!eg.in_service) continue;
+          double factor = eg.emission_factor_tco2_mwh;
+          if (eg.emission_factor_profile_id >= 0)
+            factor = profile_value_at(ts_data, eg.emission_factor_profile_id,
+                                      sh, factor);
+          if (xi < opf.external_grid_p_mw.size() && factor > 0.0 &&
+              std::isfinite(factor)) {
+            physical_carbon += std::max(0.0, opf.external_grid_p_mw[xi]) *
+                factor * ts_data.step_duration_hr;
+          }
+          ++xi;
+        }
+        const auto& proxy = carbon_ledger[static_cast<size_t>(sh)];
+        const double correction = physical_carbon -
+            (proxy.authored_assets + proxy.external_grid + proxy.storage_inventory + proxy.dc_assets);
+        correction_total += correction;
+        for (size_t m = 0; m < strata.size(); ++m) {
+          if (std::find(strata[m].hour_indices.begin(), strata[m].hour_indices.end(), sh) !=
+              strata[m].hour_indices.end()) {
+            correction_by_stratum[m] += correction;
+            ++correction_count_by_stratum[m];
+            break;
+          }
+        }
+      }
+      for (size_t m = 0; m < strata.size(); ++m) {
+        if (correction_count_by_stratum[m] > 0) {
+          corrected_carbon += correction_by_stratum[m] /
+              static_cast<double>(correction_count_by_stratum[m]) *
+              static_cast<double>(strata[m].hour_indices.size());
+        }
+      }
+    }
+    yr.sampled_pf_requested = static_cast<int>(sampled_hours.size());
+    yr.sampled_pf_converged = sampled_converged;
+    yr.sampled_pf_correction_complete =
+        !opts.run_sampled_pf_correction || sampled_converged == yr.sampled_pf_requested;
+    yr.sampled_pf_correction_tco2 = correction_total;
 
     // Use dense estimate as primary (Tier 1 gives us all hours)
-    yr.annual_carbon_tco2 = dense_carbon;
+    yr.annual_carbon_tco2 = corrected_carbon;
+    for (int t = 0; t < static_cast<int>(ann_result.step_results.size()); ++t) {
+      const auto& c = carbon_ledger[static_cast<size_t>(t)];
+      yr.carbon_external_grid_tco2 += c.external_grid;
+      yr.carbon_storage_inventory_tco2 += c.storage_inventory;
+      yr.carbon_dc_assets_tco2 += c.dc_assets;
+    }
+    yr.carbon_expanded_assets_tco2 = yr.carbon_dc_assets_tco2;
     yr.avg_carbon_intensity = (yr.annual_load_mwh > 0)
         ? yr.annual_carbon_tco2 / yr.annual_load_mwh : 0.0;
 
@@ -577,7 +1124,7 @@ LifecycleSimResult run_lifecycle_simulation(
         opts.loss_proxy_fraction, max_ef);
 
     yr.bounds.sampling = compute_sampling_bound(
-        strata, ann_result.step_results, opts.tier2_samples_per_stratum,
+        strata, ann_result.step_results, allocation,
         opts.confidence_level, ann_result.step_duration_hr,
         max_ef, opts.loss_proxy_fraction);
 
@@ -615,6 +1162,23 @@ LifecycleSimResult run_lifecycle_simulation(
         (cv.dense_carbon_tco2 > 1e-12)
             ? yr.bounds.storage_carbon.bound_tco2 / cv.dense_carbon_tco2 * 100.0
             : 0.0;
+    cv.bound_passed = std::isfinite(cv.sampling_gap_tco2) &&
+        cv.sampling_gap_tco2 <= yr.bounds.total_bound_tco2 + 1e-12;
+    bool any_external_factor = false;
+    for (const auto& eg : work_sys.ac.external_grids)
+      any_external_factor = any_external_factor || eg.emission_factor_tco2_mwh > 0.0 || eg.emission_factor_profile_id >= 0;
+    yr.carbon_factor_source = has_authored_emission_factor(work_sys) || any_external_factor
+        ? "asset_factors+external_grid_profile"
+        : "explicit_0.5_tco2_per_mwh_fallback";
+    yr.carbon_known = carbon_schedule_complete(ann_result) &&
+        (!opts.run_physical_replay || ann_result.physical_replay_complete) &&
+        yr.sampled_pf_correction_complete;
+    yr.feasible = yr.feasible &&
+        (!opts.run_physical_replay || yr.physical_replay_complete) &&
+        yr.sampled_pf_correction_complete;
+    if (!yr.carbon_known) {
+      yr.carbon_factor_source = "unknown_dispatch_schedule";
+    }
 
     // ─── NPV accumulation ───────────────────────────────────────────
 

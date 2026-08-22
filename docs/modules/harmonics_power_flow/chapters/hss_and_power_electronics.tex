@@ -1,0 +1,99 @@
+\section{谐波状态空间与电力电子频率耦合}
+\label{sec:hss}
+
+\subsection{统一状态与矩阵结构}
+\implfull{harmonics\_power\_flow.cpp:solve\_harmonic\_state\_space} 对用户给定的唯一正整数集合
+$\mathcal H$，按“次数、AC 母线、DC 母线”堆叠电压。第 $h$ 个节点块满足
+\begin{equation}
+ I_h=\sum_{k\in\mathcal H}Y_{h,k}V_k.
+\end{equation}
+线路、源、负荷和 RLC 元件只进入 $Y_{h,h}$；周期开关函数
+$s(t)=\sum_m S_m e^{jm\omega_0t}$ 通过卷积进入 $Y_{h,k}$，其中 $m=h-k$。
+用户可用 \texttt{HSSAdmittanceEntry} 明确追加任意域内或跨 AC/DC 的复导纳块；未知总线、未知次数和
+非有限复数一律拒绝。内部用 Eigen \texttt{SparseLU} 对整块矩阵只分解一次。
+
+归一化后向误差采用
+\begin{equation}
+ \eta_\infty=\frac{\|YV-I\|_\infty}
+ {\|Y\|_\infty\|V\|_\infty+\|I\|_\infty},
+\end{equation}
+默认准入门为 $10^{-10}$。分解失败、回代产生非有限数或 $\eta_\infty$ 超门时
+\fld{ok=false}，不返回可用电压。\fld{matrix\_dimension}、\fld{matrix\_nonzeros} 和
+\fld{normalized\_backward\_error} 使规模与数值质量可审计。
+
+\subsection{一等无源组件}
+\texttt{DCCapacitor}、\texttt{DCReactor} 与 \texttt{HarmonicFilter} 是 rich 模型的一等组件，均含稳定
+\fld{index}、\fld{in\_service}、名称和 SI 参数。它们经过 JSON 往返、AC/DC 域限定的 canonical
+投影、死岛剔除与结果归因。基准换算为
+\begin{equation}
+ Z_b=\frac{V_b^2}{S_b}\ [\Omega],\qquad Y_{pu}=Y_{SI}Z_b.
+\end{equation}
+DC 电容含 ESR、ESL 和漏电导：
+\begin{equation}
+ Y_C(j\omega)=G_{leak}+\frac{1}{R_{ESR}+j\omega L_{ESL}+1/(j\omega C)}.
+\end{equation}
+电抗器为 $1/(R+j\omega L)$；滤波器为串联 RLC，两端型按标准四项盖章，
+\fld{to\_bus=0} 表示接地并联支路。启用元件的母线基准、$L/C$ 和有限非负损耗参数不完整时 HSS
+直接拒绝。结果按 \texttt{component\_kind/index/terminal} 返回流入元件的 pu 复电流谱。
+
+\subsection{两电平 VSC}
+\texttt{VSCHarmonicModel::TwoLevel} 要求开关频率为基频的整数倍、$0<m_a\le1.15$、显式传输电导、
+滤波电感和直流电容。基波开关系数为
+\begin{equation}
+ S_{\pm1}=\frac{m_a}{2}e^{\pm j\phi}.
+\end{equation}
+载波前两组、每组 $n=-3,\ldots,3$ 的自然采样双傅里叶系数按 Holmes--Lipo 形式计算：
+\begin{equation}
+ S_{m,n}=\frac{2}{m\pi}J_n\!\left(\frac{m\pi m_a}{2}\right)
+ \sin\frac{(m+n)\pi}{2}e^{jn\phi}.
+\end{equation}
+整数阶 Bessel 函数使用 DLMF 10.2.2 收敛级数，当前参数区间只需 $|n|\le3$。AC 滤波器、DC-link
+电容及其 ESR 独立盖章。电流 PI 和直流电压 PI 的频率响应为
+\begin{equation}
+ G_c(j\omega)=\left(K_p+\frac{K_i}{j\omega}\right)e^{-j\omega T_d}.
+\end{equation}
+
+\subsection{MMC}
+\texttt{VSCHarmonicModel::MMC} 使用平均上臂插入函数
+\begin{equation}
+ n_u(t)=\frac{1-m_a\cos(\omega_0t+\phi)}{2},\quad
+ N_0=\frac{1}{2},\quad N_{\pm1}=-\frac{m_a}{4}e^{\pm j\phi}.
+\end{equation}
+每臂子模块等效电容按 $C_{eq}=6C_{SM}/N_{SM}$，与臂 $R/L$ 形成频率导纳；环流 PI 进入 AC
+端小信号导纳。模型要求子模块数、电容和臂电感均为正。完全无损参数在离散频点可能形成奇异共振，
+此时因子化明确失败；实现不会通过添加未声明阻尼伪造解。
+
+\subsection{LCC 六脉波模型}
+启用 LCC 谐波模型时，只有 $h=6q\pm1$ 的特征系数非零：
+\begin{equation}
+ S_h=\frac{2\sqrt3}{\pi h}\cos\frac{h\mu}{2}
+ e^{-jh(\alpha+\mu/2)},
+\end{equation}
+负次系数取共轭。$\alpha$ 来自正常触发角，缺失时使用下限；$\mu$ 由换相电抗、额定电流和阀侧
+基准电压计算并限制到 $[0,\pi/3]$。平波电抗器和 DC 滤波电容/ESR 进入 DC 端频率导纳。桥数、
+传输电导、平波电感或 DC 电容缺失时拒绝求解。
+
+\subsection{DC/DC PWM 模型}
+Buck、Boost、BuckBoost 和 Isolated 拓扑使用 CCM 矩形 PWM 系数
+\begin{equation}
+ S_0=D,\qquad S_k=\frac{\sin(\pi kD)}{\pi k}e^{-jk\pi D},\ k\ne0.
+\end{equation}
+Boost 使用 $1-s(t)$，BuckBoost 反相，Isolated 再乘变比。输入/输出电容、ESR、串联电感/电阻和
+电压 PI 全部盖章。\texttt{Generic}、$D\notin(0,1)$ 或物理参数不完整的启用模型会被拒绝。
+
+\subsection{投影、HTTP 与证据边界}
+HSS 在 rich-to-canonical 投影后求解，并按 rich 母线广播结果；同号 AC/DC ID 始终由域标志区分。
+\texttt{POST /api/session/harmonics\_hss} 接收 \fld{orders}、复电流 \fld{injections} 和显式
+\fld{couplings}，返回复电压与设备端电流的实部、虚部、幅值和相角。
+
+验证分为三层。第一层是 HSS 自身：零耦合与逐阶 HPF 差小于 $10^{-10}$ pu，单母线 DC 电容与
+SI 闭式解差小于 $10^{-10}$ pu，显式 $Y_{21}$ 的两频三角系统与闭式解差小于 $10^{-10}$ pu；四类
+换流器均验证非零跨频响应和端口归因。第二层是规模门：1000 个 AC 节点、20 个次数、4 个 VSC 的
+矩阵维数为 20080，压缩稀疏条目估算低于同维稠密复矩阵的 20\%。第三层是外部网络证据：14 个
+OpenDSS/GridLAB-D/NumPy 案例和 IEEE 13 馈线继续验证频率网络响应。外部引擎没有消费本项目 HSS
+开关矩阵，因此该证据不得扩展解释为换流器内部模型等价；换流器证据来自解析系数、退化关系和
+后向误差，而不是伪造的外部原生模型。
+
+当前 HSS 是平衡正序周期稳态小信号模型，求解正整数 Fourier 次数；它不是 EMT，未声称覆盖死区、
+器件结温、随机载波、宽频电缆或半导体开关瞬态。需要这些现象时必须进入动态/EMT 模型，而不能把
+HSS 结果重命名为瞬时波形。

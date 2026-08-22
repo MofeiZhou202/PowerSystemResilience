@@ -1923,6 +1923,10 @@ static void merge_zero_impedance_buses_impl(
   }
   for (auto& cs : sys.ac.charging_stations) cs.bus = remap_ac(cs.bus);
   for (auto& mot : sys.ac.motors) mot.bus = remap_ac(mot.bus);
+  for (auto& filter : sys.ac.harmonic_filters) {
+    filter.from_bus = remap_ac(filter.from_bus);
+    if (filter.to_bus != 0) filter.to_bus = remap_ac(filter.to_bus);
+  }
 
   // Transformers: only reindex the original rich types (not the branches
   // expanded from them 鈥?those were already handled above).
@@ -2016,6 +2020,16 @@ static void canonicalize_dc_bus_indices(HybridPowerSystem& sys) {
   for (auto& source : sys.dc.static_generators) source.bus = dc_bus(source.bus);
   for (auto& source : sys.dc.dc_static_generators) source.bus = dc_bus(source.bus);
   for (auto& array : sys.dc.pv_arrays) array.bus = dc_bus(array.bus);
+  for (auto& capacitor : sys.dc.capacitors)
+    capacitor.bus = dc_bus(capacitor.bus);
+  for (auto& reactor : sys.dc.reactors) {
+    reactor.from_bus = dc_bus(reactor.from_bus);
+    reactor.to_bus = dc_bus(reactor.to_bus);
+  }
+  for (auto& filter : sys.dc.harmonic_filters) {
+    filter.from_bus = dc_bus(filter.from_bus);
+    if (filter.to_bus != 0) filter.to_bus = dc_bus(filter.to_bus);
+  }
   for (auto& breaker : sys.dc.dc_circuit_breakers) {
     breaker.bus_from = dc_bus(breaker.bus_from);
     breaker.bus_to = dc_bus(breaker.bus_to);
@@ -2469,6 +2483,11 @@ static std::vector<int> detect_dc_dead_buses(const HybridPowerSystem& sys) {
   };
   for (const auto& br : sys.dc.branches)
     if (br.in_service) connect(br.from_bus, br.to_bus);
+  for (const auto& reactor : sys.dc.reactors)
+    if (reactor.in_service) connect(reactor.from_bus, reactor.to_bus);
+  for (const auto& filter : sys.dc.harmonic_filters)
+    if (filter.in_service && filter.to_bus != 0)
+      connect(filter.from_bus, filter.to_bus);
   // DCDC converters couple their two DC terminals into one connectivity island.
   for (const auto& c : sys.dc.dcdc_converters)
     if (c.in_service) connect(c.bus_in, c.bus_out);
@@ -2612,6 +2631,25 @@ static void strip_dead_dc_islands(HybridPowerSystem& sys,
   filter_remap(sys.dc.static_generators);
   filter_remap(sys.dc.dc_static_generators);
   filter_remap(sys.dc.pv_arrays);
+  filter_remap(sys.dc.capacitors);
+
+  auto filter_two_terminal = [&](auto& vec) {
+    using T = typename std::decay_t<decltype(vec)>::value_type;
+    std::vector<T> kept;
+    kept.reserve(vec.size());
+    for (auto& item : vec) {
+      if (is_dead_bus(item.from_bus) ||
+          (item.to_bus != 0 && is_dead_bus(item.to_bus)))
+        continue;
+      item.from_bus = remap(item.from_bus);
+      if (item.to_bus != 0) item.to_bus = remap(item.to_bus);
+      if (item.from_bus == 0) continue;
+      kept.push_back(std::move(item));
+    }
+    vec = std::move(kept);
+  };
+  filter_two_terminal(sys.dc.reactors);
+  filter_two_terminal(sys.dc.harmonic_filters);
 
   {
     std::vector<DCDCConverter> kept;

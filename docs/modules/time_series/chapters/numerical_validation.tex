@@ -1,0 +1,158 @@
+\section{数值案例、回归证据与交叉验证}
+\label{sec:ts-validation}
+
+本章只列本地 Release 构建实际执行的数字，并区分“同代码回归”“独立方程重建”“穷举证明”
+和“外部引擎”。OpenDSS/GridLAB-D 验证逐时网络 PF；UC 由 SciPy/HiGHS 独立重建及承诺序列穷举验证。
+外部引擎不直接验证整数启停、年度分解或生命周期退化，不能跨越该证据边界。
+
+\subsection{V0：预先固定的交叉验证协议}
+编码前固定 TS-UC-4H 与 TS-PF-6STEP 两个冻结算例及以下门槛：
+\begin{itemize}
+  \item UC：平台、独立 MILP 与穷举目标相对差 $\le10^{-8}$，承诺矩阵相同，独立平衡残差 $\le10^{-8}$ MW；
+  \item OpenDSS：$|\Delta V|\le5\times10^{-4}$ pu，$|\Delta P|,|\Delta Q|\le0.02$ MW/Mvar；
+  \item GridLAB-D：$|\Delta V|\le5\times10^{-3}$ pu，$|\Delta\theta|\le0.5^\circ$，
+        $|\Delta P|,|\Delta Q|\le0.02$ MW/Mvar，且本机引擎必须存在，禁止 skip。
+\end{itemize}
+执行资产为 \srcpath{tools/time\_series\_validation/validate\_time\_series\_xref.cpp} 与
+\srcpath{run\_cross\_engine\_matrix.py}；注册测试名为 \texttt{time\_series\_cross\_engine\_matrix}。
+完整报告为 \srcpath{external\_data/time\_series\_validation/cross\_engine\_matrix.json}。
+
+\subsection{A 级：TS-UC-4H 全局最优性交叉验证}
+冻结案例参数如下。所有功率 MW、能量 MWh、时段 1 h；机组 1/2 的
+$(\bar P,c_1,c_0,C^{SU},U,D)$ 分别为
+$(100,18,45,420,2,1)$ 和 $(65,43,25,310,2,2)$；初态分别开/停。
+BESS 为 40 MWh、$[-20,20]$ MW、$SOC_0=0.5$、$[0.1,0.9]$、
+$\eta_c=\eta_d=0.9$、终端周期。负荷为 $(60,130,85,140)$ MW。
+
+\begin{center}\footnotesize
+\begin{tabular}{@{}L{4.0cm}r L{5.1cm}r@{}}
+\toprule Oracle & 目标 & 两机组承诺 & 最大平衡残差 MW\\\midrule
+HySim/HiGHS & 9233.3500000000 & $[1111];[0111]$ & 后验见共同轨迹\\
+SciPy/HiGHS 独立重建 & 9233.3500000000 & $[1111];[0111]$ & 0\\
+256 承诺序列穷举 + LP & 9233.3500000000 & $[1111];[0111]$ & $7.11\times10^{-15}$\\
+\bottomrule
+\end{tabular}
+\end{center}
+穷举 256 个序列中 5 个可行；三路目标相对差为 0。共同出力和状态为
+\begin{align*}
+p_1&=(77.7778,100,100,100),&p_2&=(0,17.85,0,25.6),\\
+p^{ess}&=(-17.7778,12.15,-15,14.4),&SOC&=(0.9,0.5625,0.9,0.5).
+\end{align*}
+穷举 oracle 对每个固定承诺解连续 LP；本算例边际发电成本为正、往返效率小于 1、无必须最小出力，
+故同时充放电严格劣化，储能方向变量的 LP 松弛在该冻结案例上精确（证明见引理~\ref{lem:ts-nosim}）。
+
+该验证还发现旧实现没有把后端 \texttt{SolveStats} 传播到 \texttt{UCSchedule}，导致零 gap 解仍显示
+\texttt{optimality\_proven=false}。现已由
+\srcpath{time\_series\_pf.cpp:extract\_schedule} 传播 status/gap/证书，并由储能效率测试回归。
+
+\subsection{B 级：TS-PF-6STEP 的 OpenDSS/GridLAB-D 对照}
+系统基准为 10 MVA、12.47 kV，两母线支路 $0.012+j0.032$ pu，恒功率负荷基值
+$1.2+j0.45$ MVA，倍率 $(0.65,0.8,1.0,1.15,1.30,0.90)$。
+\begin{center}\footnotesize
+\begin{tabular}{@{}r r r r r@{}}
+\toprule 步 & 倍率 & HySim $V_2$ pu & OpenDSS $V_2$ pu & $|\Delta V|$ pu\\\midrule
+0&0.65&0.998122169&0.998122169&$4.19\times10^{-10}$\\
+1&0.80&0.997687158&0.997687158&$4.55\times10^{-10}$\\
+2&1.00&0.997106165&0.997106165&$4.11\times10^{-10}$\\
+3&1.15&0.996669684&0.996669684&$1.40\times10^{-10}$\\
+4&1.30&0.996232570&0.996232570&$6.59\times10^{-10}$\\
+5&0.90&0.997396802&0.997396801&$4.49\times10^{-10}$\\
+\bottomrule
+\end{tabular}
+\end{center}
+OpenDSS 六步最大 $(|\Delta V|,|\Delta\theta|,|\Delta P|,|\Delta Q|)$ 为
+$(6.59\times10^{-10}\ \mathrm{pu},4.51\times10^{-8}\!^\circ,
+6.64\times10^{-7}\ \mathrm{MW},2.59\times10^{-7}\ \mathrm{Mvar})$。
+GridLAB-D 相应最大值为
+$(5.85\times10^{-7}\ \mathrm{pu},4.17\times10^{-7}\!^\circ,
+4.81\times10^{-6}\ \mathrm{MW},4.99\times10^{-7}\ \mathrm{Mvar})$，6/6 通过。
+三引擎比较的是同一平衡正序恒功率快照；它不验证不平衡设备库、UC 经济性或生命周期会计。
+
+\subsection{C 级：多尺度交直流年度案例}
+入口为 \srcpath{tests/test\_multiscale\_comprehensive.cpp} 的测试
+\texttt{Multiscale comprehensive AC/DC case runs from milliseconds to a year}。案例含 21 个 AC 母线、
+4 个 DC 母线、3 个 VSC、2 个 DC/DC、AC/DC 储能、3 个多端路由器、VPP、移动储能和微网。
+先执行稳态 PF，再执行 $10$ ms 暂态，随后 24 步、168 步时序 PF，最后执行 365 步、$\Delta t=24$ h
+的全年度耦合 UC（该历史证据仍显式设置 schedule-only 以控制运行时间）。独立闭环回归另执行
+4 步预算/SOC/生命周期 sampled-PF case。
+
+\begin{center}\footnotesize
+\begin{tabular}{@{}L{4.3cm}L{3.3cm}L{2.8cm}L{3.9cm}@{}}
+\toprule
+量 & 实际值 & 门槛/期望 & 证据\\ \midrule
+稳态 PF 最大残差 & $4.09072\times10^{-10}$ & 收敛 & 测试 INFO\\
+24 步 PF & 24/24 & 24/24 & 日 profile\\
+24 步最大 PF 残差 & $4.10506\times10^{-10}$ & 有限 & replay 统计\\
+168 步 PF & 168/168 & 168/168 & 周 profile\\
+168 步最大 PF 残差 & $4.11283\times10^{-10}$ & 有限 & replay 统计\\
+周最大 AC 支路负载 & 68.4776\% & $<100\%$ & branch flow\\
+周最大 VSC 负载 & 36.0000\% & $<100\%$ & converter transfer\\
+年度步数/总时长 & $365\times24=8760$ h & 8760 h & 年度断言\\
+年度负荷/可再生 & 124949.2143 / 22793.5 MWh & $>0$ & 结果摘要\\
+年度成本 & 2419450（约）货币/年 & 有限 & 结果摘要\\
+年度 ENS、PF/OPF 收敛数 & 0 MWh；0/365、0/365 & schedule-only 语义 & 明确未 replay\\
+\bottomrule
+\end{tabular}
+\end{center}
+这个案例证明的是“profile slicing、UC 年度 chronology、能量积分和丰富模型输入不崩溃”，
+不是 365 个 AC-OPF/PF 的完整物理认证；测试明确将年度阶段设为 \fld{skip\_replay=true}。
+
+\subsection{D 级：储能解析递推交叉检查}
+\begin{center}\footnotesize
+\begin{tabular}{@{}L{5.1cm}r r r@{}}
+\toprule
+情形 & $p$ (MW) & 参数 & $SOC_1$\\ \midrule
+放电 & $+9$ & $E=100$ MWh，$\eta_d=0.9$，10\%/h 自放电，$SOC_0=0.5$ & 0.35\\
+充电 & $-10$ & $E=100$ MWh，$\eta_c=0.8$，10\%/h 自放电，$SOC_0=0.5$ & 0.53\\
+\bottomrule
+\end{tabular}
+\end{center}
+两个值由 \srcpath{tests/test\_uc\_storage\_efficiency.cpp} 的 Catch2 断言以 $10^{-8}$ 量级容差校核；
+它们独立于 AC PF，直接验证 SOC 符号、效率方向和自放电幂次。
+
+\subsection{E 级：生命周期 HTTP 端到端案例}
+在 Release \texttt{run\_gui\_server} 上加载内置
+\texttt{multiscale\_comprehensive\_acdc}，调用
+\texttt{POST /api/session/run\_lifecycle\_sim}，\texttt{num\_years=3}、
+\texttt{resolution=6h}、增长 2\%、PV 降额 0.5\%、折现 5\%。实际返回：
+\begin{center}\footnotesize
+\begin{tabular}{@{}L{2.2cm}r r r r@{}}
+\toprule
+年 & 年成本 & 负荷 MWh & 碳 tCO$_2$ & 总界 tCO$_2$\\ \midrule
+1 & 2,996,509.5942 & 105,000.3662 & 48,977.9809 & 10,928.0699\\
+2 & 3,050,471.1503 & 106,794.6763 & 49,854.8562 & 10,913.0464\\
+3 & 3,105,509.2924 & 108,624.8726 & 50,749.2260 & 10,896.5805\\
+\bottomrule
+\end{tabular}
+\end{center}
+三年汇总为可行、NPV $8,718,508.6873$、总碳 $149,582.0631$ tCO$_2$、替换 0 次；逐年
+稠密/分层抽样差约 0.4062\%、0.4055\%、0.4048\%。这些数字是 lifecycle 内置
+fleet-average emission factor 与 schedule-only 口径，不能与逐机组碳流或 PF 损耗结果直接比较。
+
+\subsection{F 级：容量扫描单调性}
+同一 3 年案例通过 \texttt{run\_lifecycle\_compare} 扫描 BESS 能量倍率：
+\begin{center}\footnotesize
+\begin{tabular}{@{}L{3.0cm}r r r@{}}
+\toprule
+倍率 & 安装 BESS MWh & NPV & 总碳 tCO$_2$\\ \midrule
+0.50 & 7.0 & 8,727,779.9907 & 149,740.0244\\
+1.00 & 14.0 & 8,718,508.6873 & 149,582.0631\\
+1.50 & 21.0 & 8,709,237.3840 & 149,424.1018\\
+\bottomrule
+\end{tabular}
+\end{center}
+此扫描执行了容量缩放、系统克隆和结果汇总链；由于生命周期仍存在逐机组碳、分数循环和扩展资产
+归因边界，不能称为全部结果归因闭合。它不是外部工具交叉验证，也不证明任意案例中
+NPV 必然随容量单调。
+
+\subsection{注册测试矩阵}
+Release 基线中与本模块直接相关的 29 个测试（外部电网、DR、储能效率/退化、VPP、路由器、
+移动储能、时间序列 snapshot、碳存储递推和多尺度年度案例）全部通过；完整命令为
+\begin{quote}\small
+\texttt{ctest --test-dir build/macos-release -R}\newline
+\texttt{'External grid:|Demand response:|Storage degradation:|...'}\newline
+\texttt{--output-on-failure}
+\end{quote}
+\par\smallskip
+此外 \srcpath{test\_nighttime\_opf} 的 24 步动态 OPF 和 4 步 UC$\to$OPF$\to$PF 均为 24/24、4/4。
+测试结果只在本地兄弟依赖当前 HEAD 上成立；该 HEAD 与仓库记录 pin 不同，发布报告必须保留这一环境差异。

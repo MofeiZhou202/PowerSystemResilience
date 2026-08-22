@@ -644,6 +644,9 @@ struct UCBuildResult {
   // reported cost reflects the true penalty form (e.g. islanding cost
   // pen·(1−o), encoded in c as −pen·o with the constant pen dropped).
   double obj_offset{0.0};
+  std::vector<double> generator_energy_budget_mwh;
+  double fuel_budget_mwh{0.0};
+  double step_duration_hr{1.0};
 };
 
 UCBuildResult build_uc_milp(const HybridPowerSystem& sys,
@@ -656,6 +659,9 @@ UCBuildResult build_uc_milp(const HybridPowerSystem& sys,
   const int T = ts_data.num_steps;
   const double dt = ts_data.step_duration_hr;
   res.T = T;
+  res.step_duration_hr = dt;
+  res.generator_energy_budget_mwh = opts.generator_energy_budget_mwh;
+  res.fuel_budget_mwh = opts.fuel_budget_mwh;
   res.ac_pv_count = static_cast<int>(sys.ac.pv_systems.size());
   res.dc_pv_count = static_cast<int>(sys.dc.pv_arrays.size());
   res.dc_sgen_count = static_cast<int>(sys.dc.dc_static_generators.size());
@@ -1729,13 +1735,18 @@ UCBuildResult build_uc_milp(const HybridPowerSystem& sys,
   const int n_ineq_ms_q = use_coreloc ? (4 * M * T) : 0;
   const int n_ineq_ms_transit = use_coreloc ? (2 * M * T) : 0;
   const int n_ineq_ms_minstay = use_coreloc ? (2 * M * T) : 0;
+  const bool use_energy_budget = !opts.generator_energy_budget_mwh.empty();
+  const int n_ineq_generator_budget = use_energy_budget ? G : 0;
+  const bool use_fuel_budget = opts.fuel_budget_mwh > 0.0;
+  const int n_ineq_fuel_budget = use_fuel_budget ? 1 : 0;
 
   const int m_ineq = n_ineq_pmax + n_ineq_pmin + n_ineq_ramp_up + n_ineq_ramp_dn
                    + n_ineq_startup + n_ineq_storage_mode
                    + n_ineq_min_updn + n_ineq_line + n_ineq_dc_line
                    + n_ineq_reserve + n_ineq_mg + n_ineq_degr_abs + n_ineq_degr_cap
                    + n_ineq_vpp_ramp
-                   + n_ineq_ms_q + n_ineq_ms_transit + n_ineq_ms_minstay;
+                   + n_ineq_ms_q + n_ineq_ms_transit + n_ineq_ms_minstay
+                   + n_ineq_generator_budget + n_ineq_fuel_budget;
 
   // --- Compute total load per time step (AC + DC loads) ---
   // Match PF aggregation semantics:
@@ -2825,6 +2836,30 @@ UCBuildResult build_uc_milp(const HybridPowerSystem& sys,
     }
   }
 
+  // Cumulative L0 energy/fuel budgets. The generator budget is a direct
+  // integral of positive dispatch. Fuel is intentionally the same explicit
+  // MWh-equivalent proxy because no heat-rate curve exists in the model.
+  // The constraint is the linear form of E_g = sum_t p_g,t*dt <= B_g.
+  if (use_energy_budget) {
+    for (int gi = 0; gi < G; ++gi) {
+      for (int t = 0; t < T; ++t)
+        ineq_trips.emplace_back(row, pg_idx(gi, t), dt);
+      const int authored = res.gen_indices[static_cast<size_t>(gi)];
+      const double cap = authored < static_cast<int>(opts.generator_energy_budget_mwh.size())
+          ? opts.generator_energy_budget_mwh[static_cast<size_t>(authored)]
+          : 0.0;
+      b_ineq[row] = cap > 0.0 ? cap : 1.0e30;
+      ++row;
+    }
+  }
+  if (use_fuel_budget) {
+    for (int gi = 0; gi < G; ++gi)
+      for (int t = 0; t < T; ++t)
+        ineq_trips.emplace_back(row, pg_idx(gi, t), dt);
+    b_ineq[row] = opts.fuel_budget_mwh;
+    ++row;
+  }
+
   if (row != m_ineq) {
     throw std::runtime_error("UC MILP row assembly mismatch");
   }
@@ -2952,12 +2987,24 @@ engine::SolveResult solve_uc_milp_with_fallback(
 UCSchedule extract_schedule(const Eigen::VectorXd& x,
                             const UCBuildResult& build,
                             double total_cost,
-                            bool feasible,
-                            const std::string& solver_name) {
+                            const engine::SolveStats& stats) {
   UCSchedule sched;
   sched.total_cost = total_cost;
-  sched.feasible = feasible;
-  sched.solver_name = solver_name;
+  sched.feasible = stats.success;
+  sched.solver_name = stats.solver_name;
+  sched.solver_status = stats.status;
+  sched.mip_gap = stats.mip_gap;
+  // Same certificate semantics as market SCUC: an optimal backend status is
+  // necessary for accepting its gap, and only a numerically closed relative
+  // gap is reported as a strict optimality proof. Wood--Wollenberg--Sheble,
+  // Power Generation, Operation, and Control, 3rd ed., Sec. 4.8.
+  const bool optimal_status =
+      stats.status.find("Optimal") != std::string::npos ||
+      stats.status.find("optimal") != std::string::npos;
+  sched.mip_gap_target_met =
+      optimal_status && std::isfinite(stats.mip_gap);
+  sched.optimality_proven =
+      sched.mip_gap_target_met && stats.mip_gap <= 1.0e-9;
 
   const int G = build.G, S = build.S, Sd = build.Sd, R = build.R, T = build.T;
   const int nPg = G * T, nUg = G * T, nSg = G * T;
@@ -3020,6 +3067,34 @@ UCSchedule extract_schedule(const Eigen::VectorXd& x,
       sched.gen_commit[static_cast<size_t>(gi)][static_cast<size_t>(t)] = (x[ug_idx(gi, t)] > 0.5) ? 1 : 0;
     }
   }
+  sched.generator_energy_mwh.assign(static_cast<size_t>(G), 0.0);
+  sched.generator_energy_budget_mwh.assign(static_cast<size_t>(G), 0.0);
+  sched.budget_constraints_applied = !build.generator_energy_budget_mwh.empty() ||
+                                     build.fuel_budget_mwh > 0.0;
+  double max_budget_violation = 0.0;
+  for (int gi = 0; gi < G; ++gi) {
+    double energy = 0.0;
+    for (int t = 0; t < T; ++t)
+      energy += std::max(0.0, sched.gen_dispatch[static_cast<size_t>(gi)][static_cast<size_t>(t)]) *
+                build.step_duration_hr;
+    sched.generator_energy_mwh[static_cast<size_t>(gi)] = energy;
+  }
+  double total_fuel = 0.0;
+  for (double e : sched.generator_energy_mwh) total_fuel += e;
+  sched.fuel_consumption_mwh = total_fuel;
+  sched.fuel_budget_mwh = build.fuel_budget_mwh;
+  for (int gi = 0; gi < G; ++gi) {
+    const int authored = build.gen_indices[static_cast<size_t>(gi)];
+    const double cap = authored < static_cast<int>(build.generator_energy_budget_mwh.size())
+        ? build.generator_energy_budget_mwh[static_cast<size_t>(authored)] : 0.0;
+    sched.generator_energy_budget_mwh[static_cast<size_t>(gi)] = cap;
+    if (cap > 0.0)
+      max_budget_violation = std::max(max_budget_violation,
+          sched.generator_energy_mwh[static_cast<size_t>(gi)] - cap);
+  }
+  sched.max_energy_budget_violation_mwh = std::max(0.0, max_budget_violation);
+  sched.fuel_budget_violation_mwh = build.fuel_budget_mwh > 0.0
+      ? std::max(0.0, total_fuel - build.fuel_budget_mwh) : 0.0;
   for (int si = 0; si < S; ++si) {
     for (int t = 0; t < T; ++t) {
       sched.ess_dispatch[static_cast<size_t>(si)][static_cast<size_t>(t)] = x[ess_idx(si, t)];
@@ -3623,14 +3698,15 @@ UCSchedule solve_unit_commitment(const HybridPowerSystem& sys,
     UCSchedule sched;
     sched.feasible = false;
     sched.solver_name = result.stats.solver_name;
+    sched.solver_status = result.stats.status;
+    sched.mip_gap = result.stats.mip_gap;
     sched.total_cost = 0.0;
     return sched;
   }
 
   return extract_schedule(result.x, build,
                           result.stats.objective + build.obj_offset,
-                          result.stats.success,
-                          result.stats.solver_name);
+                          result.stats);
 }
 
 // ═══════════════════════════════════════════════════════════════════════
@@ -3736,6 +3812,12 @@ TimeSeriesPFResult solve_time_series_pf(const HybridPowerSystem& sys_in,
     const int day_len = std::max(1, static_cast<int>(std::lround(24.0 / dt)));
     const int num_days = (T + day_len - 1) / day_len;
     if (num_days > 1) {
+      if (!opts.skip_uc || !sys_in.ac.storage.empty() ||
+          !sys_in.dc.storage.empty() || !sys_in.dc.dc_storage.empty()) {
+        throw std::invalid_argument(
+            "parallel_daily cannot reset UC/SOC state; use a coupled "
+            "horizon or provide an explicit precomputed schedule");
+      }
       TimeSeriesPFOptions day_opts = opts;
       day_opts.parallel_daily = false;              // each day is a plain solve
       day_opts.enforce_terminal_soc_cyclic = true;  // independence across days

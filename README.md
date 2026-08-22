@@ -128,9 +128,9 @@ powershell -ExecutionPolicy Bypass -File tools/package_trial_windows.ps1
 | 图建模、网络降阶、重构 | 已实现并持续回归 | 支持连通性、开关收缩、Kron/series/pendant/sparse-Kron reduction、ONR。 |
 | 可靠性与弹性分析 | 已实现并持续回归 | 包含 MC、精确容量状态 COPT/F&D、FMEA、运行年/日历年故障率精确换算、物理成功路径容斥与稳定 ID 最小割集、三阶段可靠性。物理后果统一采用显式负荷削减：主网 HL-II 执行逐岛角度参考、零下界再调度、固定注入削减和两阶段字典序 DC-OPF；混合 AC/DC 执行同口径两阶段网络 LP；配网执行含有功/无功削减、AC/DC LinDistFlow、热限、辐射森林、Stage-2 运行拓扑重构及 Stage-3 拓扑保持的 MILP，纯无功负荷也具有显式削减可行点。无源/无 slack 状态由模型内生全切负荷，任何求解或证书失败立即报错，不伪造 EENS。保护不准入在安全拓扑上继续求解后果，并与 solver failure 分开标记。信息可靠性支持共享依赖路径、QoS、联合功能、最小割集、共因环境、通信设备供电与电池自治；在线保护链覆盖 CT/PT、主后备配合、重合/分段、DER-FRT 与 Mass-Matrix DAE。LCC、多端口路由器及显式三相保护动态不在当前物理后果口径内。 |
 | 三相与短路分析 | 已实现并持续回归 | 三相 NR 与 AC/DC 短路分析均有独立测试族。详细短路模块覆盖 IEC 60909 三序网、$K_G/K_T/K_S$、两/三绕组 Y/YN/Z/ZN/$\Delta$ 零序、线路零序电纳、方法 A/B/C、公式 (77)、$I_{bmo}$、附录 A、导体温度、相/地电流、稀疏批量、authored 身份恢复，以及理想导体收缩和实际电阻边 DCCB 分流；57 个直接短路用例/917 断言、IEC 13 母线综合例、50 组 OpenDSS 完整网络、35 组 GridLAB-D 5.3.0 平衡探针和 IEEE 13/34/123 外部 Thevenin 核已验证。GridLAB-D 为短路交叉验证强制门禁；详细 IEC 60909 计算域无开放审计项，EMT、控制器、保护与 IEC 61660 属于各自模型族。 |
-| 谐波分析 | 已实现（持续增强） | 频域穿透、Newton 非线性、三相 abc 与 AC/DC 耦合谐波潮流，频扫/谐振检测与 IEEE 519 / GB/T 14549 合规校核。 |
+| 谐波分析 | 已实现并完成声明范围闭环 | 频域穿透、Newton 非线性、三相 abc/变压器零序与 AC/DC 耦合，频扫、IEEE 519 / GB/T 14549；14/14 跨域矩阵、24 个强制 GridLAB-D 切片、IEEE13/OpenDSS 164 点。 |
 | 暂态动力学 | 已实现基础框架（持续增强） | 动态建模、事件、7 类求解器（含 MassMatrixDae 同时式 DAE）、DAE 诊断、小信号与频率观测；设备模型覆盖同步机/调速器/励磁/PSS、GFM/GFL 逆变器、DER 与 IEEE 1547 保护。显式三相网络自动启用 GFL 逐相电流状态与相域限流，GFM 采用序耦合 Norton 端口和最大相电流限流；三线制默认阻断零序电流。 |
-| 时序与年度生产模拟 | 已实现并持续回归 | UC MILP → AC-OPF → PF 校验流水线；年度分层分解（支持按日并行）、多年生命周期仿真与容量扫描对比。 |
+| 时序与年度生产模拟 | 核心已实现，年度/生命周期边界已深审计 | UC MILP → AC-OPF → PF 校验流水线；年度全耦合 UC、L0 能量/燃料代理预算、跨周 SOC、bottom-up feedback、物理生命周期 replay、抽样 PF correction、AC/DC/外部网碳分项均可执行。冻结 UC 已由 SciPy/HiGHS 和 256 序列穷举证明，6 步 AC 快照已与 OpenDSS/GridLAB-D 对照。制造/材料碳、网络损耗碳、燃料热率曲线和随机抽样 coverage 仍明确不属于当前范围；schedule-only 不能写成全年物理或生命周期外部认证。 |
 | 电力市场 | 已实现（交直流线性商业模型） | 日前混合 SCUC → 固定组合/换流与储能方向 SCED → AC/DC LMP → DC 储能跨期优化 → 结算/uplift → 非线性交直流认证；实时双结算与重复博弈。N-1 采用 AC 支路预防式切平面、发电机能力约束和全覆盖元件纠正式 SCED 校核。 |
 | 园区综合能源 | 已实现 | 电-热-氢-燃料多能流 MILP 调度（CHP、热泵、电解/燃料电池、多层氢储能、CCUS、碳预算）。 |
 | 承载力、薄弱环节与反事实规划 | 已实现 | DL/T 2041-2025 分布式电源承载力（含工程校核）、多维薄弱环节辨识、五类措施反事实对比。 |
@@ -547,7 +547,7 @@ fixtures 见 `data/etap_sample.xlsx`、`data/etap_feeder.xml`。GUI 后端端到
 | AML 代数建模层 | `include/hacdcpf/power_models/`, `src/power_models/`（ACOPF/ACDCOPF/DCOPF/LinDistFlow/SCUC builder） |
 | MIPSolvers 转发层 | `include/hacdcpf/aml/`, `include/hacdcpf/engine/`, `include/hacdcpf/solver/`（header-only 转发；实现在兄弟仓库 `../MIPSolvers`） |
 | 暂态动力学 | `include/hacdcpf/dynamics/`, `src/dynamics/` |
-| 谐波潮流 | `include/hacdcpf/analysis/harmonics_power_flow.hpp`, `src/harmonics_power_flow/` |
+| 谐波潮流与 HSS | 逐阶/三相/非线性 HPF；一等 DC 电容、电抗器和 AC/DC 滤波器；两电平 VSC、MMC、LCC、DC/DC 开关函数频率耦合；`include/hacdcpf/analysis/harmonics_power_flow.hpp`, `src/harmonics_power_flow/` |
 | 短路分析 | `include/hacdcpf/analysis/short_circuit.hpp`, `include/hacdcpf/analysis/dc_short_circuit.hpp`, `src/short_circuit/` |
 | 时序/年度/生命周期 | `include/hacdcpf/time_series/`, `src/time_series/` |
 | 碳流/年度碳 | `include/hacdcpf/carbon_analysis/`, `src/carbon_analysis/` |

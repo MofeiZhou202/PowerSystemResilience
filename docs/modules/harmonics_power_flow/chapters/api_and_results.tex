@@ -1,0 +1,66 @@
+\section{公共 API、参数与结果契约}
+\subsection{入口族}
+\begin{center}\footnotesize
+\begin{longtable}{@{}L{6.0cm}L{8.5cm}@{}}\toprule
+入口 & 用途\\ \midrule\endhead
+\srcpath{solve\_harmonic\_power\_flow} & rich 混合系统的正序 AC 与 DC 纹波逐阶线性解\\
+\srcpath{solve\_harmonic\_power\_flow\_3ph} & \texttt{ThreePhaseACSystem} 的 abc 逐阶线性解\\
+\srcpath{solve\_harmonic\_power\_flow\_3ph\_hybrid} & 三相 AC 与 DC 的线性 NIC 整块解\\
+\srcpath{solve\_harmonic\_power\_flow\_newton} & 全纯二次单端口逐阶 Newton\\
+\srcpath{solve\_harmonic\_power\_flow\_newton\_real} & 非全纯恒功率 $2N$ Newton\\
+\srcpath{solve\_harmonic\_power\_flow\_newton\_coupled} & 跨次数 mixing Newton\\
+\srcpath{solve\_harmonic\_power\_flow\_3ph\_newton*} & 上述 Newton 的 abc 对应形式\\
+\srcpath{solve\_harmonic\_power\_flow\_hybrid\_newton} & AC/DC 双线性堆叠 Newton\\
+\srcpath{solve\_harmonic\_state\_space} & 一等 RLC 与换流器开关函数驱动的 AC/DC 频率耦合 HSS\\
+\srcpath{frequency\_scan/sequence\_frequency\_scan} & 单相驱动点和三序驱动点阻抗扫描\\
+\srcpath{harmonic\_metrics/check\_harmonic\_limits} & 电流、损耗及标准后处理\\
+\bottomrule\end{longtable}
+\end{center}
+
+\subsection{HPFOptions 参数表}
+\begin{paramtable}
+\fld{ac\_orders} & $\mathcal H$ & 次 & 整数 $>1$、唯一 & 5, 7, 11, 13,\newline 17, 19, 23, 25 & AC 请求次数\\
+\fld{dc\_orders} & $\mathcal R$ & 次 & 整数 $>0$、唯一 & 2, 6, 12,\newline 18, 24 & DC 纹波次数\\
+\fld{run\_base\_power\_flow} & -- & -- & bool & true & 是否求基频工作点\\
+\fld{include\_load\_impedance} & -- & -- & bool & true & 是否盖章负荷并联等值\\
+\fld{default\_source\_xpp\_pu} & $X''$ & pu & 有限正数 & 0.2 & 缺省电源内阻抗\\
+\fld{dc\_source\_impedance\_pu} & $Z_{dc}$ & pu & 有限正数 & 0.01 & DC 电压形成端内阻\\
+\fld{min\_shunt\_pu} & $g_{min}$ & pu & 有限正数 & $10^{-9}$ & 数值接地\\
+\fld{auto\_nic\_from\_vscs} & -- & -- & bool & true & 自动生成六脉动 NIC\\
+\fld{compute\_branch\_flows} & -- & -- & bool & true & 恢复端电流与串联电流\\
+\fld{skin\_effect} & -- & -- & enum & None & 线路/变压器串联 $R(h)$\\
+\fld{skin\_coefficient} & $k_s$ & -- & 有限非负 & 0 & ProportionalSqrt 系数\\
+\fld{newton\_max\_iter} & $k_{max}$ & 次 & 正整数 & 30 & Newton 上限\\
+\fld{newton\_tol} & $\epsilon$ & pu & 有限正数 & $10^{-10}$ & 无穷范数门限\\
+\end{paramtable}
+
+\subsection{输入资源}
+\texttt{HarmonicCurrentSource} 以稳定 bus ID、AC/DC 域标志、参考电流、参考相角和
+\texttt{HarmonicSpectrum} 描述。\texttt{HarmonicNIC} 另含 AC/DC 母线、VSC 稳定 ID、端口行为、
+输出导纳和工作点功率。三相资源声明 phase mask、平衡/不平衡和分相参考电流。跨次资源必须显式列出
+输入次数、输出次数、相别和复系数。
+
+HSS 使用 \texttt{HSSCurrentInjection} 和 \texttt{HSSAdmittanceEntry}；两者的 bus 均是 authored 稳定
+ID，并用 \fld{is\_dc} 限定域。\texttt{HSSOptions} 的主要准入项为唯一正整数 \fld{orders}、
+\fld{include\_converter\_models}、\fld{compute\_device\_currents} 与有限正数
+\fld{max\_backward\_error}（默认 $10^{-10}$）。完整方程和设备参数见第~\ref{sec:hss} 节。
+
+\subsection{结果索引和单位}
+\texttt{HarmonicBusResult::bus} 是 authored 稳定母线 ID，\fld{v\_by\_order} 为 order 到 pu 复相量；
+AC 含 order 1，DC 含 order 0。THD 单位为百分数。\texttt{HarmonicBranchFlow::branch\_index} 是
+canonical 支路稳定 ID，电流均为 pu 幅值；\fld{i\_by\_order}、\fld{i\_to\_by\_order}、
+\fld{i\_series\_by\_order} 分别为 from 端、to 端和串联元件电流。HTTP 响应同时返回
+\fld{branch\_index}、\fld{i\_pu}、\fld{i\_to\_pu} 和 \fld{i\_series\_pu}。
+
+\subsection{状态真值表}
+\begin{center}\scriptsize
+\begin{tabular}{@{}L{5.1cm}cccL{5.2cm}@{}}\toprule
+情形 & ok & converged/combined & order solved & 解释\\ \midrule
+全部线性次数成功 & 真 & -- & 全真 & 可使用全部谱结果\\
+任一线性次数 LU/回代失败 & 假 & -- & 对应假 & 失败次数无伪造相量\\
+Newton 达到残差门限 & 真 & 真 & 真 & 数值收敛\\
+Newton 超限或 Jacobian 失败 & 假 & 假 & 对应假 & 不得只检查 ok 或只看向量非空\\
+基础 PF 失败、谐波矩阵成功 & 真 & 谐波成功 & 真 & 使用存储工作点，limitations 明示\\
+选项非法 & 假 & 假/缺省 & 空 & message 为拒绝原因\\
+\bottomrule\end{tabular}
+\end{center}

@@ -75,6 +75,9 @@ TEST_CASE("UC storage SOC applies discharge efficiency in the correct direction"
   REQUIRE(schedule.feasible);
   REQUIRE(schedule.ess_dispatch.size() == 1);
   REQUIRE(schedule.ess_soc.size() == 1);
+  CHECK_FALSE(schedule.solver_status.empty());
+  CHECK(schedule.mip_gap_target_met);
+  CHECK(schedule.optimality_proven);
   CHECK(schedule.ess_dispatch[0][0] == Catch::Approx(9.0).margin(1e-8));
   CHECK(schedule.ess_soc[0][0] == Catch::Approx(0.35).margin(1e-8));
 }

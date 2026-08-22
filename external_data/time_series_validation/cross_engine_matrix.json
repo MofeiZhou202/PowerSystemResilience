@@ -1,0 +1,327 @@
+{
+  "schema": "hysim-time-series-cross-validation-v1",
+  "uc": {
+    "hysim": {
+      "feasible": true,
+      "gen_commit": [
+        [
+          1,
+          1,
+          1,
+          1
+        ],
+        [
+          0,
+          1,
+          1,
+          1
+        ]
+      ],
+      "gen_dispatch_mw": [
+        [
+          77.77777777777777,
+          100.0,
+          100.0,
+          100.0
+        ],
+        [
+          0.0,
+          17.85,
+          0.0,
+          25.6
+        ]
+      ],
+      "mip_gap": 0.0,
+      "mip_gap_target_met": true,
+      "objective": 9233.35,
+      "optimality_proven": true,
+      "solver_name": "HiGHS",
+      "solver_status": "HiGHS optimal",
+      "storage_dispatch_mw": [
+        [
+          -17.77777777777777,
+          12.150000000000002,
+          -15.000000000000004,
+          14.400000000000002
+        ]
+      ],
+      "storage_soc": [
+        [
+          0.9,
+          0.5625,
+          0.9,
+          0.5
+        ]
+      ]
+    },
+    "scipy_highs": {
+      "objective": 9233.35,
+      "status": "Optimization terminated successfully. (HiGHS Status 7: Optimal)",
+      "gen_dispatch_mw": [
+        [
+          77.77777777777777,
+          100.0,
+          100.0,
+          100.0
+        ],
+        [
+          0.0,
+          17.85,
+          0.0,
+          25.6
+        ]
+      ],
+      "commitment": [
+        [
+          1,
+          1,
+          1,
+          1
+        ],
+        [
+          0,
+          1,
+          1,
+          1
+        ]
+      ],
+      "storage_dispatch_mw": [
+        -17.77777777777777,
+        12.150000000000002,
+        -15.000000000000002,
+        14.400000000000002
+      ],
+      "storage_soc": [
+        0.9,
+        0.5625,
+        0.9,
+        0.5
+      ],
+      "max_balance_residual_mw": 0.0
+    },
+    "commitment_enumeration": {
+      "objective": 9233.35,
+      "status": "global optimum by 256 commitment LPs",
+      "gen_dispatch_mw": [
+        [
+          77.77777777777777,
+          100.0,
+          100.0,
+          100.0
+        ],
+        [
+          0.0,
+          17.85,
+          0.0,
+          25.599999999999998
+        ]
+      ],
+      "commitment": [
+        [
+          1,
+          1,
+          1,
+          1
+        ],
+        [
+          0,
+          1,
+          1,
+          1
+        ]
+      ],
+      "storage_dispatch_mw": [
+        -17.77777777777778,
+        12.149999999999997,
+        -15.0,
+        14.400000000000002
+      ],
+      "storage_soc": [
+        0.9,
+        0.5625000000000001,
+        0.9,
+        0.5
+      ],
+      "max_balance_residual_mw": 7.105427357601002e-15,
+      "enumerated_commitments": 256,
+      "feasible_commitments": 5
+    },
+    "objective_abs_spread": 0.0,
+    "objective_relative_spread": 0.0,
+    "commitment_equal": true,
+    "passed": true
+  },
+  "pf": {
+    "case": "TS-PF-6STEP",
+    "steps": [
+      {
+        "step": 0,
+        "scale": 0.65,
+        "hysim": {
+          "vm_load_pu": 0.9981221689494182,
+          "va_load_deg": -0.12313075906747713,
+          "pf_mw": 0.7808358730450138,
+          "qf_mvar": 0.2947290144185999
+        },
+        "opendss": {
+          "vm_load_pu": 0.9981221685305879,
+          "va_load_deg": -0.12313077397651856,
+          "pf_mw": 0.7808358426233913,
+          "qf_mvar": 0.2947290078385899,
+          "engine_version": "DSS C-API Library version 0.14.5 revision 87d85c2622c8281b92255335bc7c09b11191b21d based on OpenDSS SVN 3723 [FPC 3.2.2] (64-bit build) MVMULT INCREMENTAL_Y CONTEXT_API PM 20240329033829; License Status: Open \nDSS-Python version: 0.15.7\nOpenDSSDirect.py version: 0.9.4"
+        },
+        "abs_error": {
+          "vm_pu": 4.1883030377221075e-10,
+          "va_deg": 1.4909041431976355e-08,
+          "p_mw": 3.0421622443377316e-08,
+          "q_mvar": 6.5800099813273505e-09
+        },
+        "gridlabd_equivalence_passed": true
+      },
+      {
+        "step": 1,
+        "scale": 0.8,
+        "hysim": {
+          "vm_load_pu": 0.9976871579740573,
+          "va_load_deg": -0.15161168520760487,
+          "pf_mw": 0.9612672704674985,
+          "qf_mvar": 0.36337943307149345
+        },
+        "opendss": {
+          "vm_load_pu": 0.9976871575191505,
+          "va_load_deg": -0.15161170257975853,
+          "pf_mw": 0.9612672005763068,
+          "qf_mvar": 0.363379417824779,
+          "engine_version": "DSS C-API Library version 0.14.5 revision 87d85c2622c8281b92255335bc7c09b11191b21d based on OpenDSS SVN 3723 [FPC 3.2.2] (64-bit build) MVMULT INCREMENTAL_Y CONTEXT_API PM 20240329033829; License Status: Open \nDSS-Python version: 0.15.7\nOpenDSSDirect.py version: 0.9.4"
+        },
+        "abs_error": {
+          "vm_pu": 4.549067789128003e-10,
+          "va_deg": 1.737215366004463e-08,
+          "p_mw": 6.989119172295943e-08,
+          "q_mvar": 1.5246714446526255e-08
+        },
+        "gridlabd_equivalence_passed": true
+      },
+      {
+        "step": 2,
+        "scale": 1.0,
+        "hysim": {
+          "vm_load_pu": 0.9971061651393764,
+          "va_load_deg": -0.18962515383826736,
+          "pf_mw": 1.2019823962851284,
+          "qf_mvar": 0.4552865007052276
+        },
+        "opendss": {
+          "vm_load_pu": 0.9971061647281356,
+          "va_load_deg": -0.18962516633701598,
+          "pf_mw": 1.201982225374326,
+          "qf_mvar": 0.45528646299945696,
+          "engine_version": "DSS C-API Library version 0.14.5 revision 87d85c2622c8281b92255335bc7c09b11191b21d based on OpenDSS SVN 3723 [FPC 3.2.2] (64-bit build) MVMULT INCREMENTAL_Y CONTEXT_API PM 20240329033829; License Status: Open \nDSS-Python version: 0.15.7\nOpenDSSDirect.py version: 0.9.4"
+        },
+        "abs_error": {
+          "vm_pu": 4.112408191758732e-10,
+          "va_deg": 1.2498748619416133e-08,
+          "p_mw": 1.709108023995043e-07,
+          "q_mvar": 3.770577061690261e-08
+        },
+        "gridlabd_equivalence_passed": true
+      },
+      {
+        "step": 3,
+        "scale": 1.15,
+        "hysim": {
+          "vm_load_pu": 0.9966696838941658,
+          "va_load_deg": -0.21816456563937472,
+          "pf_mw": 1.382624096538052,
+          "qf_mvar": 0.5244975907681138
+        },
+        "opendss": {
+          "vm_load_pu": 0.996669684034555,
+          "va_load_deg": -0.21816455213632882,
+          "pf_mw": 1.382623690402539,
+          "qf_mvar": 0.5244974331948465,
+          "engine_version": "DSS C-API Library version 0.14.5 revision 87d85c2622c8281b92255335bc7c09b11191b21d based on OpenDSS SVN 3723 [FPC 3.2.2] (64-bit build) MVMULT INCREMENTAL_Y CONTEXT_API PM 20240329033829; License Status: Open \nDSS-Python version: 0.15.7\nOpenDSSDirect.py version: 0.9.4"
+        },
+        "abs_error": {
+          "vm_pu": 1.4038925577608552e-10,
+          "va_deg": 1.3503045903640043e-08,
+          "p_mw": 4.061355129980626e-07,
+          "q_mvar": 1.5757326721210774e-07
+        },
+        "gridlabd_equivalence_passed": true
+      },
+      {
+        "step": 4,
+        "scale": 1.3,
+        "hysim": {
+          "vm_load_pu": 0.9962325695759922,
+          "va_load_deg": -0.24672918883438869,
+          "pf_mw": 1.5633562310975258,
+          "qf_mvar": 0.5939499495934086
+        },
+        "opendss": {
+          "vm_load_pu": 0.9962325702347031,
+          "va_load_deg": -0.2467291437813526,
+          "pf_mw": 1.5633555668087906,
+          "qf_mvar": 0.5939496907300295,
+          "engine_version": "DSS C-API Library version 0.14.5 revision 87d85c2622c8281b92255335bc7c09b11191b21d based on OpenDSS SVN 3723 [FPC 3.2.2] (64-bit build) MVMULT INCREMENTAL_Y CONTEXT_API PM 20240329033829; License Status: Open \nDSS-Python version: 0.15.7\nOpenDSSDirect.py version: 0.9.4"
+        },
+        "abs_error": {
+          "vm_pu": 6.587109746547526e-10,
+          "va_deg": 4.505303607960087e-08,
+          "p_mw": 6.642887351304694e-07,
+          "q_mvar": 2.588633791766881e-07
+        },
+        "gridlabd_equivalence_passed": true
+      },
+      {
+        "step": 5,
+        "scale": 0.9,
+        "hysim": {
+          "vm_load_pu": 0.9973968015421495,
+          "va_load_deg": -0.17061285076408741,
+          "pf_mw": 1.0816048147383128,
+          "qf_mvar": 0.40927957842210816
+        },
+        "opendss": {
+          "vm_load_pu": 0.9973968010931804,
+          "va_load_deg": -0.17061286710900983,
+          "pf_mw": 1.0816047026947848,
+          "qf_mvar": 0.4092795538416386,
+          "engine_version": "DSS C-API Library version 0.14.5 revision 87d85c2622c8281b92255335bc7c09b11191b21d based on OpenDSS SVN 3723 [FPC 3.2.2] (64-bit build) MVMULT INCREMENTAL_Y CONTEXT_API PM 20240329033829; License Status: Open \nDSS-Python version: 0.15.7\nOpenDSSDirect.py version: 0.9.4"
+        },
+        "abs_error": {
+          "vm_pu": 4.4896908413250003e-10,
+          "va_deg": 1.6344922415534313e-08,
+          "p_mw": 1.1204352801108541e-07,
+          "q_mvar": 2.458046954867399e-08
+        },
+        "gridlabd_equivalence_passed": true
+      }
+    ],
+    "opendss_max_abs_error": {
+      "vm_pu": 6.587109746547526e-10,
+      "va_deg": 4.505303607960087e-08,
+      "p_mw": 6.642887351304694e-07,
+      "q_mvar": 2.588633791766881e-07
+    },
+    "gridlabd_max_abs_error": {
+      "vm_pu": 5.847480752940726e-07,
+      "va_deg": 4.165266190708783e-07,
+      "p_mw": 4.814738312930444e-06,
+      "q_mvar": 4.99294772415837e-07
+    },
+    "opendss_passed": true,
+    "gridlabd_passed": true,
+    "gridlabd_executable": "/Users/tianyangzhao/Codes/gridlab-d/cmake-build/bin/gridlabd"
+  },
+  "passed": true,
+  "scope": {
+    "uc": "deterministic copper-plate SCUC with one lossy cyclic BESS",
+    "pf": "balanced positive-sequence constant-power snapshots",
+    "exclusions": [
+      "OpenDSS/GridLAB-D do not validate commitment or lifecycle economics",
+      "This matrix is not an unbalanced annual feeder certification"
+    ]
+  }
+}

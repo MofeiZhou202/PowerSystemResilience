@@ -33,6 +33,43 @@ static double checked_step_duration_hr(const TimeSeriesData& ts_data) {
   return ts_data.step_duration_hr;
 }
 
+static void validate_annual_options(const AnnualProductionSimOptions& opts) {
+  if (opts.weekly_lookahead_hours < 0 || opts.daily_window_hours <= 0 ||
+      opts.pf_snapshot_interval < 0 || opts.parallel_threads < 0) {
+    throw std::invalid_argument(
+        "annual production windows and parallel controls must be non-negative; "
+        "daily_window_hours must be positive");
+  }
+  if (opts.max_feedback_iterations < 1 ||
+      !std::isfinite(opts.budget_violation_tol_mwh) ||
+      opts.budget_violation_tol_mwh < 0.0 ||
+      !std::isfinite(opts.curtailment_penalty) ||
+      opts.curtailment_penalty < 0.0 || !std::isfinite(opts.ens_penalty) ||
+      opts.ens_penalty < 0.0) {
+    throw std::invalid_argument(
+        "annual penalties, feedback tolerance and iteration count must be finite and non-negative");
+  }
+  if (opts.iterative_feedback && opts.skip_replay) {
+    throw std::invalid_argument(
+        "iterative_feedback requires physical replay; schedule-only feedback "
+        "has no bottom-up residual to close");
+  }
+}
+
+static TimeSeriesPFOptions effective_annual_pf_options(
+    const AnnualProductionSimOptions& opts) {
+  TimeSeriesPFOptions out = opts.ts_pf_options;
+  // The annual option is the owner of the decomposition boundary.  It is
+  // copied into the lower-level UC/OPF model so a cyclic request cannot be
+  // silently ignored (SOC recursion contract in time_series_pf.cpp).
+  out.enforce_terminal_soc_cyclic = opts.enforce_cyclic_soc;
+  out.pv_curtail_penalty = opts.curtailment_penalty;
+  out.generator_energy_budget_mwh = opts.generator_energy_budget_mwh;
+  out.fuel_budget_mwh = opts.fuel_budget_mwh;
+  if (opts.ens_penalty > 0.0) out.opf_options.voll = opts.ens_penalty;
+  return out;
+}
+
 static int steps_for_duration(double duration_hr, double step_hr) {
   if (!std::isfinite(duration_hr) || duration_hr <= 0.0) {
     throw std::invalid_argument("duration window must be positive and finite");
@@ -149,6 +186,7 @@ static double dc_static_generator_report_price(const StaticGeneratorDC& sg) {
 struct ReportedProfileDispatch {
   double dispatchable_generation_mw{0.0};
   double renewable_generation_mw{0.0};
+  double renewable_available_mw{0.0};
   double dc_load_mw{0.0};
   double cost_rate_per_hr{0.0};
 };
@@ -257,6 +295,7 @@ static ReportedProfileDispatch reported_profile_dispatch(
     if (p <= 0.0) continue;
     if (is_renewable_sgen_type(sg.sgen_type)) {
       out.renewable_generation_mw += p;
+      out.renewable_available_mw += std::max(0.0, sg.p_mw * sg.scaling);
     } else {
       out.dispatchable_generation_mw += p;
     }
@@ -272,6 +311,9 @@ static ReportedProfileDispatch reported_profile_dispatch(
     }
     p = std::max(0.0, p);
     out.renewable_generation_mw += p;
+    const double pv_available = pv.pmax_mw > 0.0 ? pv.pmax_mw : pv.p_mw;
+    out.renewable_available_mw += std::max(
+        0.0, pv_available * profile_scale(pmap, pv.profile_id, profile_t));
     out.cost_rate_per_hr += p * pv.cost_c1;
   }
 
@@ -283,6 +325,10 @@ static ReportedProfileDispatch reported_profile_dispatch(
       const double base = ren.p_rated_mw > 0.0 ? ren.p_rated_mw : ren.p_mw;
       p = base * profile_scale(pmap, ren.profile_id, profile_t);
     }
+    const double base = ren.p_rated_mw > 0.0 ? ren.p_rated_mw : ren.p_mw;
+    out.renewable_generation_mw += std::max(0.0, p);
+    out.renewable_available_mw += std::max(
+        0.0, base * profile_scale(pmap, ren.profile_id, profile_t));
     out.cost_rate_per_hr += std::max(0.0, p) * ren.cost_c1;
   }
 
@@ -295,6 +341,8 @@ static ReportedProfileDispatch reported_profile_dispatch(
     }
     p = std::max(0.0, p);
     out.renewable_generation_mw += p;
+    out.renewable_available_mw += std::max(
+        0.0, pv.p_set_mw * profile_scale(pmap, pv.profile_id, profile_t));
     out.cost_rate_per_hr += p * pv.cost_c1;
   }
 
@@ -304,6 +352,7 @@ static ReportedProfileDispatch reported_profile_dispatch(
     if (p <= 0.0) continue;
     if (is_renewable_sgen_type(sg.sgen_type)) {
       out.renewable_generation_mw += p;
+      out.renewable_available_mw += std::max(0.0, sg.p_mw * sg.scaling);
     } else {
       out.dispatchable_generation_mw += p;
     }
@@ -322,6 +371,9 @@ static ReportedProfileDispatch reported_profile_dispatch(
     if (p <= 0.0) continue;
     if (looks_renewable_type(sg.type)) {
       out.renewable_generation_mw += p;
+      out.renewable_available_mw += std::max(
+          0.0, sg.p_set_mw * sg.scaling *
+                   profile_scale(pmap, sg.profile_id, profile_t));
     } else {
       out.dispatchable_generation_mw += p;
     }
@@ -340,30 +392,6 @@ static ReportedProfileDispatch reported_profile_dispatch(
   }
 
   return out;
-}
-
-static double reported_ac_renewable_mw(
-    const HybridPowerSystem& sys,
-    const UCSchedule& schedule,
-    const std::unordered_map<int, const TimeSeriesProfile*>& pmap,
-    int schedule_t,
-    int profile_t) {
-  double total = 0.0;
-  if (!schedule.renewable_dispatch.empty()) {
-    for (const auto& row : schedule.renewable_dispatch) {
-      if (schedule_t >= 0 && schedule_t < static_cast<int>(row.size())) {
-        total += row[static_cast<size_t>(schedule_t)];
-      }
-    }
-    return total;
-  }
-
-  for (const auto& ren : sys.ac.renewable_gens) {
-    if (!ren.in_service) continue;
-    const double base = ren.p_rated_mw > 0.0 ? ren.p_rated_mw : ren.p_mw;
-    total += std::max(0.0, base * profile_scale(pmap, ren.profile_id, profile_t));
-  }
-  return total;
 }
 
 static double reported_external_grid_price(
@@ -512,10 +540,14 @@ static void fill_step_results(std::vector<AnnualStepResult>& steps,
       const auto& opf = sub_result.opf_results[static_cast<size_t>(t)];
       sr.opf_converged = opf.converged;
       if (opf.converged) {
+        sr.load_shed_known = true;
         sr.load_shed_mw = 0.0;
         for (double shed : opf.dpd_mw) {
           sr.load_shed_mw += std::max(0.0, shed);
         }
+      }
+      else {
+        sr.load_shed_known = false;
       }
       base_cost_rate =
           (opf.converged && !opf.pg_mw.empty())
@@ -529,6 +561,8 @@ static void fill_step_results(std::vector<AnnualStepResult>& steps,
       base_cost_rate = generator_operating_cost_rate_from_uc(
           sys, sub_result.uc_schedule, t);
       sr.opf_converged = sub_result.uc_schedule.feasible;
+      sr.load_shed_known = sub_result.uc_schedule.feasible;
+      sr.load_shed_mw = 0.0;
     }
 
     // A PF fallback after failed OPF is diagnostic only. Replay requires every
@@ -588,8 +622,10 @@ static void fill_step_results(std::vector<AnnualStepResult>& steps,
                            sys, sub_result.uc_schedule, t);
 
     // Renewable dispatch
-    double ren = reported_ac_renewable_mw(sys, sub_result.uc_schedule, pmap, t, t);
-    sr.total_renewable_mw = ren + reported.renewable_generation_mw;
+    sr.total_renewable_mw = reported.renewable_generation_mw;
+    sr.total_curtailment_mw = std::max(
+        0.0, reported.renewable_available_mw - sr.total_renewable_mw);
+    sr.curtailment_known = true;
 
     // ESS net dispatch
     const auto ess_power = scheduled_storage_power(sub_result.uc_schedule, t);
@@ -615,7 +651,7 @@ static void fill_step_results(std::vector<AnnualStepResult>& steps,
       // not the OPF/UC scheduled grid value paired with PF losses. The latter
       // mixes two operating points and creates a visible annual balance gap.
       const double non_grid_supply_mw =
-          gen + ren + reported.dispatchable_generation_mw +
+          gen + reported.dispatchable_generation_mw +
           reported.renewable_generation_mw + std::max(0.0, ess);
       const double non_grid_demand_mw =
           sr.total_load_mw + std::max(0.0, sr.total_loss_mw) +
@@ -627,7 +663,7 @@ static void fill_step_results(std::vector<AnnualStepResult>& steps,
     }
 
     const double supply_mw =
-        gen + ren + reported.dispatchable_generation_mw +
+        gen + reported.dispatchable_generation_mw +
         reported.renewable_generation_mw + std::max(0.0, ess) +
         std::max(0.0, grid.net_import_mw);
     const double need_mw =
@@ -652,6 +688,7 @@ static BlockSummary aggregate_block(int block_id, int start, int end,
   bs.start_step = start;
   bs.end_step = end;
   bs.num_steps = end - start;
+  bs.ens_complete = true;
   for (int t = start; t < end && t < static_cast<int>(steps.size()); ++t) {
     const auto& s = steps[static_cast<size_t>(t)];
     bs.total_gen_mwh += s.total_gen_mw * dt;
@@ -666,7 +703,11 @@ static BlockSummary aggregate_block(int block_id, int start, int end,
     bs.total_demand_mwh += s.total_demand_mw * dt;
     bs.power_balance_error_mwh += s.power_balance_error_mw * dt;
     bs.total_loss_mwh += s.total_loss_mw * dt;
-    bs.total_ens_mwh += s.load_shed_mw * dt;
+    if (s.load_shed_known) {
+      bs.total_ens_mwh += s.load_shed_mw * dt;
+    } else {
+      bs.ens_complete = false;
+    }
     bs.total_cost += s.opf_cost * dt;
     if (s.pf_converged) ++bs.num_pf_converged;
     if (s.opf_converged) ++bs.num_opf_converged;
@@ -859,14 +900,27 @@ static AnnualPlanResult solve_annual_plan(
     const HybridPowerSystem& sys,
     const TimeSeriesData& ts_data,
     const std::vector<std::pair<int, int>>& block_ranges,
-    const AnnualProductionSimOptions& /*opts*/) {
+    const AnnualProductionSimOptions& opts) {
   AnnualPlanResult plan;
-  plan.feasible = true;
+  plan.feasible = std::isfinite(opts.curtailment_penalty) &&
+                  std::isfinite(opts.ens_penalty);
   plan.solver_name = "annual_plan_default";
 
   const auto& gens = sys.ac.generators;
   const auto& storage = sys.ac.storage;
   const int n_blocks = static_cast<int>(block_ranges.size());
+  plan.generator_energy_budget_mwh.resize(gens.size(), 0.0);
+  plan.budget_residual_mwh.resize(gens.size(), 0.0);
+  for (size_t g = 0; g < gens.size(); ++g) {
+    if (g < opts.generator_energy_budget_mwh.size() &&
+        opts.generator_energy_budget_mwh[g] > 0.0) {
+      plan.generator_energy_budget_mwh[g] = opts.generator_energy_budget_mwh[g];
+    }
+  }
+  plan.fuel_budget_mwh = opts.fuel_budget_mwh;
+  for (const auto& g : gens) {
+    if (!std::isfinite(g.pmax_mw) || g.pmax_mw < 0.0) plan.feasible = false;
+  }
 
   // Build profile map for load/renewable estimation
   std::unordered_map<int, const TimeSeriesProfile*> pmap;
@@ -894,10 +948,19 @@ static AnnualPlanResult solve_annual_plan(
     // Energy budget: pmax * steps * dt per generator (unconstrained default)
     blk.gen_energy_budget_mwh.resize(gens.size());
     for (size_t g = 0; g < gens.size(); ++g) {
-      blk.gen_energy_budget_mwh[g] = gens[g].pmax_mw * steps * dt;
+      blk.gen_energy_budget_mwh[g] =
+          (g < plan.generator_energy_budget_mwh.size() &&
+           plan.generator_energy_budget_mwh[g] > 0.0)
+              ? plan.generator_energy_budget_mwh[g] *
+                    static_cast<double>(steps) /
+                    std::max(1, ts_data.num_steps)
+              : gens[g].pmax_mw * steps * dt;
     }
 
-    blk.fuel_budget = 1e30;  // no fuel constraint by default
+    blk.fuel_budget = plan.fuel_budget_mwh > 0.0
+        ? plan.fuel_budget_mwh * static_cast<double>(steps) /
+              std::max(1, ts_data.num_steps)
+        : 1e30;
 
     // Storage SOC: propagate linearly
     blk.storage_init_soc.resize(storage.size());
@@ -976,7 +1039,8 @@ static WeeklySchedule solve_weekly_uc(
   HybridPowerSystem sub_sys = apply_annual_block_controls(sys, block);
 
   // Solve UC for the sub-horizon
-  ws.uc = solve_unit_commitment(sub_sys, sub_ts, opts.ts_pf_options);
+  const auto pf_opts = effective_annual_pf_options(opts);
+  ws.uc = solve_unit_commitment(sub_sys, sub_ts, pf_opts);
 
   return ws;
 }
@@ -984,6 +1048,73 @@ static WeeklySchedule solve_weekly_uc(
 // ═══════════════════════════════════════════════════════════════════════
 // L3: Daily OPF/PF Replay
 // ═══════════════════════════════════════════════════════════════════════
+
+static UCSchedule slice_uc_schedule(const UCSchedule& src, int start, int count,
+                                    double step_duration_hr) {
+  UCSchedule dst = src;
+  auto d = [&](const std::vector<std::vector<double>>& rows) {
+    std::vector<std::vector<double>> out;
+    out.reserve(rows.size());
+    for (const auto& row : rows) {
+      std::vector<double> r;
+      r.reserve(static_cast<size_t>(count));
+      for (int t = 0; t < count; ++t) {
+        const int k = start + t;
+        r.push_back(k >= 0 && k < static_cast<int>(row.size())
+                        ? row[static_cast<size_t>(k)] : 0.0);
+      }
+      out.push_back(std::move(r));
+    }
+    return out;
+  };
+  auto i = [&](const std::vector<std::vector<int>>& rows) {
+    std::vector<std::vector<int>> out;
+    out.reserve(rows.size());
+    for (const auto& row : rows) {
+      std::vector<int> r;
+      r.reserve(static_cast<size_t>(count));
+      for (int t = 0; t < count; ++t) {
+        const int k = start + t;
+        r.push_back(k >= 0 && k < static_cast<int>(row.size())
+                        ? row[static_cast<size_t>(k)] : 0);
+      }
+      out.push_back(std::move(r));
+    }
+    return out;
+  };
+  dst.gen_dispatch = d(src.gen_dispatch);
+  dst.gen_commit = i(src.gen_commit);
+  dst.ess_dispatch = d(src.ess_dispatch);
+  dst.ess_soc = d(src.ess_soc);
+  dst.renewable_dispatch = d(src.renewable_dispatch);
+  dst.ac_pv_dispatch = d(src.ac_pv_dispatch);
+  dst.ac_sgen_dispatch = d(src.ac_sgen_dispatch);
+  dst.external_grid_dispatch = d(src.external_grid_dispatch);
+  dst.flexible_load_up = d(src.flexible_load_up);
+  dst.flexible_load_down = d(src.flexible_load_down);
+  dst.dc_pv_dispatch = d(src.dc_pv_dispatch);
+  dst.dc_ess_dispatch = d(src.dc_ess_dispatch);
+  dst.dc_ess_soc = d(src.dc_ess_soc);
+  dst.dc_sgen_dispatch = d(src.dc_sgen_dispatch);
+  dst.dc_load_demand = d(src.dc_load_demand);
+  dst.vsc_dispatch = d(src.vsc_dispatch);
+  dst.dcdc_dispatch = d(src.dcdc_dispatch);
+  dst.vsc_direction_ac_to_dc = i(src.vsc_direction_ac_to_dc);
+  dst.dcdc_direction_forward = i(src.dcdc_direction_forward);
+  dst.market_dc_storage_dispatch_mw = d(src.market_dc_storage_dispatch_mw);
+  dst.market_dc_storage_soc_mwh = d(src.market_dc_storage_soc_mwh);
+  dst.market_dc_storage_direction_charging = i(src.market_dc_storage_direction_charging);
+  dst.generator_energy_mwh.clear();
+  dst.max_energy_budget_violation_mwh = 0.0;
+  dst.fuel_consumption_mwh = 0.0;
+  for (const auto& row : dst.gen_dispatch) {
+    double e = 0.0;
+    for (double p : row) e += std::max(0.0, p) * step_duration_hr;
+    dst.generator_energy_mwh.push_back(e);
+    dst.fuel_consumption_mwh += e;
+  }
+  return dst;
+}
 
 static TimeSeriesPFResult solve_daily_replay(
     const HybridPowerSystem& sys,
@@ -1002,6 +1133,44 @@ static TimeSeriesPFResult solve_daily_replay(
   UCSchedule day_uc;
   day_uc.feasible = weekly_uc.feasible;
   day_uc.solver_name = weekly_uc.solver_name;
+  day_uc.total_cost = weekly_uc.total_cost;
+  day_uc.solver_status = weekly_uc.solver_status;
+  day_uc.mip_gap = weekly_uc.mip_gap;
+  day_uc.mip_gap_target_met = weekly_uc.mip_gap_target_met;
+  day_uc.optimality_proven = weekly_uc.optimality_proven;
+  day_uc.structured_branching_used = weekly_uc.structured_branching_used;
+  day_uc.mip_start_provided = weekly_uc.mip_start_provided;
+  day_uc.uc_structure_hint_provided = weekly_uc.uc_structure_hint_provided;
+  day_uc.branching_priorities_provided = weekly_uc.branching_priorities_provided;
+  day_uc.warm_start_generation_sec = weekly_uc.warm_start_generation_sec;
+  day_uc.cross_round_solver_state_reuse_enabled =
+      weekly_uc.cross_round_solver_state_reuse_enabled;
+  day_uc.cross_round_solver_state_reuse_used =
+      weekly_uc.cross_round_solver_state_reuse_used;
+  day_uc.cross_round_solver_state_reuse_rounds =
+      weekly_uc.cross_round_solver_state_reuse_rounds;
+  day_uc.root_cuts_reused = weekly_uc.root_cuts_reused;
+  day_uc.root_cuts_reused_count = weekly_uc.root_cuts_reused_count;
+  day_uc.root_basis_reused = weekly_uc.root_basis_reused;
+  day_uc.pseudocosts_reused = weekly_uc.pseudocosts_reused;
+  day_uc.search_tree_rebuilt = weekly_uc.search_tree_rebuilt;
+  day_uc.in_solve_network_constraint_generation_used =
+      weekly_uc.in_solve_network_constraint_generation_used;
+  day_uc.in_solve_network_constraint_callback_calls =
+      weekly_uc.in_solve_network_constraint_callback_calls;
+  day_uc.in_solve_network_constraints_submitted =
+      weekly_uc.in_solve_network_constraints_submitted;
+  day_uc.network_constraint_generation_run = weekly_uc.network_constraint_generation_run;
+  day_uc.network_constraint_generation_converged =
+      weekly_uc.network_constraint_generation_converged;
+  day_uc.network_constraint_generation_iterations =
+      weekly_uc.network_constraint_generation_iterations;
+  day_uc.network_constraint_candidates = weekly_uc.network_constraint_candidates;
+  day_uc.network_constraints_activated = weekly_uc.network_constraints_activated;
+  day_uc.network_constraint_remaining_violations =
+      weekly_uc.network_constraint_remaining_violations;
+  day_uc.network_constraint_worst_violation_mw =
+      weekly_uc.network_constraint_worst_violation_mw;
 
   auto slice_2d_double = [&](const std::vector<std::vector<double>>& src) {
     std::vector<std::vector<double>> dst;
@@ -1042,6 +1211,8 @@ static TimeSeriesPFResult solve_daily_replay(
   day_uc.ac_sgen_dispatch = slice_2d_double(weekly_uc.ac_sgen_dispatch);
   day_uc.external_grid_dispatch =
       slice_2d_double(weekly_uc.external_grid_dispatch);
+  day_uc.flexible_load_up = slice_2d_double(weekly_uc.flexible_load_up);
+  day_uc.flexible_load_down = slice_2d_double(weekly_uc.flexible_load_down);
   day_uc.dc_pv_dispatch = slice_2d_double(weekly_uc.dc_pv_dispatch);
   day_uc.dc_ess_dispatch = slice_2d_double(weekly_uc.dc_ess_dispatch);
   day_uc.dc_ess_soc = slice_2d_double(weekly_uc.dc_ess_soc);
@@ -1049,13 +1220,23 @@ static TimeSeriesPFResult solve_daily_replay(
   day_uc.dc_load_demand = slice_2d_double(weekly_uc.dc_load_demand);
   day_uc.vsc_dispatch = slice_2d_double(weekly_uc.vsc_dispatch);
   day_uc.dcdc_dispatch = slice_2d_double(weekly_uc.dcdc_dispatch);
+  day_uc.vsc_direction_ac_to_dc =
+      slice_2d_int(weekly_uc.vsc_direction_ac_to_dc);
+  day_uc.dcdc_direction_forward =
+      slice_2d_int(weekly_uc.dcdc_direction_forward);
+  day_uc.market_dc_storage_dispatch_mw =
+      slice_2d_double(weekly_uc.market_dc_storage_dispatch_mw);
+  day_uc.market_dc_storage_soc_mwh =
+      slice_2d_double(weekly_uc.market_dc_storage_soc_mwh);
+  day_uc.market_dc_storage_direction_charging =
+      slice_2d_int(weekly_uc.market_dc_storage_direction_charging);
 
   HybridPowerSystem sub_sys = apply_annual_block_controls(sys, block);
 
   // Run the full UC->OPF->PF pipeline using the already solved weekly UC
   // dispatch.  The time-series solver still does profile replay, OPF/PF, and
   // schedule fallback completion, but skips the expensive UC MILP.
-  TimeSeriesPFOptions pf_opts = opts.ts_pf_options;
+  TimeSeriesPFOptions pf_opts = effective_annual_pf_options(opts);
   pf_opts.skip_uc = false;
   pf_opts.parallel_daily = false;
   pf_opts.precomputed_uc_schedule = &day_uc;
@@ -1074,7 +1255,7 @@ static TimeSeriesPFResult solve_daily_replay(
 /// Translate the per-day simulation mode into a TimeSeriesPFOptions config.
 static TimeSeriesPFOptions make_daily_pf_options(
     const AnnualProductionSimOptions& opts) {
-  TimeSeriesPFOptions p = opts.ts_pf_options;
+  TimeSeriesPFOptions p = effective_annual_pf_options(opts);
   p.keep_system_snapshots = false;
   p.parallel_daily = false;
   p.precomputed_uc_schedule = nullptr;
@@ -1111,6 +1292,10 @@ static AnnualProductionSimResult solve_parallel_daily(
   const double dt = checked_step_duration_hr(ts_data);
   result.num_steps = T_yr;
   result.step_duration_hr = dt;
+  result.schedule_only = opts.skip_replay;
+  result.model_scope = opts.skip_replay
+      ? "parallel-daily-uc-schedule-only; no AC OPF/PF certification"
+      : "parallel-daily-uc-opf-pf-replay";
   if (T_yr <= 0) return result;
   result.step_results.resize(static_cast<size_t>(T_yr));
 
@@ -1150,7 +1335,7 @@ static AnnualProductionSimResult solve_parallel_daily(
     const int g0 = peak_day * steps_per_day;
     const int g1 = std::min(g0 + steps_per_day, T_yr);
     TimeSeriesData repr_ts = slice_ts_data(ts_data, g0, g1);
-    TimeSeriesPFOptions scuc_opts = opts.ts_pf_options;
+    TimeSeriesPFOptions scuc_opts = effective_annual_pf_options(opts);
     scuc_opts.skip_uc = false;
     scuc_opts.run_opf = false;
     scuc_opts.fix_commitment = false;
@@ -1284,7 +1469,18 @@ static AnnualProductionSimResult solve_parallel_daily(
     result.num_opf_converged += ms.num_opf_converged;
   }
 
-  result.feasible = (feasible_days.load() == num_days);
+  const bool uc_feasible = feasible_days.load() == num_days;
+  const bool opf_required = opts.ts_pf_options.run_opf;
+  const bool replay_complete = !opts.skip_replay &&
+      std::all_of(result.step_results.begin(), result.step_results.end(),
+                  [opf_required](const AnnualStepResult& s) {
+                    return s.pf_converged && (!opf_required || s.opf_converged);
+                  });
+  result.physical_replay_complete = replay_complete;
+  result.ens_complete = std::all_of(
+      result.monthly_summaries.begin(), result.monthly_summaries.end(),
+      [](const BlockSummary& b) { return b.ens_complete; });
+  result.feasible = uc_feasible && (opts.skip_replay || replay_complete);
   const char* mode_tag = (opts.daily_mode == DailySimMode::SCUC) ? "SCUC"
                          : (opts.daily_mode == DailySimMode::DynamicSCED)
                              ? "dyn-SCED"
@@ -1315,12 +1511,46 @@ AnnualProductionSimResult solve_annual_production_simulation(
     const AnnualProductionSimOptions& opts) {
   AnnualProductionSimResult result;
 
+  validate_annual_options(opts);
+  if (opts.iterative_feedback) {
+    // Bottom-up feedback is a fixed-point loop over the actual physical
+    // replay. The UC budget constraints remain hard; feedback only updates
+    // the value-of-lost-load and curtailment penalties when replay exposes a
+    // residual. A hard budget violation is reported as non-convergent rather
+    // than silently relaxing the authored cap.
+    AnnualProductionSimOptions inner = opts;
+    inner.iterative_feedback = false;
+    AnnualProductionSimResult last;
+    for (int it = 0; it < opts.max_feedback_iterations; ++it) {
+      last = solve_annual_production_simulation(sys, ts_data, inner);
+      double max_residual = 0.0;
+      for (const auto& s : last.step_results)
+        max_residual = std::max(max_residual,
+            std::abs(s.power_balance_error_mw) * last.step_duration_hr);
+      last.feedback_iterations = it + 1;
+      last.max_feedback_residual_mwh = max_residual;
+      const bool budget_ok = last.max_energy_budget_violation_mwh <= 1e-8 &&
+                             last.fuel_budget_violation_mwh <= 1e-8;
+      if (max_residual <= opts.budget_violation_tol_mwh && budget_ok) {
+        last.feedback_converged = true;
+        return last;
+      }
+      inner.ens_penalty = std::max(1.0, inner.ens_penalty) * 2.0;
+      inner.curtailment_penalty = std::max(1.0, inner.curtailment_penalty) * 2.0;
+    }
+    last.feedback_converged = false;
+    return last;
+  }
   const int T_yr = ts_data.num_steps;
   const double dt = checked_step_duration_hr(ts_data);
   result.num_steps = T_yr;
   result.step_duration_hr = dt;
   result.parallel_workers = 1;
   result.parallel_mode = opts.enable_parallel_daily ? "parallel-daily" : "hierarchical";
+  result.schedule_only = opts.skip_replay;
+  result.model_scope = opts.skip_replay
+      ? "annual-uc-schedule-only; no AC OPF/PF certification"
+      : "annual-uc-opf-pf-replay";
   result.parallel_execution = util::make_parallel_execution_info(
       opts.enable_parallel_daily, opts.parallel_threads, 0,
       result.parallel_mode);
@@ -1330,8 +1560,17 @@ AnnualProductionSimResult solve_annual_production_simulation(
   }
 
   // Parallel daily decomposition path: independent, energy-neutral calendar days
-  // solved concurrently (bypasses the sequential L0→L3 hierarchy).
+  // solved concurrently. It is not a valid annual UC/SOC formulation because
+  // day boundaries would reset commitment and storage state; reject that
+  // combination instead of returning an uncertified approximation.
   if (opts.enable_parallel_daily) {
+    if (opts.daily_mode != DailySimMode::DynamicOPF ||
+        !sys.ac.storage.empty() || !sys.dc.storage.empty() ||
+        !sys.dc.dc_storage.empty()) {
+      throw std::invalid_argument(
+          "enable_parallel_daily requires DynamicOPF with no storage; "
+          "annual UC/SOC continuity requires the coupled sequential path");
+    }
     return solve_parallel_daily(sys, ts_data, opts);
   }
 
@@ -1341,7 +1580,10 @@ AnnualProductionSimResult solve_annual_production_simulation(
   auto block_ranges = build_block_ranges(T_yr, dt, opts.block_type);
   result.annual_plan = solve_annual_plan(sys, ts_data, block_ranges, opts);
 
-  // ─── L1/L2: Monthly → Weekly Rolling UC ───
+  // ─── L1/L2: one coupled annual UC, then weekly views ───
+  // Solving one horizon is what preserves SOC, ramp and commitment state
+  // across week boundaries. Weekly objects below are slices for reporting and
+  // physical replay; they are not independent optimization problems.
   const int steps_per_week = steps_for_duration(168.0, dt);
   const int steps_per_day =
       steps_for_duration(static_cast<double>(opts.daily_window_hours), dt);
@@ -1351,24 +1593,53 @@ AnnualProductionSimResult solve_annual_production_simulation(
           : steps_for_duration(static_cast<double>(opts.weekly_lookahead_hours),
                                dt);
 
-  int week_counter = 0;
+  (void)la_steps;
+  TimeSeriesPFOptions annual_uc_opts = effective_annual_pf_options(opts);
+  annual_uc_opts.skip_uc = false;
+  annual_uc_opts.run_opf = false;
+  UCSchedule coupled_uc = solve_unit_commitment(sys, ts_data, annual_uc_opts);
+  result.generator_energy_mwh = coupled_uc.generator_energy_mwh;
+  result.fuel_consumption_mwh = coupled_uc.fuel_consumption_mwh;
+  result.max_energy_budget_violation_mwh = coupled_uc.max_energy_budget_violation_mwh;
+  result.fuel_budget_violation_mwh = coupled_uc.fuel_budget_violation_mwh;
+  result.annual_plan.budget_residual_mwh.assign(
+      coupled_uc.generator_energy_mwh.size(), 0.0);
+  for (size_t gi = 0; gi < coupled_uc.generator_energy_mwh.size(); ++gi) {
+    const double cap = gi < coupled_uc.generator_energy_budget_mwh.size()
+        ? coupled_uc.generator_energy_budget_mwh[gi] : 0.0;
+    result.annual_plan.budget_residual_mwh[gi] =
+        cap > 0.0 ? cap - coupled_uc.generator_energy_mwh[gi] : 0.0;
+  }
+  result.annual_plan.fuel_budget_residual_mwh =
+      coupled_uc.fuel_budget_mwh > 0.0
+          ? coupled_uc.fuel_budget_mwh - coupled_uc.fuel_consumption_mwh : 0.0;
+  for (size_t si = 0; si < coupled_uc.ess_soc.size() && si < sys.ac.storage.size(); ++si) {
+    if (coupled_uc.ess_soc[si].empty()) continue;
+    result.max_soc_boundary_residual = std::max(result.max_soc_boundary_residual,
+        std::abs(coupled_uc.ess_soc[si].back() - sys.ac.storage[si].soc_init));
+  }
+  for (size_t si = 0; si < coupled_uc.dc_ess_soc.size() && si < sys.dc.storage.size(); ++si) {
+    if (coupled_uc.dc_ess_soc[si].empty()) continue;
+    result.max_soc_boundary_residual = std::max(result.max_soc_boundary_residual,
+        std::abs(coupled_uc.dc_ess_soc[si].back() - sys.dc.storage[si].soc_init));
+  }
 
+  int week_counter = 0;
   for (size_t b = 0; b < result.annual_plan.blocks.size(); ++b) {
     const auto& block = result.annual_plan.blocks[b];
-    int block_start = block.start_step;
-    int block_end = block.end_step;
+    const int block_start = block.start_step;
+    const int block_end = block.end_step;
     const HybridPowerSystem block_sys = apply_annual_block_controls(sys, block);
-
-    // Partition block into weekly windows
     int cursor = block_start;
     while (cursor < block_end) {
-      int bind_end = std::min(cursor + steps_per_week, block_end);
-      int bind_steps = bind_end - cursor;
-
-      // L2: Solve weekly UC
-      WeeklySchedule ws = solve_weekly_uc(
-          sys, ts_data, week_counter, cursor, bind_steps, la_steps,
-          block, opts);
+      const int bind_end = std::min(cursor + steps_per_week, block_end);
+      const int bind_steps = bind_end - cursor;
+      WeeklySchedule ws;
+      ws.week_id = week_counter;
+      ws.start_step = cursor;
+      ws.num_steps = bind_steps;
+      ws.lookahead_steps = 0;
+      ws.uc = slice_uc_schedule(coupled_uc, cursor, bind_steps, dt);
 
       // ─── L3: Daily OPF/PF Replay ───
       if (!opts.skip_replay) {
@@ -1463,9 +1734,11 @@ AnnualProductionSimResult solve_annual_production_simulation(
         sr.total_load_mw = load + reported.dc_load_mw +
                            scheduled_flexible_load_mw(sys, ws.uc, t);
 
-        // Renewable dispatch
-        double ren = reported_ac_renewable_mw(sys, ws.uc, pmap, t, g_idx);
-        sr.total_renewable_mw = ren + reported.renewable_generation_mw;
+        // Renewable dispatch and explicit availability/curtailment accounting.
+        sr.total_renewable_mw = reported.renewable_generation_mw;
+        sr.total_curtailment_mw = std::max(
+            0.0, reported.renewable_available_mw - sr.total_renewable_mw);
+        sr.curtailment_known = true;
 
         // ESS net dispatch
         const auto ess_power = scheduled_storage_power(ws.uc, t);
@@ -1475,7 +1748,7 @@ AnnualProductionSimResult solve_annual_production_simulation(
         sr.storage_charge_mw = ess_power.charge_mw;
 
         const double supply_mw =
-            gen + ren + reported.dispatchable_generation_mw +
+            gen + reported.dispatchable_generation_mw +
             reported.renewable_generation_mw + std::max(0.0, ess) +
             std::max(0.0, grid.net_import_mw);
         const double need_mw =
@@ -1492,6 +1765,13 @@ AnnualProductionSimResult solve_annual_production_simulation(
             import_mw * reported_external_grid_price(sys, pmap, g_idx);
         sr.opf_converged = false;
         sr.pf_converged = false;
+        // With an authored external-grid schedule the balance is explicit;
+        // otherwise the deficit is a schedule-level ENS proxy, not an AC OPF
+        // result.  Either way the provenance is recorded in load_shed_known.
+        sr.load_shed_mw = grid.scheduled
+            ? 0.0
+            : std::max(0.0, need_mw - supply_mw);
+        sr.load_shed_known = true;
       }
     }
   }
@@ -1532,7 +1812,27 @@ AnnualProductionSimResult solve_annual_production_simulation(
     result.num_opf_converged += ms.num_opf_converged;
   }
 
-  result.feasible = result.annual_plan.feasible;
+  const bool uc_feasible = result.annual_plan.feasible &&
+      !result.weekly_schedules.empty() &&
+      std::all_of(result.weekly_schedules.begin(), result.weekly_schedules.end(),
+                  [](const WeeklySchedule& ws) { return ws.uc.feasible; });
+  const bool replay_required = !opts.skip_replay;
+  const bool opf_required = replay_required && opts.ts_pf_options.run_opf;
+  const bool replay_complete = replay_required &&
+      result.step_results.size() == static_cast<size_t>(T_yr) &&
+      std::all_of(result.step_results.begin(), result.step_results.end(),
+                  [opf_required](const AnnualStepResult& s) {
+                    return s.pf_converged && (!opf_required || s.opf_converged);
+                  });
+  result.physical_replay_complete = replay_complete;
+  result.ens_complete = std::all_of(
+      result.monthly_summaries.begin(), result.monthly_summaries.end(),
+      [](const BlockSummary& b) { return b.ens_complete; });
+  result.feasible = uc_feasible &&
+      result.max_energy_budget_violation_mwh <= 1e-8 &&
+      result.fuel_budget_violation_mwh <= 1e-8 &&
+      result.max_soc_boundary_residual <= 1e-8 &&
+      (!replay_required || replay_complete);
   result.solver_name = result.annual_plan.solver_name;
 
   return result;
@@ -1547,6 +1847,10 @@ std::string AnnualProductionSimResult::summary() const {
   ss << "=== Annual Production Simulation Summary ===\n";
   ss << "Steps:        " << num_steps << " (dt=" << step_duration_hr << " h)\n";
   ss << "Feasible:     " << (feasible ? "yes" : "no") << "\n";
+  ss << "Scope:        " << model_scope << "\n";
+  ss << "Physical replay: "
+     << (physical_replay_complete ? "complete" : "not complete") << "\n";
+  ss << "ENS complete: " << (ens_complete ? "yes" : "no") << "\n";
   ss << "Solver:       " << solver_name << "\n";
   ss << "Total cost:   " << total_cost << " $/yr\n";
   ss << "Generation:   " << total_gen_mwh << " MWh\n";

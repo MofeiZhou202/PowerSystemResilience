@@ -1,0 +1,62 @@
+\section{生命周期、退化、碳估计与容量扫描}
+\label{sec:lifecycle}
+
+\subsection{年状态更新}
+生命周期年索引 $y=1,\ldots,Y$。实现使用
+\[
+ f^{load}_y=(1+g)^{y-1},\quad f^{pv}_y=(1-d_{pv})^{y-1},\quad
+ SOH^{cal}_y=\max(0,1-a(y-1)),
+\]
+\[
+ SOH^{cyc}_y=\max(0,1-bN^{cyc}_{cum}),\qquad
+ SOH_y=\min(SOH^{cal}_y,SOH^{cyc}_y),\qquad
+ E^{rated}_y=E^{rated}_0SOH_y.
+\]
+负荷的 $P,Q$ 同时按 $f^{load}_y$ 缩放；PV 的 $pmax$ 按 $f^{pv}_y$ 缩放并将现有 $p_mw$
+截断到新上界。SOH 小于等于归一化的 \fld{eol\_percent} 时立即生成
+\fld{ReplacementEvent}，成本为 $replacement\_cost\times E^{rated}_0\times1000$，随后
+SOH 和累计循环归零。NPV 使用 $d_y=(1+r)^{-(y-1)}$，年度运行成本和当年更换成本均折现，
+碳量不折现。
+
+\subsection{三层碳估计}
+生命周期每年调用新建的年度选项：默认 \fld{skip\_replay=false}、\fld{run\_opf=true}、
+\fld{enforce\_cyclic\_soc=true}。主碳量先由全时段 dispatch 得到稠密和，再由抽样小时的
+独立 OPF/PF correction 修正：
+\[
+ \widehat C_{dense}=\bar e\sum_t P^{gen}_t\Delta t,
+\]
+其中逐机组、外部电网 profile、DC 静态源和储能库存分别按 authored 因子计算；无 authored 因子时
+才回退 $0.5$ tCO$_2$/MWh，并在 \fld{carbon\_factor\_source} 中标明。
+
+七类 operating strata（峰负荷、低可再生、高弃电、重充、重放、正常、低负荷）用于确定性地
+抽取碳代理小时，并在这些小时实际运行 PF correction。误差界另行使用 Neyman 分配和
+有限总体修正给出
+\[
+ \varepsilon_{samp}=z\sqrt{\sum_m\frac{N_m^2}{n_m}\sigma_m^2
+ (1-n_m/N_m)},
+\]
+其中估计器的实际固定样本数与界内的 Neyman 样本数可能不同；该式只是以 PF correction 为解释的
+启发式代理，不是已观测 correction 的置信区间。调度界为
+\[
+ \varepsilon_{disp}=e_{max}L_{proxy}\sum_tP^{load}_t\Delta t,
+\]
+储能界使用 $K_w=10^{-3}\max_t|\Delta P^{gen}_t|$ 和最大抽样间隔
+\[
+ \varepsilon_{stor}=\tfrac12K_w\Delta_{max}\sum_t|P^{ess}_t|\Delta t\max(1,N_{stor}).
+\]
+\fld{YearlyErrorBounds} 与 \fld{BoundCrossValidation} 必须随年结果一起报告；默认样本数 4/stratum
+时，正态近似只是名义置信度，不能写成统计保证。
+
+\subsection{容量扫描}
+\srcpath{apply\_capacity\_scaling} 对 PV、风电、BESS 功率/能量和柴油容量做符号保持缩放；
+BESS 的 $e_mwh$ 重置为额定能量的 50\%。\srcpath{run\_lifecycle\_comparison} 对每个倍率克隆系统、
+重复完整生命周期，并返回 NPV、总碳、替换次数、逐年轨迹和安装容量。扫描结果不是灵敏度导数，
+倍率之间的运行模式、启停和 replacement 事件可能发生离散跳变。
+
+\begin{gapnote}
+生命周期层的年度 replay 以全年度 UC 日程为输入，默认执行逐步 OPF/PF；储能碳库存按充放电
+顺序递推，放电使用充电前库存强度，充电使用当小时源强度；关闭
+\fld{run\_physical\_replay} 或 \fld{run\_sampled\_pf\_correction} 时，结果必须保留
+schedule-only/partial-validation 的 scope。制造碳、网络损耗碳和换流器材料库存仍需单独模型，
+不能由当前运行碳分项替代。
+\end{gapnote}

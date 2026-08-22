@@ -13,6 +13,39 @@
 
 namespace hacdcpf {
 
+enum class VSCHarmonicTopology { Disabled, TwoLevel, MMC };
+
+struct HarmonicPIController {
+  double kp{0.0};
+  double ki{0.0};
+  double delay_s{0.0};
+};
+
+// Periodic steady-state converter data used by the harmonic state-space
+// formulation. Zero/Disabled is an explicit opt-out, never an inferred model.
+struct VSCHarmonicModel {
+  VSCHarmonicTopology topology{VSCHarmonicTopology::Disabled};
+  double switching_frequency_hz{0.0};
+  double modulation_index{0.0};
+  double modulation_phase_deg{0.0};
+  double transfer_conductance_pu{0.0};
+  double filter_resistance_ohm{0.0};
+  double filter_inductance_h{0.0};
+  double filter_capacitance_f{0.0};
+  double dc_link_capacitance_f{0.0};
+  double dc_link_esr_ohm{0.0};
+  HarmonicPIController current_controller;
+  HarmonicPIController dc_voltage_controller;
+
+  // MMC arm-energy parameters. They are required when topology == MMC.
+  int submodules_per_arm{0};
+  double submodule_capacitance_f{0.0};
+  double arm_inductance_h{0.0};
+  double arm_resistance_ohm{0.0};
+  double circulating_current_kp{0.0};
+  double circulating_current_ki{0.0};
+};
+
 // ═══════════════════════════════════════════════════════════════════════
 // VSC Converter (AC-DC coupling)
 // ═══════════════════════════════════════════════════════════════════════
@@ -146,6 +179,7 @@ struct VSCConverter {
   double mtbf_hr{0.0};
 
   DynamicModelProfile dynamic_model;
+  VSCHarmonicModel harmonic_model;
 };
 
 // ═══════════════════════════════════════════════════════════════════════
@@ -230,6 +264,14 @@ struct LCCConverter {
   // overlap iteration; see model_limitations for source-specific coverage.
   std::string model_scope;
   std::string model_limitations;
+
+  // Six-pulse switching-function harmonic model. The existing firing angle,
+  // commutation reactance, bridge count and smoothing reactor remain the
+  // physical source of truth.
+  bool harmonic_model_enabled{false};
+  double harmonic_transfer_conductance_pu{0.0};
+  double dc_filter_capacitance_f{0.0};
+  double dc_filter_esr_ohm{0.0};
 };
 
 // ═══════════════════════════════════════════════════════════════════════
@@ -269,6 +311,18 @@ struct DCDCConverter {
 
   bool controllable{true};
   double f_switching_hz{0.0};
+
+  // Averaged PWM switching-function model for Buck, Boost and Isolated
+  // topologies. Generic topology is rejected when this model is enabled.
+  bool harmonic_model_enabled{false};
+  double harmonic_transfer_conductance_pu{0.0};
+  double duty_ratio{0.0};
+  double inductance_h{0.0};
+  double inductor_resistance_ohm{0.0};
+  double input_capacitance_f{0.0};
+  double output_capacitance_f{0.0};
+  double capacitor_esr_ohm{0.0};
+  HarmonicPIController voltage_controller;
 
   double mtbf_hours{0.0};
   double mttr_hours{0.0};

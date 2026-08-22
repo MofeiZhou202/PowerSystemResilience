@@ -681,6 +681,31 @@ if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/run_gui_server.cpp")
   endif()
 endif()
 
+# Time-series cross-validation: the C++ driver emits HySim and mandatory local
+# GridLAB-D observations; the Python oracle independently rebuilds the frozen
+# four-period SCUC with SciPy/HiGHS, proves it by commitment enumeration, and
+# solves six matching network snapshots with OpenDSS. See
+# docs/modules/time_series/chapters/numerical_validation.tex.
+if(EXISTS "${CMAKE_SOURCE_DIR}/tools/time_series_validation/validate_time_series_xref.cpp")
+  add_executable(validate_time_series_xref
+    "${CMAKE_SOURCE_DIR}/tools/time_series_validation/validate_time_series_xref.cpp")
+  target_link_libraries(validate_time_series_xref PRIVATE hacdcpf::hacdcpf)
+  set(_HACDCPF_TIME_SERIES_VALIDATION_PY
+      "${CMAKE_SOURCE_DIR}/.venv/bin/python")
+  if(EXISTS "${_HACDCPF_TIME_SERIES_VALIDATION_PY}" AND
+     EXISTS "${CMAKE_SOURCE_DIR}/tools/time_series_validation/run_cross_engine_matrix.py")
+    add_test(NAME time_series_cross_engine_matrix
+      COMMAND "${_HACDCPF_TIME_SERIES_VALIDATION_PY}"
+              "${CMAKE_SOURCE_DIR}/tools/time_series_validation/run_cross_engine_matrix.py"
+              --cpp-bin "$<TARGET_FILE:validate_time_series_xref>"
+              --out "${CMAKE_CURRENT_BINARY_DIR}/time_series_cross_engine_matrix.json"
+              --markdown "${CMAKE_CURRENT_BINARY_DIR}/time_series_cross_engine_matrix.md")
+    set_tests_properties(time_series_cross_engine_matrix PROPERTIES
+      LABELS "time_series;validation;scipy;highs;opendss;gridlabd"
+      TIMEOUT 300 ENVIRONMENT "PYTHONPYCACHEPREFIX=/tmp/hacdcpf_pycache")
+  endif()
+endif()
+
 # Harmonic power-flow external cross-validation driver.  Emits the C++ solver's
 # result for tools/harmonics_validation/case.json as JSON, which the independent
 # numpy reference / OpenDSS cross-check (tools/harmonics_validation/compare.py)
@@ -698,6 +723,23 @@ endif()
 
   set(_HACDCPF_HARMONICS_VALIDATION_PY
       "${CMAKE_SOURCE_DIR}/tools/harmonics_validation/.venv/bin/python")
+  set(_HACDCPF_IEEE13_DSS
+      "${CMAKE_SOURCE_DIR}/external_data/opendss_ieee_pes/opendss_reference/13_node/official_full/IEEE13Nodeckt.dss")
+  if(TARGET validate_harmonics_ieee13 AND
+     EXISTS "${_HACDCPF_HARMONICS_VALIDATION_PY}" AND
+     EXISTS "${CMAKE_SOURCE_DIR}/tools/harmonics_validation/compare_ieee13_opendss.py" AND
+     EXISTS "${_HACDCPF_IEEE13_DSS}")
+    add_test(NAME harmonics_ieee13_opendss
+      COMMAND "${_HACDCPF_HARMONICS_VALIDATION_PY}"
+              "${CMAKE_SOURCE_DIR}/tools/harmonics_validation/compare_ieee13_opendss.py"
+              --cpp-bin "$<TARGET_FILE:validate_harmonics_ieee13>"
+              --dss "${_HACDCPF_IEEE13_DSS}"
+              --out "${CMAKE_CURRENT_BINARY_DIR}/harmonics_ieee13_opendss.json"
+              --tolerance 2e-3)
+    set_tests_properties(harmonics_ieee13_opendss PROPERTIES
+      LABELS "harmonics;validation;opendss;ieee13" TIMEOUT 180
+      ENVIRONMENT "PYTHONPYCACHEPREFIX=/tmp/hacdcpf_pycache")
+  endif()
   if(EXISTS "${_HACDCPF_HARMONICS_VALIDATION_PY}" AND
      EXISTS "${CMAKE_SOURCE_DIR}/tools/harmonics_validation/compare_device_opendss.py")
     add_custom_target(validate_harmonics_device_opendss
@@ -714,6 +756,7 @@ endif()
       COMMAND "${_HACDCPF_HARMONICS_VALIDATION_PY}"
               "${CMAKE_SOURCE_DIR}/tools/harmonics_validation/run_cross_engine_matrix.py"
               --cpp-bin "$<TARGET_FILE:validate_harmonics_xref>"
+              --require-gridlabd --min-gridlabd-slices 20
       DEPENDS validate_harmonics_xref
       WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}"
       COMMENT "Running AC/DC harmonic cross-engine benchmark matrix")
@@ -721,9 +764,10 @@ endif()
       COMMAND "${_HACDCPF_HARMONICS_VALIDATION_PY}"
               "${CMAKE_SOURCE_DIR}/tools/harmonics_validation/run_cross_engine_matrix.py"
               --cpp-bin "$<TARGET_FILE:validate_harmonics_xref>"
-              --out "${CMAKE_CURRENT_BINARY_DIR}/harmonics_cross_engine_matrix.json")
+              --out "${CMAKE_CURRENT_BINARY_DIR}/harmonics_cross_engine_matrix.json"
+              --require-gridlabd --min-gridlabd-slices 20)
     set_tests_properties(harmonics_cross_engine_matrix PROPERTIES
-      LABELS "harmonics;validation;opendss" TIMEOUT 120
+      LABELS "harmonics;validation;opendss;gridlabd" TIMEOUT 300
       ENVIRONMENT "PYTHONPYCACHEPREFIX=/tmp/hacdcpf_pycache")
   endif()
 endif()

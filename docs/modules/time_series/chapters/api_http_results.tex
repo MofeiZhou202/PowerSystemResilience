@@ -1,0 +1,59 @@
+\section{C++、HTTP 与结果归因契约}
+\label{sec:ts-api}
+
+\subsection{C++ 入口与所有权}
+\begin{longtable}{@{}L{5.0cm}L{3.8cm}L{4.6cm}@{}}
+\toprule
+入口 & 输入/输出 & 重要所有权语义\\ \midrule
+\srcpath{solve\_unit\_commitment} & system + time-series data + options $\to$ \fld{UCSchedule} & 返回行按在役自然顺序；\fld{feasible}、solver status 和 gap 必须一并检查\\
+\srcpath{build\_time\_series\_system\_snapshot} & base + schedule + step $\to$ rich snapshot & 只构造指定步；不改变调用方 base\\
+\srcpath{solve\_time\_series\_pf} & 时序窗口 $\to$ PF/OPF/归因数组 & \fld{precomputed\_uc\_schedule} 与 \fld{fixed\_commitment\_schedule} 非拥有\\
+\srcpath{solve\_annual\_production\_simulation} & 年 profile $\to$ 年度 result & \fld{step\_results[t]} 的 $t$ 是全局年度步\\
+\srcpath{run\_lifecycle\_simulation} & 年度 profile + 生命周期 options $\to$ 年结果 & 每年复制/修改工作系统；原始 system 不被修改\\
+\bottomrule
+\end{longtable}
+
+\subsection{生产 HTTP 路由}
+生产 GUI 由 \srcpath{tests/run\_gui\_server.cpp} 提供：
+\begin{itemize}
+  \item \texttt{POST /api/session/run\_ts\_pf}：\newline
+        返回逐时 UC/OPF/PF 摘要；UC 证书为
+        \texttt{uc\_solver\_status}、\texttt{uc\_mip\_gap}、\newline
+        \texttt{uc\_mip\_gap\_target\_met} 与 \texttt{uc\_optimality\_proven}，
+        \texttt{uc\_feasible=true} 本身不代表最优；
+  \item \texttt{POST /api/session/run\_annual\_sim}：\texttt{resolution=1h|6h}、\texttt{block\_type}、\texttt{run\_opf}、
+        \texttt{skip\_replay}、\texttt{parallel\_daily}、\texttt{daily\_mode=scuc|sced|dopf}、\texttt{cyclic\_soc}、
+        网络约束、DR/PV/微网/VPP/路由器/移动储能开关；
+  \item \texttt{POST /api/session/run\_lifecycle\_sim}：\texttt{num\_years}、折现/增长/降额参数、容量倍率、
+        \texttt{run\_physical\_replay} 和 \texttt{run\_sampled\_pf\_correction}；
+  \item 生命周期比较路由（\texttt{/api/session/run\_lifecycle\_compare}）；
+        \texttt{sweep\_param} 属于 \texttt{pv|wind|bess\_power|bess\_energy|diesel}，
+        返回每个倍率的 NPV、碳、替换和容量轨迹。
+\end{itemize}
+HTTP 的 \texttt{profile\_source}、\texttt{scenario\_profile\_binding\_active}、\texttt{profile\_expansion\_method} 必须与
+profile 来源一起保存；GUI 对大时间轴最多返回 1000 个采样点，不能把降采样数组当作完整 $T$ 步。
+
+\subsection{结果字段与失败语义}
+\begin{center}\footnotesize
+\begin{tabular}{@{}L{4.2cm}L{3.0cm}L{6.0cm}@{}}
+\toprule
+字段 & 单位 & 解释\\ \midrule
+\fld{feasible} & 布尔 & 要求 L0、所有周/日 UC 及声明为必需的 OPF/PF 链成功；\fld{schedule\_only=true} 时仅是 UC 可行，不是 AC 认证\\
+\fld{num\_pf\_converged}/\fld{num\_opf\_converged} & 步数 & 只计真实 \fld{converged}；schedule-only 明确为 0\\
+\fld{total\_ens\_mwh} & MWh & OPF 削减或显式 schedule ENS proxy 的积分；\fld{ens\_complete=false} 时未知物理 ENS 不被写成零\\
+\fld{power\_balance\_error\_mwh} & MWh & 年度 supply-demand 残差积分；应与 PF/组件覆盖边界一起解释\\
+\fld{parallel\_execution} & 结构体/JSON & 请求后端、实际 worker、串行守卫原因和执行计数\\
+\fld{model\_scope} / provenance & 文本/JSON & 调用方应补充说明 schedule-only、cyclic SOC、近似碳因子等范围\\
+\fld{carbon\_known} / \fld{carbon\_factor\_source} & 布尔/文本 & 生命周期碳日程缺失时为 false；fallback 或资产因子来源必须随结果报告\\
+\fld{generator\_energy\_mwh}/\fld{fuel\_consumption\_mwh} & MWh & 全年度 UC 的正发电积分；预算代理证书，燃料热率未建模\\
+\fld{max\_energy\_budget\_violation\_mwh}/\fld{fuel\_budget\_violation\_mwh} & MWh & MILP 预算残差；正值时年度 infeasible\\
+\fld{feedback\_iterations}/\fld{feedback\_converged} & 次/布尔 & bottom-up replay 反馈的迭代证据\\
+\fld{sampled\_pf\_requested}/\fld{sampled\_pf\_converged} & 步数 & 生命周期抽样小时实际 PF/OPF 执行计数\\
+\fld{carbon\_external\_grid\_tco2}/\fld{carbon\_storage\_inventory\_tco2}/\fld{carbon\_dc\_assets\_tco2} & tCO2 & 外部电网、储能库存和 DC 静态资产分项；制造/网络碳不包含\\
+\bottomrule
+\end{tabular}
+\end{center}
+
+异常输入（负步数、非正/非有限步长、重复 profile ID、非有限 profile 值）抛出
+\texttt{std::invalid\_}\allowbreak\texttt{argument}；HTTP 层转换为 400。求解器失败由 \fld{feasible}、\fld{solver\_status}、
+\fld{optimality\_proven}、\fld{mip\_gap} 和收敛计数表达，不能在报告层改写成成功。

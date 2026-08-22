@@ -1,0 +1,183 @@
+% theory_decomposition_lifecycle.tex -- 年度分解、抽样、生命周期与误差理论
+
+\section{年度生产模拟、时域分解与生命周期理论}\label{sec:ts-th-life}
+
+\begin{theorynote}
+本章为通用理论，给出 8760 h 生产成本模拟的完整量化对象、滚动时域与代表时段方法、
+跨日状态耦合、分层抽样、生命周期退化/折现及碳核算误差传播。年度调度、生命周期快速估计和
+具有统计置信度的生产成本研究是不同证据等级；章末明确平台当前实现层级。
+\end{theorynote}
+
+\subsection{完整年度问题与指标恒等式}
+对 $T$ 个时段，年度模型是式~\eqref{eq:ts-ocp-obj}--\eqref{eq:ts-ocp-state} 在全年 chronology 上的实例。
+最基本的守恒审计为
+\begin{align}
+E^{load}&=\sum_tP_t^{load}\Delta t_t,\qquad
+E^{gen}=\sum_t\sum_gP_{gt}^{gen}\Delta t_t,\label{eq:ts-energy}\\
+E^{gen}+E^{import}+E^{dis}+E^{ENS}
+&=E^{load}+E^{export}+E^{ch}+E^{curt?}+E^{loss},\label{eq:ts-annual-balance}
+\end{align}
+其中可再生弃电 $E^{curt}$ 不应同时出现在已发电量和负荷侧；具体恒等式取决于“可用量/实发量”的定义。
+缺供电量为
+\begin{equation}
+ENS=\sum_t\sum_n p_{nt}^{shed}\Delta t_t,\quad 0\le p_{nt}^{shed}\le d_{nt}.\label{eq:ts-ens}
+\end{equation}
+若模型没有显式削负荷变量，求解不可行不能自动等价为 $ENS=\sum d\Delta t$；数值失败与物理缺供必须分开。
+
+年度成本应至少分解为
+\begin{equation}
+C^{yr}=C^{fuel}+C^{NL}+C^{SU}+C^{SD}+C^{import}-R^{export}
++C^{curt}+C^{ENS}+C^{deg}+C^{DR}.\label{eq:ts-annual-cost}
+\end{equation}
+任何未计入的资源都必须列为会计边界，而不是在总成本中默认为零成本。
+
+\subsection{滚动时域与 look-ahead}
+把全年分成执行窗 $H$ 和前瞻窗 $L\ge H$。第 $k$ 次求解区间 $[kH,kH+L)$，
+只固定并执行前 $H$ 时段，随后把真实末态传给下一窗：
+\begin{equation}
+s_{(k+1)H}^{init}=s_{kH+H}^{executed}.\label{eq:ts-rolling}
+\end{equation}
+若 $L=H$ 且每窗强制周期 SOC，则窗口相互独立，可并行，但删除跨窗套利和跨窗启停义务。
+
+\begin{theorem}[独立日分解的等价条件]\label{thm:ts-day-separable}
+设全年目标为每日目标之和，约束只含日内变量；所有跨日状态在每天首末固定为同一常数，
+且没有跨日启停、燃料、库存、排放预算、维修或峰值费用约束，则全年最优值等于各日独立最优值之和。
+\end{theorem}
+\begin{proof}
+在上述条件下，可行域是笛卡尔积 $\mathcal X=\prod_d\mathcal X_d$，目标
+$f(x)=\sum_df_d(x_d)$。任取各日最优 $x_d^*$，组合 $x^*=(x_1^*,\ldots,x_D^*)$ 可行，且对任意
+$x\in\mathcal X$ 有 $f(x)=\sum_df_d(x_d)\ge\sum_df_d(x_d^*)$，故组合为全年最优。
+\end{proof}
+
+\begin{corollary}[季节储能下不等价]
+若存在 $e_{d+1,0}=e_{d,T}$ 且允许 $e_{d,T}\ne e_{d,0}$ 的跨日储能，全年可行域不再是日可行域笛卡尔积；
+强制每日周期 SOC 一般给出受限问题的上界（最小化成本时），并可能显著高估成本/弃电。
+\end{corollary}
+
+\subsection{代表日、聚类与时间顺序}
+代表日方法用权重 $w_k$ 近似年度期望：
+\begin{equation}
+\widehat J=\sum_{k=1}^Kw_kJ(\xi_k),\qquad \sum_kw_k=D.\label{eq:ts-repday}
+\end{equation}
+它能保持负荷持续曲线，却通常破坏连续低风、热浪、储能季节转移和机组连续开停。
+chronological clustering 应额外保留转移矩阵或典型日序列；极端日需尾部加权，不能仅按聚类中心误差选取。
+
+\subsection{分层抽样估计与置信区间}
+把总体划分为互斥层 $m=1,\ldots,M$，层容量 $N_m$，随机抽取 $n_m$，观测量 $X_{mi}$。
+总体总量的无偏估计为
+\begin{equation}
+\widehat X=\sum_mN_m\bar X_m,\qquad
+\widehat{\mathrm{Var}}(\widehat X)=\sum_mN_m^2\left(1-\frac{n_m}{N_m}\right)\frac{s_m^2}{n_m}.\label{eq:ts-stratified}
+\end{equation}
+大样本正态区间为 $\widehat X\pm z_{1-\alpha/2}\sqrt{\widehat{\mathrm{Var}}}$。
+Neyman 分配 $n_m\propto N_ms_m$ 在固定样本量下最小化方差。
+
+\begin{proposition}[确定性取点不产生统计置信度]\label{prop:ts-deterministic-sample}
+若层内样本由固定规则选择而非概率抽样，式~\eqref{eq:ts-stratified} 的 $z$ 区间一般不是设计无偏置信区间；
+它至多是基于样本离散度的诊断量。
+\end{proposition}
+\begin{proof}
+无偏性要求每个总体元素具有已知非零入样概率。固定取峰谷或等距点的未采样元素概率为零，
+Horvitz--Thompson/分层均值无偏条件不成立，故由随机抽样分布推导的覆盖概率也不成立。
+\end{proof}
+
+\subsection{生命周期状态、替换与折现}
+年份 $y=1,\ldots,Y$ 的负荷增长和可再生降额可写为
+\begin{equation}
+d_{t,y}=d_{t,1}(1+g)^{y-1},\qquad
+\bar p_{t,y}^{pv}=\bar p_{t,1}^{pv}(1-d_{pv})^{y-1}.\label{eq:ts-growth}
+\end{equation}
+简单电池 SOH 模型为
+\begin{align}
+SOH_y^{cal}&=\max(0,1-d_{cal}(y-1)),\\
+SOH_y^{cyc}&=\max(0,1-d_{cyc}N_y^{cum}),\\
+SOH_y&=\min(SOH_y^{cal},SOH_y^{cyc}).\label{eq:ts-soh}
+\end{align}
+更物理的半经验模型常用温度 Arrhenius、时间平方根、DoD/C-rate 和雨流循环累积；
+式~\eqref{eq:ts-soh} 只适合快速情景筛选。
+
+当 $SOH_y\le SOH^{EOL}$ 时发生替换事件，容量与循环累计重置。净现值为
+\begin{equation}
+NPV=\sum_{y=1}^{Y}\frac{C_y^{op}+C_y^{replace}+C_y^{capex}-R_y}{(1+r)^{y-1}}.
+\label{eq:ts-npv}
+\end{equation}
+若碳排放用于社会成本，应把 $p_y^{CO2}E_y^{CO2}$ 纳入 $C_y$；若只作环境指标，不应折现后与货币量混加。
+
+\subsection{碳排放、储能碳库存与误差传播}
+逐机组直接排放为
+\begin{equation}
+E_y^{CO2}=\sum_{t,g}e_{g,t,y}p_{g,t,y}\Delta t_t
++\sum_te_t^{grid}p_t^{import}\Delta t_t.\label{eq:ts-carbon}
+\end{equation}
+使用 fleet-average $\bar e$ 的误差是
+\begin{equation}
+\Delta E=\sum_{t,g}(e_g-\bar e)p_{gt}\Delta t,qquad
+|\Delta E|\le \max_g|e_g-\bar e|\sum_{t,g}p_{gt}\Delta t.\label{eq:ts-carbon-average}
+\end{equation}
+因此只用 $\bar e$ 时，异质燃料组合误差不会被“PF 抽样误差”自动覆盖。
+
+储能碳库存 $W_t$ 和碳强度 $w_t=W_t/e_t$ 可按
+\begin{align}
+W_t&=\rho W_{t-1}+w_t^{charge}\eta_cp_t^{ch}\Delta t
+-w_{t-1}\frac{p_t^{dis}\Delta t}{\eta_d},\label{eq:ts-carbon-storage}\\
+w_t&=W_t/e_t\quad(e_t>0)
+\end{align}
+递推。只对总发电乘平均因子无法表示储能跨时段搬移的边际碳强度。
+
+若近似量 $\widehat E$ 由调度近似、抽样和储能传播三项造成误差，三角不等式给出
+\begin{equation}
+|E-\widehat E|\le\epsilon_{dispatch}+\epsilon_{sample}+\epsilon_{storage}.
+\label{eq:ts-error-sum}
+\end{equation}
+这只是保守合成；每一项都必须有独立成立条件。若某项只是一阶 proxy 或确定性样本诊断，
+总和也不能升级为严格概率置信界。
+
+\subsection{分层生产模拟的准入层级}
+建议把年度结果分为四级：
+\begin{enumerate}
+\item A0 会计汇总：已有 schedule 的能量/成本积分，不声称重新求解；
+\item A1 生产成本：完整或滚动 SCUC/SCED，有后端证书和状态连续性；
+\item A2 网络校核：A1 加逐时或风险抽样 AC-OPF/PF，报告违反率和抽样设计；
+\item A3 工业认证：A2 加数据版本、随机场景、$N-1$、外部模型复核、可复现环境和统计覆盖证明。
+\end{enumerate}
+生命周期 schedule-only 快速层属于 A0/A1 之间的规划筛选，不得标成 A2/A3。
+
+\subsection{与实现的对应}
+\begin{center}\footnotesize
+\begin{longtable}{@{}L{6.4cm}L{8.8cm}@{}}
+\toprule 理论条目 & 实现状态\\\midrule\endfirsthead
+\toprule 理论条目 & 实现状态\\\midrule\endhead
+年度能量、成本、ENS、损耗积分 &
+\implfull{src/time\_series/annual\_production\_sim.cpp:aggregate\_block 及统计函数}\\
+显式削负荷与 ENS 优化 & \implpart{OPF replay 可带削减；UC 核心没有统一 ENS 变量}\\
+滚动状态传递，式~\eqref{eq:ts-rolling} &
+\implfull{顺序年度采用单一全年度 UC；周对象是切片，SOC/爬坡/commitment 跨周连续}\\
+日独立分解等价条件，定理~\ref{thm:ts-day-separable} &
+\implpart{顺序年度状态连续；带 UC 或储能的并行日组合被入口拒绝，仅保留无状态 DynamicOPF 快照}\\
+代表日聚类/转移矩阵/极端日尾部加权 & \implnone\\
+分层抽样与 Neyman 权重，式~\eqref{eq:ts-stratified} &
+\implpart{估计器使用确定性固定层内样本，并对样本小时执行独立 OPF/PF correction；仍不是随机抽样覆盖率证明}\\
+负荷增长、PV 降额、SOH、替换和 NPV &
+\implpart{负荷/PV/SOH/NPV 已执行；AC/DC storage 使用 stable index、分数循环和更换后年龄重置}\\
+温度/DoD/C-rate/雨流电化学退化 & \implnone\\
+逐机组与外部电网碳因子，式~\eqref{eq:ts-carbon} &
+\implpart{生命周期读取外部电网静态/profile 因子，并保留无因子 fallback 标记}\\
+储能碳库存递推，式~\eqref{eq:ts-carbon-storage} &
+\implpart{生命周期按储能 SOC 碳强度统计放电库存项；制造碳和网络损耗碳仍未建模}\\
+三项误差合成，式~\eqref{eq:ts-error-sum} &
+\implpart{字段与计算已实现；部分分量是启发式 proxy，不是严格置信界}\\
+生命周期逐时 AC-OPF/PF & \implpart{默认全年物理 replay；可显式关闭并由结果标记 schedule-only}\\
+\bottomrule
+\end{longtable}
+\end{center}
+
+\subsection{参考文献}
+{\renewcommand{\section}[2]{}\begin{thebibliography}{9}\small
+\bibitem{ts:pss} R.~N. Allan and R.~Billinton, \emph{Reliability Evaluation of Power Systems}, 2nd ed., Plenum, 1996.
+\bibitem{ts:shapiro} A.~Shapiro, D.~Dentcheva and A.~Ruszczy\'nski,
+\emph{Lectures on Stochastic Programming}, 3rd ed., SIAM, 2021.
+\bibitem{ts:survey} N.~P. Padhy, Unit commitment---a bibliographical survey,
+\emph{IEEE Transactions on Power Systems}, 19(2), 2004.
+\bibitem{ts:battery} M.~Schimpe et al., Energy efficiency evaluation of a stationary lithium-ion battery container storage system,
+\emph{Journal of Energy Storage}, 20, 2018.
+\end{thebibliography}}

@@ -27,9 +27,11 @@
 #include <cstdlib>
 #include <fstream>
 #include <map>
+#include <limits>
 #include <sstream>
 #include <string>
 #include <unordered_map>
+#include <unordered_set>
 #include <utility>
 #include <vector>
 
@@ -54,6 +56,22 @@ using Trip  = Eigen::Triplet<Cx>;
 
 constexpr double kDeg2Rad = M_PI / 180.0;
 
+// Kundur, Power System Stability and Control, Appendix B: with kV and MVA,
+// Z_base[ohm] = V_base[kV]^2 / S_base[MVA], and Y_pu = Y_SI * Z_base.
+double zbase_ohm(double base_kv, double base_mva) {
+  return base_kv * base_kv / base_mva;
+}
+
+// IEEE Std 519-2022, Annex B passive-filter convention: a single-tuned shunt
+// is a series R-L-C branch. C<=0 reduces to an R-L branch for converter filters.
+Cx series_rlc_admittance_si(double resistance_ohm, double inductance_h,
+                            double capacitance_f, double frequency_hz) {
+  const double omega = 2.0 * M_PI * frequency_hz;
+  Cx z(resistance_ohm, omega * inductance_h);
+  if (capacitance_f > 0.0) z += Cx(0.0, -1.0 / (omega * capacitance_f));
+  return std::abs(z) > 1e-15 ? Cx(1.0, 0.0) / z : Cx(0.0, 0.0);
+}
+
 // ───────────────────────────────────────────────────────────────────────────
 // id → position maps (robust to non-contiguous bus identifiers)
 // ───────────────────────────────────────────────────────────────────────────
@@ -73,6 +91,30 @@ double skin_r(double r1, double h, const HPFOptions& opt) {
   const double sh = std::sqrt(h);
   if (opt.skin_effect == SkinEffectModel::SqrtOrder) return r1 * sh;
   return r1 * (1.0 + opt.skin_coefficient * sh);  // ProportionalSqrt
+}
+
+std::string validate_hpf_options(const HPFOptions& opt) {
+  if (!std::isfinite(opt.default_source_xpp_pu) || opt.default_source_xpp_pu <= 0.0)
+    return "default_source_xpp_pu must be finite and positive";
+  if (!std::isfinite(opt.dc_source_impedance_pu) || opt.dc_source_impedance_pu <= 0.0)
+    return "dc_source_impedance_pu must be finite and positive";
+  if (!std::isfinite(opt.min_shunt_pu) || opt.min_shunt_pu <= 0.0)
+    return "min_shunt_pu must be finite and positive";
+  if (!std::isfinite(opt.skin_coefficient) || opt.skin_coefficient < 0.0)
+    return "skin_coefficient must be finite and non-negative";
+  if (opt.newton_max_iter <= 0 || !std::isfinite(opt.newton_tol) || opt.newton_tol <= 0.0)
+    return "Newton options require newton_max_iter > 0 and finite newton_tol > 0";
+  std::unordered_set<int> seen;
+  for (int h : opt.ac_orders) {
+    if (h <= 1) return "AC harmonic orders must be unique integers greater than 1";
+    if (!seen.insert(h).second) return "AC harmonic orders must not contain duplicates";
+  }
+  seen.clear();
+  for (int r : opt.dc_orders) {
+    if (r <= 0) return "DC ripple orders must be unique positive integers";
+    if (!seen.insert(r).second) return "DC ripple orders must not contain duplicates";
+  }
+  return {};
 }
 
 // Series + charging stamp for an AC pi-branch at harmonic frequency h.
@@ -186,20 +228,9 @@ SpMat build_ac_ybus(const HybridPowerSystem& sys, const OperatingPoint& op,
     trips.emplace_back(t, t, s.ytt);
   }
 
-  // Two-winding transformers (vk%, vkr% → series r + jx referred to system base).
-  for (const auto& tf : sys.ac.transformers_2w) {
-    if (!tf.in_service) continue;
-    int f = pos(tf.hv_bus), t = pos(tf.lv_bus);
-    if (f < 0 || t < 0 || tf.sn_mva <= 0) continue;
-    double z_pu = (tf.vk_percent / 100.0) * (base / tf.sn_mva);
-    double r_pu = (tf.vkr_percent / 100.0) * (base / tf.sn_mva);
-    double x_pu = std::sqrt(std::max(z_pu * z_pu - r_pu * r_pu, 0.0));
-    BranchStamp s = ac_branch_stamp(skin_r(r_pu, h, opt), x_pu, 0.0, 1.0, 0.0, h);
-    trips.emplace_back(f, f, s.yff);
-    trips.emplace_back(f, t, s.yft);
-    trips.emplace_back(t, f, s.ytf);
-    trips.emplace_back(t, t, s.ytt);
-  }
+  // Transformer2W/3W devices are already projected into canonical ACBranch
+  // rows (with BranchExpandMap provenance). Stamping the rich transformer
+  // collections here as well would count their leakage impedance twice.
 
   // Fixed bus shunts (ACBus gs/bs) and Shunt components: y(h) = g + j*h*b.
   for (int i = 0; i < n; ++i) {
@@ -214,6 +245,28 @@ SpMat build_ac_ybus(const HybridPowerSystem& sys, const OperatingPoint& op,
     if (i < 0) continue;
     double g = sh.gs_mw / base, bb = sh.bs_mvar / base;
     trips.emplace_back(i, i, Cx(g, h * bb));
+  }
+
+  // First-class passive harmonic filters. The rich-to-canonical projection
+  // preserves their stable index while remapping only domain-qualified buses.
+  const double fundamental_hz = sys.ac.freq_hz > 0.0 ? sys.ac.freq_hz : 50.0;
+  for (const auto& filter : sys.ac.harmonic_filters) {
+    if (!filter.in_service) continue;
+    const int f = pos(filter.from_bus);
+    const int t = filter.to_bus == 0 ? -1 : pos(filter.to_bus);
+    if (f < 0 || (filter.to_bus != 0 && t < 0)) continue;
+    const double kv = sys.ac.buses[static_cast<size_t>(f)].base_kv;
+    if (!(kv > 0.0) || !(base > 0.0)) continue;
+    const Cx y = series_rlc_admittance_si(
+                     filter.resistance_ohm, filter.inductance_h,
+                     filter.capacitance_f, h * fundamental_hz) *
+                 zbase_ohm(kv, base);
+    trips.emplace_back(f, f, y);
+    if (t >= 0) {
+      trips.emplace_back(f, t, -y);
+      trips.emplace_back(t, f, -y);
+      trips.emplace_back(t, t, y);
+    }
   }
 
   // Load impedance model (parallel R // jX from fundamental P, Q).
@@ -291,7 +344,7 @@ SpMat build_ac_ybus(const HybridPowerSystem& sys, const OperatingPoint& op,
 SpMat build_dc_ybus(const DCSystem& dc,
                     const std::unordered_map<int, int>& id2pos,
                     const std::vector<int>& nic_dc_pos, int order,
-                    const HPFOptions& opt) {
+                    const HPFOptions& opt, double fundamental_hz = 50.0) {
   const int n = static_cast<int>(dc.buses.size());
   std::vector<Trip> trips;
   trips.reserve(dc.branches.size() * 4 + n * 2);
@@ -314,6 +367,56 @@ SpMat build_dc_ybus(const DCSystem& dc,
     trips.emplace_back(f, t, -y);
     trips.emplace_back(t, f, -y);
     trips.emplace_back(t, t, y);
+  }
+
+
+  const double base_mva = dc.base_mva > 0.0 ? dc.base_mva : 100.0;
+  auto device_zbase = [&](int p) {
+    return zbase_ohm(dc.buses[static_cast<size_t>(p)].base_kv, base_mva);
+  };
+  const double frequency_hz = static_cast<double>(order) * fundamental_hz;
+  for (const auto& capacitor : dc.capacitors) {
+    if (!capacitor.in_service) continue;
+    const int p = pos(capacitor.bus);
+    if (p < 0 || !(dc.buses[static_cast<size_t>(p)].base_kv > 0.0)) continue;
+    // IEC 61642: Y = G_leak + 1/(ESR+jwESL+1/jwC).
+    const Cx y_si(capacitor.leakage_conductance_s, 0.0);
+    const Cx y = y_si + series_rlc_admittance_si(
+                             capacitor.esr_ohm, capacitor.esl_h,
+                             capacitor.capacitance_f, frequency_hz);
+    trips.emplace_back(p, p, y * device_zbase(p));
+  }
+  for (const auto& reactor : dc.reactors) {
+    if (!reactor.in_service) continue;
+    const int f = pos(reactor.from_bus), t = pos(reactor.to_bus);
+    if (f < 0 || t < 0 || !(dc.buses[static_cast<size_t>(f)].base_kv > 0.0))
+      continue;
+    const Cx y = series_rlc_admittance_si(
+                     reactor.resistance_ohm, reactor.inductance_h, 0.0,
+                     frequency_hz) *
+                 device_zbase(f);
+    trips.emplace_back(f, f, y);
+    trips.emplace_back(f, t, -y);
+    trips.emplace_back(t, f, -y);
+    trips.emplace_back(t, t, y);
+  }
+  for (const auto& filter : dc.harmonic_filters) {
+    if (!filter.in_service) continue;
+    const int f = pos(filter.from_bus);
+    const int t = filter.to_bus == 0 ? -1 : pos(filter.to_bus);
+    if (f < 0 || (filter.to_bus != 0 && t < 0) ||
+        !(dc.buses[static_cast<size_t>(f)].base_kv > 0.0))
+      continue;
+    const Cx y = series_rlc_admittance_si(
+                     filter.resistance_ohm, filter.inductance_h,
+                     filter.capacitance_f, frequency_hz) *
+                 device_zbase(f);
+    trips.emplace_back(f, f, y);
+    if (t >= 0) {
+      trips.emplace_back(f, t, -y);
+      trips.emplace_back(t, f, -y);
+      trips.emplace_back(t, t, y);
+    }
   }
 
   // DC voltage-forming nodes ground the ripple network (DC_V buses + NIC DC ports).
@@ -391,6 +494,11 @@ std::string HPFResult::summary() const {
 HPFResult solve_harmonic_power_flow(const HybridPowerSystem& rich_sys,
                                     const HarmonicStudyInputs& rich_inputs,
                                     const HPFOptions& opt) {
+  HPFResult res;
+  if (const std::string error = validate_hpf_options(opt); !error.empty()) {
+    res.message = error;
+    return res;
+  }
   const auto projection_bundle =
       projection::RichToCanonicalOperator::apply(rich_sys);
   const auto& sys = projection_bundle.canonical;
@@ -442,7 +550,6 @@ HPFResult solve_harmonic_power_flow(const HybridPowerSystem& rich_sys,
     }
   }
   const auto& inputs = canonical_inputs;
-  HPFResult res;
   const double base = sys.base_mva > 0 ? sys.base_mva : 100.0;
   const auto ac_id2pos = build_id_map(sys.ac.buses);
   const auto dc_id2pos = build_id_map(sys.dc.buses);
@@ -695,11 +802,12 @@ HPFResult solve_harmonic_power_flow(const HybridPowerSystem& rich_sys,
       int f = ac_pos(br.from_bus), t = ac_pos(br.to_bus);
       if (f < 0 || t < 0) continue;
       HarmonicBranchFlow bf;
+      bf.branch_index = br.index;
       bf.from_bus = br.from_bus;
       bf.to_bus = br.to_bus;
       bf.is_dc = false;
       double i_fund = 0.0, acc = 0.0;
-      // Series current at each order: I = ys(h) * (Vf - Vt).
+      // Terminal current uses the exact pi/tap/phase-shift stamp used by Ybus.
       std::vector<int> orders{1};
       for (int h : res.ac_orders) orders.push_back(h);
       for (int h : orders) {
@@ -707,11 +815,21 @@ HPFResult solve_harmonic_power_flow(const HybridPowerSystem& rich_sys,
         auto itt = ac_res[t].v_by_order.find(h);
         if (itf == ac_res[f].v_by_order.end() || itt == ac_res[t].v_by_order.end())
           continue;
-        Cx z(skin_r(br.r_pu, static_cast<double>(h), opt),
-             static_cast<double>(h) * br.x_pu);
-        Cx ys = (std::abs(z) > 1e-12) ? Cx(1.0, 0.0) / z : Cx(0.0, 0.0);
-        double im = std::abs(ys * (itf->second - itt->second));
+        BranchStamp stamp = ac_branch_stamp(
+            skin_r(br.r_pu, static_cast<double>(h), opt), br.x_pu,
+            br.b_pu, br.tap, br.shift_deg, static_cast<double>(h));
+        const Cx ifrom = stamp.yff * itf->second + stamp.yft * itt->second;
+        const Cx ito = stamp.ytf * itf->second + stamp.ytt * itt->second;
+        const double resistance = skin_r(br.r_pu, static_cast<double>(h), opt);
+        const Cx z(resistance, static_cast<double>(h) * br.x_pu);
+        const Cx ys = std::abs(z) > 1e-12 ? Cx(1.0, 0.0) / z : Cx(0.0, 0.0);
+        const double tap = br.tap > 1e-9 ? br.tap : 1.0;
+        const Cx ratio = std::polar(tap, br.shift_deg * kDeg2Rad);
+        const double im = std::abs(ifrom);
         bf.i_by_order[h] = im;
+        bf.i_to_by_order[h] = std::abs(ito);
+        bf.i_series_by_order[h] = std::abs(ys * (itf->second / ratio - itt->second));
+        bf.r_series_by_order[h] = resistance;
         if (h == 1) i_fund = im; else acc += im * im;
       }
       bf.thd_i_pct = (i_fund > 1e-12) ? std::sqrt(acc) / i_fund * 100.0 : 0.0;
@@ -722,6 +840,7 @@ HPFResult solve_harmonic_power_flow(const HybridPowerSystem& rich_sys,
       int f = dc_pos(br.from_bus), t = dc_pos(br.to_bus);
       if (f < 0 || t < 0) continue;
       HarmonicBranchFlow bf;
+      bf.branch_index = br.index;
       bf.from_bus = authored_dc_bus(br.from_bus);
       bf.to_bus = authored_dc_bus(br.to_bus);
       bf.is_dc = true;
@@ -743,6 +862,9 @@ HPFResult solve_harmonic_power_flow(const HybridPowerSystem& rich_sys,
         Cx ys = (std::abs(z) > 1e-12) ? Cx(1.0, 0.0) / z : Cx(0.0, 0.0);
         double im = std::abs(ys * (itf->second - itt->second));
         bf.i_by_order[o] = im;
+        bf.i_to_by_order[o] = im;
+        bf.i_series_by_order[o] = im;
+        bf.r_series_by_order[o] = r;
         if (o == 0) i_fund = im; else acc += im * im;
       }
       bf.thd_i_pct = (i_fund > 1e-12) ? std::sqrt(acc) / i_fund * 100.0 : 0.0;
@@ -780,9 +902,15 @@ HPFResult solve_harmonic_power_flow(const HybridPowerSystem& rich_sys,
     res.ac_bus_results = std::move(ac_res);
   }
   res.dc_bus_results = std::move(dc_res);
-  res.ok = true;
-  if (!res.base_pf_converged && opt.run_base_power_flow)
-    res.message = "base power flow did not converge; used stored/nominal voltages";
+  res.ok = std::all_of(res.ac_order_solved.begin(), res.ac_order_solved.end(),
+                       [](const auto& row) { return row.second; }) &&
+           std::all_of(res.dc_order_solved.begin(), res.dc_order_solved.end(),
+                       [](const auto& row) { return row.second; });
+  if (!res.ok) res.message = "one or more requested harmonic-order systems failed to solve";
+  if (!res.base_pf_converged && opt.run_base_power_flow) {
+    if (!res.message.empty()) res.message += "; ";
+    res.message += "base power flow did not converge; used stored/nominal voltages";
+  }
   if (used_lossless_nic_guess) {
     if (!res.message.empty()) res.message += "; ";
     res.message += "NIC DC operating point assumed lossless (P_dc = -P_ac); "
@@ -820,7 +948,7 @@ Mat3 seq_to_phase_zabc(Cx z0, Cx z1, Cx z2) {
 }
 
 // ── Three-phase transformer winding connections (vector groups) ──
-enum class WindingConn { WyeG, Wye, Delta };
+enum class WindingConn { WyeG, Wye, Delta, ZigzagG, Zigzag };
 
 struct XfmrConn {
   WindingConn hv{WindingConn::WyeG};
@@ -839,12 +967,16 @@ XfmrConn parse_vector_group(const std::string& vg, const std::string& hv_topo,
     if (std::isdigit(static_cast<unsigned char>(ch))) { digits.push_back(ch); continue; }
     const char u = static_cast<char>(std::toupper(static_cast<unsigned char>(ch)));
     if (u == 'D' || u == 'Z' || u == 'Y') {
-      WindingConn w = (u == 'Y') ? WindingConn::Wye : WindingConn::Delta;
+      WindingConn w = u == 'Y' ? WindingConn::Wye
+                               : (u == 'Z' ? WindingConn::Zigzag
+                                           : WindingConn::Delta);
       if (slot == 0) { c.hv = w; slot = 1; }
       else if (slot == 1) { c.lv = w; slot = 2; }
     } else if (u == 'N') {  // grounded neutral for the last-assigned wye winding
       if (slot == 1 && c.hv == WindingConn::Wye) c.hv = WindingConn::WyeG;
       else if (slot == 2 && c.lv == WindingConn::Wye) c.lv = WindingConn::WyeG;
+      else if (slot == 1 && c.hv == WindingConn::Zigzag) c.hv = WindingConn::ZigzagG;
+      else if (slot == 2 && c.lv == WindingConn::Zigzag) c.lv = WindingConn::ZigzagG;
     }
   }
   if (!digits.empty()) c.clock = std::stoi(digits) % 12;
@@ -853,6 +985,11 @@ XfmrConn parse_vector_group(const std::string& vg, const std::string& hv_topo,
       std::string s;
       for (char x : t) s.push_back(static_cast<char>(std::tolower(static_cast<unsigned char>(x))));
       if (s.find("delta") != std::string::npos) return WindingConn::Delta;
+      if (s.find("zigzag") != std::string::npos || s.find("zig-zag") != std::string::npos) {
+        if (s.find("ground") != std::string::npos || s.find("neutral") != std::string::npos)
+          return WindingConn::ZigzagG;
+        return WindingConn::Zigzag;
+      }
       if (s.find("ground") != std::string::npos || s.find("wye-g") != std::string::npos)
         return WindingConn::WyeG;
       if (s.find("wye") != std::string::npos || s.find("star") != std::string::npos)
@@ -870,7 +1007,7 @@ XfmrConn parse_vector_group(const std::string& vg, const std::string& hv_topo,
 // (delta -> singular for the [1,1,1] mode) and the ±30° vector-group shift.
 struct XfmrBlocks { Mat3 ypp, yss, yps, ysp; };
 
-XfmrBlocks transformer_blocks(Cx yt, const XfmrConn& c) {
+XfmrBlocks transformer_blocks(Cx yt, Cx yt0, const XfmrConn& c) {
   Mat3 YI = yt * Mat3::Identity();
   Mat3 M2;
   M2 << Cx(2,0), Cx(-1,0), Cx(-1,0),
@@ -887,15 +1024,33 @@ XfmrBlocks transformer_blocks(Cx yt, const XfmrConn& c) {
 
   const bool hv_delta = (c.hv == WindingConn::Delta);
   const bool lv_delta = (c.lv == WindingConn::Delta);
+  const bool hv_zero = c.hv == WindingConn::WyeG || c.hv == WindingConn::ZigzagG;
+  const bool lv_zero = c.lv == WindingConn::WyeG || c.lv == WindingConn::ZigzagG;
   XfmrBlocks b;
-  if (!hv_delta && !lv_delta) {            // Yg-Yg
-    b.ypp = YI;  b.yss = YI;  b.yps = -YI;             b.ysp = -YI;
+  if (!hv_delta && !lv_delta) {
+    b.ypp = hv_zero ? YI : YII;
+    b.yss = lv_zero ? YI : YII;
+    b.yps = (hv_zero && lv_zero) ? -YI : -YII;
+    b.ysp = b.yps;
   } else if (hv_delta && lv_delta) {       // D-D
     b.ypp = YII; b.yss = YII; b.yps = -YII;            b.ysp = -YII;
-  } else if (hv_delta && !lv_delta) {      // D-Yg
-    b.ypp = YII; b.yss = YI;  b.yps = YIII;            b.ysp = YIII.transpose().eval();
-  } else {                                 // Yg-D
-    b.ypp = YI;  b.yss = YII; b.yps = YIII;            b.ysp = YIII.transpose().eval();
+  } else if (hv_delta && !lv_delta) {      // D-Y / D-Yg / D-Zn
+    b.ypp = YII; b.yss = lv_zero ? YI : YII;
+    b.yps = YIII; b.ysp = YIII.transpose().eval();
+  } else {                                 // Y-D / Yg-D / Zn-D
+    b.ypp = hv_zero ? YI : YII; b.yss = YII;
+    b.yps = YIII; b.ysp = YIII.transpose().eval();
+  }
+  // Replace the positive-sequence leakage used in the common-mode projector
+  // by the authored zero-sequence leakage. A grounded winding connected to a
+  // blocking opposite winding retains the resulting local circulating path.
+  Mat3 P0 = Mat3::Constant(Cx(1.0 / 3.0, 0.0));
+  const Mat3 delta0 = (yt0 - yt) * P0;
+  if (hv_zero) b.ypp += delta0;
+  if (lv_zero) b.yss += delta0;
+  if (hv_zero && lv_zero) {
+    b.yps -= delta0;
+    b.ysp -= delta0;
   }
   return b;
 }
@@ -1020,11 +1175,18 @@ SpMat build_3ph_ac_ybus(const ThreePhaseACSystem& sys,
     double rpu = (tf.vkr_percent / 100.0) * (base / tf.sn_mva) * vbase_scale;
     double xpu = std::sqrt(std::max(zpu * zpu - rpu * rpu, 0.0));
     Cx yt = Cx(1.0, 0.0) / Cx(skin_r(rpu, h, opt), hh * xpu);
+    const double z0pct = tf.vk0_percent > 0.0 ? tf.vk0_percent : tf.vk_percent;
+    const double r0pct = tf.vkr0_percent > 0.0 ? tf.vkr0_percent : tf.vkr_percent;
+    const double z0pu = (z0pct / 100.0) * (base / tf.sn_mva) * vbase_scale;
+    const double r0pu = (r0pct / 100.0) * (base / tf.sn_mva) * vbase_scale;
+    const double x0pu = std::sqrt(std::max(z0pu * z0pu - r0pu * r0pu, 0.0));
+    Cx z0(skin_r(r0pu, h, opt), hh * x0pu);
+    Cx yt0 = std::abs(z0) > 1e-12 ? Cx(1.0, 0.0) / z0 : yt;
     // Vector-group aware connection blocks: encodes Dy/Yd ±30° shift and the
     // delta-winding zero-sequence (triplen) blocking.
     XfmrConn conn = parse_vector_group(tf.vector_group, tf.hv_winding_topology,
                                        tf.lv_winding_topology);
-    XfmrBlocks blk = transformer_blocks(yt, conn);
+    XfmrBlocks blk = transformer_blocks(yt, yt0, conn);
     const PhaseMask mh = tf.hv_phase_mask, ml = tf.lv_phase_mask;
     for (int r = 0; r < 3; ++r) {
       for (int c = 0; c < 3; ++c) {
@@ -1178,6 +1340,10 @@ HPF3phResult solve_harmonic_power_flow_3ph(const ThreePhaseACSystem& sys,
                                            const ThreePhaseHarmonicInputs& inputs,
                                            const HPFOptions& opt) {
   HPF3phResult res;
+  if (const std::string error = validate_hpf_options(opt); !error.empty()) {
+    res.message = error;
+    return res;
+  }
   const int n = static_cast<int>(sys.buses.size());
   const double base = sys.base_mva > 0 ? sys.base_mva : 100.0;
   if (n == 0) {
@@ -1363,9 +1529,13 @@ HPF3phResult solve_harmonic_power_flow_3ph(const ThreePhaseACSystem& sys,
   }
 
   res.bus_results = std::move(bus_res);
-  res.ok = true;
-  if (!res.base_pf_converged && opt.run_base_power_flow)
-    res.message = "base power flow did not converge; used stored/nominal voltages";
+  res.ok = std::all_of(res.ac_order_solved.begin(), res.ac_order_solved.end(),
+                       [](const auto& row) { return row.second; });
+  if (!res.ok) res.message = "one or more requested harmonic-order systems failed to solve";
+  if (!res.base_pf_converged && opt.run_base_power_flow) {
+    if (!res.message.empty()) res.message += "; ";
+    res.message += "base power flow did not converge; used stored/nominal voltages";
+  }
   return res;
 }
 
@@ -1529,6 +1699,10 @@ HPFHybrid3phResult solve_harmonic_power_flow_3ph_hybrid(
     const ThreePhaseACSystem& ac, const DCSystem& dc,
     const ThreePhaseHybridInputs& inputs, const HPFOptions& opt) {
   HPFHybrid3phResult res;
+  if (const std::string error = validate_hpf_options(opt); !error.empty()) {
+    res.message = error;
+    return res;
+  }
   const int nac = static_cast<int>(ac.buses.size());
   const int ndc = static_cast<int>(dc.buses.size());
   const double ac_base = ac.base_mva > 0 ? ac.base_mva : 100.0;
@@ -1589,7 +1763,12 @@ HPFHybrid3phResult solve_harmonic_power_flow_3ph_hybrid(
   const int Nac = 3 * nac;                 // AC nodes per order
   const int dc_off = n_h * Nac;            // DC block offset
   const int M = n_h * Nac + n_r * ndc;     // total unknowns
-  if (M == 0) { res.message = "no harmonic orders requested"; res.ok = true; return res; }
+  if (M == 0) {
+    res.message = "no harmonic orders requested";
+    res.combined_solved = true;
+    res.ok = true;
+    return res;
+  }
   auto ac_idx = [&](int ai, int p, int ph) { return ai * Nac + p * 3 + ph; };
   auto dc_idx = [&](int di, int k) { return dc_off + di * ndc + k; };
   auto h_index = [&](int h) { for (int i = 0; i < n_h; ++i) if (hac[i] == h) return i; return -1; };
@@ -1778,7 +1957,7 @@ HPFHybrid3phResult solve_harmonic_power_flow_3ph_hybrid(
     br.thd_pct = thd_from_orders(br.v_by_order, 0, br.v_fund_pu);
     if (br.thd_pct > res.max_dc_thd_pct) { res.max_dc_thd_pct = br.thd_pct; res.max_dc_thd_bus = br.bus; }
   }
-  res.ok = true;
+  res.ok = res.combined_solved;
   return res;
 }
 
@@ -1801,6 +1980,11 @@ HPFNewtonResult solve_harmonic_power_flow_newton(
     const std::vector<HarmonicNonlinearSource>& nonlinear,
     const HarmonicStudyInputs& linear_inputs, const HPFOptions& opt) {
   HPFNewtonResult res;
+  if (const std::string error = validate_hpf_options(opt); !error.empty()) {
+    res.converged = false;
+    res.message = error;
+    return res;
+  }
   const int n = static_cast<int>(sys.ac.buses.size());
   if (n == 0) { res.message = "system has no AC buses"; return res; }
   const auto ac_id2pos = build_id_map(sys.ac.buses);
@@ -1855,6 +2039,11 @@ HPFNewtonResult solve_harmonic_power_flow_newton(
       continue;
     }
     Eigen::VectorXcd V = lu0.solve(Isrc);
+    if (lu0.info() != Eigen::Success) {
+      res.converged = false;
+      res.final_residual[h] = -1.0;
+      continue;
+    }
 
     // Newton iteration on r(V) = Y·V − Isrc + g2∘V².
     int it = 0;
@@ -1874,7 +2063,9 @@ HPFNewtonResult solve_harmonic_power_flow_newton(
       Eigen::SparseLU<SpMat> lu;
       lu.compute(J);
       if (lu.info() != Eigen::Success) { order_ok = false; break; }
-      V += lu.solve(-r);
+      const Eigen::VectorXcd step = lu.solve(-r);
+      if (lu.info() != Eigen::Success) { order_ok = false; break; }
+      V += step;
     }
     res.iterations[h] = it;
     res.final_residual[h] = rn;
@@ -1892,7 +2083,7 @@ HPFNewtonResult solve_harmonic_power_flow_newton(
     }
   }
   res.ac_bus_results = std::move(ac_res);
-  res.ok = true;
+  res.ok = res.converged;
   return res;
 }
 
@@ -1902,6 +2093,11 @@ HPF3phResult solve_harmonic_power_flow_3ph_newton(
     const std::vector<ThreePhaseNonlinearSource>& nonlinear,
     const ThreePhaseHarmonicInputs& linear_inputs, const HPFOptions& opt) {
   HPF3phResult res;
+  if (const std::string error = validate_hpf_options(opt); !error.empty()) {
+    res.newton_converged = false;
+    res.message = error;
+    return res;
+  }
   const int n = static_cast<int>(sys.buses.size());
   if (n == 0) { res.message = "system has no buses"; return res; }
   std::unordered_map<int, int> id2pos;
@@ -2009,6 +2205,11 @@ HPF3phResult solve_harmonic_power_flow_3ph_newton(
       continue;
     }
     Eigen::VectorXcd V = lu0.solve(Isrc);
+    if (lu0.info() != Eigen::Success) {
+      res.newton_converged = false;
+      res.ac_order_solved[h] = false;
+      continue;
+    }
 
     int it = 0;
     double rn = 0.0;
@@ -2027,7 +2228,9 @@ HPF3phResult solve_harmonic_power_flow_3ph_newton(
       Eigen::SparseLU<SpMat> lu;
       lu.compute(J);
       if (lu.info() != Eigen::Success) { order_ok = false; break; }
-      V += lu.solve(-r);
+      const Eigen::VectorXcd step = lu.solve(-r);
+      if (lu.info() != Eigen::Success) { order_ok = false; break; }
+      V += step;
     }
     res.newton_iterations[h] = it;
     res.newton_residual[h] = rn;
@@ -2050,7 +2253,7 @@ HPF3phResult solve_harmonic_power_flow_3ph_newton(
     if (mx > res.max_thd_pct) { res.max_thd_pct = mx; res.max_thd_bus = r.bus; }
   }
   res.bus_results = std::move(bus_res);
-  res.ok = true;
+  res.ok = res.newton_converged;
   return res;
 }
 
@@ -2062,6 +2265,11 @@ HPFNewtonResult solve_harmonic_power_flow_newton_real(
   using SpR = Eigen::SparseMatrix<double>;
   using TripR = Eigen::Triplet<double>;
   HPFNewtonResult res;
+  if (const std::string error = validate_hpf_options(opt); !error.empty()) {
+    res.converged = false;
+    res.message = error;
+    return res;
+  }
   const int n = static_cast<int>(sys.ac.buses.size());
   if (n == 0) { res.message = "system has no AC buses"; return res; }
   const auto id2pos = build_id_map(sys.ac.buses);
@@ -2111,6 +2319,11 @@ HPFNewtonResult solve_harmonic_power_flow_newton_real(
       continue;
     }
     Eigen::VectorXcd V = lu0.solve(Isrc);
+    if (lu0.info() != Eigen::Success) {
+      res.converged = false;
+      res.final_residual[h] = -1.0;
+      continue;
+    }
 
     // Constant real network Jacobian block  [[G, −B], [B, G]]  from Y = G + jB.
     std::vector<TripR> baseT;
@@ -2188,7 +2401,7 @@ HPFNewtonResult solve_harmonic_power_flow_newton_real(
     }
   }
   res.ac_bus_results = std::move(ac_res);
-  res.ok = true;
+  res.ok = res.converged;
   return res;
 }
 
@@ -2198,6 +2411,11 @@ HPFNewtonResult solve_harmonic_power_flow_newton_coupled(
     const std::vector<CrossOrderNonlinearSource>& resources,
     const HarmonicStudyInputs& linear_inputs, const HPFOptions& opt) {
   HPFNewtonResult res;
+  if (const std::string error = validate_hpf_options(opt); !error.empty()) {
+    res.converged = false;
+    res.message = error;
+    return res;
+  }
   const int n = static_cast<int>(sys.ac.buses.size());
   if (n == 0) { res.message = "system has no AC buses"; return res; }
   const auto id2pos = build_id_map(sys.ac.buses);
@@ -2258,6 +2476,11 @@ HPFNewtonResult solve_harmonic_power_flow_newton_coupled(
     return res;
   }
   Eigen::VectorXcd V = lu0.solve(Isrc);
+  if (lu0.info() != Eigen::Success) {
+    res.converged = false;
+    res.message = "stacked initial solve failed";
+    return res;
+  }
 
   // Resolve mixing terms whose three orders are all in the study set.
   struct MT { int oh, op, oq, bus_i; Cx k; };
@@ -2296,7 +2519,9 @@ HPFNewtonResult solve_harmonic_power_flow_newton_coupled(
     Eigen::SparseLU<SpMat> lu;
     lu.compute(J);
     if (lu.info() != Eigen::Success) { ok = false; break; }
-    V += lu.solve(-D);
+    const Eigen::VectorXcd step = lu.solve(-D);
+    if (lu.info() != Eigen::Success) { ok = false; break; }
+    V += step;
   }
   res.iterations[0] = iter;       // single coupled solve (0 = global key)
   res.final_residual[0] = rn;
@@ -2314,7 +2539,7 @@ HPFNewtonResult solve_harmonic_power_flow_newton_coupled(
     }
   }
   res.ac_bus_results = std::move(ac_res);
-  res.ok = true;
+  res.ok = res.converged;
   return res;
 }
 
@@ -2327,6 +2552,8 @@ void detect_resonances(const std::vector<double>& zmag, const std::vector<double
                        int bus, int sequence, double min_pu,
                        std::vector<HarmonicResonance>& out) {
   for (size_t i = 1; i + 1 < zmag.size(); ++i) {
+    if (!std::isfinite(zmag[i - 1]) || !std::isfinite(zmag[i]) ||
+        !std::isfinite(zmag[i + 1])) continue;
     if (zmag[i] > zmag[i - 1] && zmag[i] > zmag[i + 1] && zmag[i] >= min_pu)
       out.push_back({bus, freqs[i], zmag[i], true, sequence});
     else if (zmag[i] < zmag[i - 1] && zmag[i] < zmag[i + 1])
@@ -2348,6 +2575,16 @@ FrequencyScanResult frequency_scan(const HybridPowerSystem& sys,
                                    const FrequencyScanOptions& sopt,
                                    const HPFOptions& opt) {
   FrequencyScanResult res;
+  if (const std::string error = validate_hpf_options(opt); !error.empty()) {
+    res.message = error;
+    return res;
+  }
+  if (!std::isfinite(sopt.f_start) || !std::isfinite(sopt.f_end) ||
+      !std::isfinite(sopt.f_step) || sopt.f_start <= 0.0 ||
+      sopt.f_end < sopt.f_start || sopt.f_step <= 0.0) {
+    res.message = "frequency scan requires finite 0 < f_start <= f_end and f_step > 0";
+    return res;
+  }
   const int n = static_cast<int>(sys.ac.buses.size());
   if (n == 0) { res.message = "system has no AC buses"; return res; }
   const auto id2pos = build_id_map(sys.ac.buses);
@@ -2360,20 +2597,25 @@ FrequencyScanResult frequency_scan(const HybridPowerSystem& sys,
   std::vector<int> kpos;
   for (int bus : buses) {
     auto it = id2pos.find(bus);
-    if (it != id2pos.end()) { kpos.push_back(it->second); res.z_mag[bus]; res.z_ang_deg[bus]; }
+    if (it == id2pos.end()) {
+      res.message = "frequency-scan bus not found: " + std::to_string(bus);
+      return res;
+    }
+    kpos.push_back(it->second); res.z_mag[bus]; res.z_ang_deg[bus];
   }
 
-  const double step = (sopt.f_step > 1e-9) ? sopt.f_step : 0.1;
+  const double step = sopt.f_step;
   for (double f = sopt.f_start; f <= sopt.f_end + 1e-9; f += step) res.freqs.push_back(f);
 
   for (double f : res.freqs) {
     SpMat Y = build_ac_ybus(sys, op, id2pos, f, opt);
     Eigen::SparseLU<SpMat> lu;
     lu.compute(Y);
-    const bool ok = (lu.info() == Eigen::Success);
+    bool point_ok = (lu.info() == Eigen::Success);
     for (size_t bi = 0; bi < buses.size(); ++bi) {
-      double zm = 0.0, za = 0.0;
-      if (ok) {
+      double zm = std::numeric_limits<double>::quiet_NaN();
+      double za = std::numeric_limits<double>::quiet_NaN();
+      if (point_ok) {
         Eigen::VectorXcd e = Eigen::VectorXcd::Zero(n);
         e(kpos[bi]) = Cx(1.0, 0.0);
         Eigen::VectorXcd V = lu.solve(e);
@@ -2381,18 +2623,21 @@ FrequencyScanResult frequency_scan(const HybridPowerSystem& sys,
           Cx Z = V(kpos[bi]);
           zm = std::abs(Z);
           za = std::arg(Z) * 180.0 / M_PI;
-        }
+        } else point_ok = false;
       }
       res.z_mag[buses[bi]].push_back(zm);
       res.z_ang_deg[buses[bi]].push_back(za);
     }
+    res.frequency_solved.push_back(point_ok);
   }
 
   if (sopt.detect_resonances)
     for (int bus : buses)
       detect_resonances(res.z_mag.at(bus), res.freqs, bus, -1, sopt.resonance_min_pu,
                         res.resonances);
-  res.ok = true;
+  res.ok = std::all_of(res.frequency_solved.begin(), res.frequency_solved.end(),
+                       [](bool solved) { return solved; });
+  if (!res.ok) res.message = "one or more frequency points failed to solve";
   return res;
 }
 
@@ -2409,6 +2654,16 @@ SequenceScanResult sequence_frequency_scan(const ThreePhaseACSystem& sys, int bu
                                            const HPFOptions& opt) {
   SequenceScanResult res;
   res.bus = bus;
+  if (const std::string error = validate_hpf_options(opt); !error.empty()) {
+    res.message = error;
+    return res;
+  }
+  if (!std::isfinite(sopt.f_start) || !std::isfinite(sopt.f_end) ||
+      !std::isfinite(sopt.f_step) || sopt.f_start <= 0.0 ||
+      sopt.f_end < sopt.f_start || sopt.f_step <= 0.0) {
+    res.message = "frequency scan requires finite 0 < f_start <= f_end and f_step > 0";
+    return res;
+  }
   const int n = static_cast<int>(sys.buses.size());
   if (n == 0) { res.message = "system has no buses"; return res; }
   std::unordered_map<int, int> id2pos;
@@ -2429,7 +2684,7 @@ SequenceScanResult sequence_frequency_scan(const ThreePhaseACSystem& sys, int bu
                std::polar(vmc, b.va_c_deg * kDeg2Rad)};
   }
 
-  const double step = (sopt.f_step > 1e-9) ? sopt.f_step : 0.1;
+  const double step = sopt.f_step;
   for (double f = sopt.f_start; f <= sopt.f_end + 1e-9; f += step) res.freqs.push_back(f);
 
   const Cx a = std::polar(1.0, 2.0 * M_PI / 3.0);
@@ -2440,30 +2695,37 @@ SequenceScanResult sequence_frequency_scan(const ThreePhaseACSystem& sys, int bu
     SpMat Y = build_3ph_ac_ybus(sys, vph1, id2pos, f, opt);
     Eigen::SparseLU<SpMat> lu;
     lu.compute(Y);
-    double z1 = 0.0, z2 = 0.0, z0 = 0.0;
-    if (lu.info() == Eigen::Success) {
+    double z1 = std::numeric_limits<double>::quiet_NaN();
+    double z2 = std::numeric_limits<double>::quiet_NaN();
+    double z0 = std::numeric_limits<double>::quiet_NaN();
+    bool point_ok = lu.info() == Eigen::Success;
+    if (point_ok) {
       // Positive sequence: inject I_abc = [1, a², a]; read V1 = (Va + a·Vb + a²·Vc)/3.
       Eigen::VectorXcd ep = Eigen::VectorXcd::Zero(3 * n);
       ep(node(k, 0)) = Cx(1, 0); ep(node(k, 1)) = a2; ep(node(k, 2)) = a;
       Eigen::VectorXcd Vp = lu.solve(ep);
       if (lu.info() == Eigen::Success)
         z1 = std::abs((Vp(node(k, 0)) + a * Vp(node(k, 1)) + a2 * Vp(node(k, 2))) / 3.0);
+      else point_ok = false;
       // Negative sequence: I_abc = [1, a, a²]; V2 = (Va + a²·Vb + a·Vc)/3.
       Eigen::VectorXcd en = Eigen::VectorXcd::Zero(3 * n);
       en(node(k, 0)) = Cx(1, 0); en(node(k, 1)) = a; en(node(k, 2)) = a2;
       Eigen::VectorXcd Vn = lu.solve(en);
       if (lu.info() == Eigen::Success)
         z2 = std::abs((Vn(node(k, 0)) + a2 * Vn(node(k, 1)) + a * Vn(node(k, 2))) / 3.0);
+      else point_ok = false;
       // Zero sequence: I_abc = [1, 1, 1]; V0 = (Va + Vb + Vc)/3.
       Eigen::VectorXcd e0 = Eigen::VectorXcd::Zero(3 * n);
       e0(node(k, 0)) = Cx(1, 0); e0(node(k, 1)) = Cx(1, 0); e0(node(k, 2)) = Cx(1, 0);
       Eigen::VectorXcd V0 = lu.solve(e0);
       if (lu.info() == Eigen::Success)
         z0 = std::abs((V0(node(k, 0)) + V0(node(k, 1)) + V0(node(k, 2))) / 3.0);
+      else point_ok = false;
     }
     res.z1_mag.push_back(z1);
     res.z2_mag.push_back(z2);
     res.z0_mag.push_back(z0);
+    res.frequency_solved.push_back(point_ok);
   }
 
   if (sopt.detect_resonances) {
@@ -2471,7 +2733,9 @@ SequenceScanResult sequence_frequency_scan(const ThreePhaseACSystem& sys, int bu
     detect_resonances(res.z2_mag, res.freqs, bus, 2, sopt.resonance_min_pu, res.resonances);
     detect_resonances(res.z0_mag, res.freqs, bus, 0, sopt.resonance_min_pu, res.resonances);
   }
-  res.ok = true;
+  res.ok = std::all_of(res.frequency_solved.begin(), res.frequency_solved.end(),
+                       [](bool solved) { return solved; });
+  if (!res.ok) res.message = "one or more sequence frequency points failed to solve";
   return res;
 }
 
@@ -2518,6 +2782,11 @@ HPF3phResult solve_harmonic_power_flow_3ph_newton_real(
   using SpR = Eigen::SparseMatrix<double>;
   using TripR = Eigen::Triplet<double>;
   HPF3phResult res;
+  if (const std::string error = validate_hpf_options(opt); !error.empty()) {
+    res.newton_converged = false;
+    res.message = error;
+    return res;
+  }
   const int n = static_cast<int>(sys.buses.size());
   if (n == 0) { res.message = "system has no buses"; return res; }
   std::unordered_map<int, int> id2pos;
@@ -2566,6 +2835,11 @@ HPF3phResult solve_harmonic_power_flow_3ph_newton_real(
       continue;
     }
     Eigen::VectorXcd V = lu0.solve(Isrc);
+    if (lu0.info() != Eigen::Success) {
+      res.newton_converged = false;
+      res.ac_order_solved[h] = false;
+      continue;
+    }
 
     std::vector<TripR> baseT;
     baseT.reserve(static_cast<size_t>(Y.nonZeros()) * 4);
@@ -2638,7 +2912,7 @@ HPF3phResult solve_harmonic_power_flow_3ph_newton_real(
     if (mx > res.max_thd_pct) { res.max_thd_pct = mx; res.max_thd_bus = r.bus; }
   }
   res.bus_results = std::move(bus_res);
-  res.ok = true;
+  res.ok = res.newton_converged;
   return res;
 }
 
@@ -2647,6 +2921,11 @@ HPF3phResult solve_harmonic_power_flow_3ph_newton_coupled(
     const std::vector<ThreePhaseCrossOrderSource>& resources,
     const ThreePhaseHarmonicInputs& linear_inputs, const HPFOptions& opt) {
   HPF3phResult res;
+  if (const std::string error = validate_hpf_options(opt); !error.empty()) {
+    res.newton_converged = false;
+    res.message = error;
+    return res;
+  }
   const int n = static_cast<int>(sys.buses.size());
   if (n == 0) { res.message = "system has no buses"; return res; }
   std::unordered_map<int, int> id2pos;
@@ -2708,6 +2987,11 @@ HPF3phResult solve_harmonic_power_flow_3ph_newton_coupled(
     return res;
   }
   Eigen::VectorXcd V = lu0.solve(Isrc);
+  if (lu0.info() != Eigen::Success) {
+    res.newton_converged = false;
+    res.message = "stacked initial solve failed";
+    return res;
+  }
 
   struct MT { int oh, op, oq, bus_p, ph; Cx k; };
   std::vector<MT> mts;
@@ -2747,7 +3031,9 @@ HPF3phResult solve_harmonic_power_flow_3ph_newton_coupled(
     Eigen::SparseLU<SpMat> lu;
     lu.compute(J);
     if (lu.info() != Eigen::Success) { ok = false; break; }
-    V += lu.solve(-D);
+    const Eigen::VectorXcd step = lu.solve(-D);
+    if (lu.info() != Eigen::Success) { ok = false; break; }
+    V += step;
   }
   res.newton_iterations[0] = iter;
   res.newton_residual[0] = rn;
@@ -2769,7 +3055,7 @@ HPF3phResult solve_harmonic_power_flow_3ph_newton_coupled(
     if (mx > res.max_thd_pct) { res.max_thd_pct = mx; res.max_thd_bus = r.bus; }
   }
   res.bus_results = std::move(bus_res);
-  res.ok = true;
+  res.ok = res.newton_converged;
   return res;
 }
 
@@ -2791,41 +3077,39 @@ HarmonicMetricsResult harmonic_metrics(const HybridPowerSystem& sys,
                                        const HarmonicMetricsOptions& mopt,
                                        const HPFOptions& opt) {
   HarmonicMetricsResult res;
-  std::unordered_map<int, const HarmonicBusResult*> busmap;
-  for (const auto& br : result.ac_bus_results) busmap[br.bus] = &br;
+  (void)sys;
+  (void)opt;
 
   std::vector<int> orders{1};
   for (int h : result.ac_orders) orders.push_back(h);
 
   double tot_loss = 0.0, tot_hloss = 0.0;
-  for (const auto& br : sys.ac.branches) {
-    if (!br.in_service) continue;
-    auto itf = busmap.find(br.from_bus), itt = busmap.find(br.to_bus);
-    if (itf == busmap.end() || itt == busmap.end()) continue;
-    const auto& vf = itf->second->v_by_order;
-    const auto& vt = itt->second->v_by_order;
-
+  for (const auto& br : result.ac_branch_flows) {
     BranchHarmonicMetrics m;
+    m.branch_index = br.branch_index;
     m.from_bus = br.from_bus;
     m.to_bus = br.to_bus;
     double sum_i2 = 0.0, sum_h2i2 = 0.0, sum_harm_i2 = 0.0, loss = 0.0, hloss = 0.0;
     for (int h : orders) {
-      auto a = vf.find(h), b = vt.find(h);
-      if (a == vf.end() || b == vt.end()) continue;
+      auto terminal = br.i_by_order.find(h);
+      if (terminal == br.i_by_order.end()) continue;
       const double hh = static_cast<double>(h);
-      const double R = skin_r(br.r_pu, hh, opt);
-      Cx z(R, hh * br.x_pu);
-      Cx ys = (std::abs(z) > 1e-12) ? (Cx(1.0, 0.0) / z) : Cx(0.0, 0.0);
-      const double ih = std::abs(ys * (a->second - b->second));
+      const double ih = terminal->second;
       const double ih2 = ih * ih;
       sum_i2 += ih2;
       sum_h2i2 += hh * hh * ih2;
-      loss += ih2 * R;
+      const auto series = br.i_series_by_order.find(h);
+      const auto resistance = br.r_series_by_order.find(h);
+      const double copper = series != br.i_series_by_order.end() &&
+                                    resistance != br.r_series_by_order.end()
+                                ? series->second * series->second * resistance->second
+                                : 0.0;
+      loss += copper;
       if (h == 1) {
         m.i_fund_pu = ih;
       } else {
         sum_harm_i2 += ih2;
-        hloss += ih2 * R;
+        hloss += copper;
       }
     }
     m.i_rms_pu = std::sqrt(sum_i2);
@@ -2838,7 +3122,7 @@ HarmonicMetricsResult harmonic_metrics(const HybridPowerSystem& sys,
     tot_loss += loss;
     tot_hloss += hloss;
 
-    if (m.k_factor > res.max_k_factor) { res.max_k_factor = m.k_factor; res.max_k_factor_branch = br.index; }
+    if (m.k_factor > res.max_k_factor) { res.max_k_factor = m.k_factor; res.max_k_factor_branch = br.branch_index; }
     if (m.thd_i_pct > res.max_thd_i_pct) res.max_thd_i_pct = m.thd_i_pct;
     if (m.tdd_pct > res.max_tdd_pct) res.max_tdd_pct = m.tdd_pct;
     res.ac_branches.push_back(m);
@@ -2867,6 +3151,10 @@ HPFHybridNewtonResult solve_harmonic_power_flow_hybrid_newton(
     const HybridPowerSystem& sys, const HybridNewtonInputs& inputs,
     const HPFOptions& opt) {
   HPFHybridNewtonResult res;
+  if (const std::string error = validate_hpf_options(opt); !error.empty()) {
+    res.message = error;
+    return res;
+  }
   const int nac = static_cast<int>(sys.ac.buses.size());
   const int ndc = static_cast<int>(sys.dc.buses.size());
   if (nac == 0 && ndc == 0) { res.message = "system has no buses"; return res; }
@@ -2958,6 +3246,10 @@ HPFHybridNewtonResult solve_harmonic_power_flow_hybrid_newton(
   lu0.compute(Ybase);
   if (lu0.info() != Eigen::Success) { res.message = "stacked factorisation failed"; return res; }
   Eigen::VectorXcd V = lu0.solve(Isrc);
+  if (lu0.info() != Eigen::Success) {
+    res.message = "stacked initial solve failed";
+    return res;
+  }
 
   // Resolve bilinear terms to global indices.
   struct BT { int out_g, a_g, b_g; Cx k; };
@@ -2990,7 +3282,9 @@ HPFHybridNewtonResult solve_harmonic_power_flow_hybrid_newton(
     Eigen::SparseLU<SpMat> lu;
     lu.compute(J);
     if (lu.info() != Eigen::Success) { ok = false; break; }
-    V += lu.solve(-D);
+    const Eigen::VectorXcd step = lu.solve(-D);
+    if (lu.info() != Eigen::Success) { ok = false; break; }
+    V += step;
   }
   res.iterations = iter;
   res.final_residual = rn;
@@ -3010,8 +3304,635 @@ HPFHybridNewtonResult solve_harmonic_power_flow_hybrid_newton(
     r.thd_pct = thd_from_orders(r.v_by_order, 0, r.v_fund_pu);
     if (r.thd_pct > res.max_dc_thd_pct) { res.max_dc_thd_pct = r.thd_pct; res.max_dc_thd_bus = r.bus; }
   }
-  res.ok = true;
+  res.ok = res.converged;
   return res;
+}
+
+namespace {
+
+bool finite_nonnegative(double x) { return std::isfinite(x) && x >= 0.0; }
+
+Cx pi_frequency_response(const HarmonicPIController& controller,
+                         double frequency_hz) {
+  // Yazdani & Iravani, Voltage-Sourced Converters, Eq. (8.14):
+  // Gc(jw)=(Kp+Ki/jw)e^(-jwTd).
+  const double omega = 2.0 * M_PI * frequency_hz;
+  return (Cx(controller.kp, 0.0) +
+          Cx(0.0, -controller.ki / omega)) *
+         std::exp(Cx(0.0, -omega * controller.delay_s));
+}
+
+Cx rectangular_switch_coefficient(int k, double duty, double phase_rad = 0.0) {
+  // Erickson & Maksimovic, Fundamentals of Power Electronics, 3e, Sec. 2.6:
+  // S_0=D, S_k=sin(pi*k*D)/(pi*k) exp[-j*k(pi*D+phase)].
+  if (k == 0) return Cx(duty, 0.0);
+  return std::sin(M_PI * k * duty) / (M_PI * k) *
+         std::exp(Cx(0.0, -k * (M_PI * duty + phase_rad)));
+}
+
+double integer_bessel_j(int order, double x) {
+  // DLMF 10.2.2 power series. HSS PWM uses only |order|<=3 and |x|<4,
+  // where this recurrence reaches machine precision without asymptotics.
+  const int n = std::abs(order);
+  double term = std::pow(0.5 * x, n) / std::tgamma(n + 1.0);
+  double sum = term;
+  for (int m = 1; m < 80; ++m) {
+    term *= -0.25 * x * x / (m * (m + n));
+    sum += term;
+    if (std::abs(term) <= std::numeric_limits<double>::epsilon() *
+                              std::max(1.0, std::abs(sum)))
+      break;
+  }
+  return order < 0 && (n % 2 != 0) ? -sum : sum;
+}
+
+Cx two_level_switch_coefficient(int k, const VSCHarmonicModel& model,
+                                double fundamental_hz) {
+  const double phi = model.modulation_phase_deg * kDeg2Rad;
+  if (k == 1) return std::polar(0.5 * model.modulation_index, phi);
+  if (k == -1) return std::polar(0.5 * model.modulation_index, -phi);
+  const int carrier = static_cast<int>(std::llround(
+      model.switching_frequency_hz / fundamental_hz));
+  Cx coefficient{0.0, 0.0};
+  // Holmes & Lipo, Pulse Width Modulation for Power Converters, Sec. 5.4,
+  // bipolar natural-sampling double-Fourier carrier groups (m=1,2).
+  for (int m = 1; m <= 2; ++m) {
+    const int n = k - m * carrier;
+    if (std::abs(n) > 3) continue;
+    const double amplitude =
+        2.0 / (m * M_PI) *
+        integer_bessel_j(n, 0.5 * m * M_PI * model.modulation_index) *
+        std::sin(0.5 * M_PI * (m + n));
+    coefficient += amplitude * std::exp(Cx(0.0, n * phi));
+  }
+  if (k < 0) return std::conj(two_level_switch_coefficient(
+      -k, model, fundamental_hz));
+  return coefficient;
+}
+
+Cx mmc_switch_coefficient(int k, const VSCHarmonicModel& model) {
+  // Jovcic & Ahmed, High Voltage Direct Current Transmission, Sec. 6.3:
+  // averaged upper-arm insertion n_u=(1-m cos(wt+phi))/2.
+  const double phi = model.modulation_phase_deg * kDeg2Rad;
+  if (k == 0) return Cx(0.5, 0.0);
+  if (k == 1) return -std::polar(0.25 * model.modulation_index, phi);
+  if (k == -1) return -std::polar(0.25 * model.modulation_index, -phi);
+  return Cx(0.0, 0.0);
+}
+
+Cx lcc_switch_coefficient(int k, const LCCConverter& converter) {
+  const int h = std::abs(k);
+  if (h == 0 || (h % 6 != 1 && h % 6 != 5)) return Cx(0.0, 0.0);
+  const double alpha = (converter.alpha_set_deg > 0.0
+                            ? converter.alpha_set_deg
+                            : converter.alpha_min_deg) * kDeg2Rad;
+  double overlap = 0.0;
+  if (converter.x_comm_ohm > 0.0 && converter.rated_current_a > 0.0 &&
+      converter.vn_ac_kv > 0.0) {
+    overlap = std::min(M_PI / 3.0,
+        converter.x_comm_ohm * converter.rated_current_a /
+        (converter.vn_ac_kv * 1000.0));
+  }
+  // Arrillaga et al., Power System Harmonic Analysis, Sec. 9.2: six-pulse
+  // characteristic coefficient with finite-overlap attenuation.
+  const double magnitude = 2.0 * std::sqrt(3.0) / (M_PI * h) *
+                           std::cos(0.5 * h * overlap);
+  const Cx positive = std::polar(magnitude, -h * (alpha + 0.5 * overlap));
+  return k > 0 ? positive : std::conj(positive);
+}
+
+std::string validate_hss_model(const HybridPowerSystem& sys,
+                               const HSSOptions& options) {
+  if (!std::isfinite(options.max_backward_error) ||
+      options.max_backward_error <= 0.0)
+    return "max_backward_error must be finite and positive";
+  if (!std::isfinite(options.min_shunt_pu) || options.min_shunt_pu <= 0.0)
+    return "min_shunt_pu must be finite and positive";
+  std::unordered_set<int> orders;
+  for (int order : options.orders) {
+    if (order <= 0 || !orders.insert(order).second)
+      return "HSS orders must be unique positive integers";
+  }
+  auto ac_bus_ok = [&](int id) {
+    for (const auto& bus : sys.ac.buses)
+      if (bus.index == id) return bus.base_kv > 0.0;
+    return false;
+  };
+  auto dc_bus_ok = [&](int id) {
+    for (const auto& bus : sys.dc.buses)
+      if (bus.index == id) return bus.base_kv > 0.0;
+    return false;
+  };
+  for (const auto& c : sys.dc.capacitors) {
+    if (!c.in_service) continue;
+    if (!dc_bus_ok(c.bus) || !(c.capacitance_f > 0.0) ||
+        !finite_nonnegative(c.esr_ohm) || !finite_nonnegative(c.esl_h) ||
+        !finite_nonnegative(c.leakage_conductance_s))
+      return "in-service DCCapacitor requires a valid DC bus/base and positive finite capacitance";
+  }
+  for (const auto& r : sys.dc.reactors) {
+    if (!r.in_service) continue;
+    if (!dc_bus_ok(r.from_bus) || !dc_bus_ok(r.to_bus) ||
+        !(r.inductance_h > 0.0) || !finite_nonnegative(r.resistance_ohm))
+      return "in-service DCReactor requires valid DC buses/bases and positive finite inductance";
+  }
+  auto filter_ok = [](const HarmonicFilter& f) {
+    return f.capacitance_f > 0.0 && f.inductance_h > 0.0 &&
+           finite_nonnegative(f.resistance_ohm);
+  };
+  for (const auto& f : sys.ac.harmonic_filters)
+    if (f.in_service && (!filter_ok(f) || !ac_bus_ok(f.from_bus) ||
+        (f.to_bus != 0 && !ac_bus_ok(f.to_bus))))
+      return "in-service AC HarmonicFilter requires valid AC buses/bases and positive finite L/C";
+  for (const auto& f : sys.dc.harmonic_filters)
+    if (f.in_service && (!filter_ok(f) || !dc_bus_ok(f.from_bus) ||
+        (f.to_bus != 0 && !dc_bus_ok(f.to_bus))))
+      return "in-service DC HarmonicFilter requires valid DC buses/bases and positive finite L/C";
+  if (!options.include_converter_models) return {};
+  const double f0 = sys.ac.freq_hz > 0.0 ? sys.ac.freq_hz : 50.0;
+  for (const auto& c : sys.vsc_converters) {
+    const auto& h = c.harmonic_model;
+    if (!c.in_service || h.topology == VSCHarmonicTopology::Disabled) continue;
+    const double ratio = h.switching_frequency_hz / f0;
+    if (!ac_bus_ok(c.bus_ac) || !dc_bus_ok(c.bus_dc) ||
+        !(h.switching_frequency_hz > 0.0) ||
+        std::abs(ratio - std::round(ratio)) > 1e-9 ||
+        !(h.modulation_index > 0.0 && h.modulation_index <= 1.15) ||
+        !(h.transfer_conductance_pu > 0.0) ||
+        !(h.filter_inductance_h > 0.0) || !(h.dc_link_capacitance_f > 0.0))
+      return "enabled VSC harmonic model requires valid AC/DC bases, integer carrier ratio, modulation, transfer conductance, filter L and DC-link C";
+    if (h.topology == VSCHarmonicTopology::MMC &&
+        (h.submodules_per_arm <= 0 || !(h.submodule_capacitance_f > 0.0) ||
+         !(h.arm_inductance_h > 0.0)))
+      return "enabled MMC harmonic model requires submodule count/capacitance and arm inductance";
+  }
+  for (const auto& c : sys.lcc_converters) {
+    if (!c.in_service || !c.harmonic_model_enabled) continue;
+    if (!ac_bus_ok(c.ac_bus) || !dc_bus_ok(c.dc_bus) || c.n_bridges <= 0 ||
+        !(c.harmonic_transfer_conductance_pu > 0.0) ||
+        !(c.smoothing_reactor_mh > 0.0) || !(c.dc_filter_capacitance_f > 0.0))
+      return "enabled LCC harmonic model requires valid bases, bridge count, transfer conductance, smoothing reactor and DC filter capacitor";
+  }
+  for (const auto& c : sys.dc.dcdc_converters) {
+    if (!c.in_service || !c.harmonic_model_enabled) continue;
+    if (c.topology == DCDCTopology::Generic || !dc_bus_ok(c.bus_in) ||
+        !dc_bus_ok(c.bus_out) || !(c.f_switching_hz > 0.0) ||
+        !(c.duty_ratio > 0.0 && c.duty_ratio < 1.0) ||
+        !(c.harmonic_transfer_conductance_pu > 0.0) ||
+        !(c.inductance_h > 0.0) || !(c.input_capacitance_f > 0.0) ||
+        !(c.output_capacitance_f > 0.0))
+      return "enabled DC/DC harmonic model requires a supported topology, valid bases, switching frequency, duty ratio, transfer conductance, L and input/output C";
+  }
+  return {};
+}
+
+}  // namespace
+
+HSSResult solve_harmonic_state_space(
+    const HybridPowerSystem& rich_sys,
+    const std::vector<HSSCurrentInjection>& rich_injections,
+    const std::vector<HSSAdmittanceEntry>& rich_couplings,
+    const HSSOptions& options) {
+  HSSResult result;
+  if (const std::string error = validate_hss_model(rich_sys, options);
+      !error.empty()) {
+    result.message = error;
+    return result;
+  }
+  const auto bundle = projection::RichToCanonicalOperator::apply(rich_sys);
+  const auto& sys = bundle.canonical;
+  const int nac = static_cast<int>(sys.ac.buses.size());
+  const int ndc = static_cast<int>(sys.dc.buses.size());
+  const int nodes = nac + ndc;
+  const int nf = static_cast<int>(options.orders.size());
+  const int dimension = nodes * nf;
+  result.orders = options.orders;
+  result.matrix_dimension = dimension;
+  if (dimension == 0) {
+    result.ok = true;
+    result.factorization_succeeded = true;
+    return result;
+  }
+
+  const auto ac_map = build_id_map(sys.ac.buses);
+  const auto dc_map = build_id_map(sys.dc.buses);
+  std::unordered_map<int, int> order_position;
+  for (int i = 0; i < nf; ++i) order_position[options.orders[i]] = i;
+  auto position = [&](bool dc, int bus) {
+    const auto& map = dc ? dc_map : ac_map;
+    const auto it = map.find(bus);
+    return it == map.end() ? -1 : (dc ? nac + it->second : it->second);
+  };
+  auto global = [&](bool dc, int bus, int order) {
+    const auto oi = order_position.find(order);
+    const int p = position(dc, bus);
+    return oi == order_position.end() || p < 0 ? -1 : oi->second * nodes + p;
+  };
+
+  std::unordered_map<int, int> rich_to_canonical_ac;
+  for (const auto& b : rich_sys.ac.buses) rich_to_canonical_ac[b.index] = b.index;
+  if (sys.bus_merge_map)
+    for (const auto& [external, internal] : sys.bus_merge_map->ext_to_int)
+      rich_to_canonical_ac[external] = internal + 1;
+  std::unordered_map<int, int> rich_to_canonical_dc;
+  const size_t dc_common = std::min(rich_sys.dc.buses.size(), sys.dc.buses.size());
+  for (size_t i = 0; i < dc_common; ++i)
+    rich_to_canonical_dc[rich_sys.dc.buses[i].index] = sys.dc.buses[i].index;
+  auto canonical_bus = [&](bool dc, int bus) {
+    const auto& map = dc ? rich_to_canonical_dc : rich_to_canonical_ac;
+    const auto it = map.find(bus);
+    return it == map.end() ? bus : it->second;
+  };
+  auto authored_bus = [&](bool dc, int bus) {
+    const auto& map = dc ? rich_to_canonical_dc : rich_to_canonical_ac;
+    int authored = bus;
+    bool found = false;
+    for (const auto& [external, canonical] : map) {
+      if (canonical == bus && (!found || external < authored)) {
+        authored = external;
+        found = true;
+      }
+    }
+    return authored;
+  };
+
+  HPFOptions network_options;
+  network_options.run_base_power_flow = options.run_base_power_flow;
+  network_options.include_load_impedance = options.include_load_impedance;
+  network_options.skin_effect = options.skin_effect;
+  network_options.skin_coefficient = options.skin_coefficient;
+  network_options.default_source_xpp_pu = options.default_source_xpp_pu;
+  network_options.dc_source_impedance_pu = options.dc_source_impedance_pu;
+  network_options.min_shunt_pu = options.min_shunt_pu;
+  network_options.base_pf_options = options.base_pf_options;
+  const OperatingPoint operating_point = extract_operating_point(sys, network_options);
+  result.base_pf_converged = operating_point.pf_converged;
+  if (options.run_base_power_flow && !operating_point.pf_converged)
+    result.model_limitations.push_back(
+        "Base power flow did not converge; HSS linearization uses stored/nominal operating values.");
+
+  std::vector<Trip> trips;
+  trips.reserve(static_cast<size_t>(dimension) * 8U);
+  for (int oi = 0; oi < nf; ++oi) {
+    const int order = options.orders[oi];
+    const int offset = oi * nodes;
+    const SpMat yac = build_ac_ybus(sys, operating_point, ac_map, order,
+                                    network_options);
+    for (int col = 0; col < yac.outerSize(); ++col)
+      for (SpMat::InnerIterator it(yac, col); it; ++it)
+        trips.emplace_back(offset + it.row(), offset + it.col(), it.value());
+    const SpMat ydc = build_dc_ybus(sys.dc, dc_map, {}, order,
+                                    network_options,
+                                    sys.ac.freq_hz > 0.0 ? sys.ac.freq_hz : 50.0);
+    for (int col = 0; col < ydc.outerSize(); ++col)
+      for (SpMat::InnerIterator it(ydc, col); it; ++it)
+        trips.emplace_back(offset + nac + it.row(), offset + nac + it.col(),
+                           it.value());
+  }
+
+  Eigen::VectorXcd current = Eigen::VectorXcd::Zero(dimension);
+  for (const auto& injection : rich_injections) {
+    const int row = global(injection.is_dc,
+                           canonical_bus(injection.is_dc, injection.bus),
+                           injection.order);
+    if (row < 0 || !std::isfinite(injection.current_pu.real()) ||
+        !std::isfinite(injection.current_pu.imag())) {
+      result.message = "HSS current injection references an unknown bus/order or is non-finite";
+      return result;
+    }
+    current(row) += injection.current_pu;
+  }
+  for (const auto& coupling : rich_couplings) {
+    const int row = global(coupling.row_is_dc,
+        canonical_bus(coupling.row_is_dc, coupling.row_bus), coupling.row_order);
+    const int col = global(coupling.column_is_dc,
+        canonical_bus(coupling.column_is_dc, coupling.column_bus),
+        coupling.column_order);
+    if (row < 0 || col < 0 || !std::isfinite(coupling.admittance_pu.real()) ||
+        !std::isfinite(coupling.admittance_pu.imag())) {
+      result.message = "HSS coupling references an unknown bus/order or is non-finite";
+      return result;
+    }
+    trips.emplace_back(row, col, coupling.admittance_pu);
+  }
+
+  struct DeviceRows {
+    std::string kind;
+    int index{0};
+    std::string terminal;
+    int bus{0};
+    bool dc{false};
+    std::vector<Trip> entries;
+  };
+  std::vector<DeviceRows> converter_rows;
+  auto add_converter = [&](const std::string& kind, int index,
+                           bool a_dc, int a_bus, const std::string& a_terminal,
+                           bool b_dc, int b_bus, const std::string& b_terminal,
+                           double conductance,
+                           const auto& coefficient) {
+    converter_rows.push_back({kind, index, a_terminal, a_bus, a_dc, {}});
+    const size_t ar = converter_rows.size() - 1;
+    converter_rows.push_back({kind, index, b_terminal, b_bus, b_dc, {}});
+    const size_t br = converter_rows.size() - 1;
+    for (int ri = 0; ri < nf; ++ri) {
+      const int row_a = global(a_dc, a_bus, options.orders[ri]);
+      const int row_b = global(b_dc, b_bus, options.orders[ri]);
+      trips.emplace_back(row_a, row_a, Cx(conductance, 0.0));
+      trips.emplace_back(row_b, row_b, Cx(conductance, 0.0));
+      converter_rows[ar].entries.emplace_back(row_a, row_a, Cx(conductance, 0.0));
+      converter_rows[br].entries.emplace_back(row_b, row_b, Cx(conductance, 0.0));
+      for (int ci = 0; ci < nf; ++ci) {
+        const int delta = options.orders[ri] - options.orders[ci];
+        const Cx s = coefficient(delta);
+        if (std::abs(s) <= 1e-15) continue;
+        const int col_b = global(b_dc, b_bus, options.orders[ci]);
+        const int col_a = global(a_dc, a_bus, options.orders[ci]);
+        const Cx value = -conductance * s;
+        trips.emplace_back(row_a, col_b, value);
+        trips.emplace_back(row_b, col_a, value);
+        converter_rows[ar].entries.emplace_back(row_a, col_b, value);
+        converter_rows[br].entries.emplace_back(row_b, col_a, value);
+      }
+    }
+  };
+
+  if (options.include_converter_models) {
+    const double f0 = sys.ac.freq_hz > 0.0 ? sys.ac.freq_hz : 50.0;
+    for (const auto& converter : sys.vsc_converters) {
+      const auto& model = converter.harmonic_model;
+      if (!converter.in_service || model.topology == VSCHarmonicTopology::Disabled)
+        continue;
+      auto coefficient = [&](int k) {
+        return model.topology == VSCHarmonicTopology::TwoLevel
+                   ? two_level_switch_coefficient(k, model, f0)
+                   : mmc_switch_coefficient(k, model);
+      };
+      add_converter(model.topology == VSCHarmonicTopology::TwoLevel
+                        ? "vsc_two_level" : "vsc_mmc",
+                    converter.index, false, converter.bus_ac, "ac", true,
+                    converter.bus_dc, "dc", model.transfer_conductance_pu,
+                    coefficient);
+      const size_t ac_terminal = converter_rows.size() - 2;
+      const size_t dc_terminal = converter_rows.size() - 1;
+      const int acp = ac_map.at(converter.bus_ac);
+      const int dcp = dc_map.at(converter.bus_dc);
+      const double zac = zbase_ohm(sys.ac.buses[acp].base_kv, sys.ac.base_mva);
+      const double zdc = zbase_ohm(sys.dc.buses[dcp].base_kv, sys.dc.base_mva);
+      for (int order : options.orders) {
+        const double frequency = order * f0;
+        const int ga = global(false, converter.bus_ac, order);
+        const int gd = global(true, converter.bus_dc, order);
+        const Cx yf = series_rlc_admittance_si(
+                          model.filter_resistance_ohm,
+                          model.filter_inductance_h,
+                          model.filter_capacitance_f, frequency) * zac;
+        const Cx ydc = series_rlc_admittance_si(
+                           model.dc_link_esr_ohm, 0.0,
+                           model.dc_link_capacitance_f, frequency) * zdc;
+        const Cx yac_total = yf +
+            pi_frequency_response(model.current_controller, frequency);
+        const Cx ydc_total = ydc +
+            pi_frequency_response(model.dc_voltage_controller, frequency);
+        trips.emplace_back(ga, ga, yac_total);
+        trips.emplace_back(gd, gd, ydc_total);
+        converter_rows[ac_terminal].entries.emplace_back(ga, ga, yac_total);
+        converter_rows[dc_terminal].entries.emplace_back(gd, gd, ydc_total);
+        if (model.topology == VSCHarmonicTopology::MMC) {
+          const double ceq = 6.0 * model.submodule_capacitance_f /
+                             model.submodules_per_arm;
+          const Cx yarm = series_rlc_admittance_si(
+                              model.arm_resistance_ohm,
+                              model.arm_inductance_h, ceq, frequency) * zac;
+          const Cx gcirc = Cx(model.circulating_current_kp, 0.0) +
+                           Cx(0.0, -model.circulating_current_ki /
+                                           (2.0 * M_PI * frequency));
+          trips.emplace_back(ga, ga, yarm + gcirc);
+          converter_rows[ac_terminal].entries.emplace_back(ga, ga,
+                                                             yarm + gcirc);
+        }
+      }
+    }
+    for (const auto& converter : sys.lcc_converters) {
+      if (!converter.in_service || !converter.harmonic_model_enabled) continue;
+      add_converter("lcc", converter.index, false, converter.ac_bus, "ac",
+                    true, converter.dc_bus, "dc",
+                    converter.harmonic_transfer_conductance_pu,
+                    [&](int k) { return lcc_switch_coefficient(k, converter); });
+      const size_t dc_terminal = converter_rows.size() - 1;
+      const int dp = dc_map.at(converter.dc_bus);
+      const double zb = zbase_ohm(sys.dc.buses[dp].base_kv, sys.dc.base_mva);
+      for (int order : options.orders) {
+        const double frequency = order * f0;
+        const int gd = global(true, converter.dc_bus, order);
+        const Cx ydc = series_rlc_admittance_si(
+            converter.dc_filter_esr_ohm,
+            converter.smoothing_reactor_mh * 1e-3,
+            converter.dc_filter_capacitance_f, frequency) * zb;
+        trips.emplace_back(gd, gd, ydc);
+        converter_rows[dc_terminal].entries.emplace_back(gd, gd, ydc);
+      }
+    }
+    for (const auto& converter : sys.dc.dcdc_converters) {
+      if (!converter.in_service || !converter.harmonic_model_enabled) continue;
+      const double turns = converter.topology == DCDCTopology::Isolated
+                               ? converter.n_ratio : 1.0;
+      auto coefficient = [&](int k) {
+        Cx s = rectangular_switch_coefficient(k, converter.duty_ratio);
+        if (converter.topology == DCDCTopology::Boost) s = (k == 0 ? Cx(1.0, 0.0) : Cx(0.0, 0.0)) - s;
+        if (converter.topology == DCDCTopology::BuckBoost) s = -s;
+        return turns * s;
+      };
+      add_converter("dcdc", converter.index, true, converter.bus_in, "input",
+                    true, converter.bus_out, "output",
+                    converter.harmonic_transfer_conductance_pu, coefficient);
+      const size_t input_terminal = converter_rows.size() - 2;
+      const size_t output_terminal = converter_rows.size() - 1;
+      const int ip = dc_map.at(converter.bus_in);
+      const int op = dc_map.at(converter.bus_out);
+      const double zbi = zbase_ohm(sys.dc.buses[ip].base_kv, sys.dc.base_mva);
+      const double zbo = zbase_ohm(sys.dc.buses[op].base_kv, sys.dc.base_mva);
+      for (int order : options.orders) {
+        const double frequency = order * f0;
+        const int gi = global(true, converter.bus_in, order);
+        const int go = global(true, converter.bus_out, order);
+        const Cx yi = series_rlc_admittance_si(
+                          converter.capacitor_esr_ohm, 0.0,
+                          converter.input_capacitance_f, frequency) * zbi;
+        const Cx yo = series_rlc_admittance_si(
+                          converter.capacitor_esr_ohm, 0.0,
+                          converter.output_capacitance_f, frequency) * zbo;
+        const Cx yl = series_rlc_admittance_si(
+                          converter.inductor_resistance_ohm,
+                          converter.inductance_h, 0.0, frequency) * zbi;
+        const Cx controller =
+            pi_frequency_response(converter.voltage_controller, frequency);
+        trips.emplace_back(gi, gi, yi + yl);
+        trips.emplace_back(gi, go, -yl);
+        trips.emplace_back(go, gi, -yl);
+        trips.emplace_back(go, go, yo + yl + controller);
+        converter_rows[input_terminal].entries.emplace_back(gi, gi, yi + yl);
+        converter_rows[input_terminal].entries.emplace_back(gi, go, -yl);
+        converter_rows[output_terminal].entries.emplace_back(go, gi, -yl);
+        converter_rows[output_terminal].entries.emplace_back(
+            go, go, yo + yl + controller);
+      }
+    }
+  }
+
+  SpMat matrix(dimension, dimension);
+  matrix.setFromTriplets(trips.begin(), trips.end());
+  matrix.makeCompressed();
+  result.matrix_nonzeros = static_cast<size_t>(matrix.nonZeros());
+  double minimum_diagonal = std::numeric_limits<double>::infinity();
+  bool matrix_finite = true;
+  for (int col = 0; col < matrix.outerSize(); ++col)
+    for (SpMat::InnerIterator it(matrix, col); it; ++it) {
+      matrix_finite = matrix_finite && std::isfinite(it.value().real()) &&
+                      std::isfinite(it.value().imag());
+      if (it.row() == it.col())
+        minimum_diagonal = std::min(minimum_diagonal, std::abs(it.value()));
+    }
+  if (!matrix_finite) {
+    result.message = "HSS admittance assembly produced a non-finite entry";
+    return result;
+  }
+  Eigen::SparseLU<SpMat> lu;
+  lu.compute(matrix);
+  if (lu.info() != Eigen::Success) {
+    std::ostringstream message;
+    message << "HSS sparse factorization failed (dimension=" << dimension
+            << ", nnz=" << matrix.nonZeros()
+            << ", min_abs_diagonal=" << minimum_diagonal << ")";
+    result.message = message.str();
+    return result;
+  }
+  result.factorization_succeeded = true;
+  const Eigen::VectorXcd voltage = lu.solve(current);
+  if (lu.info() != Eigen::Success || !voltage.allFinite()) {
+    result.message = "HSS sparse solve failed or produced non-finite voltage";
+    return result;
+  }
+  const Eigen::VectorXcd residual = matrix * voltage - current;
+  std::vector<double> row_sums(static_cast<size_t>(dimension), 0.0);
+  for (int col = 0; col < matrix.outerSize(); ++col)
+    for (SpMat::InnerIterator it(matrix, col); it; ++it)
+      row_sums[static_cast<size_t>(it.row())] += std::abs(it.value());
+  const double matrix_inf_norm =
+      *std::max_element(row_sums.begin(), row_sums.end());
+  const double denominator = matrix_inf_norm * voltage.cwiseAbs().maxCoeff() +
+                             current.cwiseAbs().maxCoeff();
+  result.normalized_backward_error = residual.cwiseAbs().maxCoeff() /
+      std::max(denominator, std::numeric_limits<double>::min());
+  if (result.normalized_backward_error > options.max_backward_error) {
+    result.message = "HSS solution failed the normalized backward-error gate";
+    return result;
+  }
+
+  for (const auto& rich_bus : rich_sys.ac.buses) {
+    const int canonical = canonical_bus(false, rich_bus.index);
+    const int i = ac_map.at(canonical);
+    HSSBusResult bus;
+    bus.bus = rich_bus.index;
+    for (int oi = 0; oi < nf; ++oi)
+      bus.voltage_pu[options.orders[oi]] = voltage(oi * nodes + i);
+    result.bus_results.push_back(std::move(bus));
+  }
+  for (const auto& rich_bus : rich_sys.dc.buses) {
+    const int canonical = canonical_bus(true, rich_bus.index);
+    const int i = dc_map.at(canonical);
+    HSSBusResult bus;
+    bus.bus = rich_bus.index;
+    bus.is_dc = true;
+    for (int oi = 0; oi < nf; ++oi)
+      bus.voltage_pu[options.orders[oi]] = voltage(oi * nodes + nac + i);
+    result.bus_results.push_back(std::move(bus));
+  }
+  if (options.compute_device_currents) {
+    auto add_terminal = [&](const std::string& kind, int index,
+                            const std::string& name, int bus, bool dc,
+                            const auto& current_at_order) {
+      HSSDeviceTerminalResult terminal;
+      terminal.component_kind = kind;
+      terminal.component_index = index;
+      terminal.terminal = name;
+      terminal.bus = authored_bus(dc, bus);
+      terminal.is_dc = dc;
+      for (int order : options.orders)
+        terminal.current_into_device_pu[order] = current_at_order(order);
+      result.device_terminal_results.push_back(std::move(terminal));
+    };
+    const double f0 = sys.ac.freq_hz > 0.0 ? sys.ac.freq_hz : 50.0;
+    for (const auto& capacitor : sys.dc.capacitors) {
+      if (!capacitor.in_service) continue;
+      const int p = dc_map.at(capacitor.bus);
+      const double zb = zbase_ohm(sys.dc.buses[p].base_kv, sys.dc.base_mva);
+      add_terminal("dc_capacitor", capacitor.index, "bus", capacitor.bus, true,
+          [&](int order) {
+            const Cx y = (Cx(capacitor.leakage_conductance_s, 0.0) +
+                series_rlc_admittance_si(capacitor.esr_ohm, capacitor.esl_h,
+                    capacitor.capacitance_f, order * f0)) * zb;
+            return y * voltage(global(true, capacitor.bus, order));
+          });
+    }
+    for (const auto& reactor : sys.dc.reactors) {
+      if (!reactor.in_service) continue;
+      const int p = dc_map.at(reactor.from_bus);
+      const double zb = zbase_ohm(sys.dc.buses[p].base_kv, sys.dc.base_mva);
+      auto branch_current = [&](int order) {
+        const Cx y = series_rlc_admittance_si(
+            reactor.resistance_ohm, reactor.inductance_h, 0.0, order * f0) * zb;
+        return y * (voltage(global(true, reactor.from_bus, order)) -
+                    voltage(global(true, reactor.to_bus, order)));
+      };
+      add_terminal("dc_reactor", reactor.index, "from", reactor.from_bus, true,
+                   branch_current);
+      add_terminal("dc_reactor", reactor.index, "to", reactor.to_bus, true,
+                   [&](int order) { return -branch_current(order); });
+    }
+    auto add_filter_results = [&](const auto& filters, bool dc) {
+      for (const auto& filter : filters) {
+        if (!filter.in_service) continue;
+        const int p = dc ? dc_map.at(filter.from_bus) : ac_map.at(filter.from_bus);
+        const double kv = dc ? sys.dc.buses[p].base_kv : sys.ac.buses[p].base_kv;
+        const double base = dc ? sys.dc.base_mva : sys.ac.base_mva;
+        auto branch_current = [&](int order) {
+          const Cx y = series_rlc_admittance_si(
+              filter.resistance_ohm, filter.inductance_h, filter.capacitance_f,
+              order * f0) * zbase_ohm(kv, base);
+          const Cx vf = voltage(global(dc, filter.from_bus, order));
+          const Cx vt = filter.to_bus == 0
+                            ? Cx(0.0, 0.0)
+                            : voltage(global(dc, filter.to_bus, order));
+          return y * (vf - vt);
+        };
+        add_terminal("harmonic_filter", filter.index, "from", filter.from_bus,
+                     dc, branch_current);
+        if (filter.to_bus != 0)
+          add_terminal("harmonic_filter", filter.index, "to", filter.to_bus,
+                       dc, [&](int order) { return -branch_current(order); });
+      }
+    };
+    add_filter_results(sys.ac.harmonic_filters, false);
+    add_filter_results(sys.dc.harmonic_filters, true);
+    for (const auto& row : converter_rows) {
+      HSSDeviceTerminalResult terminal;
+      terminal.component_kind = row.kind;
+      terminal.component_index = row.index;
+      terminal.terminal = row.terminal;
+      terminal.bus = authored_bus(row.dc, row.bus);
+      terminal.is_dc = row.dc;
+      for (int order : options.orders) terminal.current_into_device_pu[order] = {};
+      for (const auto& entry : row.entries) {
+        const int order_index = entry.row() / nodes;
+        terminal.current_into_device_pu[options.orders[order_index]] +=
+            entry.value() * voltage(entry.col());
+      }
+      result.device_terminal_results.push_back(std::move(terminal));
+    }
+  }
+  result.ok = true;
+  result.message = "HSS sparse solve converged";
+  return result;
 }
 
 }  // namespace hacdcpf::harmonics

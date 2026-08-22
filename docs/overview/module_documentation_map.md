@@ -1,6 +1,6 @@
 # 模块文档覆盖地图
 
-最后核实：2026-08-21
+最后核实：2026-08-22
 
 本表以当前文件系统为准。`src/<module>/` 与 `docs/modules/<module>/` 的目录名必须完全一致；覆盖等级只表示
 文档是否存在并完成源码等价核验，不表示实现已经达到生产认证。
@@ -13,7 +13,7 @@
 | `dynamics` | [动力学手册](../modules/dynamics/dynamics_manual.tex) | `source_equivalent_solver.tex` |
 | `ev_power_traffic` | [电—交通手册](../modules/ev_power_traffic/ev_power_traffic_manual.tex) | `source_equivalent_model.tex` |
 | `graph` | [图模块手册](../modules/graph/graph_manual.tex) | 十一章：接口/索引、通用理论、建图拓扑、收缩、计划、串联/悬垂、稠密/稀疏 Kron、恢复、HTTP、验证审计、数值交叉验证 |
-| `harmonics_power_flow` | [谐波手册](../modules/harmonics_power_flow/harmonics_power_flow_manual.tex) | `source_equivalent_model.tex` |
+| `harmonics_power_flow` | [谐波专著](../modules/harmonics_power_flow/harmonics_power_flow_manual.tex) | 九章：范围架构、通用理论、单相 AC/DC 源码等价、三相变压器、非线性耦合、API、指标标准、数值交叉验证、审计准入 |
 | `integrated_energy` | [综合能源手册](../modules/integrated_energy/integrated_energy_manual.tex) | `source_equivalent_milp.tex` |
 | `io` | [输入输出手册](../modules/io/io_manual.tex) | 格式字段换算与拒绝条件，不建立独立电气模型 |
 | `market` | [市场手册](../modules/market/market_manual.tex) | `source_equivalent_contract.tex` |
@@ -28,7 +28,7 @@
 | `server` | [服务端手册](../modules/server/server_manual.tex) | ETag、revision、缓存和作业状态契约 |
 | `short_circuit` | [短路手册](../modules/short_circuit/short_circuit_manual.tex) | 十五个模块专章加统一工业评价基线：对称分量/IEC/换流器理论、AC 概览与详细序网、DC 故障、投影身份、稀疏批量、完整 I/O、HTTP/GUI、验证架构、数值交叉验证与深度审计 |
 | `sppt` | [SPPT 手册](../modules/sppt/sppt_manual.tex) | `source_equivalent_relations.tex` |
-| `time_series` | [时序手册](../modules/time_series/time_series_manual.tex) | `source_equivalent_model.tex` |
+| `time_series` | [时序手册](../modules/time_series/time_series_manual.tex) | 三卷专著：SCUC/多时段 AC/DC/储能理论；`time_series_pf.cpp`、`annual_production_sim.cpp`、`lifecycle_simulation.cpp` 各自源码等价实现；HTTP/结果、穷举+SciPy/HiGHS+OpenDSS+GridLAB-D 数值交叉验证及深度审计 |
 | `validation` | [静态校验手册](../modules/validation/validation_manual.tex) | 实际谓词、阈值和四级过滤 |
 
 ## 覆盖判据

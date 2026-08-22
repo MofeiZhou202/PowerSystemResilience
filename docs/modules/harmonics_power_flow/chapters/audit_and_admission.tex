@@ -1,0 +1,44 @@
+\section{系统审计、闭环矩阵与工业准入}
+\subsection{理论--实现--验证闭环}
+\begin{center}\scriptsize
+\begin{longtable}{@{}L{3.2cm}L{5.1cm}L{4.0cm}L{2.0cm}@{}}\toprule
+审计项 & 修复/实现 & 证据 & 状态\\ \midrule\endhead
+逐次 LU 失败仍 ok & ok 聚合全部 order solved & 非法/奇异与基础解析测试 & 关闭\\
+Newton 未收敛仍 ok & 所有 Newton 令 ok=converged & 1 次迭代强制不收敛 & 关闭\\
+支路恢复忽略 tap/shift/B & 复用四元印章，返回两端/串联电流 & 17 度、1.1 tap、充电解析式 & 关闭\\
+损耗公式与 Ybus 不一致 & 串联电流乘 $R(h)$ & K-factor/损耗测试 & 关闭\\
+变压器重复盖章 & canonical branch 唯一盖章 & 10\% 变压器精确 $V_5=j1.5$ & 关闭\\
+Z/ZN 被当作 Delta & 独立 Zigzag/ZigzagG 枚举 & ZNyn0 零序测试 & 关闭\\
+Y 与 YN 零序同义 & $P_0/P_{12}$ 接地语义 & Yy0 与 YNyn0 对比 & 关闭\\
+$vk0/vkr0$ 未消费 & 独立 $Z_0(h)$ 投影 & 10\%/20\% 单调测试 & 关闭\\
+非法/重复次数被静默过滤 & 统一 options 前置拒绝 & duplicate order 回归 & 关闭\\
+GridLAB-D 数值案例为 0 & 24 个强制稳态频率切片 & CTest gridlabd 标签 & 关闭\\
+IEEE13 脚本永远返回 0 & 固定 $2\times10^{-3}$ 退出门限 & 164 点结果 & 关闭\\
+频扫失败写 0 且仍成功 & 逐频点状态、NaN、聚合 ok & 非法范围/未知母线回归 & 关闭\\
+文档无数值结果/颗粒度不足 & 十个专章与机器可读证据 & PDF 渲染验收 & 关闭\\
+\bottomrule\end{longtable}
+\end{center}
+
+\subsection{测试覆盖}
+\texttt{test\_harmonics\_power\_flow} 当前 63 cases / 412 assertions，覆盖 AC/DC/HSS 解析解、叠加性、
+集肤、DC LC、NIC、三相不平衡、序分量、变压器接线组、所有 Newton 家族、频扫、标准门限、指标、
+投影恢复、基础潮流回退和输入拒绝。外部测试分别承担独立方程、异构引擎和真实馈线证据；单元测试不能
+替代外部验证，外部一致也不能替代失败语义测试。
+
+\subsection{工业研究输入检查表}
+\begin{enumerate}
+  \item 确认基频潮流收敛；若使用存储工作点，报告 \fld{model\_limitations}；
+  \item 谱幅值、相角、参考电流和注入符号必须有测量或设备资料来源；
+  \item 线路 $R(h)$、大地回路、并联电容和负荷等值应覆盖研究频带；
+  \item 三相变压器必须给出接线组、接地语义和可获得的 $Z_0$；
+  \item 频扫步长需通过加密检验，共振点附近不能只取整数次数；
+  \item 同时检查 order solved、ok、converged、最终残差和结果向量完整性；
+  \item IEEE/国标结论须注明 PCC、电压等级、基准电流和采用的标准版本；
+  \item 重要项目应以现场频扫/谐波测量校准，不以跨软件一致性替代实测。
+\end{enumerate}
+
+\subsection{当前声明范围内的闭环结论}
+对“周期稳态、整数次数、逐阶线性频域网络；显式给定的跨阶二次项；当前三相接线组与 AC/DC
+代数 NIC”这一声明范围，理论方程、源码、状态契约、单元测试、独立节点解、OpenDSS、GridLAB-D
+和 IEEE13 证据已闭合。EMT、PWM 开关波形、间谐波、自动设备参数辨识和现场认证是不同模型族，
+不作为本模块未完成边界，也不由本模块结果暗示。

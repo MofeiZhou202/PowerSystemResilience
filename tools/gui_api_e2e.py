@@ -563,6 +563,47 @@ def main() -> int:
         chk.check(st == 200 and counts.get("ac_buses") == 14,
                   f"load_builtin -> {counts.get('ac_buses')} AC buses")
 
+        print("2-HSS. frequency-coupled production API")
+        st, hss = c.post_json(
+            "/api/session/harmonics_hss",
+            {
+                "options": {
+                    "orders": [5],
+                    "run_base_power_flow": False,
+                    "include_load_impedance": False,
+                    "include_converter_models": False,
+                    "max_backward_error": 1e-10,
+                },
+                "injections": [
+                    {
+                        "bus": 2,
+                        "is_dc": False,
+                        "order": 5,
+                        "current_pu": {"real": 0.01, "imag": -0.02},
+                    },
+                ],
+            },
+        )
+        hss_bus2 = next(
+            (row for row in hss.get("bus_results", [])
+             if row.get("bus") == 2 and row.get("is_dc") is False),
+            {},
+        )
+        hss_spectrum = hss_bus2.get("spectrum", [])
+        chk.check(
+            st == 200 and hss.get("ok") is True and
+            hss.get("factorization_succeeded") is True and
+            hss.get("matrix_dimension", 0) > 0 and
+            hss.get("matrix_nonzeros", 0) > 0 and
+            hss.get("normalized_backward_error", 1.0) <= 1e-10 and
+            len(hss_spectrum) == 1 and hss_spectrum[0].get("order") == 5 and
+            hss_bus2.get("canvas_index") == 2,
+            "HSS API -> "
+            f"ok={hss.get('ok')} dim={hss.get('matrix_dimension')} "
+            f"nnz={hss.get('matrix_nonzeros')} "
+            f"eta={hss.get('normalized_backward_error')}",
+        )
+
         print("2-PF. explicit HELM, homotopy, and Newton-Krylov GUI API paths")
         for method, expected_actual, expected_scope in (
             ("homotopy", "hybrid_ac_dc_explicit_homotopy",

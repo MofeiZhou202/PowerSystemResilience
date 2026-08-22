@@ -1,0 +1,282 @@
+\section{\texttt{lifecycle\_simulation.cpp} 源码等价实现}
+\label{sec:lifecycle-source-equivalent}
+
+本章覆盖
+\srcpath{include/hacdcpf/time\_series/lifecycle\_simulation.hpp} 与
+\srcpath{src/time\_series/lifecycle\_simulation.cpp} 的全部公共结构、状态更新、碳估计、误差界、
+容量缩放和比较入口。当前实现是 ``多年状态更新 + 每年全年度 UC + 可选 OPF/PF replay + 抽样校正''，
+不是资产投资联合优化，也不包含制造碳的完整 LCA。
+
+\subsection{入口状态、输入复制与资产覆盖}
+当前默认入口是“逐年状态更新 + 全年度 UC + OPF/PF replay + 分层抽样 PF correction”。只有显式
+设置 \fld{run\_physical\_replay=false} 才退回 schedule-only，并且结果中的
+\fld{carbon\_known} 与 \fld{feasible} 会标记该范围。
+
+\srcpath{run\_lifecycle\_simulation} 首先复制系统为 \texttt{work\_sys}，随后在同一个工作副本上逐年
+更新；它不是每年从原系统重新复制。原始 AC load、bus load、AC PV 额定功率和 AC 储能额定能量
+另存为基准数组，用 stable \fld{index} 匹配。
+
+若 \fld{ac.loads} 为空，代码把每个 $p_d>10^{-6}$ 或 $q_d>10^{-6}$ 的 AC bus 物化为
+一个 \texttt{Load}：ID 从 1 顺序生成、profile id 固定为 0、scaling 为 1。原 bus 的 $p_d,q_d$
+仍保留。年度会计优先读取物化 load，不会把 bus load 再重复累计；物理 replay 失败会在结果中显式标记。
+
+生命周期原生更新只覆盖：
+\begin{itemize}
+  \item AC \fld{loads} 与 AC bus 的 $P/Q$ 增长；
+  \item AC \fld{pv\_systems} 的额定功率降额；
+  \item AC/DC/expanded DC \fld{storage} 的 SOH、容量、循环和更换；
+  \item AC/DC 静态资产与外部电网（含 profile）碳因子；
+  \item 抽样小时的独立 PF/OPF 校正。
+\end{itemize}
+DC PV 的额定降额、线路老化、换流器效率退化、移动储能、VPP、微网与 EnergyRouter 的
+制造/材料碳库存仍没有生命周期状态方程；这些属于明确的开放范围。
+
+\subsection{公共选项及真实时间分辨率}
+\begin{longtable}{@{}L{4.2cm}L{2.3cm}L{7.1cm}@{}}
+\toprule
+字段 & 状态 & 源码等价含义\\ \midrule
+\fld{num\_years} & 已消费 & 循环 $y=1,\ldots,Y$；负数显式拒绝。\\
+\fld{discount\_rate} & 已消费 & 折现因子 $(1+r)^{-(y-1)}$；要求有限且 $r>-1$。\\
+\fld{load\_growth\_rate} & 已消费 & AC load 和 bus $P/Q$ 的复合增长率。\\
+\fld{pv\_annual\_derating} & 已消费 & AC PV $pmax$ 的复合降额率；要求有限且 $[0,1]$。\\
+\fld{calendar\_degradation\_per\_year} & 已消费 & AC 储能线性日历 SOH 斜率。\\
+\fld{cycle\_degradation\_per\_cycle} & 已消费 & AC 储能累计实数 FDE 的线性 SOH 斜率。\\
+\fld{tier2\_samples\_per\_stratum} & 已消费 & Neyman allocation 的最小预算基数；要求 $\ge1$。\\
+\fld{confidence\_level} & 已消费 & 只映射到四档固定 $z$ 值，不求正态分布反函数；要求 $0<\alpha<1$。\\
+\fld{loss\_proxy\_fraction} & 已消费 & 调度界与抽样 proxy 方差的显式启发式比例，要求非负。\\
+\fld{step\_duration\_hr} & 一致性检查 & 非零时必须等于 \fld{ts\_data.step\_duration\_hr}；核心不重采样输入。\\
+\fld{verbose} & 未消费 & 不控制核心日志。\\
+\bottomrule
+\end{longtable}
+
+核心现在统一验证这些输入。非法增长/降额、非正抽样数、非有限 rate/cadence 或
+\fld{step\_duration\_hr} 不一致均抛出 \texttt{std::invalid\_argument}；
+\fld{verbose} 仍不改变核心结果。工业入口应在
+调用前验证这些范围，HTTP 的异常捕获不能替代数值域验证。
+
+\subsection{逐年负荷增长与 PV 降额}
+年序号从 1 开始。对每个原始 load 和 bus，代码每年从基准值重新推导，而不是在上年值上累乘：
+\begin{align}
+ f_y^{load}&=(1+g)^{y-1},\\
+ P_{\ell,y}&=P_{\ell,0}f_y^{load},\quad
+ Q_{\ell,y}=Q_{\ell,0}f_y^{load},\\
+ P_{i,y}^{bus}&=P_{i,0}^{bus}f_y^{load},\quad
+ Q_{i,y}^{bus}=Q_{i,0}^{bus}f_y^{load}.
+\end{align}
+匹配键只有 stable \fld{index}；重复 ID 会令第一个匹配基准获胜，没有显式拒绝。
+
+AC PV 使用
+\begin{align}
+ f_y^{pv}&=(1-d_{pv})^{y-1},\\
+ P_{p,y}^{max}&=P_{p,0}^{max}f_y^{pv},\\
+ P_{p,y}^{set}&=\min(P_{p,y-1}^{set},P_{p,y}^{max}).
+\end{align}
+最后一式意味着 $p_mw$ 只会被上界向下截断，不会按降额率主动缩放，也不会在后续年份恢复。
+每个 PV 生成 \texttt{RenewableYearState}，记录 authored ID、名称、原容量、降额容量和因子；
+这里的 ``renewable'' 结构并不覆盖 \fld{renewable\_gens} 或 DC PV。
+
+\subsection{AC 储能 SOH、整数循环与更换事件}
+对 authored AC storage $s$，保存初始额定能量 $E_{s,0}$。每年运行年度子问题之前计算
+\begin{align}
+ SOH^{cal}_{s,y}&=\max(0,1-a(y-1)),\\
+ SOH^{cyc}_{s,y}&=\max(0,1-bN^{int}_{s,y}),\\
+ SOH_{s,y}&=\min(SOH^{cal}_{s,y},SOH^{cyc}_{s,y}).
+\end{align}
+\fld{current\_cycles} 在组件模型中是整数。年度统计给出的实数 full-discharge equivalent cycles
+$n_{s,y}$ 在年末通过
+\begin{equation}
+ N^{int}_{s,y+1}=N^{int}_{s,y}+\operatorname{trunc}(n_{s,y})
+\end{equation}
+更新；不足 1 的年度循环被永久丢弃。匹配年度统计时使用 \fld{name}，不是 stable index；同名储能
+可能归因到错误资产。
+
+EOL 输入若大于 1，按百分数除以 100，否则按 pu；随后截断到 $[0,1]$。当
+\begin{equation}
+ SOH_{s,y}\le \operatorname{clamp}(EOL_s,0,1)
+\end{equation}
+时，在该年年度子问题之前生成 \texttt{ReplacementEvent}：
+\begin{equation}
+ C^{rep}_{s,y}=c_s^{rep}\,E_{s,0}^{rated}\,1000.
+\end{equation}
+实现把 $SOH$、两个分量和当前循环数重置为 1/1/1/0，再设置
+\begin{equation}
+ E_{s,y}^{rated}=E_{s,0}^{rated}SOH_{s,y},\qquad
+ E_{s,y}=E_{s,y}^{rated}SOC_s^{init}.
+\end{equation}
+
+日历公式使用全局 $y-1$，没有 ``距上次更换年数'' 状态。因而更换后的下一年会重新按项目绝对年龄
+计算 $SOH^{cal}=1-a y$，并非新电池的年龄 1；在长规划期可能触发过早、连续更换。更换费用的
+\fld{replacement\_cost} 被解释为 USD/kWh（乘 MWh 再乘 1000），头文件本身没有单位类型约束。
+
+\subsection{年度子问题的强制配置}
+每一年都新建 \texttt{AnnualProductionSimOptions}，覆写
+\begin{align}
+  \texttt{skip\_replay}&=\neg\texttt{run\_physical\_replay}, &
+  \texttt{enforce\_cyclic\_soc}&=\texttt{true},\\
+  \texttt{ts\_pf\_options.run\_opf}&=\texttt{run\_physical\_replay}, &
+ \texttt{verbose}&=\texttt{false}.
+\end{align}
+随后调用 \srcpath{solve\_annual\_production\_simulation(work\_sys,ts\_data,ann\_opts)}。
+年度实现把 \fld{enforce\_cyclic\_soc} 复制到核心 \fld{enforce\_terminal\_soc\_cyclic}，并用单一
+全年度 UC 保持跨周 SOC/爬坡/commitment 连续；结果中的边界残差必须小于准入阈值。
+
+从年度结果复制的字段为成本、常规发电、负荷、可再生、弃电、ENS、损耗和 feasibility。
+物理 replay 开启时，\fld{annual\_loss\_mwh}、ENS、PF/OPF 收敛状态进入
+\texttt{YearResult}；任何失败 replay 或失败 sampled correction 都使该年
+\fld{feasible=false}，不会被零值掩盖。
+
+\subsection{七个运行分层与实际抽样器}
+\srcpath{classify\_strata} 先计算全年最大负荷、可再生、弃电、储能充电和放电，再按固定优先级把
+每一步唯一分入七层。阈值和顺序为
+\begin{enumerate}
+  \item Peak Load：$P^{load}_t\ge0.85P^{load}_{max}$；
+  \item Low Renewable：$P^{ren}_{max}>0$ 且 $P^{ren}_t\le0.1P^{ren}_{max}$；
+  \item High Curtailment：$P^{curt}_{max}>0$ 且 $P^{curt}_t\ge0.3P^{curt}_{max}$；
+  \item Heavy Charging：$P^{ess}_t<-0.5P^{ch}_{max}$；
+  \item Heavy Discharging：$P^{ess}_t>0.5P^{dis}_{max}$；
+  \item Low Load：$P^{load}_t\le0.3P^{load}_{max}$；
+  \item 其余为 Normal。
+\end{enumerate}
+实现数组中 Normal 位于索引 5、Low Load 位于索引 6，但判断 Low Load 后才落入 Normal；名称顺序
+不改变上述优先级。由于年度逐步弃电当前恒为零，High Curtailment 层在现行链路中通常为空。
+
+\srcpath{compute\_sample\_allocation} 先按
+\begin{equation}
+ w_m=N_m\,\hat\sigma_m,\qquad
+ n_m=\operatorname{clip}\!\left(\operatorname{round}\frac{K w_m}{\sum_jw_j},1,N_m\right)
+\end{equation}
+生成每层 Neyman allocation。
+
+\srcpath{select\_sample\_hours} 再在每层以该 $n_m$ 等距选取位置
+$j\,\max(1,\lfloor N_m/n_m\rfloor)$，最后全局排序去重。它是确定性 stratified proxy
+样本，
+不是随机样本，也不是 PF correction 观测。
+
+\subsection{稠密碳与分层外推}
+排放因子集合只含正的 AC generator \fld{emission\_factor\_tco2\_mwh} 和 AC static generator
+\fld{co2\_emission\_rate}。对每个资产 $a$，使用其自身 dispatch 与因子：
+\begin{equation}
+ \widehat C_{dense}=\sum_t\left(\sum_g e_gP_{g,t}+\sum_s e_sP_{s,t}\right)\Delta t.
+\end{equation}
+没有任何 authored 因子时才使用显式的 $0.5$ fallback，并在
+\fld{carbon\_factor\_source} 中标明。外部电网、储能库存、启动排放和网络损耗仍不归因，
+因此不能把该字段称为完整碳流。
+
+分层估计对实际 allocation 驱动的样本 $S_m$ 使用
+\begin{equation}
+ \widehat C_{sampled}=\sum_{m:N_m>0}
+ \frac{N_m}{|S_m|}\sum_{t\in S_m}\bar e P_t^{gen}\Delta t.
+\end{equation}
+这是同一分层设计下的 proxy 外推；随后每个选定小时都会运行独立的一步 OPF/PF，
+\fld{sampled\_pf\_correction\_tco2} 是实测物理碳与 proxy 的差，校正后的年碳进入
+\fld{annual\_carbon\_tco2}。\fld{bound\_passed} 仍不是随机抽样覆盖率证明。
+
+\subsection{调度、抽样与储能碳误差界}
+最大排放因子 $e_{max}$ 从相同 AC 资产中取最大正值，无正值时为 0.5。调度界为
+\begin{equation}
+ \epsilon_{dispatch}=e_{max}L_{proxy}\sum_tP_t^{load}\Delta t.
+\end{equation}
+它是用户给定损耗比例的代理，不是从 replay PF 观测到的损耗上界。
+
+抽样界先在每层计算 $x_t=P_t^{gen}\Delta t$ 的样本方差 $s_{x,m}^2$，定义 correction 标准差
+\begin{equation}
+ \sigma_m=L_{proxy}\max(e_{max},0.01)\,s_{x,m}.
+\end{equation}
+名义总预算 $B=\max(7,7k)$，Neyman 权重给出
+\begin{equation}
+ n_m^{bound}=\operatorname{clamp}\!\left(
+ \operatorname{round}\frac{B N_m\sigma_m}{\sum_jN_j\sigma_j},1,N_m\right),
+\end{equation}
+分母为零时退回 $\min(k,N_m)$。有限总体修正后的方差和界为
+\begin{align}
+ \widehat V&=\sum_m\frac{N_m^2}{n_m^{bound}}\sigma_m^2
+ \left(1-\frac{n_m^{bound}}{N_m}\right),\\
+ \epsilon_{sampling}&=z\sqrt{\widehat V}.
+\end{align}
+$z$ 仅按 confidence 阈值取 $2.576/1.96/1.645/1.28$。需要特别区分：
+$n_m^{bound}$ 只用于界，而估计器实际使用 $n_m^{actual}=\min(k,N_m)$；两套分配通常不同。
+样本又是确定性的，故该量不是严格概率置信区间。
+
+储能界从相邻步的总发电变化构造
+\begin{align}
+ K_w&=10^{-3}\max_{t\ge1}|P_t^{gen}-P_{t-1}^{gen}|,\\
+ \Delta_{max}&=\max_j(t_{j+1}-t_j)\Delta t,
+\end{align}
+样本少于 2 时令 $\Delta_{max}=T\Delta t$。随后
+\begin{align}
+ \epsilon_{stor}^{perMWh}&=\tfrac12K_w\Delta_{max},\\
+ \epsilon_{stor}&=\epsilon_{stor}^{perMWh}
+ \left(\sum_t|P_t^{ess}|\Delta t\right)\max(1,N_{storage}^{AC}).
+\end{align}
+$10^{-3}$ 是硬编码比例，未从碳强度序列拟合；将总储能吞吐再乘储能台数可能重复放大。
+总界只是三项相加，代码没有验证
+$|\widehat C_{dense}-\widehat C_{sampled}|\le\epsilon_{total}$，也没有布尔 ``bound passed'' 字段。
+
+\subsection{交叉比较字段与 NPV}
+\texttt{BoundCrossValidation} 计算
+\begin{align}
+ gap&=|\widehat C_{dense}-\widehat C_{sampled}|,\\
+ gap_{\%}&=100\,gap/\widehat C_{dense},\\
+ bound_{k,\%}&=100\,\epsilon_k/\widehat C_{dense},
+\end{align}
+稠密碳不大于 $10^{-12}$ 时所有百分比置零。``CrossValidation'' 在这里是内部两个估计量的比较，
+不是与 OpenDSS、GridLAB-D、商业生产成本软件或实测碳数据的外部验证。
+
+年 $y$ 的运行成本和当年所有更换成本用同一折现因子：
+\begin{equation}
+ NPV=\sum_{y=1}^{Y}(1+r)^{-(y-1)}
+ \left(C_y^{annual}+\sum_{e\in\mathcal R_y}C_e^{rep}\right).
+\end{equation}
+总碳不折现，总更换成本字段是未折现名义和。\fld{YearResult.annual\_cost} 与容量扫描的
+\fld{yearly\_cost} 都不含更换成本；只有 NPV 汇总包含它。
+
+\subsection{容量缩放与比较入口}
+\srcpath{apply\_capacity\_scaling} 的精确作用域如下。
+\begin{longtable}{@{}L{3.3cm}L{3.3cm}L{7.0cm}@{}}
+\toprule
+倍率 & 资产集合 & 被缩放字段\\ \midrule
+\fld{pv\_scale} & AC PV systems & \fld{pmax\_mw}、\fld{pmin\_mw}、\fld{sn\_mva}；$p$ 仅在超上界时截断。\\
+\fld{wind\_scale} & AC renewable\_gens 中 Wind & \fld{p\_rated\_mw}；$p$ 仅在超额定时截断。\\
+\fld{bess\_power\_scale} & 全部 AC storage & \fld{p\_rated\_mw}、\fld{pmax\_mw}、\fld{pmin\_mw}，负下界保号。\\
+\fld{bess\_energy\_scale} & 全部 AC storage & \fld{e\_rated\_mwh}；随后 \fld{e\_mwh}=$0.5E^{rated}$，不修改 \fld{soc\_init}。\\
+\fld{diesel\_scale} & 全部 AC static\_generators & 额定、上下界功率；不检查其实际燃料/type。\\
+\bottomrule
+\end{longtable}
+函数不覆盖常规 \fld{generators}、DC 资产或 AC static generator 的视在功率等其他耦合容量。
+倍率没有正数/有限性校验。
+
+\srcpath{run\_lifecycle\_comparison} 对每个 sweep value 克隆原系统，复制 base scaling，并把被扫字段
+\emph{替换}为该值（不是与 base 倍率相乘），再缩放和运行完整生命周期。支持字符串仅为
+\texttt{pv}、\texttt{wind}、\texttt{bess\_power}、\texttt{bess\_energy}、\texttt{diesel}；
+未知字符串不会失败，而是重复 base scaling 并使用 ``Scenario'' 标签。
+
+\texttt{ScenarioResult} 的安装容量在生命周期运行返回后，仍从运行前的 \texttt{scaled\_sys} 汇总，
+所以不会被多年 SOH 降额改变。\fld{total\_diesel\_mw} 同样汇总全部 AC static generator。
+
+\subsection{完整结果结构、索引与单位}
+\begin{longtable}{@{}L{4.2cm}L{9.4cm}@{}}
+\toprule
+结构 & 字段口径\\ \midrule
+\texttt{DispatchErrorBound} & loss fraction pu、最大因子 tCO$_2$/MWh、界 tCO$_2$。\\
+\texttt{SamplingErrorBound} & 7 层、实际 Neyman allocation 的样本数/方差、固定 $z$ 和 tCO$_2$ 界；该 allocation 同时驱动 estimator 与 bound。\\
+\texttt{StorageCarbon}/\newline\texttt{ErrorBound} & 启发式 $K_w$、最大样本间隔 h、单位吞吐界和总界。\\
+\texttt{YearlyErrorBounds} & 三个非独立代理项的算术和，不是已证明 coverage probability。\\
+\texttt{BoundCrossValidation} & 两个内部碳 proxy 估计量、相对百分比及 $gap\le bound$ 的 \texttt{bound\_passed}；不是外部 oracle。\\
+\texttt{ReplacementEvent} & 年为 1-based；storage index 是 authored AC storage ID；成本 USD。\\
+\texttt{StorageYearState} & authored ID、SOH pu、MWh、实数当年/累计 FDE 及 replacement 后局部年龄；公共整数循环字段仅作兼容镜像。\\
+\texttt{RenewableYearState} & authored AC PV ID 与 MW；结构名不表示所有 renewable。\\
+\texttt{YearResult} & 年成本/能量/碳、资产状态、界和事件；不含底层年度完整日程。\\
+\texttt{LifecycleSimResult} & NPV、未折现碳与更换成本、全事件和逐年 feasibility 的 all-of。\\
+\texttt{ScenarioResult}/\newline\texttt{LifecycleCompare}/\newline\texttt{Result} & 每倍率 NPV、碳、名义安装容量和逐年轨迹。\\
+\bottomrule
+\end{longtable}
+
+\begin{gapnote}
+当前生命周期模块可以复现负荷/PV趋势、AC/DC BESS 退化与更换、全年物理 replay、抽样 PF correction、
+资产级 AC/DC/外部电网碳分项及容量扫描。输入 rate、confidence、sample count 和 cadence 已验证；
+更换后的日历年龄、分数循环和 stable ID 归因已实现；抽样 estimator 与 bound 使用相同 allocation。
+schedule-only 仅在显式关闭 replay 时出现；制造/材料碳、网络损耗碳、换流器效率退化和真正
+coverage-guaranteed 统计界仍不属于当前能力。\texttt{step\_duration\_hr} 非零时只作
+与输入 cadence 的一致性检查，\texttt{verbose} 不改变结果。不能仅凭 \texttt{YearlyErrorBounds} 或
+\texttt{BoundCrossValidation} 名称宣称外部交叉验证闭环。
+\end{gapnote}

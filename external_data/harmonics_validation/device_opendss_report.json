@@ -1,0 +1,615 @@
+{
+  "ok": true,
+  "tolerance": 1e-08,
+  "max_ac_network_error_pu": 5.075078888394305e-10,
+  "opendss_version": "DSS C-API Library version 0.14.5 revision 87d85c2622c8281b92255335bc7c09b11191b21d based on OpenDSS SVN 3723 [FPC 3.2.2] (64-bit build) MVMULT INCREMENTAL_Y CONTEXT_API PM 20240329033829; License Status: Open \nDSS-Python version: 0.15.7\nOpenDSSDirect.py version: 0.9.4",
+  "opendss_data_path": "/var/folders/r5/0fglxt4n6gb2nkjd11d4glpr0000gn/T/opendss_device_w1f8ejjy",
+  "hacdcpf": {
+    "ac_order_solved": [
+      [
+        5,
+        true
+      ],
+      [
+        7,
+        true
+      ],
+      [
+        11,
+        true
+      ],
+      [
+        13,
+        true
+      ]
+    ],
+    "base_pf_converged": false,
+    "branches": [
+      {
+        "branch_index": 1,
+        "from": 1,
+        "is_dc": false,
+        "orders": [
+          {
+            "i_pu": 0.0,
+            "i_series_pu": 0.0,
+            "i_to_pu": 0.0,
+            "order": 1
+          },
+          {
+            "i_pu": 0.059999999999400006,
+            "i_series_pu": 0.059999999999399985,
+            "i_to_pu": 0.059999999999400006,
+            "order": 5
+          },
+          {
+            "i_pu": 0.04289999999957099,
+            "i_series_pu": 0.04289999999957101,
+            "i_to_pu": 0.04289999999957099,
+            "order": 7
+          },
+          {
+            "i_pu": 0.027299999999726994,
+            "i_series_pu": 0.027299999999726994,
+            "i_to_pu": 0.027299999999726994,
+            "order": 11
+          },
+          {
+            "i_pu": 0.023099999999769007,
+            "i_series_pu": 0.023099999999769007,
+            "i_to_pu": 0.023099999999769007,
+            "order": 13
+          }
+        ],
+        "thd_i_pct": 0.0,
+        "to": 2
+      }
+    ],
+    "buses": [
+      {
+        "bus": 1,
+        "is_dc": false,
+        "orders": [
+          {
+            "ang_deg": 0.0,
+            "imag": 0.0,
+            "mag": 1.0,
+            "order": 1,
+            "real": 1.0
+          },
+          {
+            "ang_deg": 89.99999985676055,
+            "imag": 0.059999999999400026,
+            "mag": 0.059999999999400026,
+            "order": 5,
+            "real": 1.4999999937765722e-10
+          },
+          {
+            "ang_deg": 89.99999979946477,
+            "imag": 0.06005999999939941,
+            "mag": 0.06005999999939941,
+            "order": 7,
+            "real": 2.1020999935493552e-10
+          },
+          {
+            "ang_deg": 89.99999968487322,
+            "imag": 0.060059999999399385,
+            "mag": 0.060059999999399385,
+            "order": 11,
+            "real": 3.3032999997708863e-10
+          },
+          {
+            "ang_deg": 89.99999962757745,
+            "imag": 0.0600599999993994,
+            "mag": 0.0600599999993994,
+            "order": 13,
+            "real": 3.903900002089307e-10
+          }
+        ],
+        "thd_pct": 12.009001124036741,
+        "v_fund_pu": 1.0
+      },
+      {
+        "bus": 2,
+        "is_dc": false,
+        "orders": [
+          {
+            "ang_deg": 0.0,
+            "imag": 0.0,
+            "mag": 1.0,
+            "order": 1,
+            "real": 1.0
+          },
+          {
+            "ang_deg": 89.61803367113181,
+            "imag": 0.08999999999820002,
+            "mag": 0.09000199997727826,
+            "order": 5,
+            "real": 0.0006000001949939992
+          },
+          {
+            "ang_deg": 89.72716484313592,
+            "imag": 0.09008999999819822,
+            "mag": 0.09009102142228059,
+            "order": 7,
+            "real": 0.0004290002732687093
+          },
+          {
+            "ang_deg": 89.8263766840524,
+            "imag": 0.09008999999819818,
+            "mag": 0.09009041363491353,
+            "order": 11,
+            "real": 0.00027300042942626996
+          },
+          {
+            "ang_deg": 89.85308774403559,
+            "imag": 0.09008999999819821,
+            "mag": 0.09009029615285888,
+            "order": 13,
+            "real": 0.00023100050750469038
+          }
+        ],
+        "thd_pct": 18.013688192771475,
+        "v_fund_pu": 1.0
+      }
+    ],
+    "case_type": "device_vsc_nic",
+    "dc_branches": [
+      {
+        "branch_index": 1,
+        "from": 10,
+        "is_dc": true,
+        "orders": [
+          {
+            "i_pu": 0.0,
+            "order": 0
+          },
+          {
+            "i_pu": 0.013499999999190002,
+            "order": 6
+          },
+          {
+            "i_pu": 0.005999999999640001,
+            "order": 12
+          }
+        ],
+        "thd_i_pct": 0.0,
+        "to": 11
+      }
+    ],
+    "dc_buses": [
+      {
+        "bus": 10,
+        "is_dc": true,
+        "orders": [
+          {
+            "ang_deg": 0.0,
+            "imag": 0.0,
+            "mag": 1.0,
+            "order": 0,
+            "real": 1.0
+          },
+          {
+            "ang_deg": 0.0,
+            "imag": 0.0,
+            "mag": 0.00013499999999055001,
+            "order": 6,
+            "real": 0.00013499999999055001
+          },
+          {
+            "ang_deg": 0.0,
+            "imag": 0.0,
+            "mag": 5.9999999995800006e-05,
+            "order": 12,
+            "real": 5.9999999995800006e-05
+          }
+        ],
+        "thd_pct": 0.014773286701660029,
+        "v_fund_pu": 1.0
+      },
+      {
+        "bus": 11,
+        "is_dc": true,
+        "orders": [
+          {
+            "ang_deg": 0.0,
+            "imag": 0.0,
+            "mag": 1.0,
+            "order": 0,
+            "real": 1.0
+          },
+          {
+            "ang_deg": 0.0,
+            "imag": 0.0,
+            "mag": 0.0008099999999500501,
+            "order": 6,
+            "real": 0.0008099999999500501
+          },
+          {
+            "ang_deg": 0.0,
+            "imag": 0.0,
+            "mag": 0.00035999999997780006,
+            "order": 12,
+            "real": 0.00035999999997780006
+          }
+        ],
+        "thd_pct": 0.08863972021069884,
+        "v_fund_pu": 1.0
+      }
+    ],
+    "dc_order_solved": [
+      [
+        6,
+        true
+      ],
+      [
+        12,
+        true
+      ]
+    ],
+    "device": {
+      "ac_current_by_order": [
+        {
+          "current": {
+            "ang_deg": 0.0,
+            "imag": 0.0,
+            "mag": 0.06,
+            "real": 0.06
+          },
+          "order": 5
+        },
+        {
+          "current": {
+            "ang_deg": 0.0,
+            "imag": 0.0,
+            "mag": 0.0429,
+            "real": 0.0429
+          },
+          "order": 7
+        },
+        {
+          "current": {
+            "ang_deg": 0.0,
+            "imag": 0.0,
+            "mag": 0.0273,
+            "real": 0.0273
+          },
+          "order": 11
+        },
+        {
+          "current": {
+            "ang_deg": 0.0,
+            "imag": 0.0,
+            "mag": 0.0231,
+            "real": 0.0231
+          },
+          "order": 13
+        },
+        {
+          "current": {
+            "ang_deg": 0.0,
+            "imag": 0.0,
+            "mag": 0.0177,
+            "real": 0.0177
+          },
+          "order": 17
+        },
+        {
+          "current": {
+            "ang_deg": 0.0,
+            "imag": 0.0,
+            "mag": 0.015899999999999997,
+            "real": 0.015899999999999997
+          },
+          "order": 19
+        },
+        {
+          "current": {
+            "ang_deg": 0.0,
+            "imag": 0.0,
+            "mag": 0.012899999999999998,
+            "real": 0.012899999999999998
+          },
+          "order": 23
+        },
+        {
+          "current": {
+            "ang_deg": 0.0,
+            "imag": 0.0,
+            "mag": 0.012,
+            "real": 0.012
+          },
+          "order": 25
+        }
+      ],
+      "ac_spectrum": [
+        {
+          "mag_percent": 20.0,
+          "order": 5,
+          "phase_deg": 0.0
+        },
+        {
+          "mag_percent": 14.3,
+          "order": 7,
+          "phase_deg": 0.0
+        },
+        {
+          "mag_percent": 9.1,
+          "order": 11,
+          "phase_deg": 0.0
+        },
+        {
+          "mag_percent": 7.7,
+          "order": 13,
+          "phase_deg": 0.0
+        },
+        {
+          "mag_percent": 5.9,
+          "order": 17,
+          "phase_deg": 0.0
+        },
+        {
+          "mag_percent": 5.3,
+          "order": 19,
+          "phase_deg": 0.0
+        },
+        {
+          "mag_percent": 4.3,
+          "order": 23,
+          "phase_deg": 0.0
+        },
+        {
+          "mag_percent": 4.0,
+          "order": 25,
+          "phase_deg": 0.0
+        }
+      ],
+      "dc_current_by_order": [
+        {
+          "current": {
+            "ang_deg": 0.0,
+            "imag": 0.0,
+            "mag": 0.013499999999999998,
+            "real": 0.013499999999999998
+          },
+          "order": 6
+        },
+        {
+          "current": {
+            "ang_deg": 0.0,
+            "imag": 0.0,
+            "mag": 0.006,
+            "real": 0.006
+          },
+          "order": 12
+        },
+        {
+          "current": {
+            "ang_deg": 0.0,
+            "imag": 0.0,
+            "mag": 0.0036,
+            "real": 0.0036
+          },
+          "order": 18
+        },
+        {
+          "current": {
+            "ang_deg": 0.0,
+            "imag": 0.0,
+            "mag": 0.0024,
+            "real": 0.0024
+          },
+          "order": 24
+        }
+      ],
+      "dc_spectrum": [
+        {
+          "mag_percent": 4.5,
+          "order": 6,
+          "phase_deg": 0.0
+        },
+        {
+          "mag_percent": 2.0,
+          "order": 12,
+          "phase_deg": 0.0
+        },
+        {
+          "mag_percent": 1.2,
+          "order": 18,
+          "phase_deg": 0.0
+        },
+        {
+          "mag_percent": 0.8,
+          "order": 24,
+          "phase_deg": 0.0
+        }
+      ],
+      "i_ac1_mag_pu": 0.3,
+      "i_dc0_mag_pu": 0.3,
+      "p_dc_mw": -30.0,
+      "p_mw": 30.0,
+      "q_mvar": 0.0,
+      "type": "VSCConverter/HarmonicNIC"
+    },
+    "max_ac_thd_bus": 2,
+    "max_ac_thd_pct": 18.013688192771475,
+    "max_dc_thd_bus": 11,
+    "max_dc_thd_pct": 0.08863972021069884,
+    "message": "",
+    "network": {
+      "base_kv": 10.0,
+      "base_mva": 100.0,
+      "converter_ac_bus": 2,
+      "converter_dc_bus": 11,
+      "dc_line": {
+        "r_pu": 0.05
+      },
+      "dc_source_bus": 10,
+      "dc_source_impedance_pu": 0.01,
+      "line": {
+        "r_pu": 0.01,
+        "x_pu": 0.1
+      },
+      "source_bus": 1,
+      "source_xpp_pu": 0.2
+    },
+    "ok": true,
+    "solver": "hacdcpf::harmonics::solve_harmonic_power_flow"
+  },
+  "acdc_vsconverter_probe": {
+    "class_available": true,
+    "instantiated": true,
+    "fundamental_converged": true,
+    "harmonic_solve_converged": false,
+    "terminal_current_h5": {
+      "real": -7.068232706917233,
+      "imag": 353.41163534586167,
+      "mag": 353.4823106061114,
+      "ang_deg": 91.1457628381751
+    },
+    "note": "VSConverter is present and instantiable, but the minimal native harmonic solve did not converge in this DSS C-API build. The numeric pass/fail below therefore validates the deterministic network response to the converter harmonic current."
+  },
+  "acdc_network_rows": [
+    {
+      "order": 5,
+      "bus": 1,
+      "hacdcpf": {
+        "real": 1.4999999937765722e-10,
+        "imag": 0.059999999999400026,
+        "mag": 0.059999999999400026,
+        "ang_deg": 89.99999985676055
+      },
+      "opendss": {
+        "real": -4.869385250588324e-19,
+        "imag": 0.06000000000000001,
+        "mag": 0.06000000000000001,
+        "ang_deg": 90.0
+      },
+      "abs_error_pu": 1.5000119980115482e-10
+    },
+    {
+      "order": 5,
+      "bus": 2,
+      "hacdcpf": {
+        "real": 0.0006000001949939992,
+        "imag": 0.08999999999820002,
+        "mag": 0.09000199997727826,
+        "ang_deg": 89.61803367113181
+      },
+      "opendss": {
+        "real": 0.0005999999999999998,
+        "imag": 0.09000000000000004,
+        "mag": 0.0900019999777783,
+        "ang_deg": 89.61803379527097
+      },
+      "abs_error_pu": 1.9500230729587224e-10
+    },
+    {
+      "order": 7,
+      "bus": 1,
+      "hacdcpf": {
+        "real": 2.1020999935493552e-10,
+        "imag": 0.06005999999939941,
+        "mag": 0.06005999999939941,
+        "ang_deg": 89.99999979946477
+      },
+      "opendss": {
+        "real": 2.025411875626851e-21,
+        "imag": 0.06005999999999999,
+        "mag": 0.06005999999999999,
+        "ang_deg": 90.0
+      },
+      "abs_error_pu": 2.102108572801497e-10
+    },
+    {
+      "order": 7,
+      "bus": 2,
+      "hacdcpf": {
+        "real": 0.0004290002732687093,
+        "imag": 0.09008999999819822,
+        "mag": 0.09009102142228059,
+        "ang_deg": 89.72716484313592
+      },
+      "opendss": {
+        "real": 0.0004289999999999998,
+        "imag": 0.09008999999999999,
+        "mag": 0.09009102142278107,
+        "ang_deg": 89.72716501693192
+      },
+      "abs_error_pu": 2.7327464928450693e-10
+    },
+    {
+      "order": 11,
+      "bus": 1,
+      "hacdcpf": {
+        "real": 3.3032999997708863e-10,
+        "imag": 0.060059999999399385,
+        "mag": 0.060059999999399385,
+        "ang_deg": 89.99999968487322
+      },
+      "opendss": {
+        "real": -1.5096538460582966e-19,
+        "imag": 0.06005999999999998,
+        "mag": 0.06005999999999998,
+        "ang_deg": 90.0
+      },
+      "abs_error_pu": 3.303305461202605e-10
+    },
+    {
+      "order": 11,
+      "bus": 2,
+      "hacdcpf": {
+        "real": 0.00027300042942626996,
+        "imag": 0.09008999999819818,
+        "mag": 0.09009041363491353,
+        "ang_deg": 89.8263766840524
+      },
+      "opendss": {
+        "real": 0.0002729999999999999,
+        "imag": 0.09008999999999998,
+        "mag": 0.09009041363541404,
+        "ang_deg": 89.82637695716151
+      },
+      "abs_error_pu": 4.294300500280868e-10
+    },
+    {
+      "order": 13,
+      "bus": 1,
+      "hacdcpf": {
+        "real": 3.903900002089307e-10,
+        "imag": 0.0600599999993994,
+        "mag": 0.0600599999993994,
+        "ang_deg": 89.99999962757744
+      },
+      "opendss": {
+        "real": -1.1771846656194978e-19,
+        "imag": 0.060059999999999954,
+        "mag": 0.060059999999999954,
+        "ang_deg": 90.0
+      },
+      "abs_error_pu": 3.903904622561143e-10
+    },
+    {
+      "order": 13,
+      "bus": 2,
+      "hacdcpf": {
+        "real": 0.00023100050750469038,
+        "imag": 0.09008999999819821,
+        "mag": 0.09009029615285888,
+        "ang_deg": 89.85308774403559
+      },
+      "opendss": {
+        "real": 0.0002309999999999998,
+        "imag": 0.09008999999999995,
+        "mag": 0.09009029615335933,
+        "ang_deg": 89.85308806680116
+      },
+      "abs_error_pu": 5.075078888394305e-10
+    }
+  ],
+  "dcdc_native_validation": {
+    "native_device_available": false,
+    "matching_classes": [],
+    "note": "OpenDSS DSS C-API exposes VSConverter but no native DC/DC converter class in this installation; DC/DC harmonic validation must use an equivalent ripple source or an external reference model."
+  }
+}

@@ -1,6 +1,6 @@
 # HySim-XJTU-HRPES 文档中心
 
-最后核实：2026-08-21
+最后核实：2026-08-22
 
 本文件是仓库文档的唯一导航入口。运行行为以 `include/`、`src/`、
 `tests/run_gui_server.cpp`、`web/` 与已注册测试为准；文档用于解释实现，不覆盖实现。
@@ -45,6 +45,7 @@
 | 组件模型与参数 | 实现参考 | [模型手册](modules/model/model_manual.tex) |
 | 交直流与三相潮流 | 实现参考 | [潮流计算手册](modules/power_flow/power_flow_manual.tex) |
 | AC/DC、混合与三相 OPF | 实现参考 | [最优潮流手册](modules/optimal_power_flow/opf_manual.tex) |
+| 谐波潮流、标准与跨引擎验证 | 实现参考 | [谐波潮流专著](modules/harmonics_power_flow/harmonics_power_flow_manual.tex) |
 | 全部源码模块技术手册 | 实现参考 | [模块手册索引](modules/README.md) |
 | HTTP 路由与响应边界 | 契约 | [运行时 API](reference/runtime_api.md) |
 | 内置算例与能力示例 | 契约 | [算例目录](overview/case_catalog.md) |

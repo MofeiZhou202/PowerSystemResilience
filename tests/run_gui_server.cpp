@@ -1945,6 +1945,39 @@ inline H::HarmonicSpectrum parse_spectrum(const json& arr) {
   return spec;
 }
 
+inline H::Complex parse_complex(const json& value) {
+  if (value.is_number()) return {value.get<double>(), 0.0};
+  return {value.value("real", value.value("re", 0.0)),
+          value.value("imag", value.value("im", 0.0))};
+}
+
+inline void parse_hss_options(const json& o, H::HSSOptions& options) {
+  if (o.contains("orders")) options.orders = o["orders"].get<std::vector<int>>();
+  options.run_base_power_flow =
+      o.value("run_base_power_flow", options.run_base_power_flow);
+  options.include_load_impedance =
+      o.value("include_load_impedance", options.include_load_impedance);
+  options.include_converter_models =
+      o.value("include_converter_models", options.include_converter_models);
+  options.compute_device_currents =
+      o.value("compute_device_currents", options.compute_device_currents);
+  options.default_source_xpp_pu =
+      o.value("default_source_xpp_pu", options.default_source_xpp_pu);
+  options.dc_source_impedance_pu =
+      o.value("dc_source_impedance_pu", options.dc_source_impedance_pu);
+  options.min_shunt_pu = o.value("min_shunt_pu", options.min_shunt_pu);
+  options.max_backward_error =
+      o.value("max_backward_error", options.max_backward_error);
+  options.skin_coefficient =
+      o.value("skin_coefficient", options.skin_coefficient);
+  const std::string skin = o.value("skin_effect", std::string("none"));
+  options.skin_effect = (skin == "sqrt" || skin == "SqrtOrder")
+                            ? H::SkinEffectModel::SqrtOrder
+                        : (skin == "prop" || skin == "ProportionalSqrt")
+                            ? H::SkinEffectModel::ProportionalSqrt
+                            : H::SkinEffectModel::None;
+}
+
 // Parse user harmonic current sources and explicit NIC overrides into `inputs`.
 inline void parse_inputs(const json& j, H::HarmonicStudyInputs& inputs) {
   if (j.contains("sources") && j["sources"].is_array()) {
@@ -20023,9 +20056,12 @@ int main(int argc, char** argv) {
       for (const auto& bf : r.ac_branch_flows) {
         json spec = json::array();
         for (const auto& [ord, m] : bf.i_by_order)
-          spec.push_back(json{{"order", ord}, {"i_pu", m}});
+          spec.push_back(json{{"order", ord}, {"i_pu", m},
+                              {"i_to_pu", bf.i_to_by_order.at(ord)},
+                              {"i_series_pu", bf.i_series_by_order.at(ord)}});
         json row{{"from_bus", bf.from_bus}, {"to_bus", bf.to_bus},
-                 {"is_dc", false}, {"thd_i_pct", bf.thd_i_pct},
+                 {"branch_index", bf.branch_index}, {"is_dc", false},
+                 {"thd_i_pct", bf.thd_i_pct},
                  {"harmonics", spec}};
         const auto& branches = harmonic_projection.canonical.ac.branches;
         while (ac_branch_cursor < branches.size() &&
@@ -20048,7 +20084,8 @@ int main(int argc, char** argv) {
         for (const auto& [ord, m] : bf.i_by_order)
           spec.push_back(json{{"order", ord}, {"i_pu", m}});
         json row{{"from_bus", bf.from_bus}, {"to_bus", bf.to_bus},
-                 {"is_dc", true}, {"thd_i_pct", bf.thd_i_pct},
+                 {"branch_index", bf.branch_index}, {"is_dc", true},
+                 {"thd_i_pct", bf.thd_i_pct},
                  {"harmonics", spec}};
         const auto& branches = harmonic_projection.canonical.dc.branches;
         while (dc_branch_cursor < branches.size() &&
@@ -20104,6 +20141,101 @@ int main(int argc, char** argv) {
     }
   });
 
+  // ---- Frequency-coupled harmonic state-space (HSS) ----
+  svr.Post("/api/session/harmonics_hss",
+           [](const httplib::Request& req, httplib::Response& res) {
+    try {
+      std::shared_ptr<const hacdcpf::HybridPowerSystem> sys_snap;
+      {
+        std::lock_guard<std::mutex> lk(g_session.mu);
+        if (!g_session.current_system) throw std::runtime_error("No system loaded");
+        sys_snap = g_session.current_system;
+      }
+      if (g_session.busy.exchange(true)) {
+        res.status = 409;
+        res.set_content(json{{"error", "Another analysis is already running"}}.dump(),
+                        "application/json");
+        return;
+      }
+      const auto request = json::parse(req.body.empty() ? "{}" : req.body);
+      hacdcpf::harmonics::HSSOptions options;
+      if (request.contains("options"))
+        hpf_api::parse_hss_options(request["options"], options);
+      std::vector<hacdcpf::harmonics::HSSCurrentInjection> injections;
+      for (const auto& item : request.value("injections", json::array())) {
+        hacdcpf::harmonics::HSSCurrentInjection injection;
+        injection.bus = item.value("bus", 0);
+        injection.is_dc = item.value("is_dc", false);
+        injection.order = item.value("order", 0);
+        injection.name = item.value("name", std::string());
+        injection.current_pu = item.contains("current_pu")
+                                   ? hpf_api::parse_complex(item["current_pu"])
+                                   : hacdcpf::harmonics::Complex(
+                                         item.value("current_re_pu", 0.0),
+                                         item.value("current_im_pu", 0.0));
+        injections.push_back(std::move(injection));
+      }
+      std::vector<hacdcpf::harmonics::HSSAdmittanceEntry> couplings;
+      for (const auto& item : request.value("couplings", json::array())) {
+        hacdcpf::harmonics::HSSAdmittanceEntry coupling;
+        coupling.row_bus = item.value("row_bus", 0);
+        coupling.row_is_dc = item.value("row_is_dc", false);
+        coupling.row_order = item.value("row_order", 0);
+        coupling.column_bus = item.value("column_bus", 0);
+        coupling.column_is_dc = item.value("column_is_dc", false);
+        coupling.column_order = item.value("column_order", 0);
+        coupling.admittance_pu = item.contains("admittance_pu")
+            ? hpf_api::parse_complex(item["admittance_pu"])
+            : hacdcpf::harmonics::Complex(item.value("admittance_re_pu", 0.0),
+                                          item.value("admittance_im_pu", 0.0));
+        couplings.push_back(std::move(coupling));
+      }
+      const auto result = hacdcpf::harmonics::solve_harmonic_state_space(
+          *sys_snap, injections, couplings, options);
+      json out{{"ok", result.ok},
+               {"message", result.message},
+               {"model_scope", result.model_scope},
+               {"model_limitations", result.model_limitations},
+               {"orders", result.orders},
+               {"matrix_dimension", result.matrix_dimension},
+               {"matrix_nonzeros", result.matrix_nonzeros},
+               {"factorization_succeeded", result.factorization_succeeded},
+               {"normalized_backward_error", result.normalized_backward_error},
+               {"base_pf_converged", result.base_pf_converged}};
+      out["bus_results"] = json::array();
+      for (const auto& bus : result.bus_results) {
+        json row{{"bus", bus.bus}, {"is_dc", bus.is_dc}};
+        hpf_api::add_bus_identity(row, *sys_snap, bus.bus, bus.is_dc);
+        row["spectrum"] = json::array();
+        for (const auto& [order, voltage] : bus.voltage_pu)
+          row["spectrum"].push_back(
+              {{"order", order}, {"real_pu", voltage.real()},
+               {"imag_pu", voltage.imag()}, {"mag_pu", std::abs(voltage)},
+               {"phase_deg", std::arg(voltage) * 180.0 / M_PI}});
+        out["bus_results"].push_back(std::move(row));
+      }
+      out["device_terminal_results"] = json::array();
+      for (const auto& terminal : result.device_terminal_results) {
+        json row{{"component_kind", terminal.component_kind},
+                 {"component_index", terminal.component_index},
+                 {"terminal", terminal.terminal}, {"bus", terminal.bus},
+                 {"is_dc", terminal.is_dc}, {"current_spectrum", json::array()}};
+        for (const auto& [order, current] : terminal.current_into_device_pu)
+          row["current_spectrum"].push_back(
+              {{"order", order}, {"real_pu", current.real()},
+               {"imag_pu", current.imag()}, {"mag_pu", std::abs(current)},
+               {"phase_deg", std::arg(current) * 180.0 / M_PI}});
+        out["device_terminal_results"].push_back(std::move(row));
+      }
+      res.set_content(out.dump(), "application/json");
+      g_session.busy.store(false);
+    } catch (const std::exception& e) {
+      g_session.busy.store(false);
+      res.status = 400;
+      res.set_content(json{{"error", e.what()}}.dump(), "application/json");
+    }
+  });
+
   // ---- Harmonic frequency scan / resonance analysis ----
   svr.Post("/api/session/harmonics_freqscan",
            [](const httplib::Request& req, httplib::Response& res) {
@@ -20144,6 +20276,7 @@ int main(int argc, char** argv) {
         auto r = hacdcpf::harmonics::sequence_frequency_scan(*sys.three_phase_ac, bus, sopt, opt);
         out["ok"] = r.ok; out["message"] = r.message; out["sequence"] = true;
         out["bus"] = r.bus; out["freqs"] = r.freqs;
+        out["frequency_solved"] = r.frequency_solved;
         hpf_api::add_bus_identity(out, sys, r.bus, false);
         out["z1_mag"] = r.z1_mag; out["z2_mag"] = r.z2_mag; out["z0_mag"] = r.z0_mag;
         out["resonances"] = json::array();
@@ -20158,6 +20291,7 @@ int main(int argc, char** argv) {
         auto r = hacdcpf::harmonics::frequency_scan(sys, sopt, opt);
         out["ok"] = r.ok; out["message"] = r.message; out["sequence"] = false;
         out["freqs"] = r.freqs;
+        out["frequency_solved"] = r.frequency_solved;
         out["buses"] = json::array();
         for (const auto& [bus, zm] : r.z_mag) {
           json jb; jb["bus"] = bus; jb["z_mag"] = zm;
@@ -21037,6 +21171,10 @@ int main(int argc, char** argv) {
             {"demand_response_shiftable", opts.dr_shiftable}};
         out["uc_feasible"] = result.uc_schedule.feasible;
         out["uc_solver_name"] = result.uc_schedule.solver_name;
+        out["uc_solver_status"] = result.uc_schedule.solver_status;
+        out["uc_mip_gap"] = result.uc_schedule.mip_gap;
+        out["uc_mip_gap_target_met"] = result.uc_schedule.mip_gap_target_met;
+        out["uc_optimality_proven"] = result.uc_schedule.optimality_proven;
         out["parallel_daily_effective"] = result.parallel_daily_effective;
         out["parallel_workers"] = result.parallel_workers;
         out["parallel_mode"] = result.parallel_mode;
@@ -24187,6 +24325,15 @@ int main(int argc, char** argv) {
         opts.ts_pf_options.mobile_storage_corelocate = j.value("mobile_storage_corelocate", false);
         opts.skip_replay = j.value("skip_replay", false);
         opts.enforce_cyclic_soc = j.value("cyclic_soc", true);
+        if (j.contains("generator_energy_budget_mwh") &&
+            j.at("generator_energy_budget_mwh").is_array()) {
+          opts.generator_energy_budget_mwh =
+              j.at("generator_energy_budget_mwh").get<std::vector<double>>();
+        }
+        opts.fuel_budget_mwh = j.value("fuel_budget_mwh", 0.0);
+        opts.iterative_feedback = j.value("iterative_feedback", false);
+        opts.max_feedback_iterations = j.value("max_feedback_iterations", 3);
+        opts.budget_violation_tol_mwh = j.value("budget_violation_tol_mwh", 10.0);
         opts.pf_snapshot_interval = j.value("snapshot_interval", 24);
         // Parallel daily decomposition: split the year into independent calendar
         // days (cyclic SOC) solved concurrently; per-day mode SCUC/SCED/DOPF.
@@ -24209,6 +24356,17 @@ int main(int argc, char** argv) {
         auto result = hacdcpf::analysis::solve_annual_production_simulation(sys_ann, ts_data, opts);
         json out;
         out["feasible"] = result.feasible;
+        out["model_scope"] = result.model_scope;
+        out["schedule_only"] = result.schedule_only;
+        out["physical_replay_complete"] = result.physical_replay_complete;
+        out["ens_complete"] = result.ens_complete;
+        out["feedback_iterations"] = result.feedback_iterations;
+        out["feedback_converged"] = result.feedback_converged;
+        out["max_feedback_residual_mwh"] = result.max_feedback_residual_mwh;
+        out["max_soc_boundary_residual"] = result.max_soc_boundary_residual;
+        out["fuel_consumption_mwh"] = result.fuel_consumption_mwh;
+        out["max_energy_budget_violation_mwh"] = result.max_energy_budget_violation_mwh;
+        out["fuel_budget_violation_mwh"] = result.fuel_budget_violation_mwh;
         out["num_steps"] = result.num_steps;
         out["step_duration_hr"] = result.step_duration_hr;
         out["profile_source"] =
@@ -24259,7 +24417,11 @@ int main(int argc, char** argv) {
             {"dc_network_constraints", enable_dc_net && enable_net},
             {"reserve_fraction", std::max(0.0, reserve_frac)},
             {"economic_dispatch_opf", opts.ts_pf_options.run_opf},
-            {"cyclic_soc", opts.enforce_cyclic_soc}};
+            {"cyclic_soc", opts.enforce_cyclic_soc},
+            {"generator_energy_budget_mwh", opts.generator_energy_budget_mwh},
+            {"fuel_budget_mwh", opts.fuel_budget_mwh},
+            {"iterative_feedback", opts.iterative_feedback}};
+        out["generator_energy_mwh"] = result.generator_energy_mwh;
         out["total_gen_mwh"] = result.total_gen_mwh;
         out["total_load_mwh"] = result.total_load_mwh;
         out["total_renewable_mwh"] = result.total_renewable_mwh;
@@ -24572,6 +24734,8 @@ int main(int argc, char** argv) {
         opts.pv_annual_derating = j.value("pv_annual_derating", 0.005);
         opts.calendar_degradation_per_year = j.value("calendar_degradation", 0.02);
         opts.step_duration_hr = step_hr;
+        opts.run_physical_replay = j.value("run_physical_replay", true);
+        opts.run_sampled_pf_correction = j.value("run_sampled_pf_correction", true);
         opts.verbose = false;
 
         // Apply capacity scaling
@@ -24592,6 +24756,9 @@ int main(int argc, char** argv) {
         out["total_carbon_tco2"] = result.total_carbon_tco2;
         out["total_replacement_cost"] = result.total_replacement_cost;
         out["total_replacements"] = result.total_replacements;
+        out["model_scope"] = (opts.run_physical_replay && opts.run_sampled_pf_correction)
+            ? "lifecycle-annual-uc-opf-pf+sampled-pf-correction"
+            : "lifecycle-schedule-only-or-partial-physical-validation";
 
         // Per-year data
         json years_arr = json::array();
@@ -24608,6 +24775,19 @@ int main(int argc, char** argv) {
           yj["annual_carbon_tco2"] = yr.annual_carbon_tco2;
           yj["avg_carbon_intensity"] = yr.avg_carbon_intensity;
           yj["feasible"] = yr.feasible;
+          yj["schedule_only"] = yr.schedule_only;
+          yj["physical_replay_complete"] = yr.physical_replay_complete;
+          yj["sampled_pf_correction_complete"] = yr.sampled_pf_correction_complete;
+          yj["sampled_pf_requested"] = yr.sampled_pf_requested;
+          yj["sampled_pf_converged"] = yr.sampled_pf_converged;
+          yj["sampled_pf_correction_tco2"] = yr.sampled_pf_correction_tco2;
+          yj["carbon_scope"] = yr.carbon_scope;
+          yj["carbon_factor_source"] = yr.carbon_factor_source;
+          yj["carbon_known"] = yr.carbon_known;
+          yj["carbon_external_grid_tco2"] = yr.carbon_external_grid_tco2;
+          yj["carbon_storage_inventory_tco2"] = yr.carbon_storage_inventory_tco2;
+          yj["carbon_dc_assets_tco2"] = yr.carbon_dc_assets_tco2;
+          yj["carbon_expanded_assets_tco2"] = yr.carbon_expanded_assets_tco2;
 
           // Bounds
           json bj;
@@ -24627,6 +24807,7 @@ int main(int argc, char** argv) {
           cvj["dispatch_bound_pct"] = yr.cross_validation.dispatch_bound_pct;
           cvj["sampling_bound_pct"] = yr.cross_validation.sampling_bound_pct;
           cvj["storage_bound_pct"] = yr.cross_validation.storage_bound_pct;
+          cvj["bound_passed"] = yr.cross_validation.bound_passed;
           yj["cross_validation"] = cvj;
 
           // Storage states
@@ -24641,6 +24822,7 @@ int main(int argc, char** argv) {
               {"effective_capacity_mwh", ss.effective_capacity_mwh},
               {"cycles_this_year", ss.cycles_this_year},
               {"cumulative_cycles", ss.cumulative_cycles},
+              {"age_since_replacement_years", ss.age_since_replacement_years},
               {"replaced", ss.replaced},
             });
           }

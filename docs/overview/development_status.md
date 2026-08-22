@@ -1,10 +1,141 @@
 # Development Status
 
-Updated: 2026-08-21
+Updated: 2026-08-22
 
 This is the living handoff for verified build state and active engineering work.
 Update it in place; do not create dated copies. Source, registered tests, and
 the current Git worktrees remain authoritative.
+
+## Time-series closure repair (current worktree)
+
+The annual/lifecycle repair pass is source-backed and intentionally narrower
+than a claim of full lifecycle closure. `AnnualProductionSimResult::feasible`
+now aggregates weekly UC and required OPF/PF stages; `schedule_only`,
+`physical_replay_complete`, `ens_complete`, and `model_scope` expose whether a
+physical certificate exists. Curtailment is computed from explicit
+available-minus-dispatch power and ENS carries a known/proxy flag. Annual
+cyclic SOC and penalty settings are forwarded to the lower-level model;
+`iterative_feedback=true` now runs a bounded bottom-up fixed-point loop over
+physical replay and updates ENS/curtailment penalties; hard budget violations
+remain infeasible. The annual UC is one coupled horizon, so SOC/ramp/commitment
+states cross week boundaries. Daily replay preserves every current `UCSchedule` trajectory row,
+direction row, market-storage row, and solver certificate.
+
+Lifecycle state now validates domains and cadence, uses stable storage indices,
+retains fractional equivalent-full cycles, and resets calendar age on
+replacement. The deterministic carbon estimator is asset-resolved for
+authored AC generators/static generators and declares its fallback/source.
+Sampling and its bound share one Neyman allocation and report `bound_passed`.
+Lifecycle defaults to physical annual replay and executes independent sampled
+OPF/PF corrections. External-grid profile/static factors, AC/DC storage
+inventory intensity and DC static-generator carbon are included. Embodied
+manufacturing carbon, converter/network material inventories and fuel heat-rate
+curves remain explicit open boundaries.
+
+Verified after the repair: `test_multiscale_comprehensive` 4 cases/75
+assertions, `test_uc_storage_efficiency` 2 cases/13 assertions, the registered
+`Multiscale comprehensive AC/DC case runs from milliseconds to a year`,
+`gui_api_e2e`, and `time_series_cross_engine_matrix` all pass in the current
+macOS Release tree. The latter retains the existing OpenDSS/GridLAB-D/HiGHS/
+SciPy evidence and is a PF/UC cross-engine check, not a lifecycle oracle.
+The time-series manual was rebuilt to
+`output/pdf/time_series_manual.pdf` (50 A4 pages); the XeLaTeX log has no
+overfull boxes, unresolved references, missing glyphs, or fatal errors, and all
+50 pages rendered successfully. No full CTest, sanitizer, or new external
+lifecycle oracle was run in this repair pass.
+
+## Time-series monograph and verification baseline (2026-08-22)
+
+The `time_series` manual is now a three-volume, 50-page source-equivalent
+monograph at PF/OPF granularity. In addition to the theory and
+`time_series_pf.cpp` coverage, two dedicated chapters (506 source lines) now
+audit every public option/result family and reachable branch in
+`annual_production_sim.cpp` and `lifecycle_simulation.cpp`: time/block slicing,
+L0 defaults, weekly look-ahead, daily replay, three parallel-day modes,
+energy/cost accounting, component statistics, yearly state mutation, SOH and
+replacement, deterministic strata, the separate Neyman bound allocation,
+carbon proxies, NPV, capacity scaling and comparison. The manual distinguishes
+declared fields from consumed behavior and does not promote roadmap behavior to
+current capability.
+
+The Release evidence recorded in the manual includes 24/24 and 168/168
+time-series PF convergence on the 21-AC/4-DC multiscale case (maximum residuals
+`4.10506e-10` and `4.11283e-10`), the storage recursion checks `SOC=0.35` and
+`0.53`, a three-year lifecycle HTTP run (`NPV=8718508.6873`, total carbon
+`149582.0631 tCO2`), and the 0.5×/1.0×/1.5× BESS capacity scan. The focused
+time-series CTest selection passed 29/29 tests. The current source rerun also
+passes 11/11 focused annual/SOC/replay tests, `gui_api_e2e`, and the registered
+`time_series_cross_engine_matrix`. The annual 365×24 h case is
+historically used `skip_replay=true`; new runs can enable coupled full-year
+replay. The HTTP lifecycle route constructs 6 h input by default and now
+defaults to physical replay plus sampled correction. OpenDSS
+and GridLAB-D remain per-step PF references, not UC/lifecycle oracles.
+
+The deep source audit is now split between closed runtime repairs and explicit
+remaining boundaries. Annual feasibility includes one coupled UC, hard budget
+certificates, cyclic SOC residuals, feedback status, required OPF/PF status and
+explicit curtailment/ENS provenance. Lifecycle replacement age, fractional
+cycles, AC/DC stable-index attribution, physical replay, sampled PF correction
+and grid/storage/DC carbon components are source-backed. Remaining boundaries
+are embodied manufacturing carbon, network/converter material inventories,
+fuel heat-rate curves, randomized coverage guarantees and the intentionally
+silent `verbose` flag. Schedule-only annual results remain explicitly non-AC
+certification.
+
+The manual was rebuilt with the repository LaTeX skill using XeLaTeX and
+rendered with Poppler. The final artifact is
+`output/pdf/time_series_manual.pdf` (50 A4 pages). All 50 pages were rendered
+at 120 dpi; the full contact sheets and the dense annual/lifecycle option,
+formula and result pages show no clipping, overlap, missing glyphs, broken
+tables or blank pages. The final XeLaTeX log has no overfull boxes, unresolved
+references/citations, missing glyphs or fatal errors. The local MIPSolvers HEAD remains
+`7721936245d5756193381b415457e6cf2214341e`, different from the recorded pin
+`3bf1e66749e3b3e0bbd57696a7d4f43ecf09218c`; this is a focused Release result,
+not a pinned-dependency or sanitizer baseline.
+
+## Harmonic state-space and converter-model upgrade (2026-08-22)
+
+The harmonic model layer now owns first-class `DCCapacitor`, `DCReactor`, and
+domain-qualified AC/DC `HarmonicFilter` collections. Their SI R/L/C, ESR/ESL,
+leakage and ratings survive JSON round trip, canonical bus remapping and DC
+dead-island stripping; stable component rows are available to result attribution.
+The per-order network assembly and the new HSS path both stamp these devices.
+
+`solve_harmonic_state_space` assembles one sparse AC/DC matrix over a requested
+positive-order Fourier grid. Explicit complex current injections and arbitrary
+frequency-coupled admittance entries share the same public contract. Results are
+broadcast to authored bus IDs and report per-device terminal complex-current
+spectra, matrix dimensions/nonzeros, factorization status, model scope and a
+default `1e-10` normalized backward-error admission gate. The production route is
+`POST /api/session/harmonics_hss`.
+
+Opt-in converter models now cover two-level sinusoidal PWM (fundamental plus two
+carrier groups), averaged MMC insertion with arm/submodule energy and circulating
+control, six-pulse LCC coefficients with commutation-overlap attenuation, and
+Buck/Boost/BuckBoost/Isolated DC/DC rectangular PWM. AC filters, DC-link/input/
+output capacitors, smoothing/arm/output inductors and delayed PI controllers are
+stamped explicitly. Missing physical parameters and unsupported Generic DC/DC
+models fail rather than fall back to an empirical spectrum.
+
+The rebuilt Release harmonic target passes 63 cases/412 assertions. New numerical
+gates include zero-coupling HSS versus per-order HPF and two independent closed
+forms (DC capacitor and an off-diagonal two-frequency block), all at `1e-10 pu`,
+plus nonzero cross-frequency response for all four converter families. The frozen
+1000-AC-node, 20-frequency, four-VSC case has matrix dimension 20,080 and passes
+the predeclared sparse-storage/dense-storage ratio below 20%. The production
+server target compiles. The mandatory 14/14 cross-engine matrix reran with
+OpenDSS and local GridLAB-D 5.3.0: maxima remain `5.333277457e-10 pu` and
+`5.349716508e-10 pu`; IEEE13/OpenDSS remains `1.651738435e-3 pu` over 164 points.
+Those engines validate network/RLC frequency response, not internal HSS switching
+matrices; converter validation is analytic/degeneration/backward-error evidence.
+
+The local dependency remains at `7721936245d5756193381b415457e6cf2214341e`,
+different from the recorded pin `3bf1e66749e3b3e0bbd57696a7d4f43ecf09218c`.
+The ten-chapter monograph was rebuilt with XeLaTeX to
+`output/pdf/harmonics_power_flow_manual.pdf` (19 A4 pages). All pages were
+rendered at 120 dpi; the new HSS pages and dense API/audit pages were visually
+checked with no clipping, overlap or broken tables. The final log has no
+overfull boxes, unresolved references, missing glyphs or formula warnings.
 
 ## Short-circuit theory-to-code closure and monograph (2026-08-21)
 
@@ -1614,6 +1745,39 @@ unavailable external GridLAB-D comparisons. The focused NCP/Schur GUI test,
 Canvas/WebGL linking, hybrid Auto OPF, and RPO cross-validation all pass. The
 main repository is at `1773aa0e75d7`; the clean MIPSolvers dependency is at the
 pinned `3bf1e66749e3`.
+
+## Harmonic power-flow closure
+
+The periodic steady-state harmonic scope is now closed across theory, implementation,
+failure semantics, and external evidence. The code fixes canonical transformer
+double-stamping; derives every linear/Newton `ok` flag from actual order status or
+convergence; reuses the pi/tap/phase-shift stamp for from/to terminal current;
+separates series current for copper loss; rejects invalid/duplicate orders and
+numeric options; and implements Y/YN, Z/ZN, Delta, and authored transformer zero-sequence
+impedance in the abc network. The HTTP branch spectrum exposes canonical branch ID,
+from current, to current, and series current.
+
+Focused Release verification passes `test_harmonics_power_flow` at 63 cases / 412
+assertions. The 14-case AC/three-phase/DC/hybrid matrix passes 14/14 with maxima
+`5.349715355e-10 pu` against NumPy, `5.333277457e-10 pu` against OpenDSS, and
+`5.349716508e-10 pu` across 24 mandatory GridLAB-D 5.3.0-20236
+(`e1841e1e:master:Modified`) frequency slices. IEEE13
+passes its pre-fixed `2e-3 pu` gate at `1.652e-3 pu` over 164 bus/phase/order points;
+the VSC equivalent-network OpenDSS comparison is `5.075e-10 pu`. GridLAB-D is now a
+hard CTest dependency for the harmonic cross-engine test and cannot silently skip.
+Machine-readable evidence lives in `external_data/harmonics_validation/` and the
+ten-chapter monograph is `docs/modules/harmonics_power_flow/harmonics_power_flow_manual.tex`.
+The changed production server target compiles, and `gui_api_e2e` passes against the
+rebuilt executable. The XeLaTeX monograph is 17 A4 pages at
+`output/pdf/harmonics_power_flow_manual.pdf`; all 17 pages were rendered at 144 dpi
+and visually reviewed. The final log has no overfull boxes, unresolved references,
+missing glyphs, or PDF-string warnings, and the page images have no clipping,
+overlap, broken tables, unintended blanks, or content touching the page boundary.
+
+The local dependency checkout remains at `7721936245d5756193381b415457e6cf2214341e`,
+which differs from the recorded MIPSolvers pin `3bf1e66749e3b3e0bbd57696a7d4f43ecf09218c`;
+focused results above therefore record the actual dependency HEAD and do not imply a
+pinned clean-clone build.
 
 ## Fast orientation
 

@@ -1,0 +1,43 @@
+\section{畸变指标、损耗、频扫与标准评价}
+\subsection{电压与电流指标}
+\implfull{harmonics\_power\_flow.cpp:thd\_from\_orders/harmonic\_metrics} 计算
+\begin{align}
+THD_V&=100\frac{\sqrt{\sum_{h\ne1}|V_h|^2}}{|V_1|},&
+IHD_h&=100\frac{|V_h|}{|V_1|},\\
+THD_I&=100\frac{\sqrt{\sum_{h>1}|I_{f,h}|^2}}{|I_{f,1}|},&
+TDD&=100\frac{\sqrt{\sum_{h>1}|I_{f,h}|^2}}{I_L}.
+\end{align}
+若用户未提供正的 \fld{i\_demand\_pu}，$I_L$ 回退为 from 端基波电流；此时 TDD 数值等于 THD，
+但语义仍是缺少独立最大需量基准的回退结果。
+
+\subsection{K-factor 与铜耗}
+\begin{equation}
+K=\frac{\sum_hh^2I_{f,h}^2}{\sum_hI_{f,h}^2},\qquad
+P_{cu}=\sum_h I_{series,h}^2R(h).
+\end{equation}
+K-factor 使用 from 端电流谱；铜耗使用串联元件电流，不包含线路充电电流。变比和相移由四元印章处理。
+\texttt{BranchHarmonicMetrics::branch\_index} 保留 canonical 身份，以便通过 BranchExpandMap 归因。
+
+\subsection{IEEE 519-2014 电压门限}
+\implfull{harmonics\_power\_flow.cpp:harmonic\_voltage\_limits} 当前实现的 IHD/THD 百分数门限为：
+\begin{center}\footnotesize
+\begin{tabular}{@{}ccc@{}}\toprule 电压等级 & 单次 IHD & THD\\ \midrule
+$V\le1$ kV & 5.0 & 8.0\\
+$1<V\le69$ kV & 3.0 & 5.0\\
+$69<V\le161$ kV & 1.5 & 2.5\\
+$V>161$ kV & 1.0 & 1.5\\ \bottomrule
+\end{tabular}
+\end{center}
+这些是电压畸变评价，不是 PCC 电流 TDD 表；模块不会从短路比自动选择 IEEE 519 电流限值。
+
+\subsection{GB/T 14549-1993 门限}
+实现按电压等级返回 THD、奇次 IHD、偶次 IHD：低压为 5/4/2，10--20 kV 为 4/3.2/1.6，
+35--66 kV 为 3/2.4/1.2，110 kV 为 2/1.6/0.8，更高电压为 1.5/1.2/0.6（单位均为百分数）。
+\texttt{check\_harmonic\_limits} 对每母线/相生成最差次数、门限、THD/IHD 布尔量和全局最差比。
+
+\subsection{频率扫描}
+单相扫描对每个频率倍数 $f$ 和目标节点 $k$ 解 $Y(f)V=e_k$，报告
+$Z_{kk}=V_k$ 的幅值/相角。三相扫描分别注入正、负、零序单位电流并读出同序电压。
+共振候选是离散曲线上相邻三点的局部极大，反共振是局部极小；它是筛查工具，不是模态阻尼或稳定性
+证书。扫描步长必须足够细，且频变参数模型必须与研究频带相符。
+

@@ -268,6 +268,9 @@ struct ExternalGrid {
   bool controllable{true};
 
   double emission_factor_tco2_mwh{0.0};
+  // Optional time-varying grid carbon intensity profile. Values are
+  // tCO2/MWh and replace the static factor for each time step.
+  int emission_factor_profile_id{-1};
 
   // OPF cost (0 = not participating in OPF objective)
   double cost_c2{0.0};

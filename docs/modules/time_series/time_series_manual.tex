@@ -1,13 +1,13 @@
 % !TEX program = xelatex
 % 编译方式：在本目录执行两遍 xelatex（详见 docs/_manual_common/README.md）。
-% 源码依据：src/time_series/ 与 include/hacdcpf/time_series/ 源码及
-%           docs/theory/time_series_power_flow_models.md 等，公式与参数以代码为准。
+% 源码依据：src/time_series/ 与 include/hacdcpf/time_series/ 源码、注册测试及
+%           docs/theory/time_series_power_flow_models.md、annual_simulation_models.md。
 \documentclass[UTF8,fontset=fandol,a4paper,11pt]{ctexart}
 \usepackage{../../_manual_common/hysim_manual}
 
 \title{\textbf{交直流混合高弹性能源电力系统仿真平台}\\[0.5em]
-       {\Large 时序生产模拟技术手册}\\[0.3em]
-       {\large 数学模型、接口参数、验证校核与工业级评价}}
+       {\Large 时序生产模拟理论与工程专著}\\[0.3em]
+       {\large SCUC、多时段 AC/DC、年度生产、生命周期与跨引擎验证}}
 \author{HySim-XJTU-HRPES（西安交通大学 HRPES 团队）}
 \date{\today}
 
@@ -21,6 +21,11 @@ UC$\to$OPF$\to$PF 流水线、分层（L0$\to$L1$\to$L2$\to$L3）年度生产模
 \textbf{诚实口径}：机组组合采用\textbf{无损 DC 潮流}——\fld{UCObjective}::\texttt{MinLoss}
 仅为“最小化发电”的代理；开启 \fld{enable\_dc\_network\_constraints} 时\textbf{不追加显式
 DC 支路热限}（仅经各换流器功率变量界隐式约束）。文档版式与《碳流追踪与碳排放核算技术手册》一致。
+本手册以独立理论卷推导经济调度与 SCUC、多时段 AC/DC 网络、储能与灵活资源、年度分解、
+生命周期和碳误差传播，再以实现卷逐式映射当前代码，以验证卷给出穷举、SciPy/HiGHS、
+OpenDSS 与 GridLAB-D 的可复现交叉验证。所有数值均给出案例构造、执行入口、索引空间、单位和门槛。
+生命周期 HTTP 层默认构造 6 h 时序数据，默认执行全年度耦合 UC、物理 OPF/PF replay
+和抽样 PF correction；只有显式关闭对应选项才是 schedule-only，结果会保留该限制标记。
 \end{abstract}
 
 \tableofcontents
@@ -54,18 +59,36 @@ UC 的可行性/最优性通过 \fld{feasible}、\fld{mip\_gap}、\fld{optimalit
 （\texttt{CrossValStep}）。生命周期碳精度由显式 \texttt{YearlyErrorBounds}（调度界、
 分层抽样界、储能碳 Lipschitz 界）声明，而非隐式保证。
 
+\part{理论卷：从经济调度到生命周期}
+\input{chapters/theory_scuc_fundamentals}
+\input{chapters/theory_network_storage_flexibility}
+\input{chapters/theory_decomposition_lifecycle}
+
+\part{实现卷：源码等价模型与接口}
+\input{chapters/scope_and_architecture}
+\input{chapters/time_data_and_profiles}
+\input{chapters/tspf_pipeline}
+\input{chapters/annual_decomposition}
+\input{chapters/implementation_annual_production}
+\input{chapters/lifecycle_and_carbon}
+\input{chapters/implementation_lifecycle_simulation}
+\input{chapters/api_http_results}
+\part{验证与审计卷}
+\input{chapters/numerical_validation}
+\input{chapters/audit_and_admission}
+
 \section{功能定位与架构}
 \subsection{公共入口族}
 \begin{center}\footnotesize
-\begin{tabular}{@{}L{6.8cm}L{2.8cm}L{5.4cm}@{}}
+\begin{tabular}{@{}L{5.3cm}L{4.4cm}L{5.3cm}@{}}
 \toprule
 入口 & 定义位置 & 说明\\
 \midrule
-\srcpath{solve\_time\_series\_pf(sys, ts\_data, opts)} & time\_series\_pf.hpp & 完整 UC$\to$OPF$\to$PF-校核流水线（逐步）\\
-\srcpath{solve\_unit\_commitment(sys, ts\_data, opts)} & 同上 & 第二相 DC 潮流 MILP 机组组合\\
-\srcpath{build\_time\_series\_system\_snapshot(...)} & 同上 & 逐步缩放后的系统快照\\
-\srcpath{solve\_annual\_production\_simulation(sys, ts\_data, opts)} & annual\_production\_sim.hpp & 分层 L0$\to$L1$\to$L2$\to$L3 年度模拟（或按日并行）\\
-\srcpath{run\_lifecycle\_simulation(sys, ts\_data, opts)} & lifecycle\_simulation.hpp & 多年退化/降额 + 误差界 + NPV\\
+\srcpath{solve\_time\_series\_pf} & time\_series\_pf.hpp & 完整 UC$\to$OPF$\to$PF-校核流水线（逐步）\\
+\srcpath{solve\_unit\_commitment} & 同上 & 第二相 DC 潮流 MILP 机组组合\\
+\srcpath{build\_time\_series\_system\_snapshot} & 同上 & 逐步缩放后的系统快照\\
+\srcpath{solve\_annual\_production\_simulation} & annual\_production\_sim.hpp & 分层 L0$\to$L1$\to$L2$\to$L3 年度模拟（或按日并行）\\
+\srcpath{run\_lifecycle\_simulation} & lifecycle\_simulation.hpp & 多年退化/降额 + 误差界 + NPV\\
 \srcpath{run\_lifecycle\_comparison(...)} & 同上 & 容量扫描对比\\
 \bottomrule
 \end{tabular}
@@ -89,7 +112,7 @@ UC 的可行性/最优性通过 \fld{feasible}、\fld{mip\_gap}、\fld{optimalit
 
 \section{接口与参数}
 \begin{paramtable}
-\fld{uc\_solver} & — & — & 枚举 & Auto & UC 求解器后端（Auto/Native/HiGHS/SCIP/Gurobi）\\
+\fld{uc\_solver} & — & — & 枚举 & Auto & UC 求解器后端（Auto、Native、HiGHS、SCIP、Gurobi）\\
 \fld{run\_opf} & — & — & 布尔 & true & UC 后是否逐步 OPF 再调度\\
 \fld{skip\_uc} & — & — & 布尔 & false & 跳过 UC（直接 OPF/PF）\\
 \fld{enable\_network\_constraints} & — & — & 布尔 & — & UC 是否加节点网络约束\\
@@ -133,7 +156,9 @@ MinCurtailment/\allowbreak MinLoss/\allowbreak Weighted）\\
         （\fld{enforce\_terminal\_soc\_cyclic}/\fld{enforce\_daily\_cyclic\_soc}）。依据：
         \srcpath{src/time\_series/time\_series\_pf.cpp:resolve\_parallel\_daily\_uc\_solver}、
         \srcpath{src/time\_series/annual\_production\_sim.cpp:solve\_parallel\_daily}；
-  \item 生命周期默认 \fld{step\_duration\_hr}=$6.0$（为提速偏粗），碳精度以 \texttt{YearlyErrorBounds} 为准。
+  \item 生命周期 C++ 核心不消费 \fld{LifecycleSimOptions.step\_duration\_hr}；真实分辨率来自
+        \fld{TimeSeriesData.step\_duration\_hr}。HTTP 路由默认据 \texttt{resolution=6h} 构造
+        6 h 输入。碳精度边界见 \texttt{YearlyErrorBounds}，但该结构是启发式界而非统计覆盖保证。
 \end{itemize}
 规范文档：\srcpath{docs/theory/time\_series\_power\_flow\_models.md}、
 \srcpath{docs/theory/sequential\_production\_simulation\_rich\_models.md}、

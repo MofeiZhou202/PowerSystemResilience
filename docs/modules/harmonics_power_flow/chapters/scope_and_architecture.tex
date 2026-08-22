@@ -1,0 +1,47 @@
+\section{研究范围、假设与软件架构}
+\subsection{物理问题与声明边界}
+周期稳态电压、电流写成整数次谐波相量
+\begin{equation}
+v(t)=\Re\left\{\sum_{h\in\mathcal H} \sqrt{2}\,\hat V_h e^{jh\omega_1t}\right\},\qquad
+i(t)=\Re\left\{\sum_{h\in\mathcal H} \sqrt{2}\,\hat I_h e^{jh\omega_1t}\right\}.
+\end{equation}
+本模块声明的核心范围是周期稳态、整数次频率、参数在单次求解期间不变的谐波潮流。线性入口假定
+各次数解耦；跨次 mixing 与双线性 NIC 只有在调用 coupled/Newton 入口并显式提供系数时才进入模型。
+开关暂态、次同步/间谐波、随机谐波、控制器时域限幅、保护动作和电磁暂态不属于本模块结果语义。
+这些问题应使用 dynamics/EMT 或专门的时域模型，而不是把未建模量补成零。
+
+\subsection{实现流水线}
+\begin{enumerate}
+  \item rich \texttt{HybridPowerSystem} 经 \srcpath{RichToCanonicalOperator::apply} 投影；
+  \item 变压器、开关和三绕组设备在 canonical 图中展开为带来源映射的支路；
+  \item 基频潮流可选执行，形成 $V_{ac,1}$、$V_{dc,0}$ 与 VSC 功率工作点；
+  \item 对每个 $h$ 或 $r$ 组装稀疏导纳矩阵和诺顿注入；
+  \item 线性入口逐阶 SparseLU，非线性入口组装复数或 $2N$ 实数 Jacobian；
+  \item 电压经母线映射恢复，支路端电流以与 Ybus 相同的印章重算；
+  \item 计算 THD/IHD、TDD、K-factor、铜耗和标准合规结论。
+\end{enumerate}
+
+三类 ID 必须区分：组件 \fld{index} 是稳定对外标识，vector position 是内部位置，图节点编号是临时编号。
+AC/DC 同号母线不共享映射。\texttt{HarmonicBranchFlow::branch\_index} 位于 canonical 支路空间；需要恢复
+变压器或开关身份时使用 \texttt{BranchExpandMap}，不得用数组游标猜测设备类型。
+
+\subsection{源码与证据入口}
+\begin{center}\footnotesize
+\begin{tabular}{@{}L{5.3cm}L{9.2cm}@{}}
+\toprule
+入口 & 责任\\ \midrule
+\srcpath{include/hacdcpf/analysis/harmonics\_power\_flow.hpp} & 公共类型、选项、结果和全部求解入口\\
+\srcpath{src/harmonics\_power\_flow/harmonics\_power\_flow.cpp} & 导纳、注入、Newton、频扫、指标与标准判据\\
+\srcpath{tests/test\_harmonics\_power\_flow.cpp} & 解析式、退化关系、失败语义与变压器序网回归\\
+\srcpath{tools/harmonics\_validation/} & NumPy、OpenDSS、GridLAB-D、IEEE13 外部验证\\
+\srcpath{external\_data/harmonics\_validation/} & 机器可读的数值证据与阈值\\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\subsection{可证伪的正确性准则}
+线性核心必须同时满足：节点残差 $\|Y_hV_h-I_h\|_\infty$ 受控；支路两端电流由同一四元印章恢复；
+径向网络满足 KCL；独立密集复节点解、OpenDSS 等值网络和 GridLAB-D 频率切片在固定门限内一致。
+Newton 结果只有在最终残差严格小于 \fld{newton\_tol} 且所有分解/回代成功时，\fld{converged} 和
+\fld{ok} 才能同时为真。
+

@@ -1,17 +1,27 @@
 {
-  "schema": "hacdcpf.harmonics.cross_engine_matrix.v1",
-  "generated_at": "2026-07-12T04:39:43.011294+00:00",
-  "tolerance_pu": 2e-08,
+  "schema": "hacdcpf.harmonics.cross_engine_matrix.v2",
+  "generated_at": "2026-08-21T15:57:27.504784+00:00",
+  "tolerances_pu": {
+    "native_numpy": 2e-08,
+    "native_opendss": 2e-06,
+    "native_gridlabd": 2e-05
+  },
   "engines": {
     "native": "HACDCPF frequency-domain HPF",
     "opendss": "DSS C-API Library version 0.14.5 revision 87d85c2622c8281b92255335bc7c09b11191b21d based on OpenDSS SVN 3723 [FPC 3.2.2] (64-bit build) MVMULT INCREMENTAL_Y CONTEXT_API PM 20240329033829; License Status: Open ",
-    "gridlabd": "5.3.0 capability assessment",
+    "gridlabd": {
+      "available": true,
+      "status": "available",
+      "executable": "/Users/tianyangzhao/Codes/gridlab-d/cmake-build/bin/gridlabd",
+      "version": "GridLAB-D 5.3.0-20236 (e1841e1e:master:Modified) 64-bit MACOSX RELEASE\nWARNING  [INIT] : unable to set thread policy: No such process",
+      "detail": "Independent complex steady-state frequency slices using explicit order-scaled impedances"
+    },
     "reference": "NumPy 2.0.2 dense complex nodal solve"
   },
   "methodology": {
     "native_vs_reference": "independent equation assembly",
     "opendss": "direct/equivalent AC frequency-domain network",
-    "gridlabd": "unsupported capability rows; no fundamental substitution"
+    "gridlabd": "one executed complex steady-state network per harmonic order, with explicit R(h), hX and source impedance"
   },
   "cases": [
     {
@@ -30,13 +40,13 @@
         "comparison": {
           "sample_count": 8,
           "max_complex_voltage_error_pu": 4.6137080356591216e-10,
-          "max_voltage_magnitude_error_pu": 6.000130947647619e-13,
-          "max_voltage_angle_error_deg": 3.7242256666091634e-07,
-          "max_voltage_ihd_error_pct": 6.000089314284196e-11,
-          "max_voltage_thd_error_pct": 1.1647571795947442e-10,
+          "max_voltage_magnitude_error_pu": 5.999784002952424e-13,
+          "max_voltage_angle_error_deg": 3.7242256666091645e-07,
+          "max_voltage_ihd_error_pct": 5.999822860758286e-11,
+          "max_voltage_thd_error_pct": 1.1647394160263502e-10,
           "max_sequence_component_error_pu": 0.0,
           "max_sequence_unbalance_error_pct": 0.0,
-          "max_branch_current_magnitude_error_pu": 6.000339114464737e-13
+          "max_branch_current_magnitude_error_pu": 6.000130947647619e-13
         }
       },
       "opendss": {
@@ -44,25 +54,152 @@
         "comparison": {
           "sample_count": 8,
           "max_complex_voltage_error_pu": 4.579103736717114e-10,
-          "max_voltage_magnitude_error_pu": 6.000477892342815e-13,
-          "max_voltage_angle_error_deg": 3.7000171290945564e-07,
-          "max_voltage_ihd_error_pct": 6.000444585652076e-11,
-          "max_voltage_thd_error_pct": 1.1647571795947442e-10,
+          "max_voltage_magnitude_error_pu": 6.000130947647619e-13,
+          "max_voltage_angle_error_deg": 3.700017129094557e-07,
+          "max_voltage_ihd_error_pct": 6.000178132126166e-11,
+          "max_voltage_thd_error_pct": 1.1647394160263502e-10,
           "max_sequence_component_error_pu": 0.0,
           "max_sequence_unbalance_error_pct": 0.0
         }
       },
       "gridlabd": {
-        "status": "unsupported_frequency_domain_hpf",
-        "comparison": null,
-        "note": "GridLAB-D 5.3 exposes fundamental and deltamode waveform simulation but no native frequency-domain harmonic-order voltage/current API. A validated deltamode setup plus integer-cycle FFT is required for numeric AC comparison; DC and hybrid harmonic ports have no matching native model."
+        "status": "executed_frequency_slices",
+        "comparison": {
+          "sample_count": 8,
+          "max_complex_voltage_error_pu": 4.613710583907832e-10,
+          "max_voltage_magnitude_error_pu": 5.999992169769541e-13,
+          "max_voltage_angle_error_deg": 3.7242243943872913e-07,
+          "max_voltage_ihd_error_pct": 6.000000496442226e-11,
+          "max_voltage_thd_error_pct": 1.1646328346159862e-10,
+          "max_sequence_component_error_pu": 0.0,
+          "max_sequence_unbalance_error_pct": 0.0
+        },
+        "slice_count": 4,
+        "slices": [
+          {
+            "order": 5,
+            "voltages_pu": [
+              {
+                "real": -0.010418890660016144,
+                "imag": 0.059088465180732436
+              },
+              {
+                "real": -0.015037451338214576,
+                "imag": 0.0887368866776992
+              }
+            ],
+            "measured_source_impedance_pu": {
+              "real": -5.4488286665314e-15,
+              "imag": 1.0000000000000002
+            },
+            "measured_transfer_impedance_pu": {
+              "real": 0.010000000000030951,
+              "imag": 1.5
+            },
+            "authored_source_impedance_pu": {
+              "real": 0.0,
+              "imag": 1.0
+            },
+            "authored_transfer_impedance_pu": {
+              "real": 0.01,
+              "imag": 1.5
+            }
+          },
+          {
+            "order": 7,
+            "voltages_pu": [
+              {
+                "real": 0.020110784427550866,
+                "imag": 0.05525392610221073
+              },
+              {
+                "real": 0.03056084754205359,
+                "imag": 0.08273724069312079
+              }
+            ],
+            "measured_source_impedance_pu": {
+              "real": 4.0269145603910993e-14,
+              "imag": 1.399999999999997
+            },
+            "measured_transfer_impedance_pu": {
+              "real": 0.009999999999985881,
+              "imag": 2.100000000000006
+            },
+            "authored_source_impedance_pu": {
+              "real": 0.0,
+              "imag": 1.4000000000000001
+            },
+            "authored_transfer_impedance_pu": {
+              "real": 0.01,
+              "imag": 2.1
+            }
+          },
+          {
+            "order": 11,
+            "voltages_pu": [
+              {
+                "real": -0.03407044031925342,
+                "imag": 0.048657631430765166
+              },
+              {
+                "real": -0.050884489426921496,
+                "imag": 0.07314131278396305
+              }
+            ],
+            "measured_source_impedance_pu": {
+              "real": -5.914969754883742e-14,
+              "imag": 2.199999999999999
+            },
+            "measured_transfer_impedance_pu": {
+              "real": 0.009999999999940914,
+              "imag": 3.3000000000000016
+            },
+            "authored_source_impedance_pu": {
+              "real": 0.0,
+              "imag": 2.2
+            },
+            "authored_transfer_impedance_pu": {
+              "real": 0.01,
+              "imag": 3.3000000000000003
+            }
+          },
+          {
+            "order": 13,
+            "voltages_pu": [
+              {
+                "real": 0.03860803025278553,
+                "imag": 0.03860803025278536
+              },
+              {
+                "real": 0.05806053780322719,
+                "imag": 0.0577635529551292
+              }
+            ],
+            "measured_source_impedance_pu": {
+              "real": 6.297677682111612e-15,
+              "imag": 2.5999999999999965
+            },
+            "measured_transfer_impedance_pu": {
+              "real": 0.009999999999988147,
+              "imag": 3.899999999999997
+            },
+            "authored_source_impedance_pu": {
+              "real": 0.0,
+              "imag": 2.6
+            },
+            "authored_transfer_impedance_pu": {
+              "real": 0.01,
+              "imag": 3.9000000000000004
+            }
+          }
+        ]
       },
       "metrics": {
         "voltage_ihd_pct": [
           [
             {
               "order": 5,
-              "ihd_pct": 5.999999999939998
+              "ihd_pct": 5.999999999940001
             },
             {
               "order": 7,
@@ -74,17 +211,17 @@
             },
             {
               "order": 13,
-              "ihd_pct": 5.459999999945402
+              "ihd_pct": 5.459999999945401
             }
           ],
           [
             {
               "order": 5,
-              "ihd_pct": 9.00019999772782
+              "ihd_pct": 9.000199997727826
             },
             {
               "order": 7,
-              "ihd_pct": 8.820099999384114
+              "ihd_pct": 8.820099999384116
             },
             {
               "order": 11,
@@ -97,10 +234,10 @@
           ]
         ],
         "voltage_thd_pct": [
-          11.647729392344527,
-          17.471781076828087
+          11.647729392344528,
+          17.47178107682809
         ],
-        "max_voltage_thd_pct": 17.471781076828087,
+        "max_voltage_thd_pct": 17.47178107682809,
         "sequence": []
       },
       "pass": true
@@ -120,52 +257,179 @@
         "status": "executed",
         "comparison": {
           "sample_count": 8,
-          "max_complex_voltage_error_pu": 3.464066580990893e-10,
-          "max_voltage_magnitude_error_pu": 4.80004230807296e-12,
-          "max_voltage_angle_error_deg": 3.277318613619187e-07,
-          "max_voltage_ihd_error_pct": 4.800044806074766e-10,
+          "max_complex_voltage_error_pu": 3.464066729604499e-10,
+          "max_voltage_magnitude_error_pu": 4.800049246966864e-12,
+          "max_voltage_angle_error_deg": 3.277318665107096e-07,
+          "max_voltage_ihd_error_pct": 4.800053687858963e-10,
           "max_voltage_thd_error_pct": 9.318270599578682e-10,
           "max_sequence_component_error_pu": 0.0,
           "max_sequence_unbalance_error_pct": 0.0,
-          "max_branch_current_magnitude_error_pu": 4.8000284302851526e-12
+          "max_branch_current_magnitude_error_pu": 4.80004230807296e-12
         }
       },
       "opendss": {
         "status": "direct_equivalent_network",
         "comparison": {
           "sample_count": 8,
-          "max_complex_voltage_error_pu": 3.436374575904802e-10,
-          "max_voltage_magnitude_error_pu": 4.799986796921729e-12,
-          "max_voltage_angle_error_deg": 3.253110235132314e-07,
-          "max_voltage_ihd_error_pct": 4.799991515369584e-10,
+          "max_complex_voltage_error_pu": 3.436374724520063e-10,
+          "max_voltage_magnitude_error_pu": 4.799993735815633e-12,
+          "max_voltage_angle_error_deg": 3.253110286620222e-07,
+          "max_voltage_ihd_error_pct": 4.800000397153781e-10,
           "max_voltage_thd_error_pct": 9.318181781736712e-10,
           "max_sequence_component_error_pu": 0.0,
           "max_sequence_unbalance_error_pct": 0.0
         }
       },
       "gridlabd": {
-        "status": "unsupported_frequency_domain_hpf",
-        "comparison": null,
-        "note": "GridLAB-D 5.3 exposes fundamental and deltamode waveform simulation but no native frequency-domain harmonic-order voltage/current API. A validated deltamode setup plus integer-cycle FFT is required for numeric AC comparison; DC and hybrid harmonic ports have no matching native model."
+        "status": "executed_frequency_slices",
+        "comparison": {
+          "sample_count": 8,
+          "max_complex_voltage_error_pu": 3.464034943813588e-10,
+          "max_voltage_magnitude_error_pu": 4.799646791120438e-12,
+          "max_voltage_angle_error_deg": 3.277281229978495e-07,
+          "max_voltage_ihd_error_pct": 4.799645125785901e-10,
+          "max_voltage_thd_error_pct": 9.318110727463136e-10,
+          "max_sequence_component_error_pu": 0.0,
+          "max_sequence_unbalance_error_pct": 0.0
+        },
+        "slice_count": 4,
+        "slices": [
+          {
+            "order": 5,
+            "voltages_pu": [
+              {
+                "real": -0.010418890660017185,
+                "imag": 0.05908846518073183
+              },
+              {
+                "real": -0.007775591577538061,
+                "imag": 0.07173966946968353
+              }
+            ],
+            "measured_source_impedance_pu": {
+              "real": -2.4268928511538625e-14,
+              "imag": 0.9999999999999933
+            },
+            "measured_transfer_impedance_pu": {
+              "real": 0.08000000000037592,
+              "imag": 1.1999999999999893
+            },
+            "authored_source_impedance_pu": {
+              "real": 0.0,
+              "imag": 1.0
+            },
+            "authored_transfer_impedance_pu": {
+              "real": 0.08,
+              "imag": 1.2
+            }
+          },
+          {
+            "order": 7,
+            "voltages_pu": [
+              {
+                "real": 0.020110784427546425,
+                "imag": 0.05525392610221257
+              },
+              {
+                "real": 0.02729030851887906,
+                "imag": 0.06515552364108733
+              }
+            ],
+            "measured_source_impedance_pu": {
+              "real": -7.411152426526924e-14,
+              "imag": 1.4000000000000021
+            },
+            "measured_transfer_impedance_pu": {
+              "real": 0.07999999999947112,
+              "imag": 1.6800000000000068
+            },
+            "authored_source_impedance_pu": {
+              "real": 0.0,
+              "imag": 1.4000000000000001
+            },
+            "authored_transfer_impedance_pu": {
+              "real": 0.08,
+              "imag": 1.6800000000000002
+            }
+          },
+          {
+            "order": 11,
+            "voltages_pu": [
+              {
+                "real": -0.03407044031925393,
+                "imag": 0.04865763143076494
+              },
+              {
+                "real": -0.039115159967438085,
+                "imag": 0.05962808281943778
+              }
+            ],
+            "measured_source_impedance_pu": {
+              "real": -7.93054185635526e-14,
+              "imag": 2.200000000000003
+            },
+            "measured_transfer_impedance_pu": {
+              "real": 0.08000000000001165,
+              "imag": 2.6400000000000006
+            },
+            "authored_source_impedance_pu": {
+              "real": 0.0,
+              "imag": 2.2
+            },
+            "authored_transfer_impedance_pu": {
+              "real": 0.08,
+              "imag": 2.64
+            }
+          },
+          {
+            "order": 13,
+            "voltages_pu": [
+              {
+                "real": 0.03860803025278802,
+                "imag": 0.03860803025278298
+              },
+              {
+                "real": 0.04751757569573839,
+                "imag": 0.045141696910947084
+              }
+            ],
+            "measured_source_impedance_pu": {
+              "real": 1.70019953976791e-13,
+              "imag": 2.6
+            },
+            "measured_transfer_impedance_pu": {
+              "real": 0.08000000000015217,
+              "imag": 3.1200000000000094
+            },
+            "authored_source_impedance_pu": {
+              "real": 0.0,
+              "imag": 2.6
+            },
+            "authored_transfer_impedance_pu": {
+              "real": 0.08,
+              "imag": 3.12
+            }
+          }
+        ]
       },
       "metrics": {
         "voltage_ihd_pct": [
           [
             {
               "order": 5,
-              "ihd_pct": 5.9999999995199955
+              "ihd_pct": 5.999999999519995
             },
             {
               "order": 7,
-              "ihd_pct": 5.879999999529592
+              "ihd_pct": 5.879999999529599
             },
             {
               "order": 11,
-              "ihd_pct": 5.939999999524799
+              "ihd_pct": 5.939999999524794
             },
             {
               "order": 13,
-              "ihd_pct": 5.459999999563204
+              "ihd_pct": 5.459999999563202
             }
           ],
           [
@@ -175,15 +439,15 @@
             },
             {
               "order": 7,
-              "ihd_pct": 7.06399546981365
+              "ihd_pct": 7.063995469813657
             },
             {
               "order": 11,
-              "ihd_pct": 7.131271976128
+              "ihd_pct": 7.131271976127995
             },
             {
               "order": 13,
-              "ihd_pct": 6.55415349209162
+              "ihd_pct": 6.5541534920916185
             }
           ]
         ],
@@ -211,58 +475,185 @@
         "status": "executed",
         "comparison": {
           "sample_count": 8,
-          "max_complex_voltage_error_pu": 3.819846893037048e-10,
-          "max_voltage_magnitude_error_pu": 7.880293639850322e-12,
-          "max_voltage_angle_error_deg": 3.426287756291919e-07,
-          "max_voltage_ihd_error_pct": 7.880291974515785e-10,
-          "max_voltage_thd_error_pct": 1.361577517400292e-09,
+          "max_complex_voltage_error_pu": 3.819846877258077e-10,
+          "max_voltage_magnitude_error_pu": 7.880335273213745e-12,
+          "max_voltage_angle_error_deg": 3.4262877562919174e-07,
+          "max_voltage_ihd_error_pct": 7.88033638343677e-10,
+          "max_voltage_thd_error_pct": 1.3615846228276496e-09,
           "max_sequence_component_error_pu": 0.0,
           "max_sequence_unbalance_error_pct": 0.0,
-          "max_branch_current_magnitude_error_pu": 5.3665336063879465e-12
+          "max_branch_current_magnitude_error_pu": 5.366554423069658e-12
         }
       },
       "opendss": {
         "status": "direct_equivalent_network",
         "comparison": {
           "sample_count": 8,
-          "max_complex_voltage_error_pu": 3.789830938466133e-10,
-          "max_voltage_magnitude_error_pu": 7.880335273213745e-12,
-          "max_voltage_angle_error_deg": 3.4020791551662176e-07,
-          "max_voltage_ihd_error_pct": 7.88033638343677e-10,
-          "max_voltage_thd_error_pct": 1.3615721883297738e-09,
+          "max_complex_voltage_error_pu": 3.789830922661675e-10,
+          "max_voltage_magnitude_error_pu": 7.880376906577169e-12,
+          "max_voltage_angle_error_deg": 3.402079155166216e-07,
+          "max_voltage_ihd_error_pct": 7.880380792357755e-10,
+          "max_voltage_thd_error_pct": 1.3615792937571314e-09,
           "max_sequence_component_error_pu": 0.0,
           "max_sequence_unbalance_error_pct": 0.0
         }
       },
       "gridlabd": {
-        "status": "unsupported_frequency_domain_hpf",
-        "comparison": null,
-        "note": "GridLAB-D 5.3 exposes fundamental and deltamode waveform simulation but no native frequency-domain harmonic-order voltage/current API. A validated deltamode setup plus integer-cycle FFT is required for numeric AC comparison; DC and hybrid harmonic ports have no matching native model."
+        "status": "executed_frequency_slices",
+        "comparison": {
+          "sample_count": 8,
+          "max_complex_voltage_error_pu": 3.81984235589599e-10,
+          "max_voltage_magnitude_error_pu": 7.880474051091824e-12,
+          "max_voltage_angle_error_deg": 3.4262989200388494e-07,
+          "max_voltage_ihd_error_pct": 7.880478491983922e-10,
+          "max_voltage_thd_error_pct": 1.3615881755413284e-09,
+          "max_sequence_component_error_pu": 0.0,
+          "max_sequence_unbalance_error_pct": 0.0
+        },
+        "slice_count": 4,
+        "slices": [
+          {
+            "order": 5,
+            "voltages_pu": [
+              {
+                "real": -0.010418890660016856,
+                "imag": 0.05908846518073223
+              },
+              {
+                "real": -0.008259524864794527,
+                "imag": 0.07774689864559238
+              }
+            ],
+            "measured_source_impedance_pu": {
+              "real": -1.7713987281470345e-14,
+              "imag": 0.999999999999999
+            },
+            "measured_transfer_impedance_pu": {
+              "real": 0.08944271910026493,
+              "imag": 1.3
+            },
+            "authored_source_impedance_pu": {
+              "real": 0.0,
+              "imag": 1.0
+            },
+            "authored_transfer_impedance_pu": {
+              "real": 0.08944271909999159,
+              "imag": 1.3
+            }
+          },
+          {
+            "order": 7,
+            "voltages_pu": [
+              {
+                "real": 0.020110784427548864,
+                "imag": 0.05525392610221139
+              },
+              {
+                "real": 0.030320823967997672,
+                "imag": 0.07030987152528195
+              }
+            ],
+            "measured_source_impedance_pu": {
+              "real": -9.95179878604069e-15,
+              "imag": 1.3999999999999955
+            },
+            "measured_transfer_impedance_pu": {
+              "real": 0.10583005244261035,
+              "imag": 1.8199999999999914
+            },
+            "authored_source_impedance_pu": {
+              "real": 0.0,
+              "imag": 1.4000000000000001
+            },
+            "authored_transfer_impedance_pu": {
+              "real": 0.10583005244258363,
+              "imag": 1.82
+            }
+          },
+          {
+            "order": 11,
+            "voltages_pu": [
+              {
+                "real": -0.0340704403192544,
+                "imag": 0.04865763143076468
+              },
+              {
+                "real": -0.04135740683970836,
+                "imag": 0.06530944571419056
+              }
+            ],
+            "measured_source_impedance_pu": {
+              "real": -9.91602268638241e-14,
+              "imag": 2.200000000000005
+            },
+            "measured_transfer_impedance_pu": {
+              "real": 0.13266499161366221,
+              "imag": 2.8600000000000163
+            },
+            "authored_source_impedance_pu": {
+              "real": 0.0,
+              "imag": 2.2
+            },
+            "authored_transfer_impedance_pu": {
+              "real": 0.132664991614216,
+              "imag": 2.8600000000000003
+            }
+          },
+          {
+            "order": 13,
+            "voltages_pu": [
+              {
+                "real": 0.03860803025278489,
+                "imag": 0.03860803025278642
+              },
+              {
+                "real": 0.05233202752433057,
+                "imag": 0.048048851132912
+              }
+            ],
+            "measured_source_impedance_pu": {
+              "real": -5.159557057724316e-14,
+              "imag": 2.6000000000000107
+            },
+            "measured_transfer_impedance_pu": {
+              "real": 0.14422205101858113,
+              "imag": 3.380000000000009
+            },
+            "authored_source_impedance_pu": {
+              "real": 0.0,
+              "imag": 2.6
+            },
+            "authored_transfer_impedance_pu": {
+              "real": 0.14422205101855956,
+              "imag": 3.38
+            }
+          }
+        ]
       },
       "metrics": {
         "voltage_ihd_pct": [
           [
             {
               "order": 5,
-              "ihd_pct": 5.9999999994633475
+              "ihd_pct": 5.999999999463341
             },
             {
               "order": 7,
-              "ihd_pct": 5.879999999377723
+              "ihd_pct": 5.8799999993777226
             },
             {
               "order": 11,
-              "ihd_pct": 5.939999999211969
+              "ihd_pct": 5.939999999211965
             },
             {
               "order": 13,
-              "ihd_pct": 5.459999999212548
+              "ihd_pct": 5.459999999212551
             }
           ],
           [
             {
               "order": 5,
-              "ihd_pct": 7.818439741758265
+              "ihd_pct": 7.818439741758258
             },
             {
               "order": 7,
@@ -270,19 +661,19 @@
             },
             {
               "order": 11,
-              "ihd_pct": 7.7303032277852015
+              "ihd_pct": 7.730303227785196
             },
             {
               "order": 13,
-              "ihd_pct": 7.104458599642921
+              "ihd_pct": 7.104458599642924
             }
           ]
         ],
         "voltage_thd_pct": [
-          11.647729391099428,
-          15.165329669280533
+          11.647729391099421,
+          15.165329669280528
         ],
-        "max_voltage_thd_pct": 15.165329669280533,
+        "max_voltage_thd_pct": 15.165329669280528,
         "sequence": []
       },
       "pass": true
@@ -303,13 +694,13 @@
         "comparison": {
           "sample_count": 8,
           "max_complex_voltage_error_pu": 3.8190356034592815e-10,
-          "max_voltage_magnitude_error_pu": 4.345988846576887e-12,
+          "max_voltage_magnitude_error_pu": 4.346079052197638e-12,
           "max_voltage_angle_error_deg": 3.426287481931626e-07,
-          "max_voltage_ihd_error_pct": 4.345990234355668e-10,
-          "max_voltage_thd_error_pct": 8.063008039016495e-10,
+          "max_voltage_ihd_error_pct": 4.346079052197638e-10,
+          "max_voltage_thd_error_pct": 8.063025802584889e-10,
           "max_sequence_component_error_pu": 0.0,
           "max_sequence_unbalance_error_pct": 0.0,
-          "max_branch_current_magnitude_error_pu": 3.7416042486526635e-12
+          "max_branch_current_magnitude_error_pu": 3.741590370864856e-12
         }
       },
       "opendss": {
@@ -317,25 +708,152 @@
         "comparison": {
           "sample_count": 8,
           "max_complex_voltage_error_pu": 3.7890382194145216e-10,
-          "max_voltage_magnitude_error_pu": 4.346016602152503e-12,
+          "max_voltage_magnitude_error_pu": 4.3461068077732534e-12,
           "max_voltage_angle_error_deg": 3.402079071639205e-07,
-          "max_voltage_ihd_error_pct": 4.346016879708259e-10,
-          "max_voltage_thd_error_pct": 8.062990275448101e-10,
+          "max_voltage_ihd_error_pct": 4.346105697550229e-10,
+          "max_voltage_thd_error_pct": 8.063008039016495e-10,
           "max_sequence_component_error_pu": 0.0,
           "max_sequence_unbalance_error_pct": 0.0
         }
       },
       "gridlabd": {
-        "status": "unsupported_frequency_domain_hpf",
-        "comparison": null,
-        "note": "GridLAB-D 5.3 exposes fundamental and deltamode waveform simulation but no native frequency-domain harmonic-order voltage/current API. A validated deltamode setup plus integer-cycle FFT is required for numeric AC comparison; DC and hybrid harmonic ports have no matching native model."
+        "status": "executed_frequency_slices",
+        "comparison": {
+          "sample_count": 8,
+          "max_complex_voltage_error_pu": 3.819055330958926e-10,
+          "max_voltage_magnitude_error_pu": 4.345933335425656e-12,
+          "max_voltage_angle_error_deg": 3.426304243454797e-07,
+          "max_voltage_ihd_error_pct": 4.345936943650486e-10,
+          "max_voltage_thd_error_pct": 8.063167911132041e-10,
+          "max_sequence_component_error_pu": 0.0,
+          "max_sequence_unbalance_error_pct": 0.0
+        },
+        "slice_count": 4,
+        "slices": [
+          {
+            "order": 5,
+            "voltages_pu": [
+              {
+                "real": -0.010418890660011762,
+                "imag": 0.05908846518073333
+              },
+              {
+                "real": -0.009859761002462098,
+                "imag": 0.0774647338390166
+              }
+            ],
+            "measured_source_impedance_pu": {
+              "real": 6.906204933046262e-14,
+              "imag": 1.0000000000000022
+            },
+            "measured_transfer_impedance_pu": {
+              "real": 0.06236067977544887,
+              "imag": 1.2999999999999952
+            },
+            "authored_source_impedance_pu": {
+              "real": 0.0,
+              "imag": 1.0
+            },
+            "authored_transfer_impedance_pu": {
+              "real": 0.0623606797749979,
+              "imag": 1.3
+            }
+          },
+          {
+            "order": 7,
+            "voltages_pu": [
+              {
+                "real": 0.02011078442754735,
+                "imag": 0.05525392610221248
+              },
+              {
+                "real": 0.02876690441176526,
+                "imag": 0.07087545199019557
+              }
+            ],
+            "measured_source_impedance_pu": {
+              "real": -5.262480450918505e-14,
+              "imag": 1.4000000000000077
+            },
+            "measured_transfer_impedance_pu": {
+              "real": 0.06645751311026589,
+              "imag": 1.8200000000000112
+            },
+            "authored_source_impedance_pu": {
+              "real": 0.0,
+              "imag": 1.4000000000000001
+            },
+            "authored_transfer_impedance_pu": {
+              "real": 0.0664575131106459,
+              "imag": 1.82
+            }
+          },
+          {
+            "order": 11,
+            "voltages_pu": [
+              {
+                "real": -0.03407044031925461,
+                "imag": 0.04865763143076415
+              },
+              {
+                "real": -0.0426733468133648,
+                "imag": 0.06438801462480416
+              }
+            ],
+            "measured_source_impedance_pu": {
+              "real": -1.1675840533617963e-13,
+              "imag": 2.1999999999999935
+            },
+            "measured_transfer_impedance_pu": {
+              "real": 0.07316624790345558,
+              "imag": 2.859999999999996
+            },
+            "authored_source_impedance_pu": {
+              "real": 0.0,
+              "imag": 2.2
+            },
+            "authored_transfer_impedance_pu": {
+              "real": 0.073166247903554,
+              "imag": 2.8600000000000003
+            }
+          },
+          {
+            "order": 13,
+            "voltages_pu": [
+              {
+                "real": 0.038608030252784385,
+                "imag": 0.03860803025278663
+              },
+              {
+                "real": 0.05131980607374371,
+                "imag": 0.04906107258349861
+              }
+            ],
+            "measured_source_impedance_pu": {
+              "real": -7.554764849926144e-14,
+              "imag": 2.600000000000001
+            },
+            "measured_transfer_impedance_pu": {
+              "real": 0.07605551275454615,
+              "imag": 3.380000000000001
+            },
+            "authored_source_impedance_pu": {
+              "real": 0.0,
+              "imag": 2.6
+            },
+            "authored_transfer_impedance_pu": {
+              "real": 0.0760555127546399,
+              "imag": 3.38
+            }
+          }
+        ]
       },
       "metrics": {
         "voltage_ihd_pct": [
           [
             {
               "order": 5,
-              "ihd_pct": 5.999999999625834
+              "ihd_pct": 5.999999999625839
             },
             {
               "order": 7,
@@ -343,7 +861,7 @@
             },
             {
               "order": 11,
-              "ihd_pct": 5.939999999565397
+              "ihd_pct": 5.939999999565388
             },
             {
               "order": 13,
@@ -353,7 +871,7 @@
           [
             {
               "order": 5,
-              "ihd_pct": 7.808969122402548
+              "ihd_pct": 7.808969122402553
             },
             {
               "order": 7,
@@ -361,7 +879,7 @@
             },
             {
               "order": 11,
-              "ihd_pct": 7.724526493721745
+              "ihd_pct": 7.7245264937217355
             },
             {
               "order": 13,
@@ -370,10 +888,10 @@
           ]
         ],
         "voltage_thd_pct": [
-          11.647729391654703,
-          15.151371770500955
+          11.647729391654702,
+          15.151371770500951
         ],
-        "max_voltage_thd_pct": 15.151371770500955,
+        "max_voltage_thd_pct": 15.151371770500951,
         "sequence": []
       },
       "pass": true
@@ -394,12 +912,12 @@
         "comparison": {
           "sample_count": 24,
           "max_complex_voltage_error_pu": 4.2020229977219473e-10,
-          "max_voltage_magnitude_error_pu": 6.000130947647619e-13,
-          "max_voltage_angle_error_deg": 3.575256831219639e-07,
-          "max_voltage_ihd_error_pct": 6.000178132126166e-11,
+          "max_voltage_magnitude_error_pu": 5.999992169769541e-13,
+          "max_voltage_angle_error_deg": 3.57525682869477e-07,
+          "max_voltage_ihd_error_pct": 6.000000496442226e-11,
           "max_voltage_thd_error_pct": 1.1647571795947442e-10,
-          "max_sequence_component_error_pu": 5.999922780830502e-13,
-          "max_sequence_unbalance_error_pct": 1.6288978336734454e-14,
+          "max_sequence_component_error_pu": 5.999853391891463e-13,
+          "max_sequence_unbalance_error_pct": 2.3468295604910265e-14,
           "max_branch_current_magnitude_error_pu": 0.0
         }
       },
@@ -407,26 +925,27 @@
         "status": "direct_phase_domain_equivalent",
         "comparison": {
           "sample_count": 24,
-          "max_complex_voltage_error_pu": 4.255851601072769e-10,
-          "max_voltage_magnitude_error_pu": 5.999784002952424e-13,
-          "max_voltage_angle_error_deg": 3.6156039650546376e-07,
-          "max_voltage_ihd_error_pct": 5.999822860758286e-11,
+          "max_complex_voltage_error_pu": 4.2558515646684714e-10,
+          "max_voltage_magnitude_error_pu": 5.999645225074346e-13,
+          "max_voltage_angle_error_deg": 3.615603966317073e-07,
+          "max_voltage_ihd_error_pct": 5.999645225074346e-11,
           "max_voltage_thd_error_pct": 1.1647216524579562e-10,
-          "max_sequence_component_error_pu": 5.464394831489483e-12,
-          "max_sequence_unbalance_error_pct": 9.199583567737585e-09
+          "max_sequence_component_error_pu": 5.4643958971553405e-12,
+          "max_sequence_unbalance_error_pct": 9.199575886587071e-09
         }
       },
       "gridlabd": {
-        "status": "unsupported_frequency_domain_hpf",
+        "status": "unsupported_or_unavailable",
         "comparison": null,
-        "note": "GridLAB-D 5.3 exposes fundamental and deltamode waveform simulation but no native frequency-domain harmonic-order voltage/current API. A validated deltamode setup plus integer-cycle FFT is required for numeric AC comparison; DC and hybrid harmonic ports have no matching native model."
+        "slice_count": 0,
+        "slices": []
       },
       "metrics": {
         "voltage_ihd_pct": [
           [
             {
               "order": 5,
-              "ihd_pct": 5.9999999999399956
+              "ihd_pct": 5.999999999939997
             },
             {
               "order": 7,
@@ -434,43 +953,7 @@
             },
             {
               "order": 11,
-              "ihd_pct": 5.9399999999406
-            },
-            {
-              "order": 13,
-              "ihd_pct": 5.459999999945403
-            }
-          ],
-          [
-            {
-              "order": 5,
-              "ihd_pct": 5.999999999939996
-            },
-            {
-              "order": 7,
-              "ihd_pct": 5.8799999999412
-            },
-            {
-              "order": 11,
-              "ihd_pct": 5.939999999940601
-            },
-            {
-              "order": 13,
-              "ihd_pct": 5.459999999945403
-            }
-          ],
-          [
-            {
-              "order": 5,
-              "ihd_pct": 5.999999999939998
-            },
-            {
-              "order": 7,
-              "ihd_pct": 5.8799999999412
-            },
-            {
-              "order": 11,
-              "ihd_pct": 5.939999999940602
+              "ihd_pct": 5.9399999999405955
             },
             {
               "order": 13,
@@ -480,33 +963,51 @@
           [
             {
               "order": 5,
-              "ihd_pct": 8.400214282939968
+              "ihd_pct": 5.999999999939998
             },
             {
               "order": 7,
-              "ihd_pct": 8.232107142119576
+              "ihd_pct": 5.879999999941201
             },
             {
               "order": 11,
-              "ihd_pct": 8.316043831012587
+              "ihd_pct": 5.939999999940597
             },
             {
               "order": 13,
-              "ihd_pct": 7.64402884606198
+              "ihd_pct": 5.459999999945402
             }
           ],
           [
             {
               "order": 5,
-              "ihd_pct": 8.400214282939968
+              "ihd_pct": 5.999999999939998
             },
             {
               "order": 7,
-              "ihd_pct": 8.232107142119576
+              "ihd_pct": 5.879999999941201
             },
             {
               "order": 11,
-              "ihd_pct": 8.316043831012589
+              "ihd_pct": 5.939999999940597
+            },
+            {
+              "order": 13,
+              "ihd_pct": 5.459999999945402
+            }
+          ],
+          [
+            {
+              "order": 5,
+              "ihd_pct": 8.40021428293997
+            },
+            {
+              "order": 7,
+              "ihd_pct": 8.232107142119578
+            },
+            {
+              "order": 11,
+              "ihd_pct": 8.316043831012584
             },
             {
               "order": 13,
@@ -524,87 +1025,105 @@
             },
             {
               "order": 11,
-              "ihd_pct": 8.31604383101259
+              "ihd_pct": 8.316043831012587
             },
             {
               "order": 13,
-              "ihd_pct": 7.644028846061978
+              "ihd_pct": 7.64402884606198
+            }
+          ],
+          [
+            {
+              "order": 5,
+              "ihd_pct": 8.40021428293997
+            },
+            {
+              "order": 7,
+              "ihd_pct": 8.232107142119578
+            },
+            {
+              "order": 11,
+              "ihd_pct": 8.316043831012585
+            },
+            {
+              "order": 13,
+              "ihd_pct": 7.64402884606198
             }
           ]
         ],
         "voltage_thd_pct": [
-          11.647729392344527,
+          11.647729392344525,
           11.647729392344527,
           11.647729392344527,
           16.307021493742962,
           16.307021493742962,
-          16.307021493742965
+          16.307021493742962
         ],
-        "max_voltage_thd_pct": 16.307021493742965,
+        "max_voltage_thd_pct": 16.307021493742962,
         "sequence": [
           {
             "bus_position": 0,
             "order": 5,
-            "v0_pu": 1.0662240138585216e-17,
-            "v1_pu": 1.1564823173178714e-17,
-            "v2_pu": 0.059999999999399964,
-            "sequence_unbalance_pct": 2.62164335550506e-14
+            "v0_pu": 1.034389230519697e-17,
+            "v1_pu": 1.4628472785736255e-17,
+            "v2_pu": 0.05999999999939997,
+            "sequence_unbalance_pct": 2.986024503466846e-14
           },
           {
             "bus_position": 0,
             "order": 7,
-            "v0_pu": 5.782411586589357e-18,
+            "v0_pu": 1.2293575662938235e-17,
             "v1_pu": 0.058799999999412,
-            "v2_pu": 1.2455695750587118e-17,
-            "sequence_unbalance_pct": 2.3354535125136163e-14
+            "v2_pu": 1.3486785519039454e-17,
+            "sequence_unbalance_pct": 3.103568563925301e-14
           },
           {
             "bus_position": 0,
             "order": 11,
-            "v0_pu": 1.1510485410529578e-17,
-            "v1_pu": 2.0848781471285006e-17,
-            "v2_pu": 0.059399999999406,
-            "sequence_unbalance_pct": 4.009290144785729e-14
+            "v0_pu": 1.2645514108430982e-17,
+            "v1_pu": 1.61907524424502e-17,
+            "v2_pu": 0.05939999999940596,
+            "sequence_unbalance_pct": 3.458559454320088e-14
           },
           {
             "bus_position": 0,
             "order": 13,
-            "v0_pu": 7.517135062566164e-18,
-            "v1_pu": 0.05459999999945402,
-            "v2_pu": 1.635512977795599e-17,
-            "sequence_unbalance_pct": 3.296691033804645e-14
+            "v0_pu": 1.162250344707027e-17,
+            "v1_pu": 0.05459999999945401,
+            "v2_pu": 1.8584854349898655e-17,
+            "sequence_unbalance_pct": 4.014622760622226e-14
           },
           {
             "bus_position": 1,
             "order": 5,
-            "v0_pu": 1.2455695750587118e-17,
-            "v1_pu": 2.585973076299243e-17,
+            "v0_pu": 1.1390029893555355e-17,
+            "v1_pu": 2.4911391501174237e-17,
             "v2_pu": 0.0840021428293997,
-            "sequence_unbalance_pct": 3.4169528661716846e-14
+            "sequence_unbalance_pct": 3.260844301742548e-14
           },
           {
             "bus_position": 1,
             "order": 7,
-            "v0_pu": 1.6365348541700844e-17,
-            "v1_pu": 0.08232107142119575,
-            "v2_pu": 1.4628472785736255e-17,
-            "sequence_unbalance_pct": 2.666428713039313e-14
+            "v0_pu": 1.4628472785736255e-17,
+            "v1_pu": 0.08232107142119577,
+            "v2_pu": 2.1820464722267795e-17,
+            "sequence_unbalance_pct": 3.1911912564810994e-14
           },
           {
             "bus_position": 1,
             "order": 11,
-            "v0_pu": 1.7925475918427008e-17,
-            "v1_pu": 2.132448027717043e-17,
-            "v2_pu": 0.08316043831012589,
-            "sequence_unbalance_pct": 3.349884255552501e-14
+            "v0_pu": 1.9081958235744878e-17,
+            "v1_pu": 1.6838636710167774e-17,
+            "v2_pu": 0.08316043831012584,
+            "sequence_unbalance_pct": 3.0602509525076806e-14
           },
           {
             "bus_position": 1,
             "order": 13,
-            "v0_pu": 5.171946152598485e-18,
+            "v0_pu": 1.3877787807814457e-17,
             "v1_pu": 0.07644028846061979,
             "v2_pu": 2.324500689414054e-17,
-            "sequence_unbalance_pct": 3.1152980825891114e-14
+            "sequence_unbalance_pct": 3.541660752165498e-14
           }
         ]
       },
@@ -625,13 +1144,13 @@
         "status": "executed",
         "comparison": {
           "sample_count": 24,
-          "max_complex_voltage_error_pu": 4.20202288276502e-10,
-          "max_voltage_magnitude_error_pu": 6.000130947647619e-13,
-          "max_voltage_angle_error_deg": 3.5752567690078183e-07,
-          "max_voltage_ihd_error_pct": 6.000178132126166e-11,
-          "max_voltage_thd_error_pct": 1.1647216524579562e-10,
-          "max_sequence_component_error_pu": 3.6666503167026576e-13,
-          "max_sequence_unbalance_error_pct": 2.2737367544323206e-13,
+          "max_complex_voltage_error_pu": 4.202022784634891e-10,
+          "max_voltage_magnitude_error_pu": 5.999992169769541e-13,
+          "max_voltage_angle_error_deg": 3.575256597381461e-07,
+          "max_voltage_ihd_error_pct": 6.000000496442226e-11,
+          "max_voltage_thd_error_pct": 1.1647394160263502e-10,
+          "max_sequence_component_error_pu": 3.6665809277636185e-13,
+          "max_sequence_unbalance_error_pct": 1.7053025658242404e-13,
           "max_branch_current_magnitude_error_pu": 0.0
         }
       },
@@ -639,26 +1158,27 @@
         "status": "direct_phase_domain_equivalent",
         "comparison": {
           "sample_count": 24,
-          "max_complex_voltage_error_pu": 4.169725725056468e-10,
-          "max_voltage_magnitude_error_pu": 5.999714614013385e-13,
-          "max_voltage_angle_error_deg": 3.5510483683188584e-07,
-          "max_voltage_ihd_error_pct": 5.999734042916316e-11,
-          "max_voltage_thd_error_pct": 1.1646861253211682e-10,
-          "max_sequence_component_error_pu": 3.6664421498855404e-13,
-          "max_sequence_unbalance_error_pct": 1.1368683772161603e-13
+          "max_complex_voltage_error_pu": 4.169725626926341e-10,
+          "max_voltage_magnitude_error_pu": 5.999575836135307e-13,
+          "max_voltage_angle_error_deg": 3.5510482653430455e-07,
+          "max_voltage_ihd_error_pct": 5.999556407232376e-11,
+          "max_voltage_thd_error_pct": 1.1647038888895622e-10,
+          "max_sequence_component_error_pu": 3.6663727609465013e-13,
+          "max_sequence_unbalance_error_pct": 2.2737367544323206e-13
         }
       },
       "gridlabd": {
-        "status": "unsupported_frequency_domain_hpf",
+        "status": "unsupported_or_unavailable",
         "comparison": null,
-        "note": "GridLAB-D 5.3 exposes fundamental and deltamode waveform simulation but no native frequency-domain harmonic-order voltage/current API. A validated deltamode setup plus integer-cycle FFT is required for numeric AC comparison; DC and hybrid harmonic ports have no matching native model."
+        "slice_count": 0,
+        "slices": []
       },
       "metrics": {
         "voltage_ihd_pct": [
           [
             {
               "order": 5,
-              "ihd_pct": 5.9999999999399956
+              "ihd_pct": 5.999999999939997
             },
             {
               "order": 7,
@@ -666,11 +1186,11 @@
             },
             {
               "order": 11,
-              "ihd_pct": 5.9399999999406
+              "ihd_pct": 5.9399999999405955
             },
             {
               "order": 13,
-              "ihd_pct": 5.459999999945403
+              "ihd_pct": 5.459999999945402
             }
           ],
           [
@@ -680,11 +1200,11 @@
             },
             {
               "order": 7,
-              "ihd_pct": 3.527999999964719
+              "ihd_pct": 3.5279999999647202
             },
             {
               "order": 11,
-              "ihd_pct": 3.56399999996436
+              "ihd_pct": 3.5639999999643583
             },
             {
               "order": 13,
@@ -694,15 +1214,15 @@
           [
             {
               "order": 5,
-              "ihd_pct": 1.3999999999859993
+              "ihd_pct": 1.3999999999859996
             },
             {
               "order": 7,
-              "ihd_pct": 1.3719999999862802
+              "ihd_pct": 1.3719999999862804
             },
             {
               "order": 11,
-              "ihd_pct": 1.3859999999861405
+              "ihd_pct": 1.3859999999861397
             },
             {
               "order": 13,
@@ -712,15 +1232,15 @@
           [
             {
               "order": 5,
-              "ihd_pct": 8.400214282939968
+              "ihd_pct": 8.40021428293997
             },
             {
               "order": 7,
-              "ihd_pct": 8.232107142119576
+              "ihd_pct": 8.232107142119578
             },
             {
               "order": 11,
-              "ihd_pct": 8.316043831012587
+              "ihd_pct": 8.316043831012584
             },
             {
               "order": 13,
@@ -730,15 +1250,15 @@
           [
             {
               "order": 5,
-              "ihd_pct": 5.040128569763981
+              "ihd_pct": 5.040128569763982
             },
             {
               "order": 7,
-              "ihd_pct": 4.939264285271745
+              "ihd_pct": 4.939264285271746
             },
             {
               "order": 11,
-              "ihd_pct": 4.989626298607554
+              "ihd_pct": 4.9896262986075515
             },
             {
               "order": 13,
@@ -748,15 +1268,15 @@
           [
             {
               "order": 5,
-              "ihd_pct": 1.9600499993526599
+              "ihd_pct": 1.96004999935266
             },
             {
               "order": 7,
-              "ihd_pct": 1.9208249998279014
+              "ihd_pct": 1.920824999827902
             },
             {
               "order": 11,
-              "ihd_pct": 1.940410227236271
+              "ihd_pct": 1.9404102272362704
             },
             {
               "order": 13,
@@ -765,11 +1285,11 @@
           ]
         ],
         "voltage_thd_pct": [
-          11.647729392344527,
+          11.647729392344525,
           6.9886376354067155,
-          2.7178035248803902,
+          2.71780352488039,
           16.307021493742962,
-          9.784212896245778,
+          9.784212896245776,
           3.804971681873359
         ],
         "max_voltage_thd_pct": 16.307021493742962,
@@ -777,65 +1297,65 @@
           {
             "bus_position": 0,
             "order": 5,
-            "v0_pu": 0.036666666666299974,
-            "v1_pu": 0.013283239229981342,
-            "v2_pu": 0.013283239229981337,
-            "sequence_unbalance_pct": 293.59235949124655
+            "v0_pu": 0.03666666666629998,
+            "v1_pu": 0.013283239229981345,
+            "v2_pu": 0.013283239229981342,
+            "sequence_unbalance_pct": 293.5923594912465
           },
           {
             "bus_position": 0,
             "order": 7,
             "v0_pu": 0.035933333332974,
-            "v1_pu": 0.013017574445381723,
-            "v2_pu": 0.01301757444538172,
-            "sequence_unbalance_pct": 293.5923594912464
+            "v1_pu": 0.01301757444538172,
+            "v2_pu": 0.013017574445381716,
+            "sequence_unbalance_pct": 293.5923594912465
           },
           {
             "bus_position": 0,
             "order": 11,
-            "v0_pu": 0.036299999999637005,
-            "v1_pu": 0.013150406837681537,
-            "v2_pu": 0.01315040683768153,
-            "sequence_unbalance_pct": 293.5923594912466
+            "v0_pu": 0.036299999999636984,
+            "v1_pu": 0.013150406837681528,
+            "v2_pu": 0.013150406837681521,
+            "sequence_unbalance_pct": 293.59235949124667
           },
           {
             "bus_position": 0,
             "order": 13,
-            "v0_pu": 0.03336666666633302,
-            "v1_pu": 0.012087747699283039,
+            "v0_pu": 0.03336666666633301,
+            "v1_pu": 0.012087747699283035,
             "v2_pu": 0.012087747699283028,
-            "sequence_unbalance_pct": 293.5923594912463
+            "sequence_unbalance_pct": 293.5923594912464
           },
           {
             "bus_position": 1,
             "order": 5,
-            "v0_pu": 0.0513346428401887,
+            "v0_pu": 0.05133464284018871,
             "v1_pu": 0.018597009317418946,
-            "v2_pu": 0.01859700931741894,
-            "sequence_unbalance_pct": 293.59235949124655
+            "v2_pu": 0.018597009317418946,
+            "sequence_unbalance_pct": 293.5923594912465
           },
           {
             "bus_position": 1,
             "order": 7,
-            "v0_pu": 0.05030732142406407,
-            "v1_pu": 0.018224841422784317,
-            "v2_pu": 0.01822484142278431,
-            "sequence_unbalance_pct": 293.59235949124644
+            "v0_pu": 0.050307321424064085,
+            "v1_pu": 0.018224841422784327,
+            "v2_pu": 0.018224841422784313,
+            "sequence_unbalance_pct": 293.5923594912464
           },
           {
             "bus_position": 1,
             "order": 11,
-            "v0_pu": 0.05082026785618805,
-            "v1_pu": 0.018410666609242583,
-            "v2_pu": 0.018410666609242565,
-            "sequence_unbalance_pct": 293.59235949124667
+            "v0_pu": 0.050820267856188026,
+            "v1_pu": 0.018410666609242572,
+            "v2_pu": 0.018410666609242562,
+            "sequence_unbalance_pct": 293.5923594912466
           },
           {
             "bus_position": 1,
             "order": 13,
             "v0_pu": 0.04671350961482321,
             "v1_pu": 0.01692291064068916,
-            "v2_pu": 0.016922910640689154,
+            "v2_pu": 0.01692291064068915,
             "sequence_unbalance_pct": 293.5923594912464
           }
         ]
@@ -857,13 +1377,13 @@
         "status": "executed",
         "comparison": {
           "sample_count": 24,
-          "max_complex_voltage_error_pu": 4.2021045782153003e-10,
-          "max_voltage_magnitude_error_pu": 1.9700630016217247e-12,
-          "max_voltage_angle_error_deg": 3.5752566317998883e-07,
-          "max_voltage_ihd_error_pct": 1.9700596709526508e-10,
+          "max_complex_voltage_error_pu": 4.202104532372272e-10,
+          "max_voltage_magnitude_error_pu": 1.970035246046109e-12,
+          "max_voltage_angle_error_deg": 3.5752565803119826e-07,
+          "max_voltage_ihd_error_pct": 1.9700330256000598e-10,
           "max_voltage_thd_error_pct": 3.403961557069124e-10,
-          "max_sequence_component_error_pu": 1.4447124052630045e-12,
-          "max_sequence_unbalance_error_pct": 2.8421709430404007e-13,
+          "max_sequence_component_error_pu": 1.4446915885812928e-12,
+          "max_sequence_unbalance_error_pct": 1.7053025658242404e-13,
           "max_branch_current_magnitude_error_pu": 0.0
         }
       },
@@ -871,19 +1391,20 @@
         "status": "direct_phase_domain_equivalent",
         "comparison": {
           "sample_count": 24,
-          "max_complex_voltage_error_pu": 4.1698059623917157e-10,
-          "max_voltage_magnitude_error_pu": 1.9700560627278207e-12,
-          "max_voltage_angle_error_deg": 3.5510482533130146e-07,
-          "max_voltage_ihd_error_pct": 1.9700507891684538e-10,
+          "max_complex_voltage_error_pu": 4.169805916554786e-10,
+          "max_voltage_magnitude_error_pu": 1.970028307152205e-12,
+          "max_voltage_angle_error_deg": 3.5510482018251094e-07,
+          "max_voltage_ihd_error_pct": 1.9700241438158628e-10,
           "max_voltage_thd_error_pct": 3.40394379350073e-10,
-          "max_sequence_component_error_pu": 1.4447193441569084e-12,
+          "max_sequence_component_error_pu": 1.4446985274751967e-12,
           "max_sequence_unbalance_error_pct": 2.8421709430404007e-13
         }
       },
       "gridlabd": {
-        "status": "unsupported_frequency_domain_hpf",
+        "status": "unsupported_or_unavailable",
         "comparison": null,
-        "note": "GridLAB-D 5.3 exposes fundamental and deltamode waveform simulation but no native frequency-domain harmonic-order voltage/current API. A validated deltamode setup plus integer-cycle FFT is required for numeric AC comparison; DC and hybrid harmonic ports have no matching native model."
+        "slice_count": 0,
+        "slices": []
       },
       "metrics": {
         "voltage_ihd_pct": [
@@ -898,17 +1419,17 @@
             },
             {
               "order": 11,
-              "ihd_pct": 5.939999999802989
+              "ihd_pct": 5.939999999802992
             },
             {
               "order": 13,
-              "ihd_pct": 5.459999999803137
+              "ihd_pct": 5.459999999803135
             }
           ],
           [
             {
               "order": 5,
-              "ihd_pct": 2.399999999946336
+              "ihd_pct": 2.399999999946335
             },
             {
               "order": 7,
@@ -916,17 +1437,17 @@
             },
             {
               "order": 11,
-              "ihd_pct": 2.3759999999211954
+              "ihd_pct": 2.375999999921196
             },
             {
               "order": 13,
-              "ihd_pct": 2.183999999921255
+              "ihd_pct": 2.1839999999212543
             }
           ],
           [
             {
               "order": 5,
-              "ihd_pct": 4.799999999892672
+              "ihd_pct": 4.79999999989267
             },
             {
               "order": 7,
@@ -934,17 +1455,17 @@
             },
             {
               "order": 11,
-              "ihd_pct": 4.751999999842391
+              "ihd_pct": 4.751999999842392
             },
             {
               "order": 13,
-              "ihd_pct": 4.36799999984251
+              "ihd_pct": 4.367999999842508
             }
           ],
           [
             {
               "order": 5,
-              "ihd_pct": 8.401071360157205
+              "ihd_pct": 8.401071360157204
             },
             {
               "order": 7,
@@ -952,17 +1473,17 @@
             },
             {
               "order": 11,
-              "ihd_pct": 8.316482128746058
+              "ihd_pct": 8.316482128746062
             },
             {
               "order": 13,
-              "ihd_pct": 7.644374990667048
+              "ihd_pct": 7.644374990667045
             }
           ],
           [
             {
               "order": 5,
-              "ihd_pct": 3.360428544062884
+              "ihd_pct": 3.360428544062883
             },
             {
               "order": 7,
@@ -970,17 +1491,17 @@
             },
             {
               "order": 11,
-              "ihd_pct": 3.3265928514984235
+              "ihd_pct": 3.3265928514984244
             },
             {
               "order": 13,
-              "ihd_pct": 3.0577499962668195
+              "ihd_pct": 3.0577499962668186
             }
           ],
           [
             {
               "order": 5,
-              "ihd_pct": 6.720857088125768
+              "ihd_pct": 6.720857088125766
             },
             {
               "order": 7,
@@ -988,87 +1509,87 @@
             },
             {
               "order": 11,
-              "ihd_pct": 6.653185702996846
+              "ihd_pct": 6.653185702996849
             },
             {
               "order": 13,
-              "ihd_pct": 6.115499992533639
+              "ihd_pct": 6.115499992533636
             }
           ]
         ],
         "voltage_thd_pct": [
           11.647729392120608,
-          4.659091756848244,
-          9.318183513696487,
+          4.659091756848243,
+          9.318183513696486,
           16.308173288029074,
-          6.523269315211631,
-          13.046538630423262
+          6.52326931521163,
+          13.04653863042326
         ],
         "max_voltage_thd_pct": 16.308173288029074,
         "sequence": [
           {
             "bus_position": 0,
             "order": 5,
-            "v0_pu": 0.043999999999016146,
-            "v1_pu": 0.01058300524402171,
-            "v2_pu": 0.010583005244021717,
-            "sequence_unbalance_pct": 427.61798705987917
+            "v0_pu": 0.04399999999901613,
+            "v1_pu": 0.010583005244021712,
+            "v2_pu": 0.010583005244021719,
+            "sequence_unbalance_pct": 427.61798705987894
           },
           {
             "bus_position": 0,
             "order": 7,
-            "v0_pu": 0.04311999999885915,
-            "v1_pu": 0.01037134513909879,
-            "v2_pu": 0.010371345139098799,
+            "v0_pu": 0.043119999998859154,
+            "v1_pu": 0.010371345139098792,
+            "v2_pu": 0.0103713451390988,
             "sequence_unbalance_pct": 427.61798705987917
           },
           {
             "bus_position": 0,
             "order": 11,
-            "v0_pu": 0.04355999999855525,
-            "v1_pu": 0.010477175191468279,
-            "v2_pu": 0.010477175191468287,
-            "sequence_unbalance_pct": 427.6179870598788
+            "v0_pu": 0.04355999999855527,
+            "v1_pu": 0.010477175191468286,
+            "v2_pu": 0.010477175191468293,
+            "sequence_unbalance_pct": 427.61798705987877
           },
           {
             "bus_position": 0,
             "order": 13,
-            "v0_pu": 0.04003999999855634,
-            "v1_pu": 0.009630534771927872,
-            "v2_pu": 0.009630534771927877,
+            "v0_pu": 0.04003999999855632,
+            "v1_pu": 0.009630534771927868,
+            "v2_pu": 0.009630534771927872,
             "sequence_unbalance_pct": 427.61798705987917
           },
           {
             "bus_position": 1,
             "order": 5,
-            "v0_pu": 0.06160785664115287,
+            "v0_pu": 0.06160785664115283,
             "v1_pu": 0.014818097043655394,
-            "v2_pu": 0.014818097043655411,
-            "sequence_unbalance_pct": 427.617987059879
+            "v2_pu": 0.014818097043655401,
+            "sequence_unbalance_pct": 427.61798705987906
           },
           {
             "bus_position": 1,
             "order": 7,
             "v0_pu": 0.06037349974869367,
-            "v1_pu": 0.014521206010333083,
-            "v2_pu": 0.014521206010333092,
-            "sequence_unbalance_pct": 427.6179870598792
+            "v1_pu": 0.014521206010333087,
+            "v2_pu": 0.014521206010333096,
+            "sequence_unbalance_pct": 427.6179870598791
           },
           {
             "bus_position": 1,
             "order": 11,
-            "v0_pu": 0.06098753561080442,
-            "v1_pu": 0.014668895663716739,
-            "v2_pu": 0.014668895663716755,
-            "sequence_unbalance_pct": 427.6179870598788
+            "v0_pu": 0.06098753561080444,
+            "v1_pu": 0.014668895663716748,
+            "v2_pu": 0.01466889566371676,
+            "sequence_unbalance_pct": 427.61798705987877
           },
           {
             "bus_position": 1,
             "order": 13,
-            "v0_pu": 0.056058749931558356,
-            "v1_pu": 0.013483410102551137,
+            "v0_pu": 0.05605874993155833,
+            "v1_pu": 0.013483410102551127,
             "v2_pu": 0.013483410102551137,
-            "sequence_unbalance_pct": 427.6179870598791
+            "sequence_unbalance_pct": 427.6179870598793
           }
         ]
       },
@@ -1087,13 +1608,13 @@
         "status": "executed",
         "comparison": {
           "sample_count": 12,
-          "max_complex_voltage_error_pu": 2.270718221220903e-10,
-          "max_voltage_magnitude_error_pu": 1.5082310400593713e-12,
-          "max_voltage_angle_error_deg": 3.300236869559593e-07,
-          "max_voltage_ihd_error_pct": 1.5082335380611767e-10,
-          "max_voltage_thd_error_pct": 1.963762485956977e-10,
-          "max_sequence_component_error_pu": 1.5082032844837556e-12,
-          "max_sequence_unbalance_error_pct": 4.0908604245680605e-14,
+          "max_complex_voltage_error_pu": 2.2707182494889684e-10,
+          "max_voltage_magnitude_error_pu": 1.5082171622715634e-12,
+          "max_voltage_angle_error_deg": 3.3002369184115854e-07,
+          "max_voltage_ihd_error_pct": 1.5082157744927827e-10,
+          "max_voltage_thd_error_pct": 1.963744722388583e-10,
+          "max_sequence_component_error_pu": 1.5081894066959478e-12,
+          "max_sequence_unbalance_error_pct": 6.08801884990158e-14,
           "max_branch_current_magnitude_error_pu": 0.0
         }
       },
@@ -1102,26 +1623,37 @@
         "comparison": null
       },
       "gridlabd": {
-        "status": "unsupported_frequency_domain_hpf",
+        "status": "unsupported_or_unavailable",
         "comparison": null,
-        "note": "GridLAB-D 5.3 exposes fundamental and deltamode waveform simulation but no native frequency-domain harmonic-order voltage/current API. A validated deltamode setup plus integer-cycle FFT is required for numeric AC comparison; DC and hybrid harmonic ports have no matching native model."
+        "slice_count": 0,
+        "slices": []
       },
       "metrics": {
         "voltage_ihd_pct": [
           [
             {
               "order": 3,
-              "ihd_pct": 1.7999999999279992
+              "ihd_pct": 1.7999999999279985
             },
             {
               "order": 9,
-              "ihd_pct": 2.1599999999135986
+              "ihd_pct": 2.1599999999136
             }
           ],
           [
             {
               "order": 3,
-              "ihd_pct": 1.7999999999279999
+              "ihd_pct": 1.7999999999280016
+            },
+            {
+              "order": 9,
+              "ihd_pct": 2.1599999999136
+            }
+          ],
+          [
+            {
+              "order": 3,
+              "ihd_pct": 1.7999999999279988
             },
             {
               "order": 9,
@@ -1131,85 +1663,75 @@
           [
             {
               "order": 3,
-              "ihd_pct": 1.7999999999279994
+              "ihd_pct": 3.961817764486839
             },
             {
               "order": 9,
-              "ihd_pct": 2.159999999913599
+              "ihd_pct": 4.75224241790826
             }
           ],
           [
             {
               "order": 3,
-              "ihd_pct": 3.96181776448684
+              "ihd_pct": 3.9618177644868426
             },
             {
               "order": 9,
-              "ihd_pct": 4.752242417908259
+              "ihd_pct": 4.752242417908261
             }
           ],
           [
             {
               "order": 3,
-              "ihd_pct": 3.9618177644868413
+              "ihd_pct": 3.961817764486839
             },
             {
               "order": 9,
-              "ihd_pct": 4.752242417908259
-            }
-          ],
-          [
-            {
-              "order": 3,
-              "ihd_pct": 3.9618177644868404
-            },
-            {
-              "order": 9,
-              "ihd_pct": 4.752242417908259
+              "ihd_pct": 4.75224241790826
             }
           ]
         ],
         "voltage_thd_pct": [
-          2.8116898832139263,
-          2.811689883213927,
           2.8116898832139268,
-          6.187067802890965,
+          2.811689883213929,
+          2.8116898832139263,
           6.187067802890966,
+          6.187067802890968,
           6.187067802890966
         ],
-        "max_voltage_thd_pct": 6.187067802890966,
+        "max_voltage_thd_pct": 6.187067802890968,
         "sequence": [
           {
             "bus_position": 0,
             "order": 3,
-            "v0_pu": 0.017999999999279995,
-            "v1_pu": 3.3716963797598634e-18,
-            "v2_pu": 1.828559098217032e-18,
-            "sequence_unbalance_pct": 2.1308988463208548e-14
+            "v0_pu": 0.017999999999279998,
+            "v1_pu": 1.2198010604906713e-17,
+            "v2_pu": 8.596172817152846e-18,
+            "sequence_unbalance_pct": 8.290364216291227e-14
           },
           {
             "bus_position": 0,
             "order": 9,
-            "v0_pu": 0.02159999999913599,
-            "v1_pu": 2.8475074733888388e-18,
-            "v2_pu": 2.8912057932946786e-18,
-            "sequence_unbalance_pct": 1.8787040317880836e-14
+            "v0_pu": 0.021599999999135998,
+            "v1_pu": 3.0733939157345587e-18,
+            "v2_pu": 1.1564823173178713e-18,
+            "sequence_unbalance_pct": 1.5202678434837046e-14
           },
           {
             "bus_position": 1,
             "order": 3,
             "v0_pu": 0.039618177644868406,
-            "v1_pu": 5.782411586589357e-18,
-            "v2_pu": 4.625929269271485e-18,
-            "sequence_unbalance_pct": 1.8691167530618925e-14
+            "v1_pu": 1.2929865381496215e-17,
+            "v2_pu": 1.0910232361133898e-17,
+            "sequence_unbalance_pct": 4.270231191054943e-14
           },
           {
             "bus_position": 1,
             "order": 9,
-            "v0_pu": 0.04752242417908259,
-            "v1_pu": 5.613706212540097e-18,
-            "v2_pu": 5.171946152598485e-18,
-            "sequence_unbalance_pct": 1.6061895944392983e-14
+            "v0_pu": 0.047522424179082604,
+            "v1_pu": 8.182674270850422e-18,
+            "v2_pu": 2.3129646346357427e-18,
+            "sequence_unbalance_pct": 1.7893218806773877e-14
           }
         ]
       },
@@ -1229,14 +1751,14 @@
         "status": "executed",
         "comparison": {
           "sample_count": 6,
-          "max_complex_voltage_error_pu": 2.2199946983849798e-13,
-          "max_voltage_magnitude_error_pu": 2.219995021146559e-13,
-          "max_voltage_angle_error_deg": 8.41506804649584e-15,
+          "max_complex_voltage_error_pu": 2.2199903308319138e-13,
+          "max_voltage_magnitude_error_pu": 2.2199906843378692e-13,
+          "max_voltage_angle_error_deg": 6.192785146147516e-15,
           "max_voltage_ihd_error_pct": 2.2199908578102168e-11,
-          "max_voltage_thd_error_pct": 2.6745106129766327e-11,
+          "max_voltage_thd_error_pct": 2.6745050618615096e-11,
           "max_sequence_component_error_pu": 0.0,
           "max_sequence_unbalance_error_pct": 0.0,
-          "max_branch_current_magnitude_error_pu": 3.599988362967821e-12
+          "max_branch_current_magnitude_error_pu": 3.599981424073917e-12
         }
       },
       "opendss": {
@@ -1244,16 +1766,17 @@
         "comparison": null
       },
       "gridlabd": {
-        "status": "unsupported_frequency_domain_hpf",
+        "status": "unsupported_or_unavailable",
         "comparison": null,
-        "note": "GridLAB-D 5.3 exposes fundamental and deltamode waveform simulation but no native frequency-domain harmonic-order voltage/current API. A validated deltamode setup plus integer-cycle FFT is required for numeric AC comparison; DC and hybrid harmonic ports have no matching native model."
+        "slice_count": 0,
+        "slices": []
       },
       "metrics": {
         "voltage_ihd_pct": [
           [
             {
               "order": 6,
-              "ihd_pct": 0.05999999999579999
+              "ihd_pct": 0.05999999999580001
             },
             {
               "order": 12,
@@ -1261,7 +1784,7 @@
             },
             {
               "order": 18,
-              "ihd_pct": 0.0199999999986
+              "ihd_pct": 0.019999999998600002
             }
           ],
           [
@@ -1271,7 +1794,7 @@
             },
             {
               "order": 12,
-              "ihd_pct": 0.20999999998705002
+              "ihd_pct": 0.20999999998705005
             },
             {
               "order": 18,
@@ -1280,10 +1803,10 @@
           ]
         ],
         "voltage_thd_pct": [
-          0.0722841614689449,
-          0.43370496881728365
+          0.07228416146894492,
+          0.4337049688172837
         ],
-        "max_voltage_thd_pct": 0.43370496881728365,
+        "max_voltage_thd_pct": 0.4337049688172837,
         "sequence": []
       },
       "pass": true
@@ -1302,14 +1825,14 @@
         "status": "executed",
         "comparison": {
           "sample_count": 6,
-          "max_complex_voltage_error_pu": 1.5281884157046212e-12,
-          "max_voltage_magnitude_error_pu": 3.9955278668957206e-13,
-          "max_voltage_angle_error_deg": 1.5469855757564853e-08,
-          "max_voltage_ihd_error_pct": 3.9955261321722446e-11,
-          "max_voltage_thd_error_pct": 6.513989347922688e-11,
+          "max_complex_voltage_error_pu": 1.5281880223708103e-12,
+          "max_voltage_magnitude_error_pu": 3.9955452141304804e-13,
+          "max_voltage_angle_error_deg": 1.54698507663023e-08,
+          "max_voltage_ihd_error_pct": 3.995537234402491e-11,
+          "max_voltage_thd_error_pct": 6.514011552383181e-11,
           "max_sequence_component_error_pu": 0.0,
           "max_sequence_unbalance_error_pct": 0.0,
-          "max_branch_current_magnitude_error_pu": 3.6000091796495326e-12
+          "max_branch_current_magnitude_error_pu": 3.6000022407556287e-12
         }
       },
       "opendss": {
@@ -1317,9 +1840,10 @@
         "comparison": null
       },
       "gridlabd": {
-        "status": "unsupported_frequency_domain_hpf",
+        "status": "unsupported_or_unavailable",
         "comparison": null,
-        "note": "GridLAB-D 5.3 exposes fundamental and deltamode waveform simulation but no native frequency-domain harmonic-order voltage/current API. A validated deltamode setup plus integer-cycle FFT is required for numeric AC comparison; DC and hybrid harmonic ports have no matching native model."
+        "slice_count": 0,
+        "slices": []
       },
       "metrics": {
         "voltage_ihd_pct": [
@@ -1344,7 +1868,7 @@
             },
             {
               "order": 12,
-              "ihd_pct": 0.6640783085954044
+              "ihd_pct": 0.6640783085954043
             },
             {
               "order": 18,
@@ -1353,10 +1877,10 @@
           ]
         ],
         "voltage_thd_pct": [
-          0.07228416146894491,
-          1.0808330120139695
+          0.0722841614689449,
+          1.0808330120139693
         ],
-        "max_voltage_thd_pct": 1.0808330120139695,
+        "max_voltage_thd_pct": 1.0808330120139693,
         "sequence": []
       },
       "pass": true
@@ -1375,14 +1899,14 @@
         "status": "executed",
         "comparison": {
           "sample_count": 6,
-          "max_complex_voltage_error_pu": 2.2181531743096467e-13,
+          "max_complex_voltage_error_pu": 2.2181531662653963e-13,
           "max_voltage_magnitude_error_pu": 2.217232474011066e-13,
-          "max_voltage_angle_error_deg": 3.030108853076437e-10,
+          "max_voltage_angle_error_deg": 3.0301637859851177e-10,
           "max_voltage_ihd_error_pct": 2.2172319535940233e-11,
           "max_voltage_thd_error_pct": 2.666844522991596e-11,
           "max_sequence_component_error_pu": 0.0,
           "max_sequence_unbalance_error_pct": 0.0,
-          "max_branch_current_magnitude_error_pu": 3.5954364485668577e-12
+          "max_branch_current_magnitude_error_pu": 3.595429509672954e-12
         }
       },
       "opendss": {
@@ -1390,24 +1914,25 @@
         "comparison": null
       },
       "gridlabd": {
-        "status": "unsupported_frequency_domain_hpf",
+        "status": "unsupported_or_unavailable",
         "comparison": null,
-        "note": "GridLAB-D 5.3 exposes fundamental and deltamode waveform simulation but no native frequency-domain harmonic-order voltage/current API. A validated deltamode setup plus integer-cycle FFT is required for numeric AC comparison; DC and hybrid harmonic ports have no matching native model."
+        "slice_count": 0,
+        "slices": []
       },
       "metrics": {
         "voltage_ihd_pct": [
           [
             {
               "order": 6,
-              "ihd_pct": 0.059975132264454285
+              "ihd_pct": 0.05997513226445429
             },
             {
               "order": 12,
-              "ihd_pct": 0.034942083273125875
+              "ihd_pct": 0.03494208327312587
             },
             {
               "order": 18,
-              "ihd_pct": 0.019925765757756956
+              "ihd_pct": 0.019925765757756966
             }
           ],
           [
@@ -1417,11 +1942,11 @@
             },
             {
               "order": 12,
-              "ihd_pct": 0.20965249964050242
+              "ihd_pct": 0.2096524996405024
             },
             {
               "order": 18,
-              "ihd_pct": 0.11955459454753806
+              "ihd_pct": 0.11955459454753808
             }
           ]
         ],
@@ -1448,11 +1973,11 @@
         "status": "executed",
         "comparison": {
           "sample_count": 6,
-          "max_complex_voltage_error_pu": 1.5391872851139687e-12,
-          "max_voltage_magnitude_error_pu": 5.117122003905905e-13,
-          "max_voltage_angle_error_deg": 1.5002485876460348e-08,
-          "max_voltage_ihd_error_pct": 5.117128942799809e-11,
-          "max_voltage_thd_error_pct": 7.519518341325693e-11,
+          "max_complex_voltage_error_pu": 1.539187028541918e-12,
+          "max_voltage_magnitude_error_pu": 5.117113330288525e-13,
+          "max_voltage_angle_error_deg": 1.5002490398927023e-08,
+          "max_voltage_ihd_error_pct": 5.117117840569563e-11,
+          "max_voltage_thd_error_pct": 7.519507239095446e-11,
           "max_sequence_component_error_pu": 0.0,
           "max_sequence_unbalance_error_pct": 0.0,
           "max_branch_current_magnitude_error_pu": 3.8417533043677565e-12
@@ -1463,20 +1988,21 @@
         "comparison": null
       },
       "gridlabd": {
-        "status": "unsupported_frequency_domain_hpf",
+        "status": "unsupported_or_unavailable",
         "comparison": null,
-        "note": "GridLAB-D 5.3 exposes fundamental and deltamode waveform simulation but no native frequency-domain harmonic-order voltage/current API. A validated deltamode setup plus integer-cycle FFT is required for numeric AC comparison; DC and hybrid harmonic ports have no matching native model."
+        "slice_count": 0,
+        "slices": []
       },
       "metrics": {
         "voltage_ihd_pct": [
           [
             {
               "order": 6,
-              "ihd_pct": 0.06131423616199068
+              "ihd_pct": 0.061314236161990686
             },
             {
               "order": 12,
-              "ihd_pct": 0.03828027475947996
+              "ihd_pct": 0.038280274759479975
             },
             {
               "order": 18,
@@ -1486,23 +2012,23 @@
           [
             {
               "order": 6,
-              "ihd_pct": 0.5746553917405363
+              "ihd_pct": 0.5746553917405361
             },
             {
               "order": 12,
-              "ihd_pct": 0.597172286253712
+              "ihd_pct": 0.5971722862537121
             },
             {
               "order": 18,
-              "ihd_pct": 0.5553042700677085
+              "ihd_pct": 0.5553042700677087
             }
           ]
         ],
         "voltage_thd_pct": [
-          0.07640941765138941,
-          0.997600316299762
+          0.07640941765138942,
+          0.9976003162997621
         ],
-        "max_voltage_thd_pct": 0.997600316299762,
+        "max_voltage_thd_pct": 0.9976003162997621,
         "sequence": []
       },
       "pass": true
@@ -1529,45 +2055,172 @@
         "comparison": {
           "ac": {
             "sample_count": 8,
-            "max_complex_voltage_error_pu": 5.349602996460862e-10,
+            "max_complex_voltage_error_pu": 5.349602984983203e-10,
             "max_voltage_magnitude_error_pu": 6.331046797924955e-13,
-            "max_voltage_angle_error_deg": 3.7242257823237515e-07,
+            "max_voltage_angle_error_deg": 3.724225752535839e-07,
             "max_voltage_ihd_error_pct": 6.331024593464463e-11,
-            "max_voltage_thd_error_pct": 1.2658851744618005e-10,
+            "max_voltage_thd_error_pct": 1.2658496473250125e-10,
             "max_sequence_component_error_pu": 0.0,
             "max_sequence_unbalance_error_pct": 0.0
           },
           "dc": {
             "sample_count": 4,
-            "max_complex_voltage_error_pu": 5.1615070724431167e-14,
-            "max_voltage_magnitude_error_pu": 5.1615070724431167e-14,
+            "max_complex_voltage_error_pu": 5.161496230421392e-14,
+            "max_voltage_magnitude_error_pu": 5.161496230421392e-14,
             "max_voltage_angle_error_deg": 0.0,
-            "max_voltage_ihd_error_pct": 5.1615101082092e-12,
-            "max_voltage_thd_error_pct": 5.648329026719523e-12,
+            "max_voltage_ihd_error_pct": 5.161496230421392e-12,
+            "max_voltage_thd_error_pct": 5.648315148931715e-12,
             "max_sequence_component_error_pu": 0.0,
             "max_sequence_unbalance_error_pct": 0.0
           },
-          "max_complex_voltage_error_pu": 5.349602996460862e-10,
-          "max_branch_current_magnitude_error_pu": 8.370023424353334e-13
+          "max_complex_voltage_error_pu": 5.349602984983203e-10,
+          "max_branch_current_magnitude_error_pu": 8.370006077118575e-13
         }
       },
       "opendss": {
         "status": "ac_port_equivalent_network_only",
         "comparison": {
           "sample_count": 8,
-          "max_complex_voltage_error_pu": 5.333165609669127e-10,
+          "max_complex_voltage_error_pu": 5.333165598191053e-10,
           "max_voltage_magnitude_error_pu": 6.330908020046877e-13,
-          "max_voltage_angle_error_deg": 3.714308367549349e-07,
+          "max_voltage_angle_error_deg": 3.7143083377614374e-07,
           "max_voltage_ihd_error_pct": 6.330935775622493e-11,
-          "max_voltage_thd_error_pct": 1.2658496473250125e-10,
+          "max_voltage_thd_error_pct": 1.2658141201882245e-10,
           "max_sequence_component_error_pu": 0.0,
           "max_sequence_unbalance_error_pct": 0.0
         }
       },
       "gridlabd": {
-        "status": "unsupported_frequency_domain_hpf",
-        "comparison": null,
-        "note": "GridLAB-D 5.3 exposes fundamental and deltamode waveform simulation but no native frequency-domain harmonic-order voltage/current API. A validated deltamode setup plus integer-cycle FFT is required for numeric AC comparison; DC and hybrid harmonic ports have no matching native model."
+        "status": "executed_frequency_slices",
+        "comparison": {
+          "sample_count": 8,
+          "max_complex_voltage_error_pu": 5.349605833622364e-10,
+          "max_voltage_magnitude_error_pu": 6.330630464290721e-13,
+          "max_voltage_angle_error_deg": 3.7242243212862325e-07,
+          "max_voltage_ihd_error_pct": 6.330580504254613e-11,
+          "max_voltage_thd_error_pct": 1.2657075387778605e-10,
+          "max_sequence_component_error_pu": 0.0,
+          "max_sequence_unbalance_error_pct": 0.0
+        },
+        "slice_count": 4,
+        "slices": [
+          {
+            "order": 5,
+            "voltages_pu": [
+              {
+                "real": 0.01999999999999968,
+                "imag": 0.06000000000000013
+              },
+              {
+                "real": 0.030600000000001862,
+                "imag": 0.0897999999999994
+              }
+            ],
+            "measured_source_impedance_pu": {
+              "real": -5.4488286665314e-15,
+              "imag": 1.0000000000000002
+            },
+            "measured_transfer_impedance_pu": {
+              "real": 0.010000000000030951,
+              "imag": 1.5
+            },
+            "authored_source_impedance_pu": {
+              "real": 0.0,
+              "imag": 1.0
+            },
+            "authored_transfer_impedance_pu": {
+              "real": 0.01,
+              "imag": 1.5
+            }
+          },
+          {
+            "order": 7,
+            "voltages_pu": [
+              {
+                "real": 0.020020000000001686,
+                "imag": 0.060059999999999295
+              },
+              {
+                "real": 0.03045899999999948,
+                "imag": 0.08994700000000046
+              }
+            ],
+            "measured_source_impedance_pu": {
+              "real": 4.0269145603910993e-14,
+              "imag": 1.399999999999997
+            },
+            "measured_transfer_impedance_pu": {
+              "real": 0.009999999999985881,
+              "imag": 2.100000000000006
+            },
+            "authored_source_impedance_pu": {
+              "real": 0.0,
+              "imag": 1.4000000000000001
+            },
+            "authored_transfer_impedance_pu": {
+              "real": 0.01,
+              "imag": 2.1
+            }
+          },
+          {
+            "order": 11,
+            "voltages_pu": [
+              {
+                "real": 0.020019999999998376,
+                "imag": 0.0600600000000005
+              },
+              {
+                "real": 0.0303029999999984,
+                "imag": 0.08999900000000056
+              }
+            ],
+            "measured_source_impedance_pu": {
+              "real": -5.914969754883742e-14,
+              "imag": 2.199999999999999
+            },
+            "measured_transfer_impedance_pu": {
+              "real": 0.009999999999940914,
+              "imag": 3.3000000000000016
+            },
+            "authored_source_impedance_pu": {
+              "real": 0.0,
+              "imag": 2.2
+            },
+            "authored_transfer_impedance_pu": {
+              "real": 0.01,
+              "imag": 3.3000000000000003
+            }
+          },
+          {
+            "order": 13,
+            "voltages_pu": [
+              {
+                "real": 0.02002000000000012,
+                "imag": 0.06005999999999987
+              },
+              {
+                "real": 0.0302609999999997,
+                "imag": 0.09001300000000001
+              }
+            ],
+            "measured_source_impedance_pu": {
+              "real": 6.297677682111612e-15,
+              "imag": 2.5999999999999965
+            },
+            "measured_transfer_impedance_pu": {
+              "real": 0.009999999999988147,
+              "imag": 3.899999999999997
+            },
+            "authored_source_impedance_pu": {
+              "real": 0.0,
+              "imag": 2.6
+            },
+            "authored_transfer_impedance_pu": {
+              "real": 0.01,
+              "imag": 3.9000000000000004
+            }
+          }
+        ]
       },
       "metrics": {
         "ac": {
@@ -1575,11 +2228,11 @@
             [
               {
                 "order": 5,
-                "ihd_pct": 6.32455532027351
+                "ihd_pct": 6.3245553202735145
               },
               {
                 "order": 7,
-                "ihd_pct": 6.330879875593788
+                "ihd_pct": 6.33087987559379
               },
               {
                 "order": 11,
@@ -1593,7 +2246,7 @@
             [
               {
                 "order": 5,
-                "ihd_pct": 9.487043796620732
+                "ihd_pct": 9.487043796620734
               },
               {
                 "order": 7,
@@ -1605,15 +2258,15 @@
               },
               {
                 "order": 13,
-                "ihd_pct": 9.496351030737964
+                "ihd_pct": 9.496351030737966
               }
             ]
           ],
           "voltage_thd_pct": [
-            12.658598658492778,
-            18.98809458308005
+            12.658598658492782,
+            18.988094583080052
           ],
-          "max_voltage_thd_pct": 18.98809458308005,
+          "max_voltage_thd_pct": 18.988094583080052,
           "sequence": []
         },
         "dc": {
@@ -1621,17 +2274,17 @@
             [
               {
                 "order": 6,
-                "ihd_pct": 0.013949999999023495
+                "ihd_pct": 0.013949999999023497
               },
               {
                 "order": 12,
-                "ihd_pct": 0.006199999999565997
+                "ihd_pct": 0.006199999999566
               }
             ],
             [
               {
                 "order": 6,
-                "ihd_pct": 0.08369999999483849
+                "ihd_pct": 0.0836999999948385
               },
               {
                 "order": 12,
@@ -1640,10 +2293,10 @@
             ]
           ],
           "voltage_thd_pct": [
-            0.015265729591715354,
-            0.09159437755105544
+            0.015265729591715358,
+            0.09159437755105546
           ],
-          "max_voltage_thd_pct": 0.09159437755105544,
+          "max_voltage_thd_pct": 0.09159437755105546,
           "sequence": []
         }
       },
@@ -1671,25 +2324,25 @@
         "comparison": {
           "ac": {
             "sample_count": 8,
-            "max_complex_voltage_error_pu": 5.349715362246571e-10,
-            "max_voltage_magnitude_error_pu": 2.2826462942049375e-12,
-            "max_voltage_angle_error_deg": 3.724225712915659e-07,
-            "max_voltage_ihd_error_pct": 2.2826451839819129e-10,
+            "max_complex_voltage_error_pu": 5.349715355067983e-10,
+            "max_voltage_magnitude_error_pu": 2.282687927568361e-12,
+            "max_voltage_angle_error_deg": 3.7242257228449646e-07,
+            "max_voltage_ihd_error_pct": 2.2826895929028979e-10,
             "max_voltage_thd_error_pct": 3.735998177489819e-10,
             "max_sequence_component_error_pu": 0.0,
             "max_sequence_unbalance_error_pct": 0.0
           },
           "dc": {
             "sample_count": 4,
-            "max_complex_voltage_error_pu": 1.2512476352680016e-13,
+            "max_complex_voltage_error_pu": 1.2512470233016353e-13,
             "max_voltage_magnitude_error_pu": 7.515711143712966e-14,
-            "max_voltage_angle_error_deg": 7.1746387263559856e-09,
+            "max_voltage_angle_error_deg": 7.174639455892712e-09,
             "max_voltage_ihd_error_pct": 7.515710276351228e-12,
             "max_voltage_thd_error_pct": 9.599820938177572e-12,
             "max_sequence_component_error_pu": 0.0,
             "max_sequence_unbalance_error_pct": 0.0
           },
-          "max_complex_voltage_error_pu": 5.349715362246571e-10,
+          "max_complex_voltage_error_pu": 5.349715355067983e-10,
           "max_branch_current_magnitude_error_pu": 1.4142159665553322e-12
         }
       },
@@ -1697,19 +2350,146 @@
         "status": "ac_port_equivalent_network_only",
         "comparison": {
           "sample_count": 8,
-          "max_complex_voltage_error_pu": 5.333277463733976e-10,
-          "max_voltage_magnitude_error_pu": 2.282604660841514e-12,
-          "max_voltage_angle_error_deg": 3.7143083267662494e-07,
-          "max_voltage_ihd_error_pct": 2.2826096568451248e-10,
+          "max_complex_voltage_error_pu": 5.33327745655861e-10,
+          "max_voltage_magnitude_error_pu": 2.2826462942049375e-12,
+          "max_voltage_angle_error_deg": 3.7143083366955555e-07,
+          "max_voltage_ihd_error_pct": 2.2826540657661099e-10,
           "max_voltage_thd_error_pct": 3.735944886784637e-10,
           "max_sequence_component_error_pu": 0.0,
           "max_sequence_unbalance_error_pct": 0.0
         }
       },
       "gridlabd": {
-        "status": "unsupported_frequency_domain_hpf",
-        "comparison": null,
-        "note": "GridLAB-D 5.3 exposes fundamental and deltamode waveform simulation but no native frequency-domain harmonic-order voltage/current API. A validated deltamode setup plus integer-cycle FFT is required for numeric AC comparison; DC and hybrid harmonic ports have no matching native model."
+        "status": "executed_frequency_slices",
+        "comparison": {
+          "sample_count": 8,
+          "max_complex_voltage_error_pu": 5.349716507668031e-10,
+          "max_voltage_magnitude_error_pu": 2.2827156831439765e-12,
+          "max_voltage_angle_error_deg": 3.72421478809797e-07,
+          "max_voltage_ihd_error_pct": 2.2827162382554889e-10,
+          "max_voltage_thd_error_pct": 3.736193576742153e-10,
+          "max_sequence_component_error_pu": 0.0,
+          "max_sequence_unbalance_error_pct": 0.0
+        },
+        "slice_count": 4,
+        "slices": [
+          {
+            "order": 5,
+            "voltages_pu": [
+              {
+                "real": 0.020000000000001707,
+                "imag": 0.05999999999999954
+              },
+              {
+                "real": 0.03134164078650155,
+                "imag": 0.08955278640449948
+              }
+            ],
+            "measured_source_impedance_pu": {
+              "real": 2.7850566178372686e-14,
+              "imag": 1.0000000000000016
+            },
+            "measured_transfer_impedance_pu": {
+              "real": 0.02236067977502573,
+              "imag": 1.4999999999999998
+            },
+            "authored_source_impedance_pu": {
+              "real": 0.0,
+              "imag": 1.0
+            },
+            "authored_transfer_impedance_pu": {
+              "real": 0.022360679774997897,
+              "imag": 1.5
+            }
+          },
+          {
+            "order": 7,
+            "voltages_pu": [
+              {
+                "real": 0.020019999999998525,
+                "imag": 0.06006000000000067
+              },
+              {
+                "real": 0.031165027312444516,
+                "imag": 0.08971165756251885
+              }
+            ],
+            "measured_source_impedance_pu": {
+              "real": -3.559328279734413e-14,
+              "imag": 1.4000000000000037
+            },
+            "measured_transfer_impedance_pu": {
+              "real": 0.026457513110592235,
+              "imag": 2.1000000000000076
+            },
+            "authored_source_impedance_pu": {
+              "real": 0.0,
+              "imag": 1.4000000000000001
+            },
+            "authored_transfer_impedance_pu": {
+              "real": 0.026457513110645908,
+              "imag": 2.1
+            }
+          },
+          {
+            "order": 11,
+            "voltages_pu": [
+              {
+                "real": 0.020020000000000555,
+                "imag": 0.060059999999999926
+              },
+              {
+                "real": 0.03093543856776709,
+                "imag": 0.08978818714407777
+              }
+            ],
+            "measured_source_impedance_pu": {
+              "real": 1.9079731260992138e-14,
+              "imag": 2.2000000000000037
+            },
+            "measured_transfer_impedance_pu": {
+              "real": 0.033166247903554935,
+              "imag": 3.3000000000000043
+            },
+            "authored_source_impedance_pu": {
+              "real": 0.0,
+              "imag": 2.2
+            },
+            "authored_transfer_impedance_pu": {
+              "real": 0.033166247903554,
+              "imag": 3.3000000000000003
+            }
+          },
+          {
+            "order": 13,
+            "voltages_pu": [
+              {
+                "real": 0.020020000000001165,
+                "imag": 0.060059999999999676
+              },
+              {
+                "real": 0.030862882344632084,
+                "imag": 0.08981237255178935
+              }
+            ],
+            "measured_source_impedance_pu": {
+              "real": 4.9604953419058977e-14,
+              "imag": 2.6000000000000028
+            },
+            "measured_transfer_impedance_pu": {
+              "real": 0.03605551275463485,
+              "imag": 3.900000000000002
+            },
+            "authored_source_impedance_pu": {
+              "real": 0.0,
+              "imag": 2.6
+            },
+            "authored_transfer_impedance_pu": {
+              "real": 0.03605551275463989,
+              "imag": 3.9000000000000004
+            }
+          }
+        ]
       },
       "metrics": {
         "ac": {
@@ -1717,19 +2497,19 @@
             [
               {
                 "order": 5,
-                "ihd_pct": 6.324555320195338
+                "ihd_pct": 6.324555320195337
               },
               {
                 "order": 7,
-                "ihd_pct": 6.3308798754896
+                "ihd_pct": 6.330879875489599
               },
               {
                 "order": 11,
-                "ihd_pct": 6.330879875447123
+                "ihd_pct": 6.330879875447126
               },
               {
                 "order": 13,
-                "ihd_pct": 6.330879875428834
+                "ihd_pct": 6.330879875428829
               }
             ],
             [
@@ -1739,15 +2519,15 @@
               },
               {
                 "order": 7,
-                "ihd_pct": 9.4970734596163
+                "ihd_pct": 9.497073459616297
               },
               {
                 "order": 11,
-                "ihd_pct": 9.49679941331163
+                "ihd_pct": 9.496799413311633
               },
               {
                 "order": 13,
-                "ihd_pct": 9.496725630257341
+                "ihd_pct": 9.496725630257338
               }
             ]
           ],
@@ -1763,11 +2543,11 @@
             [
               {
                 "order": 6,
-                "ihd_pct": 0.014152304514531745
+                "ihd_pct": 0.014152304514531748
               },
               {
                 "order": 12,
-                "ihd_pct": 0.006575877379284424
+                "ihd_pct": 0.006575877379284423
               }
             ],
             [
@@ -1777,7 +2557,7 @@
               },
               {
                 "order": 12,
-                "ihd_pct": 0.08822465299155166
+                "ihd_pct": 0.08822465299155167
               }
             ]
           ],
@@ -1797,13 +2577,15 @@
     "passed": 14,
     "failed": 0,
     "opendss_numeric_cases": 9,
-    "gridlabd_numeric_cases": 0,
-    "max_native_reference_error_pu": 5.349715362246571e-10,
-    "max_native_opendss_error_pu": 5.333277463733976e-10,
-    "max_branch_current_error_pu": 5.3665336063879465e-12,
-    "max_voltage_ihd_error_pct": 7.880291974515785e-10,
-    "max_voltage_thd_error_pct": 1.361577517400292e-09,
-    "max_sequence_component_error_pu": 1.5082032844837556e-12,
-    "max_sequence_unbalance_error_pct": 2.8421709430404007e-13
+    "gridlabd_numeric_cases": 6,
+    "gridlabd_numeric_slices": 24,
+    "max_native_reference_error_pu": 5.349715355067983e-10,
+    "max_native_opendss_error_pu": 5.33327745655861e-10,
+    "max_native_gridlabd_error_pu": 5.349716507668031e-10,
+    "max_branch_current_error_pu": 5.366554423069658e-12,
+    "max_voltage_ihd_error_pct": 7.88033638343677e-10,
+    "max_voltage_thd_error_pct": 1.3615846228276496e-09,
+    "max_sequence_component_error_pu": 1.5081894066959478e-12,
+    "max_sequence_unbalance_error_pct": 1.7053025658242404e-13
   }
 }

@@ -280,6 +280,26 @@ RichResultAttribution CanonicalToRichOperator::apply(
                      row.recovery_reason = "DC conductance terminal equation";
                    }
                  });
+  add_collection(out, rich.dc.capacitors, "dc_capacitor", "DC",
+                 "DC Capacitor", [](auto& row, const auto&) {
+                   row.recovery = RecoveryClass::Strong;
+                   row.recovery_reason = "stable DC capacitor identity";
+                 });
+  add_collection(out, rich.dc.reactors, "dc_reactor", "DC",
+                 "DC Reactor", [](auto& row, const auto&) {
+                   row.recovery = RecoveryClass::Strong;
+                   row.recovery_reason = "stable DC reactor identity";
+                 });
+  add_collection(out, rich.ac.harmonic_filters, "harmonic_filter", "AC",
+                 "AC Harmonic Filter", [](auto& row, const auto&) {
+                   row.recovery = RecoveryClass::Strong;
+                   row.recovery_reason = "stable AC harmonic-filter identity";
+                 });
+  add_collection(out, rich.dc.harmonic_filters, "harmonic_filter", "DC",
+                 "DC Harmonic Filter", [](auto& row, const auto&) {
+                   row.recovery = RecoveryClass::Strong;
+                   row.recovery_reason = "stable DC harmonic-filter identity";
+                 });
 
   add_collection(out, rich.ac.generators, "generator", "AC", "Generator",
                  [&](auto& row, const auto& generator) {

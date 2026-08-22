@@ -1,0 +1,65 @@
+\section{数值案例与跨引擎交叉验证}
+\subsection{验收门限与禁止事项}
+门限在实现修改前冻结：Native/NumPy 最大复电压误差 $2\times10^{-8}$ pu，Native/OpenDSS
+$2\times10^{-6}$ pu，GridLAB-D 至少 20 个真实进程切片且最大误差 $2\times10^{-5}$ pu，IEEE13
+复杂馈线 $2\times10^{-3}$ pu。禁止以能力探测、版本字符串、跳过或同一源码重复调用代替数值比较。
+
+\subsection{14 案例跨域矩阵}
+\srcpath{tools/harmonics\_validation/run\_cross\_engine\_matrix.py} 覆盖 4 个单相 AC、4 个三相、4 个 DC
+纹波和 2 个 VSC AC/DC 案例。变量包括电阻/电抗比、两种集肤律、不平衡相电流、三倍频零序、DC
+电感/电容/LC 以及换流器端口谱。当前机器可读结果位于
+\srcpath{external\_data/harmonics\_validation/cross\_engine\_matrix.json}。
+
+\begin{center}\footnotesize
+\begin{tabular}{@{}L{6.1cm}rL{4.1cm}@{}}\toprule
+指标 & 实测最大值 & 固定门限\\ \midrule
+Native--独立 NumPy 复电压 & $5.349715355\times10^{-10}$ pu & $2\times10^{-8}$ pu\\
+Native--OpenDSS 复电压 & $5.333277457\times10^{-10}$ pu & $2\times10^{-6}$ pu\\
+Native--GridLAB-D 复电压 & $5.349716508\times10^{-10}$ pu & $2\times10^{-5}$ pu\\
+支路电流幅值 & $5.366554423\times10^{-12}$ pu & $2\times10^{-8}$ pu\\
+电压 THD & $1.361584623\times10^{-9}$ 百分点 & $2\times10^{-8}$ 百分点\\
+序分量 & $1.508189407\times10^{-12}$ pu & $2\times10^{-8}$ pu\\
+\bottomrule\end{tabular}
+\end{center}
+14/14 案例通过；OpenDSS 有 9 个数值案例，GridLAB-D 有 6 个案例、24 个实际频率切片。
+
+\subsection{GridLAB-D 等价频率切片的可辨识量}
+GridLAB-D 5.3.0 没有原生“第 $h$ 次谐波潮流”API。验证器没有把基频结果冒充谐波，而是对每个可表达
+AC 次数启动独立进程，显式写入 $R(h)+jhX$、源阻抗和恒流负荷。记录内部/负荷复电压及支路复电流，
+由
+\begin{equation}
+Z_{s}^{GLD}=\frac{V_{int}-V_{swing}}{-I_{branch}},\qquad
+Z_{tr}^{GLD}=\frac{V_{load}-V_{swing}}{-I_{branch}}
+\end{equation}
+辨识传递阻抗，再乘同一 HACDCPF 谐波源相量。这个实验独立验证 $Y(h)V(h)=I(h)$ 的可表达 AC
+切片；它不声称验证 PWM 时域波形、换相和 FFT 泄漏。CTest 使用
+\texttt{--require-gridlabd --min-gridlabd-slices 20}，本机缺失或切片不足即失败。
+
+\subsection{IEEE 13 节点复杂馈线}
+\srcpath{compare\_ieee13\_opendss.py} 通过生产 OpenDSS 桥读取官方 IEEE13 模型，在 675 母线注入
+100 A 参考六脉动谱，比较 $h=5,7,11,13$。共有 164 个母线--相--次数共同点，最大复电压误差
+$1.652\times10^{-3}$ pu，通过 $2\times10^{-3}$ pu 门限。最差点为 680.2 的 7 次：Native
+$0.124078\angle-117.01^\circ$ pu，OpenDSS $0.125463\angle-116.59^\circ$ pu。
+余差主要来自两引擎对调压器/频变设备细节的表达差异；门限不在观察结果后调整。
+
+\subsection{设备级 VSC 对比}
+\srcpath{compare\_device\_opendss.py} 对同一变换器谐波电流驱动的 AC 网络得到最大复电压差
+$5.075\times10^{-10}$ pu。当前 DSS C-API 的 \texttt{VSConverter} 可实例化且基频收敛，但最小原生
+谐波求解不收敛；OpenDSS 也没有原生 DC/DC 类。因此数值通过项准确命名为“确定性变换器电流驱动的
+网络响应”，DC 端由独立 NumPy 节点方程校核，不伪称 OpenDSS 原生 DC/DC 验证。
+
+\subsection{复现命令}
+\begin{verbatim}
+cmake --build --preset macos-release --target test_harmonics_power_flow \
+  validate_harmonics_xref validate_harmonics_ieee13
+build/macos-release/tests/test_harmonics_power_flow
+tools/harmonics_validation/.venv/bin/python \
+  tools/harmonics_validation/run_cross_engine_matrix.py \
+  --cpp-bin build/macos-release/tests/validate_harmonics_xref \
+  --require-gridlabd --min-gridlabd-slices 20
+tools/harmonics_validation/.venv/bin/python \
+  tools/harmonics_validation/compare_ieee13_opendss.py \
+  --cpp-bin build/macos-release/tests/validate_harmonics_ieee13 \
+  --tolerance 2e-3
+\end{verbatim}
+

@@ -79,6 +79,10 @@ struct ACOPFOptions {
   bool allow_fallback{true};
   bool verbose{false};
 
+  /// Value of lost load ($/MWh) used by economic AC-OPF load-shedding
+  /// recourse.  Zero preserves the formulation's automatic calibration.
+  double voll{0.0};
+
   /// Bounded Phase I for the native parity IPM. It restores primal
   /// feasibility and fits one dual/slack start without running barrier or
   /// Hessian steps. A compatible full continuation state bypasses Phase I.

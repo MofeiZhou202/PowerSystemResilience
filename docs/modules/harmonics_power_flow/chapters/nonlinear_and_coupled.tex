@@ -1,0 +1,53 @@
+\section{非线性、跨次与 AC/DC 耦合求解}
+\subsection{逐阶复 Newton}
+\implfull{harmonics\_power\_flow.cpp:solve\_harmonic\_power\_flow\_newton} 的单端口模型为
+\begin{equation}
+I_h(V_h)=I_h^{src}-Y_h^{out}V_h-g_{2,h}V_h^2,
+\end{equation}
+故残差和对角 Jacobian 为
+\begin{equation}
+F_h=Y_hV_h-I_h^{src}+g_{2,h}V_h^2,\qquad
+J_h=Y_h+\operatorname{diag}(2g_{2,h}V_h).
+\end{equation}
+初值来自线性解。任何初值分解、Newton Jacobian 分解、回代失败或最终
+$\|F\|_\infty\ge\epsilon$ 都令 \fld{converged=false} 和 \fld{ok=false}。
+
+\subsection{恒功率的 \texorpdfstring{$2N$}{2N} 实数 Newton}
+\textbf{已实现}\par\noindent
+\srcpath{harmonics\_power\_flow.cpp:solve\_harmonic\_power\_flow\_newton\_real} 对
+$V=a+jb$、$Y=G+jB$ 使用网络块
+\begin{equation}
+\begin{bmatrix}G&-B\\B&G\end{bmatrix},
+\end{equation}
+并把 $\overline S/\overline V$ 的四个实偏导显式加入。分母 $|V|^2$ 小于 $10^{-24}$ 时截断到
+$10^{-24}$，这是数值保护，不是低电压物理模型。
+
+\subsection{跨次数 mixing}
+\implfull{harmonics\_power\_flow.cpp:solve\_harmonic\_power\_flow\_newton\_coupled} 将所有 AC 次数堆叠。
+对 $F_o\mathrel{+}=kV_pV_q$，Jacobian 加入 $kV_q$ 和 $kV_p$；若 $p=q$，Eigen triplet 求和自然得到
+$2kV_p$。只有 out、p、q 三个次数都在请求集时 term 才进入矩阵。
+
+\subsection{线性三相 AC/DC NIC}
+\implfull{harmonics\_power\_flow.cpp:solve\_harmonic\_power\_flow\_3ph\_hybrid} 建立
+\begin{equation}
+\begin{bmatrix}Y_{abc}&-K_{ad}\\-K_{da}&Y_{dc}\end{bmatrix}
+\begin{bmatrix}V_{abc}\\V_{dc}\end{bmatrix}=
+\begin{bmatrix}I_{abc}\\I_{dc}\end{bmatrix}.
+\end{equation}
+只有满足 $|h-r|=1$ 的 AC/DC 次数对应用用户给定的 \fld{k\_ad/k\_da}。结果
+\fld{combined\_solved} 精确表示整块矩阵分解和回代是否成功。
+
+\subsection{双线性混合 Newton}
+\implfull{harmonics\_power\_flow.cpp:solve\_harmonic\_power\_flow\_hybrid\_newton} 允许每个
+\texttt{HybridBilinearTerm} 的输出、a、b 分别属于 AC 或 DC：
+\begin{equation}
+F_{out}\mathrel{+}=kV_aV_b.
+\end{equation}
+不存在隐式能量守恒补式；调用者必须给出物理一致的系数和次数连接。该入口验证的是所声明代数模型，
+不是从 PWM 参数自动辨识换流器谐波模型。
+
+\subsection{复杂度与数值预期}
+独立路径需 $H+R$ 次稀疏分解，主成本近似为各次填充后的 $\sum_h C_{LU}(Y_h)$；跨次模型对
+$M=Hn_{ac}+Rn_{dc}$ 或 $3Hn_{ac}+Rn_{dc}$ 的 Jacobian 每次重分解。若网络拓扑不变，未来可复用
+symbolic ordering；当前实现未声明数值因子复用。预期上，逐阶线性成本随次数数目近线性增长，跨阶
+成本受块间耦合和填充支配。

@@ -1,127 +1,27 @@
-> 文档同步：2026-07-12。
-> 范围：已对照当前仓库结构、CMake 预设/选项和注册测试目标复核。
-> 状态：实现支撑的验证参考；求解器变化后必须重跑所列测试。
-> 权威来源：文档与实现冲突时，以 `src/`、`include/`、`tests/` 和 CMake 文件为准。
+# Harmonic Power-Flow Verification Contract
 
-# 谐波潮流正确性验证
+The full theory, implementation contract, audit, and numerical tables are in
+[the harmonic power-flow monograph](harmonics_power_flow_manual.tex).
 
-本文记录谐波潮流（HPF）模块的正确性验证。实现位于
-`src/harmonics_power_flow/harmonics_power_flow.cpp`，公共 API 位于
-`include/hacdcpf/analysis/harmonics_power_flow.hpp`。历史理论材料已归档于
-`docs/archive/theory/harmonics/`；当前模块的唯一活动文档目录为
-`docs/modules/harmonics_power_flow/`。
+| Comparison | Frozen gate | Current result |
+|---|---:|---:|
+| Native / independent NumPy | `2e-8 pu` | `5.349715355e-10 pu` |
+| Native / OpenDSS | `2e-6 pu` | `5.333277457e-10 pu` |
+| Native / GridLAB-D | `2e-5 pu`, at least 20 slices | `5.349716508e-10 pu`, 24 slices |
+| IEEE13 / OpenDSS | `2e-3 pu` | `1.652e-3 pu`, 164 points |
 
-## Summary
+All 14 AC, three-phase, DC, and hybrid AC/DC matrix cases pass. The device-level
+VSC equivalent-network comparison differs from OpenDSS by at most `5.075e-10 pu`.
+The C++ suite passes 63 cases / 412 assertions. The added HSS gates cover
+zero-coupling degeneration, an SI DC-capacitor closed form, an independent
+two-frequency off-diagonal closed form, four converter families, JSON identity,
+and the 1000-node/20-frequency/four-VSC sparse-storage case.
 
-The solver was reviewed against the design docs and standard HPF theory, the unit
-suite was strengthened, one real bug was fixed, and the solver was cross-validated
-against two independent external implementations. **The single-phase linear core,
-the Norton current-injection convention, branch-flow recovery, and the THD/IHD
-formulas now agree with both an independent numpy reference and the OpenDSS engine
-to ~1e-13 pu.**
+GridLAB-D 5.3.0 has no native harmonic-order API. Each reported AC slice is an
+actual independent process with explicit `R(h)+j h X`, source impedance, and
+constant-current injection. Measured complex voltages and branch current identify
+the transfer impedance before applying the common harmonic source phasor. This
+validates the decoupled frequency-slice equation; it is not an EMT/PWM/FFT claim.
+CTest requires GridLAB-D and at least 20 numerical slices.
 
-## Current API scope
-
-The current public harmonic API is wider than the original Level-1 linear
-penetration solver:
-
-* Single-phase / positive-sequence hybrid AC/DC HPF with automatic VSC-to-NIC
-  spectra, optional Norton output admittance, frequency-dependent AC resistance,
-  and optional DC ripple branch/shunt frequency dependence.
-* Three-phase abc-domain HPF with positive/negative/zero-sequence routing,
-  transformer zero-sequence/vector-group effects, unbalanced per-phase sources,
-  and per-phase THD reporting.
-* Coupled three-phase AC + DC HPF for a full NIC bridge, including linear
-  AC-to-DC and DC-to-AC ripple/harmonic coupling gains.
-* Newton families for nonlinear harmonic resources: single-phase, real/imaginary
-  constant-power, cross-order frequency mixing, three-phase variants, and a
-  stacked hybrid AC/DC Newton solve with bilinear NIC cross-domain coupling.
-* Post-processing helpers for IEEE 519-2014 / GB/T 14549-1993 voltage distortion
-  checks, driving-point and sequence frequency scans, resonance detection,
-  branch current THD/TDD, K-factor, and harmonic-loss metrics.
-
-## 1. Code review findings
-
-A line-by-line review of the implementation against the documented equations found
-the foundational solver mathematically sound and consistent with the docs.
-Confirmed-correct items (with the tests that pin them):
-
-* Per-order impedance `Z(h)=r+j·h·x`, line charging `j·h·b`, shunt `g+j·h·b`,
-  source grounding `1/(r+j·h·x'')`, skin-effect `R(h)` models.
-* Current injection "positive into network"; `from→to` branch current `ys·(Vf−Vt)`.
-* THD/IHD: `sqrt(Σ_{h≠fund}|V_h|²)/|V_fund|·100`.
-* Three-phase sequence-by-order routing `((h%3))` → pos/neg/zero, and the
-  symmetrical-component injection/read-out.
-* NIC operating point `I_ac,1 = conj(S_ac)/conj(V_ac,1)`, `I_dc,0 = P_dc/V_dc,0`.
-* Newton Jacobian `Ĵ = Ŷ − ∂Î_res/∂V̂`; the real/imag (2N) form for
-  non-holomorphic constant-power loads; bilinear frequency-mixing derivatives.
-* Frequency-scan driving-point impedance `Z_dp=(Ŷ⁻¹)_kk`; K-factor, TDD, `I²R(h)`
-  losses.
-
-## 2. Bug fixed
-
-**DC branch-flow current ignored the ripple inductance.** The DC branch-flow loop
-computed `|(Vf−Vt)/r|` (resistance only) while the network solve uses
-`Z(r)=r_pu+j·r·x_pu` when `dc_ripple_model.branch_x_pu` is set, so the reported DC
-branch current was overstated at higher ripple orders. Fixed to use the same
-order-dependent impedance as `build_dc_ybus` (`harmonics_power_flow.cpp`, DC
-branch-flow loop). Pinned by a new test: in a radial DC feeder KCL forces the
-branch current to equal the injected ripple current exactly (1.0 pu); the pre-fix
-formula returned 2.6 pu.
-
-Reviewed but **not** bugs: the three-phase balanced negative-sequence rotation is
-correct; `ThreePhaseLoad` has no `scaling` field (so none is dropped).
-
-## 3. Test coverage added
-
-`tests/test_harmonics_power_flow.cpp` grew from 45 to 50 cases (315 → 344
-assertions), closing previously-untested paths:
-
-1. DC branch flow with ripple inductance (pins the §2 fix).
-2. Three-phase load-as-shunt-impedance path (no prior 3-phase test enabled it) —
-   analytic positive-sequence value + strict attenuation.
-3. NIC operating point derived from a **converged base power flow** (the
-   `vsc_transfers` path; every other NIC test hand-fed setpoints) on
-   `build_ieee14_acdc()`.
-4. Single-phase NIC Norton output admittance `y_out_ac` stamping (analytic
-   `|V|=1.2` vs `1.5` ideal).
-5. THD with a depressed fundamental voltage (denominator robustness).
-
-## 4. Documented simplifications
-
-Annotated in the header so users see them: the load conductance `P/V²` is not
-frequency/skin-scaled; the NIC `P_dc = −P_ac` lossless guess (now also surfaced in
-`HPFResult::message` when taken); `solve_harmonic_power_flow_3ph` covers the AC
-network only and ignores `auto_nic_from_vscs`.
-
-## 5. External cross-validation
-
-`tools/harmonics_validation/` validates the solver on a canonical two-bus case
-(`case.json`, the single source of truth) against two independent code bases:
-
-| Reference | Result |
-|-----------|--------|
-| Independent numpy nodal solver | max \|Δ\| = **2.8e-17** pu |
-| OpenDSS engine (OpenDSSDirect.py 0.9.4) | max \|Δ\| = **6.0e-13** pu |
-
-A notable finding during this work: OpenDSS `Line` elements carry a default
-frequency-dependent / earth-return impedance model, so the apples-to-apples
-comparison models the series branch as an OpenDSS `Reactor` (`Z(h)=r+j·h·x`),
-matching the solver and the docs.
-
-Reproduce:
-
-```bash
-cmake --build build_rel --target validate_harmonics_xref
-cd tools/harmonics_validation
-python3 -m venv .venv && source .venv/bin/activate && pip install -r requirements.txt
-python compare.py        # -> OVERALL: PASS
-```
-
-## 6. Scope
-
-The implemented solver is the documented **"Level 1" direct-nodal penetration**
-method, not the paper's full hybrid-parameter Newton; this is by design (see the
-header preamble). The Newton family (nonlinear, non-holomorphic constant-power,
-cross-order mixing, hybrid AC/DC bilinear) is covered by the unit suite's
-reduces-to-linear and analytic-fixed-point tests.
+Machine-readable evidence is stored in `external_data/harmonics_validation/`.

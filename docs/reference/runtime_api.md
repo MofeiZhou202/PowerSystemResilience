@@ -168,14 +168,21 @@ series PF round-trip、case33bw split-series 以及 DC-OPF objective round-trip 
 |---|---|
 | `POST /api/session/pf` | Authored-space PF result with rich component attribution and P/Q diagnostics. `method=three_phase_hybrid` selects the monolithic unbalanced abc/DC/VSC Newton path. |
 | `POST /api/session/opf` | OPF plus authored-space post-PF Canvas payload. `network_model=three_phase_hybrid` selects Full/GraphReduced phase-domain hybrid OPF and same-model PF replay. |
-| `POST /api/session/run_ts_pf` | UC/OPF/PF time-series summary and cached per-step results. |
-| `POST /api/session/run_annual_sim` | Annual production simulation and aggregate statistics. |
+| `POST /api/session/run_ts_pf` | UC/OPF/PF time-series summary and cached per-step results. UC certificates are exposed as `uc_solver_status`, `uc_mip_gap`, `uc_mip_gap_target_met`, and `uc_optimality_proven`; feasibility alone is not an optimality claim. |
+| `POST /api/session/run_annual_sim` | Annual production simulation and aggregate statistics. Response includes `model_scope`, `schedule_only`, `physical_replay_complete`, `ens_complete`, budget residuals, SOC boundary residual and bottom-up feedback status; schedule-only is not a full-year AC physical certificate. |
 | `POST /api/session/run_carbon` | Static carbon flow. |
 | `POST /api/session/run_dynamic_carbon` | Dynamic carbon flow using cached or newly solved TSPF states. |
 | `POST /api/session/run_transient` | Phasor-domain transient result and cached telemetry. |
 | `POST /api/session/small_signal` | Modal analysis at the initialized dynamic operating point. |
 | `POST /api/session/sc`, `dc_sc`, `sc_detailed` | AC/DC short-circuit analyses. |
 | `POST /api/session/harmonics*` | Harmonic PF, three-phase, frequency scan, metrics, and Newton variants. |
+| `POST /api/session/harmonics_hss` | Frequency-coupled AC/DC HSS with explicit complex injections/couplings and first-class converter/passive-device attribution. |
+
+`POST /api/session/harmonics` 的 AC 支路谱以 canonical `branch_index` 标识，并同时返回
+`i_pu`（from 端）、`i_to_pu`（to 端）和 `i_series_pu`（铜耗串联元件）以及 `thd_i_pct`。
+带变压器/开关来源的支路身份通过投影映射附加到响应；不能把数组位置当作 authored 组件 ID。
+`POST /api/session/harmonics_freqscan` 返回与 `freqs` 等长的 `frequency_solved`；任一频点失败时
+顶层 `ok=false`，失败点阻抗为 JSON `null`（C++ 中为 NaN），不得解释为零阻抗反共振。
 | `POST /api/session/run_reliability*` | Non-sequential, sequential, FMEA, feeder, and three-stage reliability. |
 | `POST /api/session/run_reconfig` | Topology reconfiguration. |
 

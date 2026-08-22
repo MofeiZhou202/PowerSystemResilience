@@ -138,6 +138,7 @@ struct ACSystem {
   std::vector<ChargingStation> charging_stations;
   std::vector<Charger> chargers;
   std::vector<AsynchronousMotor> motors;
+  std::vector<HarmonicFilter> harmonic_filters;
   double base_mva{100.0};
   double freq_hz{50.0};
   std::string name{"AC System"};
@@ -155,6 +156,9 @@ struct DCSystem {
   std::vector<StaticGenerator> static_generators;
   std::vector<StaticGeneratorDC> dc_static_generators;
   std::vector<PVArrayDC> pv_arrays;
+  std::vector<DCCapacitor> capacitors;
+  std::vector<DCReactor> reactors;
+  std::vector<HarmonicFilter> harmonic_filters;
   std::vector<DCDCConverter> dcdc_converters;
   std::vector<DCCircuitBreaker> dc_circuit_breakers;
   double base_mva{100.0};

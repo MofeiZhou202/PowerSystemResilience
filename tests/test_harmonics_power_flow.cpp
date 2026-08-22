@@ -33,6 +33,7 @@
 
 #include "hacdcpf/analysis/harmonics_power_flow.hpp"
 #include "hacdcpf/io/case_builders.hpp"
+#include "hacdcpf/io/json_io.hpp"
 
 using namespace hacdcpf;
 using namespace hacdcpf::harmonics;
@@ -1156,6 +1157,149 @@ TEST_CASE("HPF transformer vector group introduces a 30-degree phase shift",
   CHECK_THAT(std::abs(angdiff_deg(v1_c11, v1_c1)), WithinAbs(60.0, 1e-2));
 }
 
+TEST_CASE("HPF transformer zero-sequence impedance and neutral semantics are explicit",
+          "[harmonics][3ph][transformer][zero-sequence]") {
+  auto run = [](const std::string& vector_group, double vk0) {
+    ThreePhaseACSystem sys;
+    sys.base_mva = 100.0;
+    sys.buses = {tp_bus(1, BusType::SLACK), tp_bus(2, BusType::PQ)};
+    auto transformer = tp_xfmr(1, 1, 2, vector_group);
+    transformer.vk0_percent = vk0;
+    transformer.vkr0_percent = 0.0;
+    sys.transformers = {transformer};
+    ThreePhaseHarmonicSource source;
+    source.bus = 2;
+    source.balanced = true;
+    source.i_base_pu = 1.0;
+    source.spectrum = {{3, 100.0, 0.0}};
+    HPFOptions options;
+    options.run_base_power_flow = false;
+    options.include_load_impedance = false;
+    options.ac_orders = {3};
+    return solve_harmonic_power_flow_3ph(
+        sys, ThreePhaseHarmonicInputs{.sources = {source}, .nics = {}}, options);
+  };
+
+  const auto grounded_z10 = run("YNyn0", 10.0);
+  const auto grounded_z20 = run("YNyn0", 20.0);
+  REQUIRE(grounded_z10.ok);
+  REQUIRE(grounded_z20.ok);
+  CHECK(std::abs(vph(grounded_z20, 2, 3, 0)) >
+        std::abs(vph(grounded_z10, 2, 3, 0)) + 0.25);
+
+  const auto ungrounded = run("Yy0", 10.0);
+  REQUIRE(ungrounded.ok);
+  CHECK(std::abs(vph(ungrounded, 2, 3, 0)) >
+        1.0e6 * std::abs(vph(grounded_z10, 2, 3, 0)));
+
+  const auto zigzag_grounded = run("ZNyn0", 10.0);
+  REQUIRE(zigzag_grounded.ok);
+  CHECK_THAT(std::abs(vph(zigzag_grounded, 2, 3, 0)),
+             WithinRel(std::abs(vph(grounded_z10, 2, 3, 0)), 1e-8));
+}
+
+TEST_CASE("HPF canonical transformer is stamped exactly once",
+          "[harmonics][transformer][projection]") {
+  HybridPowerSystem sys;
+  sys.base_mva = 100.0;
+  sys.ac.base_mva = 100.0;
+  sys.ac.buses = {ac_bus(1, BusType::SLACK), ac_bus(2, BusType::PQ)};
+  Transformer2W transformer;
+  transformer.index = 41;
+  transformer.hv_bus = 1;
+  transformer.lv_bus = 2;
+  transformer.sn_mva = 100.0;
+  transformer.vn_hv_kv = 10.0;
+  transformer.vn_lv_kv = 10.0;
+  transformer.vk_percent = 10.0;
+  transformer.vkr_percent = 0.0;
+  sys.ac.transformers_2w = {transformer};
+  HarmonicCurrentSource source;
+  source.bus = 2;
+  source.i_base_pu = 1.0;
+  source.spectrum = {{5, 100.0, 0.0}};
+  HPFOptions options;
+  options.run_base_power_flow = false;
+  options.include_load_impedance = false;
+  options.ac_orders = {5};
+  options.dc_orders = {};
+  const auto result = solve_harmonic_power_flow(
+      sys, HarmonicStudyInputs{.sources = {source}, .nics = {}}, options);
+  REQUIRE(result.ok);
+  CHECK_THAT(vbus(result, 2, 5).imag(), WithinAbs(1.5, 1e-9));
+  REQUIRE(result.ac_branch_flows.size() == 1);
+}
+
+TEST_CASE("HPF branch recovery uses the exact pi tap and phase-shift stamp",
+          "[harmonics][branch-flow]") {
+  HybridPowerSystem sys;
+  sys.base_mva = 100.0;
+  sys.ac.base_mva = 100.0;
+  sys.ac.buses = {ac_bus(1, BusType::SLACK), ac_bus(2, BusType::PQ)};
+  auto branch = ac_line(7, 1, 2, 0.02, 0.08, 0.04);
+  branch.tap = 1.1;
+  branch.shift_deg = 17.0;
+  sys.ac.branches = {branch};
+  HarmonicCurrentSource source;
+  source.bus = 2;
+  source.i_base_pu = 0.4;
+  source.spectrum = {{5, 100.0, 23.0}};
+  HPFOptions options;
+  options.run_base_power_flow = false;
+  options.include_load_impedance = false;
+  options.ac_orders = {5};
+  options.dc_orders = {};
+  const auto result = solve_harmonic_power_flow(
+      sys, HarmonicStudyInputs{.sources = {source}, .nics = {}}, options);
+  REQUIRE(result.ok);
+  REQUIRE(result.ac_branch_flows.size() == 1);
+  const Cx vf = vbus(result, 1, 5);
+  const Cx vt = vbus(result, 2, 5);
+  const Cx ys = 1.0 / Cx(0.02, 5.0 * 0.08);
+  const Cx ych(0.0, 5.0 * 0.04);
+  const Cx tap = std::polar(1.1, 17.0 * kPi / 180.0);
+  const Cx expected_from = (ys + 0.5 * ych) / (1.1 * 1.1) * vf -
+                           ys / std::conj(tap) * vt;
+  const Cx expected_to = -ys / tap * vf + (ys + 0.5 * ych) * vt;
+  const auto& flow = result.ac_branch_flows.front();
+  CHECK(flow.branch_index == 7);
+  CHECK_THAT(flow.i_by_order.at(5), WithinAbs(std::abs(expected_from), 1e-11));
+  CHECK_THAT(flow.i_to_by_order.at(5), WithinAbs(std::abs(expected_to), 1e-11));
+}
+
+TEST_CASE("HPF rejects invalid options and reports Newton non-convergence honestly",
+          "[harmonics][validation][newton]") {
+  HybridPowerSystem sys;
+  sys.base_mva = 100.0;
+  sys.ac.base_mva = 100.0;
+  sys.ac.buses = {ac_bus(1, BusType::SLACK), ac_bus(2, BusType::PQ)};
+  sys.ac.branches = {ac_line(1, 1, 2, 0.0, 0.1)};
+
+  HPFOptions invalid;
+  invalid.run_base_power_flow = false;
+  invalid.ac_orders = {5, 5};
+  invalid.dc_orders = {};
+  const auto rejected = solve_harmonic_power_flow(sys, {}, invalid);
+  CHECK_FALSE(rejected.ok);
+  CHECK(rejected.message.find("duplicates") != std::string::npos);
+
+  HPFOptions options;
+  options.run_base_power_flow = false;
+  options.include_load_impedance = false;
+  options.ac_orders = {5};
+  options.dc_orders = {};
+  options.newton_max_iter = 1;
+  options.newton_tol = 1e-30;
+  HarmonicNonlinearSource nonlinear;
+  nonlinear.bus = 2;
+  nonlinear.i_src[5] = Cx(1.0, 0.0);
+  nonlinear.g2[5] = Cx(10.0, 0.0);
+  const auto nonconverged = solve_harmonic_power_flow_newton(
+      sys, {nonlinear}, {}, options);
+  CHECK_FALSE(nonconverged.converged);
+  CHECK_FALSE(nonconverged.ok);
+}
+
 // ===========================================================================
 // Newton-Raphson HPF with nonlinear (voltage-dependent) resources
 // ===========================================================================
@@ -1562,6 +1706,30 @@ TEST_CASE("Frequency scan reproduces the analytic driving-point impedance",
   CHECK_THAT(r.z_mag.at(1)[i5], WithinAbs(1.0, 1e-3));
   // Impedance scales linearly with frequency: |Z(7)|/|Z(5)| = 7/5.
   CHECK_THAT(r.z_mag.at(2)[i7] / r.z_mag.at(2)[i5], WithinRel(7.0 / 5.0, 1e-4));
+}
+
+TEST_CASE("Frequency scans reject invalid ranges and unknown buses",
+          "[harmonics][scan][validation]") {
+  HybridPowerSystem sys;
+  sys.base_mva = 100.0;
+  sys.ac.base_mva = 100.0;
+  sys.ac.buses = {ac_bus(1, BusType::SLACK)};
+  HPFOptions options;
+  options.run_base_power_flow = false;
+
+  FrequencyScanOptions invalid_range;
+  invalid_range.f_start = 5.0;
+  invalid_range.f_end = 1.0;
+  CHECK_FALSE(frequency_scan(sys, invalid_range, options).ok);
+
+  FrequencyScanOptions missing_bus;
+  missing_bus.f_start = 1.0;
+  missing_bus.f_end = 2.0;
+  missing_bus.f_step = 1.0;
+  missing_bus.buses = {999};
+  const auto result = frequency_scan(sys, missing_bus, options);
+  CHECK_FALSE(result.ok);
+  CHECK(result.message.find("bus not found") != std::string::npos);
 }
 
 TEST_CASE("Frequency scan detects a parallel resonance from a shunt capacitor",
@@ -2260,9 +2428,269 @@ TEST_CASE("HPF projects rich topology and broadcasts merged-bus observables",
   CHECK(std::abs(vbus(result, 30, 5)) > 0.0);
 }
 
+static Cx hss_voltage(const HSSResult& result, int bus, bool dc, int order) {
+  for (const auto& item : result.bus_results) {
+    if (item.bus != bus || item.is_dc != dc) continue;
+    const auto it = item.voltage_pu.find(order);
+    if (it != item.voltage_pu.end()) return it->second;
+  }
+  return {};
+}
 
+TEST_CASE("HSS zero-coupling solution equals the per-order HPF solution",
+          "[harmonics][hss][degeneration]") {
+  HybridPowerSystem sys;
+  sys.base_mva = sys.ac.base_mva = 100.0;
+  sys.ac.buses = {ac_bus(1, BusType::SLACK), ac_bus(2, BusType::PQ)};
+  sys.ac.branches = {ac_line(1, 1, 2, 0.01, 0.1)};
 
+  HarmonicCurrentSource source;
+  source.bus = 2;
+  source.i_base_pu = 1.0;
+  source.spectrum = {{5, 100.0, 17.0}};
+  HPFOptions pf_options;
+  pf_options.run_base_power_flow = false;
+  pf_options.include_load_impedance = false;
+  pf_options.ac_orders = {5};
+  pf_options.dc_orders = {};
+  const auto per_order = solve_harmonic_power_flow(
+      sys, HarmonicStudyInputs{.sources = {source}}, pf_options);
+  REQUIRE(per_order.ok);
 
+  HSSOptions hss_options;
+  hss_options.orders = {5};
+  hss_options.run_base_power_flow = false;
+  hss_options.include_load_impedance = false;
+  const HSSCurrentInjection injection{
+      .bus = 2, .order = 5,
+      .current_pu = std::polar(1.0, 17.0 * kPi / 180.0)};
+  const auto hss = solve_harmonic_state_space(sys, {injection}, {}, hss_options);
+  REQUIRE(hss.ok);
+  CHECK_THAT(std::abs(hss_voltage(hss, 2, false, 5) - vbus(per_order, 2, 5)),
+             WithinAbs(0.0, 1e-10));
+  CHECK(hss.normalized_backward_error <= 1e-10);
+}
 
+TEST_CASE("HSS first-class DC capacitor matches the SI RLC closed form",
+          "[harmonics][hss][dc-capacitor][analytic]") {
+  HybridPowerSystem sys;
+  sys.base_mva = sys.dc.base_mva = 100.0;
+  sys.dc.buses = {dc_bus(1, DCBusType::DC_V, 10.0)};
+  DCCapacitor cap;
+  cap.index = 71;
+  cap.bus = 1;
+  cap.capacitance_f = 1e-3;
+  cap.esr_ohm = 0.1;
+  sys.dc.capacitors = {cap};
+  HSSOptions options;
+  options.orders = {6};
+  options.run_base_power_flow = false;
+  options.min_shunt_pu = 1e-12;
+  const auto result = solve_harmonic_state_space(
+      sys, {{.bus = 1, .is_dc = true, .order = 6,
+             .current_pu = Cx(1.0, 0.0)}}, {}, options);
+  REQUIRE(result.ok);
+  const double omega = 2.0 * kPi * 300.0;
+  const Cx zc(0.1, -1.0 / (omega * 1e-3));
+  const Cx ycap = Cx(1.0, 0.0) / zc;  // Zbase=10^2/100=1 ohm.
+  const Cx expected = Cx(1.0, 0.0) / (Cx(100.0 + 1e-12, 0.0) + ycap);
+  CHECK_THAT(std::abs(hss_voltage(result, 1, true, 6) - expected),
+             WithinAbs(0.0, 1e-10));
+  REQUIRE(result.device_terminal_results.size() == 1);
+  CHECK(result.device_terminal_results.front().component_index == 71);
+}
 
+TEST_CASE("HSS explicit off-diagonal block matches a two-frequency closed form",
+          "[harmonics][hss][analytic][coupling]") {
+  HybridPowerSystem sys;
+  sys.base_mva = sys.ac.base_mva = 100.0;
+  sys.ac.buses = {ac_bus(1, BusType::SLACK, 10.0)};
+  HSSOptions options;
+  options.orders = {2, 3};
+  options.run_base_power_flow = false;
+  options.include_load_impedance = false;
+  options.min_shunt_pu = 1e-12;
+  const Cx coupling(0.07, -0.03);
+  const auto result = solve_harmonic_state_space(
+      sys, {{.bus = 1, .order = 2, .current_pu = Cx(1.0, 0.0)}},
+      {{.row_bus = 1, .row_order = 3, .column_bus = 1,
+        .column_order = 2, .admittance_pu = coupling}}, options);
+  REQUIRE(result.ok);
+  const Cx y2 = Cx(1.0, 0.0) / Cx(0.0, 2.0 * 0.2) + Cx(1e-12, 0.0);
+  const Cx y3 = Cx(1.0, 0.0) / Cx(0.0, 3.0 * 0.2) + Cx(1e-12, 0.0);
+  const Cx expected2 = Cx(1.0, 0.0) / y2;
+  const Cx expected3 = -coupling * expected2 / y3;
+  CHECK_THAT(std::abs(hss_voltage(result, 1, false, 2) - expected2),
+             WithinAbs(0.0, 1e-10));
+  CHECK_THAT(std::abs(hss_voltage(result, 1, false, 3) - expected3),
+             WithinAbs(0.0, 1e-10));
+}
 
+static HybridPowerSystem hss_converter_system() {
+  HybridPowerSystem sys;
+  sys.base_mva = sys.ac.base_mva = sys.dc.base_mva = 100.0;
+  sys.ac.freq_hz = 50.0;
+  sys.ac.buses = {ac_bus(1, BusType::SLACK, 10.0)};
+  sys.dc.buses = {dc_bus(10, DCBusType::DC_V, 10.0),
+                  dc_bus(11, DCBusType::DC_V, 10.0)};
+  return sys;
+}
+
+TEST_CASE("HSS converter families stamp cross-frequency switching physics",
+          "[harmonics][hss][converter]") {
+  SECTION("two-level VSC") {
+    auto sys = hss_converter_system();
+    VSCConverter converter;
+    converter.index = 81; converter.bus_ac = 1; converter.bus_dc = 10;
+    auto& h = converter.harmonic_model;
+    h.topology = VSCHarmonicTopology::TwoLevel;
+    h.switching_frequency_hz = 500.0; h.modulation_index = 0.8;
+    h.transfer_conductance_pu = 0.2; h.filter_inductance_h = 1e-3;
+    h.dc_link_capacitance_f = 1e-3;
+    sys.vsc_converters = {converter};
+    HSSOptions options; options.orders = {1, 2}; options.run_base_power_flow = false;
+    const auto result = solve_harmonic_state_space(
+        sys, {{.bus = 10, .is_dc = true, .order = 1,
+               .current_pu = Cx(1.0, 0.0)}}, {}, options);
+    INFO(result.message);
+    REQUIRE(result.ok);
+    CHECK(std::abs(hss_voltage(result, 1, false, 2)) > 1e-8);
+    CHECK(result.device_terminal_results.size() == 2);
+    CHECK(std::abs(result.device_terminal_results.front()
+                       .current_into_device_pu.at(2)) > 1e-8);
+  }
+  SECTION("MMC") {
+    auto sys = hss_converter_system();
+    VSCConverter converter;
+    converter.index = 82; converter.bus_ac = 1; converter.bus_dc = 10;
+    auto& h = converter.harmonic_model;
+    h.topology = VSCHarmonicTopology::MMC;
+    h.switching_frequency_hz = 500.0; h.modulation_index = 0.9;
+    h.transfer_conductance_pu = 0.15; h.filter_inductance_h = 1e-3;
+    h.filter_resistance_ohm = 0.05;
+    h.dc_link_capacitance_f = 2e-3; h.dc_link_esr_ohm = 0.02;
+    h.submodules_per_arm = 20;
+    h.submodule_capacitance_f = 5e-3; h.arm_inductance_h = 2e-3;
+    h.arm_resistance_ohm = 0.02;
+    sys.vsc_converters = {converter};
+    HSSOptions options; options.orders = {1, 2}; options.run_base_power_flow = false;
+    const auto result = solve_harmonic_state_space(
+        sys, {{.bus = 10, .is_dc = true, .order = 1,
+               .current_pu = Cx(1.0, 0.0)}}, {}, options);
+    INFO(result.message);
+    REQUIRE(result.ok);
+    CHECK(std::abs(hss_voltage(result, 1, false, 2)) > 1e-8);
+  }
+  SECTION("LCC") {
+    auto sys = hss_converter_system();
+    LCCConverter converter;
+    converter.index = 83; converter.ac_bus = 1; converter.dc_bus = 10;
+    converter.harmonic_model_enabled = true;
+    converter.harmonic_transfer_conductance_pu = 0.2;
+    converter.smoothing_reactor_mh = 10.0;
+    converter.dc_filter_capacitance_f = 1e-3;
+    sys.lcc_converters = {converter};
+    HSSOptions options; options.orders = {1, 6}; options.run_base_power_flow = false;
+    const auto result = solve_harmonic_state_space(
+        sys, {{.bus = 10, .is_dc = true, .order = 1,
+               .current_pu = Cx(1.0, 0.0)}}, {}, options);
+    REQUIRE(result.ok);
+    CHECK(std::abs(hss_voltage(result, 1, false, 6)) > 1e-8);
+  }
+  SECTION("DC/DC buck") {
+    auto sys = hss_converter_system();
+    DCDCConverter converter;
+    converter.index = 84; converter.bus_in = 10; converter.bus_out = 11;
+    converter.topology = DCDCTopology::Buck;
+    converter.harmonic_model_enabled = true;
+    converter.harmonic_transfer_conductance_pu = 0.2;
+    converter.f_switching_hz = 500.0; converter.duty_ratio = 0.4;
+    converter.inductance_h = 1e-3; converter.input_capacitance_f = 1e-3;
+    converter.output_capacitance_f = 1e-3;
+    sys.dc.dcdc_converters = {converter};
+    HSSOptions options; options.orders = {1, 2}; options.run_base_power_flow = false;
+    const auto result = solve_harmonic_state_space(
+        sys, {{.bus = 10, .is_dc = true, .order = 1,
+               .current_pu = Cx(1.0, 0.0)}}, {}, options);
+    REQUIRE(result.ok);
+    CHECK(std::abs(hss_voltage(result, 11, true, 2)) > 1e-8);
+  }
+}
+
+TEST_CASE("HSS model components survive JSON round trip",
+          "[harmonics][hss][json]") {
+  auto sys = hss_converter_system();
+  sys.dc.capacitors = {{.index = 1, .bus = 10, .capacitance_f = 1e-3}};
+  sys.dc.reactors = {{.index = 2, .from_bus = 10, .to_bus = 11,
+                      .inductance_h = 2e-3}};
+  sys.ac.harmonic_filters = {{.index = 3, .from_bus = 1,
+      .resistance_ohm = 0.1, .inductance_h = 1e-3,
+      .capacitance_f = 1e-4}};
+  VSCConverter vsc;
+  vsc.index = 4; vsc.bus_ac = 1; vsc.bus_dc = 10;
+  vsc.harmonic_model.topology = VSCHarmonicTopology::MMC;
+  vsc.harmonic_model.switching_frequency_hz = 500.0;
+  vsc.harmonic_model.modulation_index = 0.9;
+  vsc.harmonic_model.transfer_conductance_pu = 0.2;
+  vsc.harmonic_model.filter_inductance_h = 1e-3;
+  vsc.harmonic_model.dc_link_capacitance_f = 1e-3;
+  vsc.harmonic_model.submodules_per_arm = 10;
+  vsc.harmonic_model.submodule_capacitance_f = 2e-3;
+  vsc.harmonic_model.arm_inductance_h = 1e-3;
+  sys.vsc_converters = {vsc};
+  const auto restored = hacdcpf::io::from_json(hacdcpf::io::to_json(sys));
+  REQUIRE(restored.dc.capacitors.size() == 1);
+  REQUIRE(restored.dc.reactors.size() == 1);
+  REQUIRE(restored.ac.harmonic_filters.size() == 1);
+  REQUIRE(restored.vsc_converters.size() == 1);
+  CHECK(restored.dc.capacitors.front().index == 1);
+  CHECK(restored.vsc_converters.front().harmonic_model.topology ==
+        VSCHarmonicTopology::MMC);
+  CHECK_THAT(restored.vsc_converters.front().harmonic_model.dc_link_capacitance_f,
+             WithinAbs(1e-3, 1e-15));
+}
+
+TEST_CASE("HSS 1000-node 20-frequency matrix remains sparse with four VSCs",
+          "[harmonics][hss][performance]") {
+  HybridPowerSystem sys;
+  sys.base_mva = sys.ac.base_mva = sys.dc.base_mva = 100.0;
+  sys.ac.freq_hz = 50.0;
+  sys.ac.buses.reserve(1000);
+  sys.ac.branches.reserve(999);
+  for (int i = 1; i <= 1000; ++i)
+    sys.ac.buses.push_back(ac_bus(i, i == 1 ? BusType::SLACK : BusType::PQ,
+                                  10.0));
+  for (int i = 1; i < 1000; ++i)
+    sys.ac.branches.push_back(ac_line(i, i, i + 1, 0.01, 0.02));
+  for (int i = 0; i < 4; ++i) {
+    sys.dc.buses.push_back(dc_bus(2001 + i, DCBusType::DC_V, 10.0));
+    VSCConverter converter;
+    converter.index = 3001 + i;
+    converter.bus_ac = 200 * (i + 1);
+    converter.bus_dc = 2001 + i;
+    auto& h = converter.harmonic_model;
+    h.topology = VSCHarmonicTopology::TwoLevel;
+    h.switching_frequency_hz = 1000.0;
+    h.modulation_index = 0.8;
+    h.transfer_conductance_pu = 0.1;
+    h.filter_resistance_ohm = 0.02;
+    h.filter_inductance_h = 1e-3;
+    h.dc_link_capacitance_f = 1e-3;
+    h.dc_link_esr_ohm = 0.01;
+    sys.vsc_converters.push_back(converter);
+  }
+  HSSOptions options;
+  options.run_base_power_flow = false;
+  options.include_load_impedance = false;
+  options.compute_device_currents = false;
+  options.orders.clear();
+  for (int order = 1; order <= 20; ++order) options.orders.push_back(order);
+  const auto result = solve_harmonic_state_space(sys, {}, {}, options);
+  REQUIRE(result.ok);
+  REQUIRE(result.matrix_dimension == 20080);
+  const double sparse_bytes = result.matrix_nonzeros *
+      static_cast<double>(sizeof(Cx) + 2 * sizeof(int));
+  const double dense_bytes = static_cast<double>(result.matrix_dimension) *
+      result.matrix_dimension * sizeof(Cx);
+  CHECK(sparse_bytes / dense_bytes < 0.20);
+}

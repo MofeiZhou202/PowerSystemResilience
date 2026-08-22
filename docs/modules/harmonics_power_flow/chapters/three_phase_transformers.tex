@@ -1,0 +1,45 @@
+\section{三相 abc 网络与变压器序网}
+\subsection{线路相矩阵}
+\implfull{harmonics\_power\_flow.cpp:build\_3ph\_ac\_ybus} 支持两种线路输入。若
+\fld{use\_phase\_matrix=true}，直接形成
+\begin{equation}
+\mathbf Z_{abc}(h)=\mathbf R_{abc}(h)+jh\mathbf X_{abc},\quad
+\mathbf Y_{sh,abc}(h)=jh\mathbf B_{abc}/2,
+\end{equation}
+并只逆活动相子矩阵，避免缺相线路的零行/零列导致三阶矩阵奇异。否则由
+$z_0,z_1,z_2(=z_1)$ 经对称分量矩阵转换。相掩码同时约束 from、to 和线路活动相。
+
+\subsection{次数到序分量的路由}
+平衡源使用 $h\bmod3$：余数 1 为正序 $[1,a^2,a]$，余数 2 为负序 $[1,a,a^2]$，余数 0 为
+零序 $[1,1,1]$。不平衡源分别使用 \fld{i\_base\_pu\_a/b/c}，不强制序对称。
+
+\subsection{接线组解析}
+\textbf{已实现}\par\noindent
+\srcpath{harmonics\_power\_flow.cpp:parse\_vector\_group} 区分
+\texttt{WyeG/Wye/Delta/ZigzagG/Zigzag}。字母 N 只把紧邻的 Y 或 Z 标为接地；因此
+\texttt{Yy0} 与 \texttt{YNyn0} 不再同义，\texttt{Z} 与 \texttt{ZN} 也不再错误映射为 Delta。
+vector-group 为空时，解析 hv/lv topology 字符串中的 delta、wye/star、zigzag、ground/neutral。
+
+\subsection{正、负、零序投影器}
+令
+\begin{equation}
+\mathbf P_0=\frac13\mathbf 1\mathbf 1^T,\qquad
+\mathbf P_{12}=\mathbf I-\mathbf P_0.
+\end{equation}
+三角形与未接地星形/曲折形的线路端自导纳使用 $y_1\mathbf P_{12}$，从而阻断外部零序；接地星形和
+接地曲折形允许零序。\texttt{vk0\_percent/vkr0\_percent} 在变压器自身 MVA 基准和 LV 电压基准上形成
+$z_0$，再按次数变成 $R_0(h)+jhX_0$。若零序铭牌为空，才回退正序铭牌。代码用
+$(y_0-y_1)\mathbf P_0$ 替换共同模态导纳，因此 $Z_0$ 不再被忽略。
+
+三角形—星形组合的非零序互导纳使用 $\mathbf Y_{III}$，clock 组选择转置方向，形成正/负 $30^\circ$
+相移。三角形侧零序可在绕组内部环流但不流入线路；接地星形侧保留局部零序自导纳。
+
+\subsection{验证不变量}
+测试固定以下关系：YNyn0 的三倍频有有限通路；YNd11 和 Yy0 的负荷侧零序呈开路正则化响应；
+ZNyn0 与相同 $Z_0$ 的 YNyn0 在共同模态一致；把 \fld{vk0\_percent} 从 10\% 提至 20\% 会严格增加
+零序驱动点电压；YNd1 与 YNd11 的正序幅值相等而相角相差 $60^\circ$。
+
+\subsection{三相结果口径}
+\texttt{HPF3phResult} 对每个稳定母线 ID 返回三相基频幅值、各次复相量和分相 THD。
+\fld{ac\_order\_solved} 是逐次状态；Newton 入口另有 \fld{newton\_converged}、逐次迭代数和残差。
+任何请求次数失败都会令 \fld{ok=false}。

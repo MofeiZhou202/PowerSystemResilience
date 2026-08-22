@@ -1,0 +1,77 @@
+\section{UC--OPF--PF 时序流水线}
+\label{sec:tspf-pipeline}
+
+\subsection{阶段语义}
+\srcpath{solve\_time\_series\_pf} 的默认流程是
+\[
+\begin{aligned}
+  &\text{profile replay}\;\longrightarrow\;\text{DC UC MILP}\;\longrightarrow\\
+  &\text{逐时 AC/DC snapshot}\;\longrightarrow\;\text{AC-OPF（可选）}\;\longrightarrow\;\text{PF validation}.
+\end{aligned}
+\]
+\fld{skip\_uc=true} 时没有 UC 行程，\fld{run\_opf=true} 仍可逐步 OPF；
+\fld{run\_opf=false} 时 PF 直接重放 UC/预计算 schedule。预计算日程通过
+\fld{precomputed\_uc\_schedule} 非拥有指针传入，必须在调用期间保持有效。
+
+\subsection{UC 的平衡与目标}
+不启用 \fld{enable\_network\_constraints} 时使用铜板平衡
+\[
+ \sum_{i\in\mathcal S_t}p_{i,t}-\sum_{j\in\mathcal D_t}p_{j,t}=0.
+\]
+启用后，对非参考 AC 母线增加 DC 潮流角变量和支路热限；
+\fld{enable\_dc\_network\_constraints} 增加 DC 母线平衡及 VSC/DC--DC 耦合。
+只有 \fld{enable\_dc\_branch\_flows=true} 才创建显式
+$f_{ij,t}\in[-rate_{ij},rate_{ij}]$；否则不能把模型解释成含 DC 线路热限或电阻压降的潮流。
+
+常规机组在时段 $t$ 的边界为
+\[
+ P_g^{min}u_{g,t}\le p_{g,t}\le P_g^{max}u_{g,t},
+\]
+并有爬坡、启停、最小开停机约束。目标模式实际是线性权重切换：Cost 为燃料/空载/启动，
+Carbon 使用 \fld{emission\_factor\_tco2\_mwh}，MinCurtailment 奖励可再生利用，
+MinLoss 只是减少发电量的无损代理，Weighted 使用四个公开权重。\fld{UCSchedule.total\_cost}
+与求解器内部目标可能不同：报告阶段会重新按 dispatch、静态源、储能 bid、外部电网价格和
+默认缺失进口价格计算成本。
+
+\subsection{储能递推}
+令净出力 $p_t=p_t^{dis}-p_t^{ch}$，正值为放电。实现的 SOC 递推（AC/DC 两组相同）是
+\[
+ SOC_t+\frac{\Delta t}{\eta_dE'}p_t
+ +\frac{\Delta t}{E'}(\eta_d^{-1}-\eta_c)p_t^{ch}
+ -\rho SOC_{t-1}=0,
+\]
+其中 $\rho=[\operatorname{clamp}(1-sd/100,0,1)]^{\max(0,\Delta t)}$，
+$E'=E$（$E\ge10^{-12}$）否则取 1，效率截断到 $[10^{-6},1]$。当
+终端循环 SOC 开关为 true 时，末端变量边界固定到
+$\operatorname{clamp}(SOC^{init},SOC^{min},SOC^{max})$，这不是额外等式行。
+储能效率的方向由注册测试锁定：9 MW 放电、$E=100$ MWh、$\eta_d=0.9$、10\%/h 自放电时
+$SOC_1=0.35$；10 MW 充电、$\eta_c=0.8$ 时 $SOC_1=0.53$。
+
+\subsection{OPF 跟踪和结果闭环}
+UC 行程应用到 OPF 前，在线机组的边界可被跟踪带收紧：
+\[
+b_g=\max(a_g,r_g\max(|p_g^{UC}|,1)),\quad
+P_g^{new}\in[\max(P_g^{min},p_g^{UC}-b_g),\min(P_g^{max},p_g^{UC}+b_g)].
+\]
+若 OPF 给出 \fld{dpd\_mw}/\fld{dqd\_mvar}，缺供量按母线负荷比例回写到快照；
+PF 未收敛或前级 OPF 未收敛时，年度层不会把该步标成完整 PF 成功。
+
+\subsection{跨步结果索引}
+\begin{center}\footnotesize
+\begin{tabular}{@{}L{4.2cm}L{3.1cm}L{5.9cm}@{}}
+\toprule
+结果 & 索引空间 & 闭环条件\\ \midrule
+\fld{uc\_schedule.gen\_dispatch[g][t]} & 在役 AC generator 顺序 & 与 \fld{gen\_commit}、\fld{gen\_soc} 同行\\
+\fld{opf\_results[t]} & 局部窗口 $t$ & \fld{num\_opf\_converged} 只统计 \fld{converged=true}\\
+\fld{pf\_results[t]} & 局部窗口 $t$ & \fld{num\_converged} 统计 PF 成功步\\
+\fld{crossval[t]} & 局部窗口 $t$ & OPF/PF 电压、损耗差；空 OPF 时不伪造比较\\
+\fld{rich\_results[t]} & 稳定组件身份 & 由 result attribution 恢复，而非数组猜测\\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\begin{theorynote}
+\textbf{可验证闭环：}在 PF 收敛步，年度 accounting 使用实际 PF 支路、VSC 和 DC/DC 损耗，
+并将外部电网交换重算为功率残差；这样能源恒等式闭合，但该交换不再等于 OPF 决策变量。
+若需要研究市场结算，应同时保存原始 OPF 外部电网向量，不能只读年度 residual exchange。
+\end{theorynote}

@@ -1,167 +1,43 @@
 % !TEX program = xelatex
-% 编译方式：在本目录执行两遍 xelatex（详见 docs/_manual_common/README.md）。
-% 源码依据：单头文件 include/hacdcpf/analysis/harmonics_power_flow.hpp 与
-%           src/harmonics_power_flow/harmonics_power_flow.cpp 源码，公式与参数以代码为准。
 \documentclass[UTF8,fontset=fandol,a4paper,11pt]{ctexart}
 \usepackage{../../_manual_common/hysim_manual}
 
 \title{\textbf{交直流混合高弹性能源电力系统仿真平台}\\[0.5em]
-       {\Large 谐波潮流技术手册}\\[0.3em]
-       {\large 数学模型、接口参数、验证校核与工业级评价}}
+       {\Large 谐波潮流理论、实现与验证专著}\\[0.3em]
+       {\large 频域网络、三相序网、非线性谐波平衡、标准评价与跨引擎证据}}
 \author{HySim-XJTU-HRPES（西安交通大学 HRPES 团队）}
 \date{\today}
 
 \begin{document}
 \maketitle
 \begin{abstract}
-\noindent 本手册依据 HySim-XJTU-HRPES 平台谐波潮流模块整理。该模块以单个头文件
-\srcpath{include/hacdcpf/analysis/harmonics\_power\_flow.hpp} 与实现
-\srcpath{src/harmonics\_power\_flow/harmonics\_power\_flow.cpp} 提供（注意：并无
-\srcpath{include/hacdcpf/harmonics\_power\_flow/} 目录），命名空间 \texttt{hacdcpf::harmonics}。
-手册覆盖频域“谐波穿透”线性直接解、牛顿谐波平衡变体、三相 abc 域求解与 NIC 交直流桥接，以及
-IEEE 519-2014 / GB/T 14549-1993 合规校核。顶层暂无权威 Markdown 文档，头文件与测试即权威来源；
-直流纹波网络按设计为纯阻性，基频未收敛时回退到存储/额定电压并在 \fld{model\_limitations} 中标注。
-版式与《碳流追踪与碳排放核算技术手册》一致。
+本书给出平台谐波潮流模块的理论边界、源码等价方程、公共接口、失败语义和数值证据。
+研究对象包括正序与三相 abc 频域穿透、交直流纹波网络、谐波状态空间（HSS）、一等 DC 电容/
+电抗器/滤波器、两电平 VSC、MMC、LCC 与 DC/DC 开关函数、逐阶及跨阶 Newton 谐波平衡、频率
+扫描、支路损耗，以及 IEEE 519-2014 和 GB/T 14549-1993 电压畸变评价。
+本次系统审计关闭了求解状态失真、变压器重复盖章、支路恢复与 Ybus 不一致、未接地星形和曲折形
+误判、零序铭牌参数未消费、非法阶次未拒绝以及 GridLAB-D 仅声明不计算等缺口。
+
+证据链包含 63 个 C++ 用例、412 个断言；14 个跨域基准全部通过；OpenDSS 执行 9 个数值模型，
+GridLAB-D 5.3.0 强制执行 24 个频率切片；IEEE 13 节点馈线比较 164 个复电压点。固定门限分别为
+$2\times10^{-8}$、$2\times10^{-6}$、$2\times10^{-5}$ 和 $2\times10^{-3}$ pu，均在运行前冻结。
+文中不把 GridLAB-D 的稳态频率切片扩大解释为 EMT/FFT 验证，也不把 OpenDSS 缺失的 DC/DC 类
+替换为虚构的原生模型。
 \end{abstract}
 
 \tableofcontents
 \newpage
 
-\section{阅读指南与约定}
-\subsection{数据来源}
-\begin{itemize}
-  \item \srcpath{include/hacdcpf/analysis/harmonics\_power\_flow.hpp} —— 全部接口、选项与结果结构
-        （单头文件）；
-  \item \srcpath{src/harmonics\_power\_flow/harmonics\_power\_flow.cpp} —— 求解实现；
-  \item \srcpath{tests/test\_harmonics\_power\_flow.cpp} 与 \srcpath{tools/harmonics\_validation/}
-        —— 验证与跨引擎校核依据；
-  \item 归档理论 \srcpath{docs/archive/theory/harmonics/}（\srcpath{harmonic\_general.md}、
-        \srcpath{harmonic\_nic.md}、\srcpath{harmonic\_three\_phase.md} 等）。
-\end{itemize}
-命名空间为 \texttt{hacdcpf::harmonics}。顶层无权威 Markdown，契约以头文件与测试为准。
-
-\subsection{单位制与索引空间}
-谐波次 $h$ 为整数（交流缺省奇次、直流缺省偶次），电压以标幺或母线额定折算，THD 以百分数表示。
-交直流结果分列：\fld{ac\_bus\_results}/\fld{dc\_bus\_results}（\texttt{HarmonicBusResult}）、
-\fld{ac\_branch\_flows}；每母线以 \fld{v\_by\_order}（次$\to$复数）、\fld{thd\_pct}、\fld{v\_fund\_pu}
-表述。索引空间与基频潮流的交/直流母线一致。
-
-\subsection{诚实口径}
-本模块为“Level 1”线性模型：每个谐波次一次复数稀疏分解。直流纹波网络按设计为纯阻性
-（DCBranch 无电感），除非 \texttt{DCRippleModel} 覆盖引入 \fld{x\_pu}/\fld{b\_pu}。负荷阻性部分
-$P/V^2$ 与频率无关，不随集肤效应缩放（仅线路/变压器/电源串联 R 频变）。三相
-\srcpath{solve\_harmonic\_power\_flow\_3ph} 求解不含直流子系统（仅交流），此时
-\fld{auto\_nic\_from\_vscs} 被忽略。请求但未收敛的基频潮流回退到存储/额定电压
-（\fld{used\_stored\_operating\_point}=true，并列入 \fld{model\_limitations}）。
-
-\section{功能定位与架构}
-\subsection{公共入口族}
-\begin{center}\footnotesize
-\begin{tabular}{@{}L{6.6cm}L{3.0cm}L{5.4cm}@{}}
-\toprule
-入口 & 定义位置 & 说明\\
-\midrule
-\srcpath{solve\_harmonic\_power\_flow} & analysis/harmonics\_power\_flow.hpp & 单相/正序交直流线性直接节点解（Level 1）\\
-\srcpath{solve\_harmonic\_power\_flow\_newton} 等 & 同上 & 牛顿谐波平衡变体（含 \_real/\_coupled）\\
-\srcpath{solve\_harmonic\_power\_flow\_3ph} & 同上 & 三相 abc 域求解（仅交流）\\
-\srcpath{solve\_harmonic\_power\_flow\_3ph\_hybrid} & 同上 & 三相 + NIC 交直流桥接\\
-\srcpath{solve\_harmonic\_power\_flow\_hybrid\_newton} & 同上 & 交直流耦合牛顿求解\\
-\srcpath{check\_harmonic\_limits} / \srcpath{harmonic\_voltage\_limits} & 同上 & IEEE 519 / GB/T 14549 合规校核\\
-\srcpath{default\_six\_pulse\_ac\_spectrum} / \srcpath{default\_dc\_ripple\_spectrum} & 同上 & 6 脉动交流/直流纹波缺省谱\\
-\bottomrule
-\end{tabular}
-\end{center}
-
-\subsection{关键数据结构}
-\compmeta{HPFOptions}{include/hacdcpf/analysis/harmonics\_power\_flow.hpp}
-主要字段：\fld{ac\_orders}（缺省 5, 7, 11, 13, 17, 19, 23, 25）、\fld{dc\_orders}
-（缺省 2, 6, 12, 18, 24）、\fld{run\_base\_power\_flow}、\fld{include\_load\_impedance}、
-\fld{default\_source\_xpp\_pu}（$0.2$）、\fld{skin\_effect}（\texttt{SkinEffectModel}）、
-\fld{auto\_nic\_from\_vscs}、\fld{newton\_max\_iter}/\fld{newton\_tol}。
-
-\compmeta{HPFResult}{include/hacdcpf/analysis/harmonics\_power\_flow.hpp}
-主要字段：\fld{ok}、\fld{ac\_bus\_results}/\fld{dc\_bus\_results}、\fld{ac\_branch\_flows}、
-\fld{base\_pf\_converged}、\fld{used\_stored\_operating\_point}、\fld{model\_limitations}、
-\fld{max\_ac\_thd\_pct}。两端口 \texttt{HarmonicNIC} 含 \fld{ac\_port}/\fld{dc\_port}
-（\texttt{PortBehavior}）、\fld{ac\_spectrum}/\fld{dc\_spectrum}、\fld{y\_out\_ac}；单端口
-\texttt{HarmonicCurrentSource} 给出诺顿谱。合规结构 \texttt{HarmonicComplianceReport}/
-\texttt{HarmonicLimitCheck} 含 \fld{thd\_ok}、\fld{worst\_ihd\_order}、\fld{compliant} 与
-\texttt{HarmonicStandard}。
-
-\section{核心数学模型}
-频域“谐波穿透”把各谐波次视为独立的复数节点问题，资源以诺顿谐波电流源表示。
-
-\subsection{频域节点方程}
-对每个谐波次 $h$ 组装复数节点导纳并直接求解
-\begin{equation}
-\mathbf{Y}(h)\,\mathbf{V}(h) = \mathbf{I}(h),\qquad h\in\{5,7,11,\dots\},
-\end{equation}
-每次仅一次复数稀疏分解（Level 1，逐次线性）。
-
-\subsection{NIC 一致注入}
-两端口 NIC 由同一基频通过功率给出自洽的交/直流谱
-\begin{equation}
-I_{ac,1} = \frac{\overline{S_{ac}}}{\overline{V_{ac,1}}},\qquad
-I_{dc,0} = \frac{P_{dc}}{V_{dc,0}}.
-\end{equation}
-
-\subsection{支路与负荷谐波阻抗}
-交流支路按
-\begin{equation}
-Z_{ij}(h) = r_{ij} + \mathrm{j}\,h\,x_{ij},\qquad
-y^{\text{sh}}_{ij}(h) = \mathrm{j}\,h\,b_{ij}
-\end{equation}
-缩放，负荷以 CIGRE/IEC 并联 $R\parallel\mathrm{j}X$ 建模。
-
-\subsection{三相序分量}
-三相路径用
-\begin{equation}
-\mathbf{Z}_{abc}(h) = \mathbf{A}\,\mathrm{diag}(z_0,z_1,z_1)\,\mathbf{A}^{-1},
-\end{equation}
-按 $h \bmod 3$ 自动指派零/正/负序。
-
-\subsection{THD 与合规}
-电压总谐波畸变率
-\begin{equation}
-\mathrm{THD}_v = \frac{\sqrt{\sum_{h>1}\lvert V_h\rvert^2}}{\lvert V_1\rvert}\times 100\%,
-\end{equation}
-并按 IEEE 519-2014 / GB/T 14549-1993 判定 \fld{thd\_ok} 与 \fld{compliant}。
-
-\section{接口与参数}
-\begin{paramtable}
-\fld{ac\_orders} & — & — & 奇次为主 & 见说明 & 交流谐波次集，缺省 5, 7, 11, 13, 17, 19, 23, 25\\
-\fld{dc\_orders} & — & — & 偶次为主 & 见说明 & 直流纹波次集，缺省 2, 6, 12, 18, 24\\
-\fld{run\_base\_power\_flow} & — & — & 布尔 & — & 先解基频潮流以取工作点\\
-\fld{include\_load\_impedance} & — & — & 布尔 & — & 负荷并入谐波阻抗（并联 R//jX）\\
-\fld{default\_source\_xpp\_pu} & $x''$ & pu & — & $0.2$ & 电源次暂态电抗缺省值\\
-\fld{skin\_effect} & — & — & 枚举 & — & 集肤效应模型（仅作用于串联 R）\\
-\fld{auto\_nic\_from\_vscs} & — & — & 布尔 & — & 由 VSC 自动生成两端口 NIC\\
-\fld{newton\_max\_iter} & — & — & 整数 & — & 牛顿谐波平衡最大迭代次数\\
-\fld{newton\_tol} & — & — & 小正数 & — & 牛顿谐波平衡收敛容差\\
-\fld{max\_ac\_thd\_pct} & THD & \% & — & — & 结果：全网最大交流电压 THD\\
-\fld{used\_stored\_operating\_point} & — & — & 布尔 & — & 结果：基频未收敛时回退标志\\
-\end{paramtable}
-
-\section{验证与边界局限}
-\subsection{验证与校核}
-注册测试 \srcpath{test\_harmonics\_power\_flow}（\srcpath{tests/test\_harmonics\_power\_flow.cpp}）；
-ctest 项 \srcpath{harmonics\_cross\_engine\_matrix}（标签 \texttt{harmonics;validation;opendss}）；
-校核驱动 \srcpath{validate\_harmonics\_xref}、\srcpath{validate\_harmonics\_ieee13} 与目标
-\srcpath{validate\_harmonics\_device\_opendss}（\srcpath{tools/harmonics\_validation/}）。
-
-\subsection{边界与局限（如实标注）}
-\begin{itemize}
-  \item “Level 1”线性模型；直流纹波网络按设计纯阻性（DCBranch 无电感），除非
-        \texttt{DCRippleModel} 覆盖引入 \fld{x\_pu}/\fld{b\_pu}；
-  \item 负荷阻性部分 $P/V^2$ 频率无关，不随集肤效应缩放（仅串联 R 频变）；
-  \item 三相 \srcpath{solve\_harmonic\_power\_flow\_3ph} 不建模直流子系统（仅交流），
-        \fld{auto\_nic\_from\_vscs} 在其中被忽略；
-  \item 基频请求但未收敛时回退存储/额定电压（\fld{used\_stored\_operating\_point}=true，列入
-        \fld{model\_limitations}）；
-  \item 顶层无权威 Markdown，头文件与测试即权威；归档理论见
-        \srcpath{docs/archive/theory/harmonics/}。
-\end{itemize}
+\input{chapters/scope_and_architecture}
+\input{chapters/theory_frequency_domain}
 \input{chapters/source_equivalent_model}
+\input{chapters/three_phase_transformers}
+\input{chapters/nonlinear_and_coupled}
+\input{chapters/hss_and_power_electronics}
+\input{chapters/api_and_results}
+\input{chapters/metrics_and_standards}
+\input{chapters/numerical_validation}
+\input{chapters/audit_and_admission}
 \input{../../_manual_common/industrial_evaluation}
 
 \end{document}

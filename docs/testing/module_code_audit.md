@@ -1,6 +1,6 @@
 # Module Code Audit
 
-Updated: 2026-08-21
+Updated: 2026-08-22
 
 This is the living code-audit ledger for repository modules. It records
 source-backed defects and audit coverage; it is not a dated snapshot and does
@@ -66,6 +66,19 @@ New open findings from the deep `graph/` audit:
 | AUD-030 | Medium | A series-created edge receives an `edge_id` beyond existing graph/component IDs while adjacency, bridge, and cycle APIs continue to use vector positions. The initial convenience relation `edge_id == edges[] position` no longer holds after reduction. | Separate these types or renumber graph-internal IDs consistently, then add post-series topology/index regressions. |
 | AUD-031 | High | Graph construction omits Transformer3W, LCC, EnergyRouter, and three-phase topology and under-flags several rich injections. Contraction does not remap multiple rich asset terminals; HTTP compact export then filters dangling objects, potentially deleting assets instead of preserving them. | Complete rich-component graph/remap coverage or reject unsupported reductions, with per-component HTTP reload and semantic round-trip tests. |
 
+New open findings from the deep `time_series/` annual/lifecycle audit:
+
+| ID | Severity | Finding | Required closure |
+|---|---|---|---|
+| AUD-066 | Closed in code; regression pending | Sequential annual `feasible` no longer copies only the L0 default: it aggregates weekly UC and, when replay is requested, every required OPF/PF step. `model_scope`, `schedule_only`, `physical_replay_complete` and `ens_complete` expose the certificate boundary. | Add a forced failed-week/replay fixture before upgrading this to independently regression-closed. |
+| AUD-067 | Closed for implemented scope | L0 generator/fuel budgets are MILP inequalities, the annual UC is one coupled horizon (SOC/ramp/commitment cross week boundaries), and `iterative_feedback` reruns physical replay with explicit penalty updates and convergence evidence. Fuel is an MWh-equivalent generation proxy because no heat-rate curve exists. | Add heat-rate/fuel-type curves if fuel rather than output budgets are required. |
+| AUD-068 | Partially closed | Step curtailment is now `max(0, available-dispatch)` with source availability tracked; schedule-only ENS is marked as a schedule proxy and unknown physical ENS is not silently zero. | Add independent balance/ENS identity cases for OPF failure and export. |
+| AUD-069 | Closed in code; regression pending | Daily replay slices all current `UCSchedule` 2-D arrays, including DR, VSC/DC-DC directions, market DC storage, and solver certificates. VPP/microgrid/router state is represented only where the schedule contract contains rows. | Add a field-by-field frozen schedule replay test. |
+| AUD-070 | Closed in code; regression pending | Replacement age is local to each stable storage index; fractional FDE cycles are retained in an internal double accumulator and public integer compatibility field; name matching is removed. | Add duplicate-name and multi-replacement numerical fixtures. |
+| AUD-071 | Closed for implemented scope | Each selected stratum hour now runs an independent one-step UC-schedule OPF/PF replay; the measured correction and convergence count are reported. The estimator remains deterministic stratified sampling, so the z-bound is not a random-design confidence guarantee. | Add randomized sampling and repeated PF campaigns for a statistical coverage claim. |
+| AUD-072 | Partially closed | Years, rates, confidence, loss proxy, cadence and positive sample count are validated; a nonzero `step_duration_hr` must match `TimeSeriesData`. `verbose` remains non-operative and is not advertised as a control. | Remove/deprecate `verbose` or implement observable logging. |
+| AUD-073 | Closed for implemented scope | External-grid static/profile factors, AC/DC storage inventory intensity, and DC static-generator factors are included in lifecycle carbon components and JSON/API results. Embodied manufacturing carbon, network-loss carbon and converter material inventories remain outside the model. | Add authored embodied-carbon factors and a component bill-of-materials model for full asset LCA. |
+
 Findings closed by the short-circuit theory-to-code implementation pass:
 
 | ID | Status | Closure | Focused evidence |
@@ -107,6 +120,18 @@ Findings closed by the short-circuit theory-to-code implementation pass:
 | AUD-009 | Topology cycles explicitly contain graph-edge positions; cut vertices and propagated resilience results expose AC/DC-qualified IDs. | `test_graph` same-ID topology case |
 | AUD-010 | CSV uses full-field integer parsing and quoted-field state-machine parsing; trailing text and malformed quotes are rejected. | `test_carbonflow_dynamic_storage` CSV cases |
 | AUD-011 | StrictHiGHS B&C calls execute on fresh joined threads, isolating them from Native adapter TLS while Native retains the caller thread's required stack capacity. | `test_resilience_assessment` five-cycle ordered backend case |
+| AUD-054 | HPF linear and Newton result families derive `ok` from per-order solution or final convergence; a failed factorization/iteration cannot report success. | `test_harmonics_power_flow` invalid-option and forced non-convergence cases |
+| AUD-055 | AC harmonic terminal currents reuse the exact pi/tap/phase-shift Ybus stamp; copper loss uses series current and `R(h)`. | 1.1-tap/17-degree/charging analytic regression |
+| AUD-056 | Canonical transformer equivalents are stamped once; the rich `Transformer2W` collection is not counted a second time. | 10% transformer exact `V5=j1.5 pu` regression |
+| AUD-057 | Three-phase transformer parsing distinguishes Y/YN, Z/ZN, and Delta; zero-sequence paths use projectors and authored `vk0/vkr0`. | Yy0/YNyn0/ZNyn0 and 10%/20% zero-sequence regressions |
+| AUD-058 | HPF options reject invalid, non-finite, non-positive, and duplicate order/numerical settings before assembly. | duplicate-order regression and result-message check |
+| AUD-059 | GridLAB-D is a mandatory numerical gate with 24 executed frequency slices, not a capability-only row. | `harmonics_cross_engine_matrix`, max error `5.349716508e-10 pu` |
+| AUD-062 | First-class DC capacitor/reactor and AC/DC harmonic-filter identity survives JSON, projection and terminal-current attribution. | `test_harmonics_power_flow` JSON, analytic capacitor and attribution cases |
+| AUD-063 | HSS off-diagonal frequency indexing degenerates to per-order HPF at zero coupling and matches an independent two-frequency closed form. | `test_harmonics_power_flow`, `1e-10 pu` gates |
+| AUD-064 | Enabled two-level VSC, MMC, LCC and supported DC/DC models stamp nonzero cross-frequency blocks; incomplete or unsupported models reject explicitly. | converter-family HSS sections and validation failures |
+| AUD-065 | Every successful HSS solve passes a normalized backward-error gate and reports sparse dimensions/nonzeros; non-finite assembly is rejected before factorization. | HSS analytic, converter and 1000-node tests |
+| AUD-060 | IEEE13 OpenDSS validation has a fixed `2e-3 pu` exit gate and is registered in CTest. | 164 points, max error `1.652e-3 pu` |
+| AUD-061 | Frequency scans reject invalid ranges/unknown buses, expose one solve flag per frequency, use NaN rather than fabricated zero on failure, and aggregate `ok`. | scan range and unknown-bus regressions |
 
 The original evidence and required closure statements are retained below as
 the review record. The table above is the current status.
@@ -243,7 +268,7 @@ the review record. The table above is the current status.
   expose `lmp_available=false` and leave an explicit limitation. Extend the D2
   test beyond generator dispatch.
 
-#### AUD-008: hybrid and Newton harmonic fallbacks are not disclosed consistently
+#### AUD-008: hybrid and Newton harmonic fallbacks are not disclosed consistently (closed)
 
 - Module: `harmonics_power_flow/` (distributed documentation)
 - Evidence: swallowed base-PF failure at
@@ -302,9 +327,9 @@ the review record. The table above is the current status.
 | `analysis/` | Distributed | Sampled | Focused submodule documents exist; no umbrella result contract. |
 | `scenario_generation/` | Focused | Deep | AUD-001 and AUD-002 closed. |
 | `short_circuit/` | Focused | Deep | AUD-032--AUD-053 are closed with zero open findings in the detailed IEC 60909 calculation scope. Release direct short-circuit targets pass 57 cases / 917 assertions; focused JSON passes 3/48. IEC §6.2 plus a 13-bus comprehensive network, 50 OpenDSS complete-network cases, mandatory 35-case GridLAB-D 5.3.0 gate, IEEE 13/34/123 external-Thevenin fault kernels, 77-check production API E2E, authored identity, analytic DCCB division and a 1000-bus sparse batch benchmark are recorded in the manual. EMT, controller, protection and IEC 61660 studies belong to their dedicated model families and are not represented as unfinished IEC 60909 work. |
-| `harmonics_power_flow/` | Distributed | Deep | AUD-008 closed. |
+| `harmonics_power_flow/` | Focused | Deep | AUD-008 and AUD-054--AUD-065 closed. Ten implementation/theory/validation chapters cover per-order and HSS periodic steady state. Focused test count and external evidence are recorded below. |
 | `dynamics/` | Focused | Deep | AUD-016 closed: small-signal participation falls back to right-eigenvector magnitude on a defective reduced Jacobian; active runtime contract confirmed. |
-| `time_series/` | Focused | Baseline | Existing pipeline and annual/lifecycle contracts retained. |
+| `time_series/` | Focused | Deep | AUD-066/069/070 are closed in runtime code pending dedicated regressions; AUD-067/068/071/072/073 remain partial with explicit scope. Existing focused rerun passes 11/11 direct tests; new Release rebuild and numerical evidence must be recorded before claiming full closure. |
 | `carbon_analysis/` | Focused | Deep | AUD-010 closed. |
 | `ev_power_traffic/` | Distributed | Deep | AUD-007 closed. |
 | `integrated_energy/` | Focused | Deep | AUD-003, AUD-004, and AUD-005 closed. |
@@ -324,7 +349,7 @@ disabled and the local dependency dirty-check override:
 | Typhoon traffic/catalog | `test_typhoon_traffic_impact`: 5 cases, 35 assertions |
 | Campus integrated energy | `test_integrated_energy_campus`: 6 cases, 106 assertions |
 | SPPT executable layer | 7 targets: 33 cases, 213 assertions |
-| Harmonics | `test_harmonics_power_flow`: 52 cases, 359 assertions |
+| Harmonics | `test_harmonics_power_flow`: 63 cases, 412 assertions; cross-engine 14/14, GridLAB-D 24 slices, IEEE13/OpenDSS 164 points |
 | EV Formulation D | `test_ev_power_traffic_joint_opt_d`: 15 cases, 196 assertions |
 | Graph/reduction | Focused Release rebuild `test_graph`, `test_graph_kron`, `test_graph_roundtrip`: 56 cases, 467 assertions; numeric logs in `/private/tmp/hysim_graph_nr_evidence_20260821/` |
 | Graph cross-module | Existing `macos-release` `test_distribution_pipeline`, `test_three_phase_hybrid_opf`: 13 cases, 330 assertions |

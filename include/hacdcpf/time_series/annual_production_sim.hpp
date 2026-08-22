@@ -30,6 +30,10 @@ struct AnnualPlanBlock {
 struct AnnualPlanResult {
   std::vector<AnnualPlanBlock> blocks;   // 12 months or 52 weeks
   double total_plan_cost{0.0};
+  std::vector<double> generator_energy_budget_mwh;
+  double fuel_budget_mwh{0.0};
+  std::vector<double> budget_residual_mwh;
+  double fuel_budget_residual_mwh{0.0};
   bool feasible{false};
   std::string solver_name;
 };
@@ -63,6 +67,11 @@ struct AnnualStepResult {
   double total_demand_mw{0.0};
   double power_balance_error_mw{0.0};
   double load_shed_mw{0.0};
+  // True only when an OPF (or an explicit schedule balance) established the
+  // served/unserved-load quantity.  A failed or skipped physical replay must
+  // not be reported as ENS=0 by default.
+  bool load_shed_known{false};
+  bool curtailment_known{false};
   bool pf_converged{false};
   bool opf_converged{false};
   double opf_cost{0.0};
@@ -86,6 +95,7 @@ struct BlockSummary {
   double power_balance_error_mwh{0.0};
   double total_loss_mwh{0.0};
   double total_ens_mwh{0.0};        // energy not served
+  bool ens_complete{false};
   double total_cost{0.0};
   int num_pf_converged{0};
   int num_opf_converged{0};
@@ -173,7 +183,19 @@ struct AnnualProductionSimResult {
   double total_loss_mwh{0.0};
   int num_pf_converged{0};
   int num_opf_converged{0};
+  bool ens_complete{false};
+  bool physical_replay_complete{false};
+  bool schedule_only{false};
+  std::string model_scope;
   bool feasible{false};
+  int feedback_iterations{0};
+  bool feedback_converged{false};
+  double max_feedback_residual_mwh{0.0};
+  double max_soc_boundary_residual{0.0};
+  std::vector<double> generator_energy_mwh;
+  double fuel_consumption_mwh{0.0};
+  double max_energy_budget_violation_mwh{0.0};
+  double fuel_budget_violation_mwh{0.0};
   std::string solver_name;
   bool parallel_daily_effective{false};
   int parallel_workers{1};
@@ -229,6 +251,11 @@ struct AnnualProductionSimOptions {
 
   // Cyclic storage boundary enforcement
   bool enforce_cyclic_soc{true};       // E_{s,T-1} = E_{s,0}
+
+  // Optional L0 annual budgets. Generator entries use authored generator
+  // indices and are enforced by the UC MILP over the full annual horizon.
+  std::vector<double> generator_energy_budget_mwh;
+  double fuel_budget_mwh{0.0};
 
   // Iterative feedback (bottom-up → re-solve upper level)
   bool iterative_feedback{false};

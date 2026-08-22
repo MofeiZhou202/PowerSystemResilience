@@ -226,11 +226,21 @@ struct HarmonicBusResult {
 };
 
 struct HarmonicBranchFlow {
+  /// Stable canonical branch ID. Use BranchExpandMap to recover the authored
+  /// transformer/switch identity when the rich model was projected.
+  int    branch_index{0};
   int    from_bus{0};
   int    to_bus{0};
   bool   is_dc{false};
-  /// Current magnitude per order [pu] in the from->to direction.
+  /// From-terminal current magnitude per order [pu]. Kept as the compatibility
+  /// field consumed by the HTTP API and existing callers.
   std::map<int, double> i_by_order;
+  /// To-terminal current magnitude [pu]. This differs from the from-terminal
+  /// value for pi charging, off-nominal taps, and phase-shifting branches.
+  std::map<int, double> i_to_by_order;
+  /// Series-element current and resistance used for copper-loss recovery.
+  std::map<int, double> i_series_by_order;
+  std::map<int, double> r_series_by_order;
   /// Current total harmonic distortion [%] referred to the fundamental current.
   double thd_i_pct{0.0};
 };
@@ -292,6 +302,92 @@ HPFResult solve_harmonic_power_flow(const HybridPowerSystem& sys,
 /// Convenience overload: no explicit sources, converters auto-modelled.
 HPFResult solve_harmonic_power_flow(const HybridPowerSystem& sys,
                                     const HPFOptions& opt = {});
+
+// ===========================================================================
+// Harmonic state-space (HSS) frequency-coupled AC/DC power flow
+// ===========================================================================
+// The stacked nodal equation is
+//
+//   I_h = sum_k Y_{h,k} V_k,
+//
+// where every block contains all AC buses followed by all DC buses. Passive
+// networks and first-class RLC devices occupy diagonal frequency blocks;
+// periodically switched converters contribute Toeplitz off-diagonal blocks.
+
+struct HSSCurrentInjection {
+  int bus{0};
+  bool is_dc{false};
+  int order{0};
+  Complex current_pu{0.0, 0.0};
+  std::string name;
+};
+
+/// User-supplied entry in the stacked admittance matrix. Positive values use
+/// the nodal convention I_row += Y * V_column. Device-generated entries are
+/// assembled internally and returned through HSSDeviceTerminalResult.
+struct HSSAdmittanceEntry {
+  int row_bus{0};
+  bool row_is_dc{false};
+  int row_order{0};
+  int column_bus{0};
+  bool column_is_dc{false};
+  int column_order{0};
+  Complex admittance_pu{0.0, 0.0};
+};
+
+struct HSSOptions {
+  /// Positive Fourier orders solved together. Order zero is excluded because
+  /// the fundamental PF supplies the periodic operating point.
+  std::vector<int> orders{1, 5, 6, 7, 11, 12, 13};
+  bool run_base_power_flow{true};
+  bool include_load_impedance{true};
+  bool include_converter_models{true};
+  bool compute_device_currents{true};
+  SkinEffectModel skin_effect{SkinEffectModel::None};
+  double skin_coefficient{0.0};
+  double default_source_xpp_pu{0.2};
+  double dc_source_impedance_pu{0.01};
+  double min_shunt_pu{1e-9};
+  /// Normalized infinity-norm backward-error admission gate.
+  double max_backward_error{1e-10};
+  PowerFlowOptions base_pf_options{};
+};
+
+struct HSSBusResult {
+  int bus{0};
+  bool is_dc{false};
+  std::map<int, Complex> voltage_pu;
+};
+
+struct HSSDeviceTerminalResult {
+  std::string component_kind;
+  int component_index{0};
+  std::string terminal;
+  int bus{0};
+  bool is_dc{false};
+  std::map<int, Complex> current_into_device_pu;
+};
+
+struct HSSResult {
+  bool ok{false};
+  std::string message;
+  std::string model_scope{"ac-dc-hss-v1"};
+  std::vector<std::string> model_limitations;
+  std::vector<int> orders;
+  std::vector<HSSBusResult> bus_results;
+  std::vector<HSSDeviceTerminalResult> device_terminal_results;
+  int matrix_dimension{0};
+  std::size_t matrix_nonzeros{0};
+  double normalized_backward_error{0.0};
+  bool factorization_succeeded{false};
+  bool base_pf_converged{false};
+};
+
+HSSResult solve_harmonic_state_space(
+    const HybridPowerSystem& sys,
+    const std::vector<HSSCurrentInjection>& injections = {},
+    const std::vector<HSSAdmittanceEntry>& additional_couplings = {},
+    const HSSOptions& options = {});
 
 /// Default characteristic six-pulse AC current spectrum (percent of fundamental).
 HarmonicSpectrum default_six_pulse_ac_spectrum();
@@ -713,6 +809,7 @@ struct FrequencyScanResult {
   bool        ok{false};
   std::string message;
   std::vector<double> freqs;
+  std::vector<bool> frequency_solved;  ///< one status per entry of freqs
   std::map<int, std::vector<double>> z_mag;      ///< bus -> |Z_dp| per frequency
   std::map<int, std::vector<double>> z_ang_deg;  ///< bus -> angle(Z_dp) per freq
   std::vector<HarmonicResonance> resonances;
@@ -729,6 +826,7 @@ struct SequenceScanResult {
   std::string message;
   int         bus{0};
   std::vector<double> freqs;
+  std::vector<bool> frequency_solved;  ///< all three sequence solves succeeded
   std::vector<double> z1_mag;  ///< positive-sequence |Z_dp| per frequency
   std::vector<double> z2_mag;  ///< negative-sequence
   std::vector<double> z0_mag;  ///< zero-sequence
@@ -801,6 +899,7 @@ struct HarmonicMetricsOptions {
 };
 
 struct BranchHarmonicMetrics {
+  int    branch_index{0};
   int    from_bus{0};
   int    to_bus{0};
   double i_fund_pu{0.0};         ///< |I_1|

@@ -1,6 +1,6 @@
 # 源码模块技术手册索引
 
-最后核实：2026-08-18
+最后核实：2026-08-22
 
 本目录与 `src/` 顶层目录执行严格的一一映射：目录名必须与源码模块名完全相同，每个模块只能有一个
 文档目录、一个 `README.md` 和一个主手册。章节文件可以位于该模块的 `chapters/`，但不得另建大小写、
@@ -14,7 +14,7 @@
 | `dynamics` | `modules/dynamics/` | [动力学手册](dynamics/dynamics_manual.tex) | 机电暂态 DAE、设备模型、小信号 |
 | `ev_power_traffic` | `modules/ev_power_traffic/` | [电—交通手册](ev_power_traffic/ev_power_traffic_manual.tex) | CTM/LTM、联合优化、MPC |
 | `graph` | `modules/graph/` | [图模块手册](graph/graph_manual.tex) | 拓扑、收缩、降阶、结果恢复 |
-| `harmonics_power_flow` | `modules/harmonics_power_flow/` | [谐波手册](harmonics_power_flow/harmonics_power_flow_manual.tex) | 频域、三相、AC/DC 耦合、标准校核 |
+| `harmonics_power_flow` | `modules/harmonics_power_flow/` | [谐波专著](harmonics_power_flow/harmonics_power_flow_manual.tex) | 频域、三相序网、AC/DC 耦合、Newton、频扫、标准与跨引擎验证 |
 | `integrated_energy` | `modules/integrated_energy/` | [综合能源手册](integrated_energy/integrated_energy_manual.tex) | 园区电—热—氢 MILP |
 | `io` | `modules/io/` | [输入输出手册](io/io_manual.tex) | 格式映射、导入报告、往返 |
 | `market` | `modules/market/` | [市场手册](market/market_manual.tex) | 日前、实时、安全校核、结算 |

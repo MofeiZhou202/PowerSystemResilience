@@ -57,8 +57,12 @@ OpenDSS is exercised numerically for directly representable AC networks. Pure
 DC and hybrid DC-port results are checked with an independently assembled dense
 complex nodal solve. GridLAB-D 5.3 is reported as unsupported for native
 frequency-domain harmonic power flow; ordinary fundamental power flow is never
-presented as harmonic validation. A future GridLAB-D numeric comparison must use
-a qualified deltamode waveform case and integer-cycle FFT pipeline.
+presented as harmonic validation. The cross-engine matrix now executes a separate
+GridLAB-D complex steady-state network for every representable AC harmonic order.
+It explicitly authors `R(h)+j h X` and recovers transfer impedance from recorded
+complex voltage/current. This closes the decoupled frequency-slice comparison;
+EMT/PWM waveform validation would still require a separately qualified deltamode
+and integer-cycle FFT experiment.
 
 ## Real-Feeder Harmonic Penetration (IEEE13)
 
@@ -77,7 +81,7 @@ tools/harmonics_validation/.venv/bin/python \
 ```
 
 Current status on IEEE13 (164 bus/phase/order points, injection 100 A at bus
-675): max complex voltage deviation 1.7e-3 pu; driving-point impedance
+675): max complex voltage deviation 1.652e-3 pu, below the fixed 2e-3 pu gate; driving-point impedance
 |Z(675, h)| matches OpenDSS across h=2..25 including the h4/h8 resonances.
 Residual deviation is dominated by regulator tap ratios, which the harmonic
 study does not model (taps are held at ratio 1.0).
@@ -90,4 +94,3 @@ Setup notes learned the hard way:
   and sample each order separately.
 - `Bus.kVBase` is already line-neutral; do not divide by sqrt(3) again.
 - `Circuit.AllBusVolts` returns flat re/im pairs, not complex objects.
-

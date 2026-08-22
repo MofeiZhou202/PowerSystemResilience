@@ -14,6 +14,8 @@ import argparse
 import cmath
 import json
 import math
+import os
+import shutil
 import subprocess
 import tempfile
 from pathlib import Path
@@ -25,6 +27,111 @@ import opendssdirect as dss
 
 REPO = Path(__file__).resolve().parents[2]
 DEFAULT_OUT = REPO / "external_data/harmonics_validation/cross_engine_matrix.json"
+
+
+def gridlabd_capability() -> dict[str, Any]:
+    configured = os.environ.get("HACDCPF_GRIDLABD_BIN") or os.environ.get("GRIDLABD_BIN")
+    candidates = [
+        Path(configured) if configured else None,
+        Path(found) if (found := shutil.which("gridlabd")) else None,
+        REPO.parent / "gridlab-d" / "cmake-build" / "bin" / "gridlabd",
+        REPO.parent / "gridlab-d" / "build" / "bin" / "gridlabd",
+        REPO.parent / "gridlab-d" / "build" / "source" / "gridlabd",
+    ]
+    executable = next((p.resolve() for p in candidates
+                       if p is not None and p.is_file() and os.access(p, os.X_OK)), None)
+    if executable is None:
+        return {"available": False, "status": "unavailable", "detail":
+                "GridLAB-D was not found through HACDCPF_GRIDLABD_BIN, GRIDLABD_BIN, PATH, or sibling builds"}
+    probe = subprocess.run([str(executable), "--version"], capture_output=True,
+                           text=True, check=False, timeout=120)
+    return {"available": probe.returncode == 0, "status": "available" if probe.returncode == 0 else "probe_failed",
+            "executable": str(executable), "version": (probe.stdout or probe.stderr).strip(),
+            "detail": "Independent complex steady-state frequency slices using explicit order-scaled impedances"}
+
+
+def _gridlabd_csv_complex(path: Path) -> complex:
+    rows = [row for row in path.read_text(encoding="utf-8").splitlines()
+            if row and not row.startswith("#")]
+    if not rows:
+        raise RuntimeError(f"GridLAB-D recorder is empty: {path.name}")
+    fields = rows[-1].split(",")
+    if len(fields) < 3:
+        raise RuntimeError(f"GridLAB-D recorder row is invalid: {rows[-1]}")
+    return complex(float(fields[-2].strip().rstrip(";")),
+                   float(fields[-1].strip().rstrip(";")))
+
+
+def gridlabd_frequency_slice(capability: dict[str, Any], case: dict[str, Any],
+                             order: int, current_pu: complex) -> dict[str, Any]:
+    if not capability.get("available"):
+        raise RuntimeError(capability["detail"])
+    base_mva = float(case.get("base_mva", 100.0))
+    base_kv = float(case.get("base_kv", 10.0))
+    base_v = base_kv * 1000.0
+    base_i = base_mva * 1e6 / base_v
+    zbase = base_v / base_i
+    line = case["line"]
+    zsrc = complex(0.0, order * float(case.get("source_xpp_pu", 0.2))) * zbase
+    zline = complex(skin_r(float(line["r_pu"]), order, case),
+                    order * float(line["x_pu"])) * zbase
+    probe_a = 100.0
+    glm = f"""#set double_format=%.15g;
+clock {{ timezone EST+5EDT; starttime '2000-01-01 00:00:00'; stoptime '2000-01-01 00:00:01'; }}
+module powerflow {{ solver_method NR; }}
+module tape;
+object node {{ name source; phases AN; bustype SWING; nominal_voltage {base_v:.15g}; voltage_A {base_v:.15g}+0j; }}
+object series_reactor {{ name source_z; phases AN; from source; to internal; phase_A_impedance {zsrc.real:+.15g}{zsrc.imag:+.15g}j; }}
+object node {{ name internal; phases AN; nominal_voltage {base_v:.15g}; }}
+object series_reactor {{ name feeder_z; phases AN; from internal; to loadbus; phase_A_impedance {zline.real:+.15g}{zline.imag:+.15g}j; }}
+object load {{ name loadbus; phases AN; nominal_voltage {base_v:.15g}; constant_current_A {-probe_a:+.15g}+0j; }}
+object recorder {{ parent internal; property voltage_A.real,voltage_A.imag; interval 1; file internal.csv; }}
+object recorder {{ parent loadbus; property voltage_A.real,voltage_A.imag; interval 1; file load.csv; }}
+object recorder {{ parent feeder_z; property current_in_A.real,current_in_A.imag; interval 1; file current.csv; }}
+"""
+    executable = Path(capability["executable"])
+    root = executable.parent.parent
+    environment = os.environ.copy()
+    runtime_paths = [executable.parent, root, root / "lib", root / "share"]
+    environment["GLPATH"] = os.pathsep.join(str(p) for p in runtime_paths if p.exists())
+    with tempfile.TemporaryDirectory(prefix=f"hpf_gld_h{order}_") as directory:
+        working = Path(directory)
+        model = working / "slice.glm"
+        model.write_text(glm, encoding="utf-8")
+        run = subprocess.run([str(executable), model.name], cwd=working, env=environment,
+                             capture_output=True, text=True, check=False, timeout=120)
+        if run.returncode != 0:
+            raise RuntimeError(f"GridLAB-D h={order} failed: {run.stderr[-2000:]}")
+        vint = _gridlabd_csv_complex(working / "internal.csv")
+        vload = _gridlabd_csv_complex(working / "load.csv")
+        ibranch = _gridlabd_csv_complex(working / "current.csv")
+    injection_probe = -ibranch
+    if abs(injection_probe) <= 1e-9:
+        raise RuntimeError(f"GridLAB-D h={order} returned zero probe current")
+    zsrc_measured = (vint - base_v) / injection_probe
+    ztotal_measured = (vload - base_v) / injection_probe
+    voltages_pu = [zsrc_measured / zbase * current_pu,
+                   ztotal_measured / zbase * current_pu]
+    return {"order": order, "voltages_pu": voltages_pu,
+            "measured_source_impedance_pu": zsrc_measured / zbase,
+            "measured_transfer_impedance_pu": ztotal_measured / zbase,
+            "authored_source_impedance_pu": zsrc / zbase,
+            "authored_transfer_impedance_pu": (zsrc + zline) / zbase}
+
+
+def gridlabd_single(capability: dict[str, Any], case: dict[str, Any]) -> dict[str, Any]:
+    slices = [gridlabd_frequency_slice(capability, case, h, spectrum_current(case, h))
+              for h in case["ac_orders"]]
+    return {"orders": {row["order"]: row["voltages_pu"] for row in slices},
+            "slices": slices}
+
+
+def gridlabd_slice_report(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    def pair(value: complex) -> dict[str, float]:
+        return {"real": value.real, "imag": value.imag}
+    return [{key: (pair(value) if isinstance(value, complex)
+                   else [pair(x) for x in value] if isinstance(value, list) else value)
+             for key, value in row.items()} for row in rows]
 
 
 def as_complex(row: dict[str, Any]) -> complex:
@@ -359,7 +466,9 @@ def branch_error(native: dict[str, Any], reference: dict[int, complex], dc: bool
     return max((abs(vals[h] - abs(i)) for h, i in reference.items() if h in vals), default=0.0)
 
 
-def benchmark_case(binary: Path, case: dict[str, Any], tolerance: float) -> dict[str, Any]:
+def benchmark_case(binary: Path, case: dict[str, Any], tolerance: float,
+                   opendss_tolerance: float, gridlabd_tolerance: float,
+                   gridlabd: dict[str, Any]) -> dict[str, Any]:
     native = run_native(binary, case)
     domain = case["domain"]
     phase = domain == "ac_3ph"
@@ -368,6 +477,7 @@ def benchmark_case(binary: Path, case: dict[str, Any], tolerance: float) -> dict
         nord = native_single_orders(native)
         direct = opendss_single(case)
         open_status = "direct_equivalent_network"
+        gld = gridlabd_single(gridlabd, case) if gridlabd.get("available") else None
     elif domain == "ac_3ph":
         ref = independent_three_phase(case)
         nord = native_phase_orders(native)
@@ -377,11 +487,13 @@ def benchmark_case(binary: Path, case: dict[str, Any], tolerance: float) -> dict
         except ValueError:
             direct = None
             open_status = "unsupported_without_sequence_model_substitution"
+        gld = None
     elif domain == "dc":
         ref = independent_dc(case)
         nord = native_single_orders(native, dc=True)
         direct = None
         open_status = "unsupported_dc_harmonic_network"
+        gld = None
     else:
         href = hybrid_reference(case, native)
         nac, ndc = native_single_orders(native), native_single_orders(native, dc=True)
@@ -392,40 +504,47 @@ def benchmark_case(binary: Path, case: dict[str, Any], tolerance: float) -> dict
         direct = opendss_single({**case, "spectrum": native["device"]["ac_spectrum"],
                                  "i_base_pu": native["device"]["i_ac1_mag_pu"],
                                  "i_base_phase_deg": -math.degrees(math.atan2(float(case.get("q_mvar", 0.0)), float(case.get("p_mw", 0.0))))})
+        gld_case = {**case, "spectrum": native["device"]["ac_spectrum"],
+                    "i_base_pu": native["device"]["i_ac1_mag_pu"],
+                    "i_base_phase_deg": -math.degrees(math.atan2(float(case.get("q_mvar", 0.0)),
+                                                                  float(case.get("p_mw", 0.0))))}
+        gld = gridlabd_single(gridlabd, gld_case) if gridlabd.get("available") else None
         open_status = "ac_port_equivalent_network_only"
         cmp_ref = {"ac": ac_cmp, "dc": dc_cmp,
                    "max_complex_voltage_error_pu": max(ac_cmp["max_complex_voltage_error_pu"], dc_cmp["max_complex_voltage_error_pu"]),
                    "max_branch_current_magnitude_error_pu": max(branch_error(native, href["ac"]["branch_currents"], False), branch_error(native, href["dc"]["branch_currents"], True))}
         open_cmp = full_comparison(nac, direct["orders"], False)
+        gld_cmp = full_comparison(nac, gld["orders"], False) if gld else None
         ok = (native["ok"] and cmp_ref["max_complex_voltage_error_pu"] <= tolerance
               and cmp_ref["max_branch_current_magnitude_error_pu"] <= tolerance
-              and open_cmp["max_complex_voltage_error_pu"] <= tolerance)
+              and open_cmp["max_complex_voltage_error_pu"] <= opendss_tolerance
+              and (gld_cmp is None or gld_cmp["max_complex_voltage_error_pu"] <= gridlabd_tolerance))
         return {"id": case["id"], "domain": domain, "balance": case["balance"], "orders": {"ac": case["ac_orders"], "dc": case["dc_orders"]},
                 "native_ok": native["ok"], "independent_reference": {"status": "executed", "comparison": cmp_ref},
                 "opendss": {"status": open_status, "comparison": open_cmp},
-                "gridlabd": gridlabd_status(domain), "metrics": {"ac": derived_metrics(nac, False), "dc": derived_metrics(ndc, False)}, "pass": ok}
+                "gridlabd": {"status": "executed_frequency_slices" if gld else "unsupported_or_unavailable",
+                             "comparison": gld_cmp, "slice_count": len(gld["slices"]) if gld else 0,
+                             "slices": gridlabd_slice_report(gld["slices"]) if gld else []},
+                "metrics": {"ac": derived_metrics(nac, False), "dc": derived_metrics(ndc, False)}, "pass": ok}
 
     cmp_ref = full_comparison(nord, ref["orders"], phase)
     cmp_ref["max_branch_current_magnitude_error_pu"] = 0.0 if phase else branch_error(native, ref["branch_currents"], domain == "dc")
     open_cmp = full_comparison(nord, direct["orders"], phase) if direct else None
+    gld_cmp = full_comparison(nord, gld["orders"], False) if gld else None
     ok = (native["ok"] and cmp_ref["max_complex_voltage_error_pu"] <= tolerance
           and cmp_ref["max_branch_current_magnitude_error_pu"] <= tolerance)
     if open_cmp is not None:
-        ok = ok and open_cmp["max_complex_voltage_error_pu"] <= tolerance
+        ok = ok and open_cmp["max_complex_voltage_error_pu"] <= opendss_tolerance
+    if gld_cmp is not None:
+        ok = ok and gld_cmp["max_complex_voltage_error_pu"] <= gridlabd_tolerance
     return {"id": case["id"], "domain": domain, "balance": case["balance"],
             "orders": case.get("ac_orders", case.get("dc_orders")), "native_ok": native["ok"],
             "independent_reference": {"status": "executed", "comparison": cmp_ref},
             "opendss": {"status": open_status, "comparison": open_cmp},
-            "gridlabd": gridlabd_status(domain), "metrics": derived_metrics(nord, phase), "pass": ok}
-
-
-def gridlabd_status(domain: str) -> dict[str, Any]:
-    return {"status": "unsupported_frequency_domain_hpf",
-            "comparison": None,
-            "note": ("GridLAB-D 5.3 exposes fundamental and deltamode waveform simulation but no native "
-                     "frequency-domain harmonic-order voltage/current API. A validated deltamode setup plus "
-                     "integer-cycle FFT is required for numeric AC comparison; DC and hybrid harmonic ports "
-                     "have no matching native model.")}
+            "gridlabd": {"status": "executed_frequency_slices" if gld else "unsupported_or_unavailable",
+                         "comparison": gld_cmp, "slice_count": len(gld["slices"]) if gld else 0,
+                         "slices": gridlabd_slice_report(gld["slices"]) if gld else []},
+            "metrics": derived_metrics(nord, phase), "pass": ok}
 
 
 def markdown(report: dict[str, Any]) -> str:
@@ -437,7 +556,9 @@ def markdown(report: dict[str, Any]) -> str:
         ne = row["independent_reference"]["comparison"]["max_complex_voltage_error_pu"]
         oc = row["opendss"]["comparison"]
         oe = f"{oc['max_complex_voltage_error_pu']:.3e}" if oc else "n/a"
-        lines.append(f"| `{row['id']}` | {row['domain']} | {row['balance']} | {ne:.3e} | {row['opendss']['status']} | {oe} | unsupported HPF | {'PASS' if row['pass'] else 'FAIL'} |")
+        gc = row["gridlabd"]["comparison"]
+        ge = f"{row['gridlabd']['slice_count']} slices / {gc['max_complex_voltage_error_pu']:.3e}" if gc else row["gridlabd"]["status"]
+        lines.append(f"| `{row['id']}` | {row['domain']} | {row['balance']} | {ne:.3e} | {row['opendss']['status']} | {oe} | {ge} | {'PASS' if row['pass'] else 'FAIL'} |")
     s = report["summary"]
     lines += ["", "## Summary", "",
               f"- Cases: {s['case_count']} ({s['passed']} passed, {s['failed']} failed)",
@@ -448,12 +569,13 @@ def markdown(report: dict[str, Any]) -> str:
               f"- Maximum voltage IHD error: `{s['max_voltage_ihd_error_pct']:.6e} percentage points`",
               f"- Maximum voltage THD error: `{s['max_voltage_thd_error_pct']:.6e} percentage points`",
               f"- Maximum sequence-component error: `{s['max_sequence_component_error_pu']:.6e} pu`",
-              "- GridLAB-D numeric harmonic cases: 0 (capability gap, not a failed numerical comparison)", "",
+              f"- GridLAB-D numerical frequency slices: {s['gridlabd_numeric_slices']}",
+              f"- Maximum native/GridLAB-D complex-voltage error: `{s['max_native_gridlabd_error_pu']:.6e} pu`", "",
               "## Interpretation", "",
               "OpenDSS rows are direct frequency-domain solves of an electrically equivalent Reactor/Isource network. "
               "The hybrid rows compare only the AC port in OpenDSS; DC and converter coupling are independently checked with a dense complex nodal solve. "
               "The zero-sequence case is not translated to a decoupled OpenDSS circuit because doing so would discard its distinct zero-sequence impedance.", "",
-              "GridLAB-D fundamental power-flow output is intentionally excluded. Numeric GridLAB-D harmonic validation requires a separately qualified deltamode waveform model and FFT pipeline.", ""]
+              "GridLAB-D has no native harmonic-order API. Each reported slice is therefore an independently executed complex steady-state network at one authored harmonic frequency: R(h), hX, source impedance, and current injection are explicit. The measured voltage/current transfer impedance is applied to the same source phasor before comparison; this validates the decoupled per-order network equation without claiming nonlinear waveform/FFT coverage.", ""]
     return "\n".join(lines)
 
 
@@ -462,27 +584,44 @@ def main() -> int:
     parser.add_argument("--cpp-bin", type=Path, default=REPO / "build/macos-release/tests/validate_harmonics_xref")
     parser.add_argument("--out", type=Path, default=DEFAULT_OUT)
     parser.add_argument("--tolerance", type=float, default=2e-8)
+    parser.add_argument("--opendss-tolerance", type=float, default=2e-6)
+    parser.add_argument("--gridlabd-tolerance", type=float, default=2e-5)
+    parser.add_argument("--require-gridlabd", action="store_true")
+    parser.add_argument("--min-gridlabd-slices", type=int, default=20)
     args = parser.parse_args()
     if not args.cpp_bin.exists():
         raise SystemExit(f"missing native harmonic emitter: {args.cpp_bin}")
     cpp_bin = args.cpp_bin.resolve()
     out_path = args.out.resolve()
+    gridlabd = gridlabd_capability()
+    if args.require_gridlabd and not gridlabd.get("available"):
+        raise SystemExit(gridlabd["detail"])
     with tempfile.TemporaryDirectory(prefix="hpf_dss_") as tmp:
         dss.Basic.DataPath(tmp)
-        rows = [benchmark_case(cpp_bin, c, args.tolerance) for c in cases()]
+        rows = [benchmark_case(cpp_bin, c, args.tolerance, args.opendss_tolerance,
+                               args.gridlabd_tolerance, gridlabd) for c in cases()]
     open_errors = [r["opendss"]["comparison"]["max_complex_voltage_error_pu"] for r in rows if r["opendss"]["comparison"]]
+    gridlabd_errors = [r["gridlabd"]["comparison"]["max_complex_voltage_error_pu"]
+                       for r in rows if r["gridlabd"]["comparison"]]
+    gridlabd_slices = sum(r["gridlabd"]["slice_count"] for r in rows)
     ref_errors = [r["independent_reference"]["comparison"]["max_complex_voltage_error_pu"] for r in rows]
     reference_parts = []
     for row in rows:
         comparison = row["independent_reference"]["comparison"]
         reference_parts.extend([comparison["ac"], comparison["dc"]] if "ac" in comparison else [comparison])
-    report = {"schema": "hacdcpf.harmonics.cross_engine_matrix.v1", "generated_at": __import__("datetime").datetime.now(__import__("datetime").timezone.utc).isoformat(),
-              "tolerance_pu": args.tolerance, "engines": {"native": "HACDCPF frequency-domain HPF", "opendss": dss.Basic.Version().splitlines()[0], "gridlabd": "5.3.0 capability assessment", "reference": f"NumPy {np.__version__} dense complex nodal solve"},
-              "methodology": {"native_vs_reference": "independent equation assembly", "opendss": "direct/equivalent AC frequency-domain network", "gridlabd": "unsupported capability rows; no fundamental substitution"},
+    report = {"schema": "hacdcpf.harmonics.cross_engine_matrix.v2", "generated_at": __import__("datetime").datetime.now(__import__("datetime").timezone.utc).isoformat(),
+              "tolerances_pu": {"native_numpy": args.tolerance, "native_opendss": args.opendss_tolerance,
+                                "native_gridlabd": args.gridlabd_tolerance},
+              "engines": {"native": "HACDCPF frequency-domain HPF", "opendss": dss.Basic.Version().splitlines()[0],
+                          "gridlabd": gridlabd, "reference": f"NumPy {np.__version__} dense complex nodal solve"},
+              "methodology": {"native_vs_reference": "independent equation assembly", "opendss": "direct/equivalent AC frequency-domain network",
+                              "gridlabd": "one executed complex steady-state network per harmonic order, with explicit R(h), hX and source impedance"},
               "cases": rows,
               "summary": {"case_count": len(rows), "passed": sum(r["pass"] for r in rows), "failed": sum(not r["pass"] for r in rows),
-                          "opendss_numeric_cases": len(open_errors), "gridlabd_numeric_cases": 0,
+                          "opendss_numeric_cases": len(open_errors), "gridlabd_numeric_cases": len(gridlabd_errors),
+                          "gridlabd_numeric_slices": gridlabd_slices,
                           "max_native_reference_error_pu": max(ref_errors, default=0.0), "max_native_opendss_error_pu": max(open_errors, default=0.0),
+                          "max_native_gridlabd_error_pu": max(gridlabd_errors, default=0.0),
                           "max_branch_current_error_pu": max((x.get("max_branch_current_magnitude_error_pu", 0.0) for x in reference_parts), default=0.0),
                           "max_voltage_ihd_error_pct": max((x["max_voltage_ihd_error_pct"] for x in reference_parts), default=0.0),
                           "max_voltage_thd_error_pct": max((x["max_voltage_thd_error_pct"] for x in reference_parts), default=0.0),
@@ -493,6 +632,10 @@ def main() -> int:
     out_path.with_suffix(".md").write_text(markdown(report), encoding="utf-8")
     print(json.dumps(report["summary"], indent=2))
     print(f"wrote {out_path}")
+    if args.require_gridlabd and gridlabd_slices < args.min_gridlabd_slices:
+        raise SystemExit(f"GridLAB-D produced {gridlabd_slices} numerical slices; at least {args.min_gridlabd_slices} are required")
+    if gridlabd_errors and max(gridlabd_errors) > args.gridlabd_tolerance:
+        raise SystemExit(f"GridLAB-D complex-voltage error {max(gridlabd_errors):.9g} exceeds {args.gridlabd_tolerance:.9g}")
     return 0 if report["summary"]["failed"] == 0 else 1
 
 

@@ -14,6 +14,46 @@
 
 namespace hacdcpf {
 
+// Frequency-domain passive devices. Physical SI parameters are authoritative;
+// harmonic solvers convert them to per unit on the connected bus base.
+struct DCCapacitor {
+  int index{0};
+  int bus{0};
+  bool in_service{true};
+  std::string name;
+  double capacitance_f{0.0};
+  double esr_ohm{0.0};
+  double esl_h{0.0};
+  double leakage_conductance_s{0.0};
+  double rated_voltage_kv{0.0};
+};
+
+struct DCReactor {
+  int index{0};
+  int from_bus{0};
+  int to_bus{0};
+  bool in_service{true};
+  std::string name;
+  double inductance_h{0.0};
+  double resistance_ohm{0.0};
+  double rated_current_a{0.0};
+};
+
+// A series RLC branch. to_bus == 0 denotes a grounded shunt filter. The
+// containing ACSystem/DCSystem determines the electrical domain.
+struct HarmonicFilter {
+  int index{0};
+  int from_bus{0};
+  int to_bus{0};
+  bool in_service{true};
+  std::string name;
+  double resistance_ohm{0.0};
+  double inductance_h{0.0};
+  double capacitance_f{0.0};
+  double rated_voltage_kv{0.0};
+  double tuning_frequency_hz{0.0};
+};
+
 // ═══════════════════════════════════════════════════════════════════════
 // DC Bus
 // ═══════════════════════════════════════════════════════════════════════

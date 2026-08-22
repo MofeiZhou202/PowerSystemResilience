@@ -55,11 +55,11 @@ AC/DC 储能净出力及期末 SOC、可再生出力；可选块包括外部电�
 外部电网变量范围为 $[-\max(1,\texttt{external\_grid\_cap\_mw}),
 +\max(1,\texttt{external\_grid\_cap\_mw})]$，价格 profile 存在时直接使用该绝对价格，否则用
 \texttt{cost\_c1}。需求响应的上下调容量分别为
-\begin{equation}
- \bar p^{up}=\max(0,flex^{up})a,\qquad
- \bar p^{dn}=\min(\max(0,flex^{dn})a,\max(0,p_0)),\quad
- a=\operatorname{clamp}(availability/100,0,1),
-\end{equation}
+\begin{align}
+ \bar p^{up}&=\max(0,flex^{up})a,\\
+ \bar p^{dn}&=\min(\max(0,flex^{dn})a,\max(0,p_0)),\\
+ a&=\operatorname{clamp}(availability/100,0,1).
+\end{align}
 且两者系数均为 $\max(0,\texttt{w\_demand\_response})\Delta t$。依据：
 \srcpath{src/time\_series/time\_series\_pf.cpp:dcdc\_idx（lambda）}。
 

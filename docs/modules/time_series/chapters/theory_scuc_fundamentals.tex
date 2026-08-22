@@ -1,0 +1,171 @@
+% theory_scuc_fundamentals.tex -- 时序生产模拟通用理论：经济调度与机组组合
+
+\section{经济调度与安全约束机组组合理论}\label{sec:ts-th-scuc}
+
+\begin{theorynote}
+本章为通用理论，系统推导经济调度（ED）、机组组合（UC/SCUC）的目标、启停逻辑、
+爬坡、最小开停机、备用与网络安全约束，并给出拉格朗日价格解释和计算复杂性。
+公式不自动构成平台实现承诺；章末逐项列出与
+\srcpath{src/time\_series/time\_series\_pf.cpp:build\_uc\_milp} 的对应。
+理论依据为 Wood--Wollenberg--Shebl~\cite{ts:wood}、Morales-Espa\~na 等~\cite{ts:morales}
+及 Conejo 等~\cite{ts:conejo}。
+\end{theorynote}
+
+\subsection{集合、时间离散与符号}
+令 $\mathcal T=\{0,\ldots,T-1\}$ 为等长或变长调度时段，$\Delta t_t>0$；
+$\mathcal G$、$\mathcal N$、$\mathcal L$ 分别为常规机组、母线和交流支路集合。
+机组 $g$ 的有功、承诺、启动、停机变量分别为
+$p_{gt}\in\mathbb R_+$、$u_{gt},y_{gt},z_{gt}\in\{0,1\}$；负荷为 $d_{nt}$。
+参数 $\underline P_g,\overline P_g$ 为出力界，$R_g^\uparrow,R_g^\downarrow$ 为每时段
+爬坡界，$U_g,D_g$ 为最小开、停机时段数。$u_{g,-1}$ 与 $p_{g,-1}$ 是调度窗前状态，
+不能隐式设为零。符号约定为注入正、负荷正，成本单位为货币/时段或货币/MWh。
+
+\subsection{从经济调度到混合整数模型}
+给定承诺 $u$ 后，线性成本经济调度为
+\begin{align}
+\min_p\quad &\sum_{t\in\mathcal T}\sum_{g\in\mathcal G}
+ (c_g^1p_{gt}\Delta t_t+c_g^0u_{gt}\Delta t_t),\label{eq:ts-ed-obj}\\
+\text{s.t.}\quad&\sum_g p_{gt}=\sum_n d_{nt},\quad t\in\mathcal T,\label{eq:ts-ed-bal}\\
+&\underline P_gu_{gt}\le p_{gt}\le\overline P_gu_{gt}.\label{eq:ts-ed-cap}
+\end{align}
+若采用分段线性热耗曲线，把 $p_{gt}=\underline P_gu_{gt}+\sum_kp_{gkt}$，
+$0\le p_{gkt}\le\overline p_{gk}$，并令目标增加 $\sum_kc_{gk}p_{gkt}\Delta t_t$。
+二次成本 $c_g^2p_{gt}^2$ 可保留为 MIQP，或以割线给出凸分段线性外逼近。
+
+承诺状态满足精确转换恒等式
+\begin{equation}
+u_{gt}-u_{g,t-1}=y_{gt}-z_{gt},\qquad y_{gt}+z_{gt}\le1.\label{eq:ts-logic}
+\end{equation}
+于是标准目标为
+\begin{equation}
+\min\sum_{g,t}\left(C_g(p_{gt})\Delta t_t+C_g^{NL}u_{gt}\Delta t_t
++C_g^{SU}y_{gt}+C_g^{SD}z_{gt}\right).\label{eq:ts-uc-obj}
+\end{equation}
+若只引入连续启动费用 $s_{gt}$，也可用
+\begin{equation}
+s_{gt}\ge C_g^{SU}(u_{gt}-u_{g,t-1}),\qquad s_{gt}\ge0,\label{eq:ts-startaux}
+\end{equation}
+并最小化 $s_{gt}$；在 $C_g^{SU}\ge0$ 时式~\eqref{eq:ts-startaux} 在最优点自动取等。
+这种紧凑式不能直接表达停机费、热/温/冷启动和启动轨迹。
+
+\subsection{最小开停机与边界状态}
+标准聚合窗口式为
+\begin{align}
+\sum_{\tau=t-U_g+1}^{t}y_{g\tau}&\le u_{gt},\label{eq:ts-minup}\\
+\sum_{\tau=t-D_g+1}^{t}z_{g\tau}&\le1-u_{gt},\label{eq:ts-mindown}
+\end{align}
+其中越界项由窗前持续开停时间确定。等价的启动蕴含式为
+$y_{gt}\le u_{g,t+k}$（$k=0,\ldots,U_g-1$）；停机蕴含式类似。
+
+\begin{proposition}[时域截断的必要性]\label{prop:ts-boundary}
+若只对完全落在 $\mathcal T$ 内的窗口施加式~\eqref{eq:ts-minup}--\eqref{eq:ts-mindown}，
+则调度窗末端的启动/停机不受跨窗剩余时间约束；结果只在“窗末状态不承诺后续可行性”口径下有效。
+滚动优化必须把末态及剩余最小开停机时间传给下一窗口。
+\end{proposition}
+\begin{proof}
+令 $t=T-1$ 启动且 $U_g>1$。窗内没有 $u_{g,T},\ldots,u_{g,T+U_g-2}$，
+故任何只含窗内变量的启动蕴含式均不能强制这些未来状态为 1。把末态和剩余时间作为下一窗初始条件，
+才可恢复跨窗逻辑。
+\end{proof}
+
+\subsection{爬坡、启动能力与备用}
+最简单的运行爬坡约束是
+\begin{align}
+p_{gt}-p_{g,t-1}&\le R_g^\uparrow\Delta t_t,\\
+p_{g,t-1}-p_{gt}&\le R_g^\downarrow\Delta t_t.\label{eq:ts-ramp}
+\end{align}
+严格 SCUC 还应区分启动/停机能力 $SU_g,SD_g$：
+\begin{align}
+p_{gt}-p_{g,t-1}&\le R_g^\uparrow u_{g,t-1}+SU_gy_{gt},\\
+p_{g,t-1}-p_{gt}&\le R_g^\downarrow u_{gt}+SD_gz_{gt}.\label{eq:ts-ramp-tight}
+\end{align}
+旋转备用 $r_{gt}^{\uparrow}$ 满足
+\begin{align}
+0\le r_{gt}^{\uparrow}&\le \overline P_gu_{gt}-p_{gt},\\
+\sum_g r_{gt}^{\uparrow}&\ge R_t^{sys}.\label{eq:ts-reserve}
+\end{align}
+仅使用 $\sum_g(\overline P_gu_{gt}-p_{gt})\ge R_t^{sys}$ 相当于把全部在线余量视为同质、可在响应时间内到达，
+不包含备用分区、爬坡可达性、最大事故或 $N-1$ 备用。
+
+\subsection{网络约束与节点边际价格}
+在无损 DC 近似下，支路 $\ell=(i,j)$ 的有功为
+\begin{equation}
+f_{\ell t}=b_\ell(\theta_{it}-\theta_{jt}-\phi_\ell),\qquad
+-\overline F_\ell\le f_{\ell t}\le\overline F_\ell,\label{eq:ts-dcpf}
+\end{equation}
+节点平衡为
+\begin{equation}
+\sum_{g\in\mathcal G_n}p_{gt}+p^{ext}_{nt}+p^{res}_{nt}-d_{nt}
+=\sum_{\ell\in\delta^+(n)}f_{\ell t}-\sum_{\ell\in\delta^-(n)}f_{\ell t}.\label{eq:ts-nodal}
+\end{equation}
+每个连通分量需固定一个角度参考。给定整数承诺后，式~\eqref{eq:ts-nodal} 的对偶乘子
+$\lambda_{nt}$ 是该线性模型的节点边际价格；若线路约束不活跃且无损，所有节点价格相同。
+含损耗 AC-OPF 的价格还包括边际损耗与无功/电压约束分量，不能由该 DC-SCUC 对偶量替代。
+
+\begin{theorem}[固定承诺后的凸性与强对偶]\label{thm:ts-fixed-uc}
+若 $u,y,z$ 固定，成本为线性或凸分段线性，且只含
+式~\eqref{eq:ts-ed-bal}--\eqref{eq:ts-nodal} 一类线性约束，则剩余问题是 LP；若可行且有界，
+存在原始最优解与对偶最优解，二者目标相等。
+\end{theorem}
+\begin{proof}
+固定整数变量后，目标与所有约束均为仿射函数，变量界给出闭多面体。
+可行有界 LP 的基本定理保证最优基本可行解存在；LP 强对偶定理给出原、对偶目标相等。
+\end{proof}
+
+\subsection{复杂性、最优性证书与诚实报告}
+UC 包含二元承诺选择，通常为 NP-hard；直接枚举需要 $2^{|\mathcal G|T}$ 个固定承诺 ED。
+分支定界/割平面维护可行 incumbent $z_P$ 与全局对偶界 $z_D$，最小化问题常用相对 gap
+\begin{equation}
+\gamma=\frac{|z_P-z_D|}{\max(1,|z_P|)}.\label{eq:ts-gap}
+\end{equation}
+“找到可行解”“达到给定 gap”“严格证明最优”是三个不同命题。时间限制下若无有效全局界，
+不得把启发式 incumbent 报告为最优。数值后验还必须复算功率平衡、变量界与整数性残差。
+
+\subsection{四时段可复现算例}
+本仓库的 TS-UC-4H 算例含两台机组和一台 40 MWh 储能，负荷为
+$(60,130,85,140)$ MW。独立 SciPy/HiGHS 重建、256 个承诺序列穷举及平台 HiGHS 均得到
+\begin{align*}
+u_1&=(1,1,1,1),&p_1&=(77.7778,100,100,100)\ \mathrm{MW},\\
+u_2&=(0,1,1,1),&p_2&=(0,17.85,0,25.6)\ \mathrm{MW},\\
+p^{ess}&=(-17.7778,12.15,-15,14.4)\ \mathrm{MW},&
+SOC&=(0.9,0.5625,0.9,0.5),
+\end{align*}
+共同目标为 9233.35，三路目标相对差为 0；穷举的 256 个承诺中仅 5 个可行。
+原始报告见 \srcpath{external\_data/time\_series\_validation/cross\_engine\_matrix.json}。
+
+\subsection{与实现的对应}
+\begin{center}\footnotesize
+\begin{longtable}{@{}L{6.2cm}L{9.0cm}@{}}
+\toprule 理论条目 & 实现状态\\\midrule\endfirsthead
+\toprule 理论条目 & 实现状态\\\midrule\endhead
+线性燃料、空载与启动目标，式~\eqref{eq:ts-uc-obj}、\eqref{eq:ts-startaux} &
+\implfull{src/time\_series/time\_series\_pf.cpp:build\_uc\_milp}\\
+二次/分段线性热耗曲线 & \implnone（当前 UC 只消费 \texttt{cost\_c1/c0}）\\
+停机费用、热温冷启动 & \implnone\\
+出力上下界与运行爬坡，式~\eqref{eq:ts-ed-cap}、\eqref{eq:ts-ramp} &
+\implfull{time\_series\_pf.cpp:build\_uc\_milp}\\
+启动/停机状态相关紧爬坡，式~\eqref{eq:ts-ramp-tight} & \implnone\\
+窗内最小开停机蕴含式 & \implpart{实现只约束窗内可见未来；不保存窗前剩余时间和窗末义务}\\
+系统百分比旋转备用，式~\eqref{eq:ts-reserve} &
+\implpart{按在线容量余量聚合；无备用变量、响应可达性、分区或最大事故约束}\\
+DC 节点平衡、相角和 AC 支路热限，式~\eqref{eq:ts-dcpf}--\eqref{eq:ts-nodal} &
+\implfull{time\_series\_pf.cpp:build\_uc\_milp}\\
+固定承诺后的 LMP/对偶输出 & \implnone（时间序列结果不公开 UC 对偶量）\\
+后端状态、MIP gap 与最优性证书传播 &
+\implfull{time\_series\_pf.cpp:extract\_schedule；tests/test\_uc\_storage\_efficiency.cpp}\\
+TS-UC-4H 三路交叉验证 &
+\implfull{tools/time\_series\_validation/run\_cross\_engine\_matrix.py}\\
+\bottomrule
+\end{longtable}
+\end{center}
+
+\subsection{参考文献}
+{\renewcommand{\section}[2]{}\begin{thebibliography}{9}\small
+\bibitem{ts:wood} A.~J. Wood, B.~F. Wollenberg and G.~B. Shebl,
+\emph{Power Generation, Operation, and Control}, 3rd ed., Wiley, 2014.
+\bibitem{ts:morales} G.~Morales-Espa\~na, J.~M. Latorre and A.~Ramos,
+Tight and compact MILP formulation for the thermal unit commitment problem,
+\emph{IEEE Transactions on Power Systems}, 28(4), 2013.
+\bibitem{ts:conejo} A.~J. Conejo, M.~Carri\'on and J.~M. Morales,
+\emph{Decision Making Under Uncertainty in Electricity Markets}, Springer, 2010.
+\end{thebibliography}}

@@ -1,0 +1,56 @@
+\section{时序数据、profile 与时间索引契约}
+\label{sec:ts-data}
+
+\subsection{输入结构}
+\compmeta{TimeSeriesData}{include/hacdcpf/time\_series/time\_series\_pf.hpp}
+\begin{center}\footnotesize
+\begin{tabular}{@{}L{3.6cm}L{2.0cm}L{8.4cm}@{}}
+\toprule
+字段 & 单位/索引 & 实际语义\\ \midrule
+\fld{num\_steps} & $T$ & 非负步数；求解入口要求 $T>0$，年度 $T=0$ 返回空结果\\
+\fld{step\_duration\_hr} & h/step & $T>0$ 时必须为有限正数；能量、成本和 SOC 均使用它积分\\
+\fld{profiles[].id} & 稳定整数 ID & 设备的 \fld{profile\_id} 通过它查找，重复 ID 直接抛出异常\\
+\fld{profiles[].values[t]} & 无量纲 & 设备相关的缩放/价格序列；缺失 profile 或越界值按 $1.0$ 回退\\
+\bottomrule
+\end{tabular}
+\end{center}
+
+profile 的单位不是“MW”；基准功率由设备自身的 $p_mw$、$p_{rated}$ 或 $p_{set}$ 提供。
+例如负荷使用 $p_{mw}\,\pi_{load}(t)\,scaling$，可再生可用功率使用
+$p_{rated}\,\pi_{ren}(t)$，外部电网价格在有 \fld{price\_profile\_id} 时使用
+$c_1\pi_{price}(t)$（若 $c_1$ 为零则 profile 本身视作绝对价格）。profile 数值只检查有限性，
+代码不强制其位于 $[0,1]$，因此过发、负缩放或价格负值必须由调用方显式防护。
+
+\subsection{设备到 profile 的映射}
+\begin{longtable}{@{}L{4.1cm}L{4.0cm}L{5.7cm}@{}}
+\toprule
+设备族 & 读取字段 & 缺失/越界行为\\ \midrule
+AC/DC Load & \fld{profile\_id} & 负荷基值乘 $1.0$ 回退\\
+AC Renewable / PV、DC PV & \fld{profile\_id} & 可用功率乘 $1.0$ 回退\\
+DC StaticGenerator & \fld{profile\_id} & $p_{set}\times scaling$ 乘 $1.0$ 回退\\
+ExternalGrid & \fld{price\_profile\_id} & 无价格或非正价格报告阶段回退 $20$ 货币/MWh\\
+FlexibleLoad / DR & 基线 + UC 的 up/down 行 & availability 截断到 $[0,1]$；未启用 DR 保持基线\\
+\bottomrule
+\end{longtable}
+
+年度切片 \srcpath{slice\_ts\_data} 与时序切片 \srcpath{slice\_ts\_window} 都复制
+$[t_0,t_1)$ 的值；原 profile 不足时填 $1.0$。因此“profile 长度不足”不会自动失败，
+而是产生可审计但可能不符合物理预期的平坦尾部；严谨运行应在调用前检查
+\fld{values.size() == num\_steps}。
+
+\subsection{能量、成本和符号}
+功率的正负约定是：机组、可再生、外部电网进口和储能放电为正；负的储能出力表示充电，
+外部电网负值表示出口。每步能量为 $E_t=P_t\Delta t$，块汇总为
+$E_B=\sum_{t\in B}P_t\Delta t$；成本率（货币/h）乘同一 $\Delta t$ 得时段成本。
+\fld{external\_grid\_net\_mw} > 0 的进口和 $<0$ 的出口分别进入
+\fld{external\_grid\_import\_mwh} 与 \fld{external\_grid\_export\_mwh}。
+
+\subsection{输入准入清单}
+在生产运行前建议强制检查：
+\begin{enumerate}
+  \item $T\ge1$、$\Delta t>0$ 且所有 profile 值有限；
+  \item 设备引用的 profile ID 唯一且存在，profile 长度等于 $T$；
+  \item AC/DC 设备额定值、SOC 上下界、效率和爬坡率满足物理符号；
+  \item 若使用按日并行，$24/\Delta t$ 应接近整数，并明确接受日循环 SOC 的建模假设；
+  \item 将结果行映射回稳定设备 ID，而不是把行号当作组件 \fld{index}。
+\end{enumerate}

@@ -1,0 +1,60 @@
+\section{系统审计、理论--实现差距与准入门}
+\label{sec:ts-audit}
+
+\subsection{审计结论矩阵}
+\begin{longtable}{@{}L{3.6cm}L{3.1cm}L{4.3cm}L{2.1cm}@{}}
+\toprule
+主题 & 当前实现 & 影响/报告要求 & 状态\\ \midrule
+profile 校验 & 重复 ID/非有限值拒绝；长度不足填 1.0 & 长度需由调用方预检 & 已闭环\\
+UC 求解证书 & 后端 status/gap/最优性传播至 C++ 与 HTTP & 可行、gap 达标、零 gap 证明分离 & 已闭环\\
+UC SOC & AC/DC 线性递推、效率、自放电、循环末端边界 & 长时储能受 cyclic/周重锚定限制 & 近似且显式\\
+AC 网络约束 & B 矩阵相角 + AC 支路热限 & UC 阶段不是 AC 潮流 & 已实现/代理\\
+DC 网络约束 & 可选节点平衡、换流器耦合、显式运输流 & 未启用运输流时无 DC 支路热限；无 DC 电压变量 & 明确限制\\
+L0 年度计划 & 块预算映射到全年度 UC 积分不等式；块成本仍为估值 & 燃料采用发电量代理，热率曲线未建模 & 范围内闭环\\
+年度公共选项 & cyclic SOC/penalty、budget 和 bottom-up feedback 已接线 & hard budget 违约保持 infeasible；feedback 无物理 replay 时显式拒绝 & 已闭环/范围声明\\
+周窗连续性 & 全年度 UC 后按周切片，SOC/开停/爬坡/预算跨周连续 & 会重置状态的并行日 UC 组合被入口拒绝 & 已闭环/显式拒绝\\
+日 replay 字段 & 当前 UCSchedule 全部二维轨迹、方向和 solver certificate 均切片 & 只有没有 schedule row 的扩展状态仍不在此契约内 & 部分闭环\\
+日并行 & 仅允许无 UC、无储能的 DynamicOPF；其余组合显式拒绝 & 不再返回未认证的独立日年度结果 & 已闭环\\
+年度 accounting & 经典机组/储能/可再生/外部电网闭环 & VPP/微网/移动储能/路由器/DR 归因不完整 & 开放边界\\
+年度弃电/ENS & 逐步可用-调度差、OPF dpd 和 schedule ENS proxy 均带 provenance & 物理失败不再隐式写零；未知值需查 known flag & 部分闭环\\
+年度可行性 & 顺序/并行均聚合 UC 与必需 OPF/PF 证书 & schedule-only 仍不是全年 AC 认证 & 已闭环/范围声明\\
+生命周期碳 & AC/DC/外部电网 profile/储能库存按逐时递推分项归因；无因子才用显式 fallback & 制造碳和网络损耗碳仍排除 & 范围内闭环\\
+生命周期 PF/OPF & 默认全年 replay；抽样小时独立 PF correction & 显式关闭时才是 schedule-only & 已闭环/范围声明\\
+生命周期分辨率 & 非零 option cadence 与输入 cadence 不一致即拒绝 & 核心不重采样；HTTP 负责构造输入数据 & 已闭环/范围声明\\
+生命周期更换 & EOL 后重置 SOH、局部年龄和 fractional cycles & 仍需 duplicate-name/multi-replacement 专项回归 & 已闭环/回归待补\\
+生命周期抽样 & estimator 与 bound 共享同一 Neyman allocation，样本小时执行 PF correction & 确定性样本不构成随机 coverage 保证 & 范围内闭环\\
+生命周期循环 & fractional FDE 以 double 保存，AC/DC 按 stable ID 归因，replacement 后年龄重置 & 制造/材料退化仍未建模 & 范围内闭环\\
+外部引擎 & 6 步 PF 经两种外部引擎；UC 经 SciPy 重建和 256 序列穷举 & 生命周期仍无外部等价接口 & 声明范围内闭环\\
+\bottomrule
+\end{longtable}
+
+\subsection{工业准入条件}
+生产报告只有在以下条件同时满足时才标为“可审计年度结果”：
+\begin{enumerate}
+  \item 输入 profile 长度与 $T$ 一致，单位和时间基准（UTC/本地、闰年与否）已记录；
+  \item 记录 \texttt{solver\_name}、\texttt{solver\_status}、MIP gap、\texttt{optimality\_proven}、
+        daily/weekly 模式及 cyclic SOC 设置；
+  \item 对物理年度结果，\texttt{skip\_replay=false} 且报告 PF/OPF 收敛计数、最大残差、
+        支路/换流器负载和 \texttt{power\_balance\_error\_mwh}；
+  \item 若使用生命周期层，报告输入 \texttt{TimeSeriesData.step\_duration\_hr}（不能以未消费的
+        option 代替）、碳因子口径、三项 bound 和 dense-vs-sampled gap，并明确其 schedule-only 范围；
+  \item 含扩展组件时，单独给出其 dispatch/energy 归因；若没有，则必须标注
+        \texttt{component economics outside annual perimeter}，禁止宣称闭环；
+  \item 依赖版本（尤其兄弟仓库 MIPSolvers commit）和测试命令写入验证记录。
+\end{enumerate}
+
+\subsection{尚未闭环但可复现的研究问题}
+\begin{itemize}
+  \item 将燃料热率、燃料类型和真正燃料库存替代当前的发电量 MWh 代理；
+  \item 以滚动 SOC 链替代强制日/周循环，量化季节储能的分解差距；
+  \item 增加制造/材料碳、网络损耗碳和换流器库存的明确来源；
+  \item 用随机抽样重复试验建立统计 coverage，而不是把确定性分层 bound 写成置信保证；
+  \item 将 VPP、微网、移动储能、EnergyRouter、DR 的 schedule 行加入年度/生命周期 accounting；
+  \item 为年度结果建立外部参考（生产成本模型或逐时 OpenDSS/商业 SCUC），而不是把 PF 引擎当 UC 参考。
+\end{itemize}
+
+\begin{theorynote}
+本章列出的缺口不是路线图承诺，而是当前代码审计结果。任何未来修复必须同步更新
+\srcpath{docs/overview/development\_status.md}、本手册、注册测试和 HTTP 结果字段，且不能删除
+旧的近似范围声明。
+\end{theorynote}

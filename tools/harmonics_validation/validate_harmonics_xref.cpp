@@ -176,13 +176,16 @@ json result_to_json(const HPFResult& res) {
   out["branches"] = json::array();
   for (const auto& br : res.ac_branch_flows) {
     json jb;
+    jb["branch_index"] = br.branch_index;
     jb["from"] = br.from_bus;
     jb["to"] = br.to_bus;
     jb["is_dc"] = false;
     jb["thd_i_pct"] = br.thd_i_pct;
     jb["orders"] = json::array();
     for (const auto& [ord, i] : br.i_by_order) {
-      jb["orders"].push_back({{"order", ord}, {"i_pu", i}});
+      jb["orders"].push_back({{"order", ord}, {"i_pu", i},
+                               {"i_to_pu", br.i_to_by_order.at(ord)},
+                               {"i_series_pu", br.i_series_by_order.at(ord)}});
     }
     out["branches"].push_back(jb);
   }
@@ -190,6 +193,7 @@ json result_to_json(const HPFResult& res) {
   out["dc_branches"] = json::array();
   for (const auto& br : res.dc_branch_flows) {
     json jb;
+    jb["branch_index"] = br.branch_index;
     jb["from"] = br.from_bus;
     jb["to"] = br.to_bus;
     jb["is_dc"] = true;

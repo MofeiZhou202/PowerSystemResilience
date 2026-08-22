@@ -1,0 +1,51 @@
+\section{范围、架构与可审计边界}
+\label{sec:ts-scope}
+
+\subsection{问题定义}
+给定富语义交直流系统 $\mathcal S$、离散 profile 集合
+$\{\pi_k(t)\}_{t=0}^{T-1}$、步长 $\Delta t$ 和设备参数，模块计算
+\[
+  \{u_{g,t},p_{g,t},e_{s,t},V_t,I_t\}_{t=0}^{T-1},
+\]
+并将功率积分为 MWh、将可计价项积分为货币量。入口按保真度分成三层：
+\begin{enumerate}
+  \item \textbf{时序层}：\srcpath{solve\_time\_series\_pf}，单个耦合窗口内执行
+        UC（可选）、逐步 AC-OPF（可选）和 PF 校验；
+  \item \textbf{年度层}：\srcpath{solve\_annual\_production\_simulation}，提供
+        L0 年度块、L2 周 UC、L3 日 replay，或绕过层级的独立按日并行；
+  \item \textbf{生命周期层}：\srcpath{run\_lifecycle\_simulation}，年循环更新负荷、PV
+        降额和储能 SOH，再调用年度 schedule-only 快速层；\srcpath{run\_lifecycle\_comparison}
+        在克隆系统上扫描容量倍率。
+\end{enumerate}
+
+\subsection{数据流与身份}
+所有求解均遵循“rich system $\rightarrow$ profile snapshot $\rightarrow$ canonical projection
+$\rightarrow$ solver result $\rightarrow$ rich attribution”的主线。设备的稳定
+\fld{index}、向量位置和图节点编号绝不混用；\fld{UCSchedule} 的行是\textbf{在役设备的自然顺序}
+（不是稳定 ID 排序），而 \fld{opf\_results}/\fld{pf\_results} 的外层索引是局部窗口的 $t$。
+年度拼接时由 \fld{global\_step=start\_step+t} 恢复全局时标。AC 与 DC 母线即使具有相同整数
+ID 也使用不同域映射。
+
+\subsection{两条年度路径}
+\begin{center}\footnotesize
+\begin{tabular}{@{}L{3.3cm}L{5.2cm}L{5.8cm}@{}}
+\toprule
+路径 & 实际执行 & 主要假设\\ \midrule
+层级 sequential & L0 heuristic $\rightarrow$ 周 UC（168 h + lookahead）$\rightarrow$ 日 replay & 周间 SOC 重新锚定；L0 预算/维护目前是默认占位值\\
+按日 parallel & 每个日窗独立调用时序求解，末端 SOC 可固定为初始 SOC & 日与日之间没有能量套利；并行安全取决于 UC 后端\\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\begin{gapnote}
+\textbf{已实现：}日窗划分、SCUC/DynamicSCED/DynamicOPF 三模式、结果按全局步拼接、
+并行后端守卫和 provenance 字段。\textbf{仅结构存在：}L0 维护、燃料预算和
+\fld{iterative\_feedback} 参数；当前 \srcpath{solve\_annual\_plan} 不求解 L0 MILP，
+\fld{max\_feedback\_iterations} 与 \fld{budget\_violation\_tol\_mwh} 也未参与控制流。
+\end{gapnote}
+
+\subsection{复杂度与内存}
+设 $G,S,R$ 分别为在役机组、储能和可再生数，日窗长度为 $\tau$。单个 UC 窗口的二进制量
+主要为 $O(G\tau)$，年度层级将其变成约 52 个周问题或 $\lceil T/\tau\rceil$ 个日问题；
+\fld{step\_results} 为 $O(T)$，PF 快照只在 \fld{pf\_snapshot\_interval} 命中时保留。
+并行日路径按日结果槽位写入，随后主线程按日序拼接，因此数值顺序不依赖线程完成顺序。
