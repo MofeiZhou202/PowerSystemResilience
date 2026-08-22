@@ -1,0 +1,61 @@
+% source_equivalent_contract.tex -- exact I/O executable contract
+\section{源码等价的导入、往返与单位契约}\label{sec:io-source-equivalent}
+
+本章只转写核心适配路径当前执行的谓词和换算。各格式未覆盖的源对象必须进入报告，不能由
+本章的公共公式推断为“自动保留”。
+
+\subsection{ImportReport 的精确状态机}
+\srcpath{src/io/import\_report.cpp:ImportReport::add} 先按 disposition 对
+\fld{accepted}/\fld{coerced}/\fld{rejected}/\fld{skipped} 中恰好一个计数器加一，再保存记录。
+错误和强制/推断谓词为
+\begin{align}
+ has\_errors(R)&\Longleftrightarrow \#\{q:q.severity=Error\}>0,\\
+ coerced\_or\_inferred(R)&\Longleftrightarrow
+ unit\_assertion\ne Asserted\ \lor\ \exists q:q.disposition=Coerced.
+\end{align}
+因此 \srcpath{src/io/import\_report.cpp:passes\_mode} 的实际逻辑是
+\begin{align}
+ pass(R,Permissive)&=\neg has\_errors(R),\\
+ pass(R,Strict)&=\neg has\_errors(R)\land\neg coerced\_or\_inferred(R).
+\end{align}
+Skipped/Warning 本身不会使 Strict 失败；若业务要求“任何结构损失都拒绝”，必须另查 skipped
+计数。这一点不能被概括成“Strict 拒绝所有 skipped”。
+
+\subsection{JSON 往返比较器}
+\srcpath{src/io/roundtrip.cpp:diff\_systems} 把两个系统先投影为本项目 JSON DOM，再递归比较。
+数值字段 $a,b$ 的门槛精确为
+\begin{equation}
+ |a-b|\le\varepsilon\max(1,|a|).
+\end{equation}
+该尺度以 before 值 $a$ 为基准，因此不是对称距离；字符串、布尔和 null 精确比较；对象比较
+键并集，数组比较最大长度。最多保留 64 条 mismatch 样本，但
+\fld{fields\_mismatched} 继续累计全部错误。\srcpath{src/io/roundtrip.cpp:json\_roundtrip}
+执行 $from\_json(to\_json(M))$，异常被转换为未通过证据而非伪造空系统。
+
+\subsection{MATPOWER 单位和结构映射}
+\srcpath{src/io/matpower\_parser.cpp:parse\_matpower} 默认把标准 MATPOWER 的功率解释为 MW/Mvar、
+支路阻抗解释为以 \fld{baseMVA} 为基准的标幺值。非标准 kW/ohm 标记只在
+\fld{best\_effort\_import=true} 时消费：
+\begin{equation}
+ P_{MW}=P_{kW}/1000,\qquad Z_B=V_{base,kV}^2/S_{base,MVA},\qquad
+ (r,x)_{pu}=(R,X)_{ohm}/Z_B.
+\end{equation}
+该路径把 \fld{unit\_assertion} 置 BestEffort 并追加 Coerced/UnitInferred；严格 twin 路径不
+静默执行换算。tap 的绝对值小于 $10^{-12}$ 时按 1.0 读取。非单位 tap/非零 shift 的支路
+会生成链接到原支路的 \texttt{Transformer2W} 元数据，但不虚构 OLTC 档位范围。
+
+\srcpath{src/io/matpower\_parser.cpp:to\_matpower} 只导出有界 AC 子集；DC 网络、换流器和富
+变压器语义超出范围。负荷和 shunt 在导出前按稳定 bus ID 聚合，非在役一等组件不参与聚合。
+
+\subsection{CIM、BPA 与外部文本的边界}
+\srcpath{src/io/cim\_io.cpp:from\_cim} 只承诺 CGMES EQ+SSH 有界子集并拒绝实体声明；配电 RDF
+归 \srcpath{src/io/cim\_dist\_io.cpp:from\_cim\_dist}，缺失工程参数可产生 Canonical/BestEffort
+记录。BPA/DSP 卡片由 \srcpath{src/io/bpa\_io.cpp:parse\_bpa\_dat} 解析，LCC/VSC 卡的控制与
+单位口径由独立 reason/warning 记录。GridLAB-D/OpenDSS 文本导入的 legacy warnings/skipped
+经 \srcpath{src/io/import\_report.cpp:uniform\_report\_from\_messages} 分别转为 Coerced 与 Skipped，
+不会丢失为控制台文字。
+
+\subsection{复杂度与失败边界}
+DOM 往返比较为 $O(F)$ 字段扫描、最多保存 $O(1)$ 条 mismatch 样本；矩阵/卡片解析通常为
+$O(R)$ 源记录扫描。文件不存在、语法错误、XML 实体、引用无法解析、严格模式单位推断均应返回
+异常或结构化错误。导入器不运行 PF，也不允许以零阻抗、零负荷或默认成功掩盖未知量。

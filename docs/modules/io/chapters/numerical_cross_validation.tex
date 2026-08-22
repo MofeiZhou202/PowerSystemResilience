@@ -1,0 +1,41 @@
+% numerical_cross_validation.tex -- I/O numerical and external evidence
+\section{往返结果、外部参考与验证边界}\label{sec:io-numerical}
+
+本轮 macOS Release 直接二进制结果如下。JSON 目标的一个 skip 是测试数据文件缺失，429 条
+实际执行断言全部通过；不能把 skip 计成验证成功。
+\begin{center}\small
+\begin{tabular}{@{}L{6.1cm}rrL{4.2cm}@{}}
+\toprule 目标 & cases & assertions & 证据类型\\\midrule
+\srcpath{test\_io\_roundtrip} & 6 & 22 & rich JSON 往返/故障注入\\
+\srcpath{test\_io\_json} & 43（42 pass, 1 skip） & 429 & 字段与错误契约\\
+\srcpath{test\_io\_matpower} & 2 & 15 & 单位纪律\\
+\srcpath{test\_io\_cim} & 12 & 156 & CGMES 子集、结构损失、XXE\\
+\srcpath{test\_bpa\_io} & 25 & 885 & 卡片结构和往返\\
+\srcpath{test\_bpa\_dsp\_compare} & 5 & 251 & DSP 外部参考工况\\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\subsection{往返与拒绝证据}
+内置 IEEE-14 AC/DC rich JSON 案例逐字段往返通过；人为把首条 AC 支路 $x_{pu}$ 加 1 后，
+比较器报告至少一项 mismatch，证明门控不仅检查“能否重新解析”。动态 RL 选择器、遥测绑定和
+schema major 版本也在往返/拒绝矩阵中；不兼容 major 在 Strict 拒绝、Permissive 仅按当前
+best-effort 契约处理。
+
+CIM 目标覆盖 EQ+SSH 有界往返、越界类的 structural-loss 记录以及 DOCTYPE/ENTITY 拒绝。
+这些结果证明实现遵守声明子集和安全边界，不证明完整 CGMES 互操作一致性。
+
+\subsection{BPA--DSP 外部交叉验证}
+DSP 参考通道覆盖 39-bus、IEEE90、2DC LCC、CIGRE LCC 和 vsc2 VSC-HVDC。LCC 参考工况为
+整流侧 $P_{ac}=-1500$ MW、逆变侧 $+1410$ MW、$I_d=3.0$ kA、直流电压 500/470 kV，
+直流线路损耗 90 MW；测试门槛分别为功率/电压 1 MW 或 1 kV、电流 0.01 kA。
+VSC 工况对拍 $P/Q/P_{dc}$、站损和约 300 kV 直流电压。5 cases/251 assertions 全部通过。
+
+该 oracle 来自 DSP 文件和报告，独立于 HySim 求解器，但只覆盖对应 BPA 卡片和稳态 AC/DC
+公共物理。它不能认证 JSON、CIM、ETAP、保护、动态或市场语义。
+
+\subsection{可选外部引擎和未闭环范围}
+GridLAB-D、OpenDSS 与 ETAP 测试受本机构建能力和数据存在性门控；本轮未把它们重新执行结果
+混入上述无条件表。当前没有完整 CGMES 3.0 一致性套件、ETAP 商业程序双向 oracle 或所有格式
+的字段级 schema 覆盖率。因此“导入通过”仍必须与 \texttt{ImportReport}、validation 和实际
+PF/OPF 状态共同解释。

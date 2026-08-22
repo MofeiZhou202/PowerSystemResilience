@@ -14,17 +14,17 @@
 | `api` | `modules/api/` | [公共 API 手册](api/api_manual.tex) | 能力门控、safe API、句柄签名、OPF 解后审计与验证边界 |
 | `carbon_analysis` | `modules/carbon_analysis/` | [碳分析手册](carbon_analysis/carbon_analysis_manual.tex) | 碳流理论、矩阵/比例追踪、年度储能碳递推与交叉验证 |
 | `dynamics` | `modules/dynamics/` | [动力学手册](dynamics/dynamics_manual.tex) | 机电暂态 DAE、设备模型、小信号 |
-| `ev_power_traffic` | `modules/ev_power_traffic/` | [电—交通手册](ev_power_traffic/ev_power_traffic_manual.tex) | CTM/LTM、联合优化、MPC |
+| `ev_power_traffic` | `modules/ev_power_traffic/` | [电—交通手册](ev_power_traffic/ev_power_traffic_manual.tex) | CTM/LTM 守恒与 CFL、DUE/VI、A--H 源码模型、交叉模型诊断与数值证据 |
 | `graph` | `modules/graph/` | [图模块手册](graph/graph_manual.tex) | 拓扑、收缩、降阶、结果恢复 |
 | `harmonics_power_flow` | `modules/harmonics_power_flow/` | [谐波手册](harmonics_power_flow/harmonics_power_flow_manual.tex) | 频域、三相、AC/DC 耦合、标准校核 |
 | `integrated_energy` | `modules/integrated_energy/` | [综合能源专著](integrated_energy/integrated_energy_manual.tex) | 十章/23 页：守恒、库存、LP/MILP 对偶，源码等价模型，解析解与 24 h 独立残差 oracle |
-| `io` | `modules/io/` | [输入输出手册](io/io_manual.tex) | 格式映射、导入报告、往返 |
+| `io` | `modules/io/` | [输入输出手册](io/io_manual.tex) | 信息保真、导入报告状态机、JSON/MATPOWER/CIM/BPA 映射、往返与 DSP 参考交叉验证 |
 | `market` | `modules/market/` | [市场手册](market/market_manual.tex) | SCUC/SCED/LMP、LODF N-1、混合模型边界、结算与数值证据 |
 | `model` | `modules/model/` | [工程模型专著](model/model_manual.tex) | 十一章/22 页：类型化身份、量纲/标幺、商图恢复、组件语义、投影 oracle 与稳定 ID 开放缺陷 |
 | `network_reconfiguration` | `modules/network_reconfiguration/` | [网络重构手册](network_reconfiguration/network_reconfiguration_manual.tex) | 混合重构 MILP、ONR |
 | `optimal_power_flow` | `modules/optimal_power_flow/` | [最优潮流手册](optimal_power_flow/opf_manual.tex) | Native、Parity、DC、RPO、三相 OPF |
 | `power_flow` | `modules/power_flow/` | [潮流计算手册](power_flow/power_flow_manual.tex) | AC/DC、三相、配网、CPF、鲁棒求解 |
-| `power_models` | `modules/power_models/` | [AML 建模层手册](power_models/power_models_manual.tex) | ACOPF、ACDCOPF、DCOPF、LinDistFlow、SCUC builder |
+| `power_models` | `modules/power_models/` | [AML 建模层手册](power_models/power_models_manual.tex) | 五类 builder 理论/源码等价模型，DCOPF/LinDistFlow/SCUC 五次跨后端方程 oracle |
 | `reliability` | `modules/reliability/` | [可靠性手册](reliability/reliability_manual.tex) | MC、FMEA、三阶段、F\&D |
 | `resilience` | `modules/resilience/` | [弹性手册](resilience/resilience_manual.tex) | 启发式恢复、严格 MILP、MESS |
 | `scenario_generation` | `modules/scenario_generation/` | [场景生成手册](scenario_generation/scenario_generation_manual.tex) | 常规、可靠性、弹性、台风场景 |

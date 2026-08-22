@@ -99,6 +99,7 @@ MILP 平衡对偶非认证市场出清价（\fld{price\_valid}=false）。混合
 \input{chapters/theory_modeling_foundations}
 % ── 实现转写层（源码等价）──
 \input{chapters/source_equivalent_builders}
+\input{chapters/numerical_cross_validation}
 
 \section{接口与参数}
 \begin{paramtable}
@@ -117,12 +118,14 @@ MILP 平衡对偶非认证市场出清价（\fld{price\_valid}=false）。混合
 
 \section{验证与边界局限}
 \subsection{验证与校核}
-无专用 \srcpath{test\_power\_models} 文件；AML 建模器经由其它测试间接覆盖：
+专用注册目标 \srcpath{power\_models\_cross\_validation} 已覆盖 AML DCOPF、LinDistFlow 与
+SCUC 的公开入口，并以独立 Python 方程 oracle 重算解析解；详见
+第\ref{sec:power-models-numerical}节。非线性 AML 建模器仍经由其它测试间接覆盖：
 \srcpath{to\_acopf\_data}/\srcpath{to\_acdcopf\_data}/\srcpath{solve\_acdcopf} 见
 \srcpath{tests/test\_converter\_coordination.cpp}，\srcpath{to\_acdcopf\_data} 见
-\srcpath{tests/test\_hacdcpf.cpp}。交叉校核目标 \srcpath{test\_acopf\_dcopf\_crossval} 检验的是生产
-\srcpath{opf::solve\_dc\_opf}，而非 AML 的 \srcpath{power\_models::solve\_dc\_opf}。AML 变体
-\srcpath{solve\_lindistflow}/\srcpath{solve\_scuc}/\srcpath{solve\_acopf} 在 \srcpath{tests/} 中暂无引用。
+\srcpath{tests/test\_hacdcpf.cpp}。旧交叉校核目标 \srcpath{test\_acopf\_dcopf\_crossval} 检验的是生产
+\srcpath{opf::solve\_dc\_opf}，不能替代本轮 AML 专项 oracle。AML 非线性
+\srcpath{solve\_acopf}/\srcpath{solve\_acdcopf} 尚无本模块专属独立数值 oracle。
 
 \subsection{边界与局限（如实标注）}
 \begin{itemize}

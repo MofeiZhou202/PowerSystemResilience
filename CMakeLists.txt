@@ -804,6 +804,12 @@ if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/tools/model_validation/validate_model_pro
   target_link_libraries(model_projection_xref PRIVATE hacdcpf::hacdcpf)
 endif()
 
+if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/tools/power_models_validation/validate_power_models_xref.cpp")
+  add_executable(power_models_xref
+    tools/power_models_validation/validate_power_models_xref.cpp)
+  target_link_libraries(power_models_xref PRIVATE hacdcpf::hacdcpf)
+endif()
+
 if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/tools/bpa_dat_convert.cpp")
   add_executable(bpa_dat_convert tools/bpa_dat_convert.cpp)
   target_link_libraries(bpa_dat_convert PRIVATE hacdcpf::hacdcpf)

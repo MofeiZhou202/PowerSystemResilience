@@ -27,9 +27,9 @@ AC/DC 母线 ID 在各自域内唯一；同号 AC/DC ID 不构成重复。支路
 \begin{longtable}{@{}L{7.0cm}L{8.2cm}@{}}
 \toprule 谓词/层级 & 实现状态\\\midrule
 \endfirsthead\toprule 谓词/层级 & 实现状态\\\midrule\endhead
-基础字段与引用检查 & \implfull{src/validation/validate_system.cpp:validate}\\
-参考节点资格 & \implfull{src/validation/validate_system.cpp:validate_reference_bus_eligibility}\\
-四级过滤/Warning 提升 & \implfull{src/validation/validate_system.cpp:validate}\\
+基础字段与引用检查 & \implfull{src/validation/validate\_system.cpp:validate}\\
+参考节点资格 & \implfull{src/validation/validate\_system.cpp:validate\_reference\_bus\_eligibility}\\
+四级过滤/Warning 提升 & \implfull{src/validation/validate\_system.cpp:validate}\\
 非有限值的统一拒绝 & \implpart{部分比较依赖 C++ NaN 语义，未由每个 helper 统一捕获}\\
 PF/OPF 收敛证明 & \implnone\\
 \bottomrule

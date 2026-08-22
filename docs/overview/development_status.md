@@ -47,6 +47,75 @@ sanitizer, external PF/MILP engine or pinned-dependency release validation was r
 Local MIPSolvers HEAD `7721936245d5756193381b415457e6cf2214341e` differs from pin
 `3bf1e66749e3b3e0bbd57696a7d4f43ecf09218c`.
 
+## EV--traffic, I/O and AML power-model documentation closure (2026-08-22)
+
+The final three compact manuals identified by the 23-module audit now have explicit
+theory--source--result chains. `ev_power_traffic` adds CTM/LTM conservation and CFL,
+Wardrop VI, charging-stock and certificate theory ahead of the existing A--H source
+model. Four current Release binaries pass 38 cases/1326 assertions. The 20-vehicle
+pulse closes exactly in both CTM and LTM; the deliberately CFL-invalid case separates
+150, 1967 and 1998 veh/h LTM/coarse-CTM/fine-CTM outcomes; the DUE case serves 40/40
+kWh at zero reported gap. These are analytic and cross-discretization checks, not a
+SUMO/MATSim or field-calibrated traffic oracle.
+
+`io` now defines round-trip equivalence, domain-qualified identity, unit/source
+evidence, structural loss, XML safety and the exact `ImportReport::passes_mode`
+predicate before mapping those contracts to JSON, MATPOWER, CIM and BPA. Six focused
+Release binaries pass 93 cases/1758 assertions; `test_io_json` has one explicitly
+skipped case because its optional data file is absent. BPA--DSP comparison passes
+5 cases/251 assertions across the shared LCC/VSC electrical subset. GridLAB-D,
+OpenDSS and ETAP were not rerun in this pass, and no complete CGMES 3.0 or commercial
+ETAP bidirectional oracle is claimed.
+
+`power_models` now separates general ACOPF/ACDCOPF/DCOPF/LinDistFlow/SCUC theory from
+the source-equivalent AML builders. The new registered
+`power_models_cross_validation` executes five repetitions, independently recomputes
+all public equations in Python and aggregates the worst residual at a fixed `1e-7`
+gate. DCOPF is fixed to `NativeDualSimplex`, LinDistFlow alternates explicit
+`NativeDualSimplex`/`NativeIPMLP`, and SCUC is fixed to `StrictHiGHS`, all with
+fallback disabled. Backend-contract error is zero; the worst numerical error is
+`3.73311195e-8`, with LinDistFlow's worst analytic voltage error `8.737e-12`. The
+test completed in no more than 1.71 s during this pass. An adversarial
+`NativeIPMLP` DCOPF run had only `7.050e-9 MW`
+dispatch error but `1.7402e-7` absolute objective error and is therefore not admitted
+at the unchanged gate. This is an internal cross-backend plus independent-equation
+oracle, not an external solver certification; nonlinear ACOPF/ACDCOPF remain outside
+this specialized oracle and SCUC prices remain invalid.
+
+The three manuals compile with XeLaTeX to 14, 12 and 15 A4 pages. All 41 pages were
+rendered at 110 dpi and inspected; the added theory, source and numerical pages show
+no clipping, overlap, broken tables, unintended blanks or literal TeX control words.
+This was a focused Release/documentation pass, not full CTest, sanitizer or pinned-
+dependency validation. Project HEAD is `e9799bb7aac4d239ff2c5811a202cbfa0fd1c086`;
+the local MIPSolvers HEAD remains different from the repository pin as recorded above.
+
+## Market, carbon, analysis, API, server and validation documentation closure (2026-08-22)
+
+The six previously compact module manuals now include separate general-theory chapters,
+source-symbol mappings, numerical evidence and explicit validation gaps. `market` documents
+SCUC/SCED/LMP, LODF security and settlement; its Release regression is 22 cases/845 assertions
+with 24/24 pricing and AC-security periods, while no independent LP/MILP or market-software
+oracle was run. `carbon_analysis` documents proportional tracing, sparse carbon-potential
+equations and sequential storage-carbon inventory; its three Release targets pass 21/246,
+15/126 and 5/202 assertions, without an external carbon-flow oracle.
+
+`analysis` documents hosting-capacity, multidimensional weak-link and counterfactual decision
+theory; the three focused targets pass 3/27, 4/33 and 2/52 assertions, without an independent
+DL/T 2041 calculator or 8760-hour planning oracle. `api` documents capability Boolean gates,
+safe-result semantics, signature reuse and OPF post-audit; `test_solver_capabilities` passes
+17/61 assertions, but no long-lived handle benchmark or cross-language ABI test was run.
+`server` documents ETag/revision preconditions, cache invalidation, stale asynchronous jobs and
+edition routing; `test_edition_profile` passes 3/33 assertions, while production RuntimeApiV1
+HTTP E2E remains unquantified. `validation` documents exact predicates and Basic/Electrical/
+SolverReady/Strict filtering; `test_validation` passes 37/178 assertions. These results are
+regression and closed-form evidence, not field accuracy, false-positive-rate or large-scale
+performance certification.
+
+All six manuals were rebuilt from the current worktree with XeLaTeX: `analysis` 16 pages,
+`api` 10, `carbon_analysis` 11, `market` 12, `server` 6 and `validation` 6. All 61 A4
+pages were rendered at 100 dpi and reviewed as contact sheets; no unintended blank page,
+clipping, overlap or broken theory/numerical table was observed.
+
 ## Resilience dynamic-feedback and cross-validation closure (current worktree)
 
 The resilience monograph now follows the theory/implementation/interface/

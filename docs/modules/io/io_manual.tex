@@ -104,6 +104,9 @@ TNTP 交通网 & \srcpath{parse\_tntp\_network} & tntp\_parser.hpp\\
 \texttt{BpaImportResult}、\texttt{EtapIoReport}、\texttt{ExternalGridImportReport}、
 \texttt{TNTPNetworkData}、\texttt{GridLABDExported\allowbreak Snapshot} 分列于各自头文件。
 
+\input{chapters/theory_information_fidelity}
+\input{chapters/source_equivalent_contract}
+
 \section{核心数据契约：统一导入报告（§8）}
 所有导入器（无论格式）都返回或填充统一的 \texttt{ImportReport}，把“读到了什么、
 怎么落库、为什么”变成机器可读记录，使孪生/自动化流水线可据此判定可用性，而非
@@ -172,6 +175,7 @@ TNTP 交通网 & \srcpath{parse\_tntp\_network} & tntp\_parser.hpp\\
   \item 导入是否通过由 \srcpath{passes\_mode()} 门控（Strict：无错误且无任何强制/推断）；
   \item 本模块只做格式映射，不校核电气可解性、不修复失败工况。
 \end{itemize}
+\input{chapters/numerical_cross_validation}
 \input{../../_manual_common/industrial_evaluation}
 
 \end{document}

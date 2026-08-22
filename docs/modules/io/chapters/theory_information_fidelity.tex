@@ -1,0 +1,72 @@
+% theory_information_fidelity.tex -- general I/O fidelity theory
+\section{数据映射、信息保真与可验证导入理论}\label{sec:io-theory}
+
+\begin{theorynote}
+本章讨论电力系统数据适配的通用理论：序列化往返、身份和单位保持、结构损失、来源证明与
+安全解析。理论性质不意味着每种外部格式都能无损承载完整 \texttt{HybridPowerSystem}；
+具体格式的保留集合和拒绝条件以源码等价章及导入报告为准。
+\end{theorynote}
+
+\subsection{编码、解码与往返不变量}
+令内部模型空间为 $\mathcal M$、外部格式空间为 $\mathcal F$，编码器和解码器分别为
+$E:\mathcal M\to\mathcal F$、$D:\mathcal F\to\mathcal M$。对声明为无损的字段集合
+$\Pi$，往返准入条件是
+\begin{equation}
+ \Pi(D(E(M)))\simeq_\varepsilon\Pi(M).
+\end{equation}
+离散身份、枚举、字符串和布尔量必须精确相等；浮点量按声明的绝对/相对误差比较。对规范
+投影型格式，只能在商空间 $\mathcal M/{\sim}$ 上要求等价，不能由电气等效反推富组件身份。
+
+稳定 ID 是序列化身份的一部分。vector position 或临时 graph index 在重新排序后会改变，
+因此不能作为外部往返的对象键。AC/DC 同号 ID 只有与 domain 一起组成二元身份
+$(domain,id)$ 才唯一。
+
+\subsection{量纲映射与标幺换算}
+若源格式给出实际阻抗，基准阻抗和标幺值为
+\begin{equation}
+ Z_B=\frac{V_B^2}{S_B},\qquad r_{pu}=R/Z_B,\qquad x_{pu}=X/Z_B.
+\end{equation}
+kW 到 MW 除以 $10^3$，角度和弧度按 $\theta_{rad}=\pi\theta_{deg}/180$ 换算。
+这类变换只有在源文件显式声明单位或格式标准唯一确定单位时才是 Asserted；依赖注释、数值
+范围或经验猜测时必须降级为 Inferred/BestEffort。单位变换应满足幂等性：同一物理字段不能
+在二次导入或二次规范化时重复缩放。
+
+\subsection{结构损失与来源格}
+外部格式可表达的组件集合记为 $C_F$，内部集合记为 $C_M$。若 $C_M\not\subseteq C_F$，
+编码必然产生结构损失。可靠适配器必须为每个源对象输出处置
+\begin{equation}
+ d\in\{Accepted,Coerced,Rejected,Skipped\},
+\end{equation}
+并记录源定位、目标稳定引用、原因码和严重度。Accepted 表示在声明字段集内原样映射；
+Coerced 表示已默认、钳制或推断；Skipped 表示已知越界；Rejected 表示违反硬契约。
+
+严格模式的通过谓词应是单调的：增加 Error、Coerced 或非 Asserted 单位证据不能把失败报告
+变成成功。宽松模式可以接受 Coerced，但不能丢弃记录。由此，导入成功和电气可解是两个独立
+命题：前者证明映射契约，后者必须交给 validation/PF。
+
+\subsection{安全解析边界}
+解析器面对不可信文件时还须满足资源和实体边界。XML 解析必须拒绝 DOCTYPE/ENTITY 或禁用
+外部实体展开，防止 XXE；矩阵、字符串、递归重定向和文件数量应有上限。安全拒绝是有效
+结果，不应为提高“导入成功率”而切换到不受控解析。
+
+\begin{gapnote}
+不存在覆盖全部 CIM/CGMES、ETAP、BPA/DSP、OpenDSS、GridLAB-D 与平台富组件的单一无损
+双射。当前 JSON 是 rich 层主要无损通道；MATPOWER 和多数外部电网格式是有界子集；SVG 和
+配电 CIM 可能含推断参数。外部引擎的 PF 对拍只能认证共同电气子集，不能证明被跳过的保护、
+动态、市场或控制语义。
+\end{gapnote}
+
+\subsection{与实现的对应}
+\begin{center}\footnotesize
+\begin{longtable}{@{}L{6.5cm}L{8.7cm}@{}}
+\toprule 理论条目 & 实现状态\\\midrule
+\endfirsthead\toprule 理论条目 & 实现状态\\\midrule\endhead
+Rich JSON 往返字段比较 & \implfull{src/io/roundtrip.cpp:json\_roundtrip}\\
+导入处置和严格/宽松谓词 & \implfull{src/io/import\_report.cpp:passes\_mode}\\
+MATPOWER 单位和有界 AC 映射 & \implfull{src/io/matpower\_parser.cpp:parse\_matpower}\\
+CIM XML 实体拒绝 & \implfull{src/io/cim\_io.cpp:from\_cim}\\
+全格式富语义双射 & \implnone\\
+外部格式自动证明电气可解 & \implnone\\
+\bottomrule
+\end{longtable}
+\end{center}

@@ -1,0 +1,102 @@
+% theory_modeling_foundations.tex -- solver-independent model-builder theory
+\section{求解器无关电力优化建模理论}\label{sec:power-models-theory}
+
+\begin{theorynote}
+本章给出 ACOPF、AC/DC OPF、DCOPF、LinDistFlow 与 SCUC 的通用数学结构，并说明 AML
+建模层应保持的变量、对偶和证书语义。它不承诺本模块是生产求解路径；源码实际的符号、
+缩放、平滑和模型缺项由下一章逐式限定。
+\end{theorynote}
+
+\subsection{代数建模层的职责}
+求解器无关建模把问题写为
+\begin{equation}
+ \min_x f(x;p)\quad\text{s.t.}\quad c_E(x;p)=0,
+ \quad c_I(x;p)\le0,
+ \quad \ell\le x\le u,
+ \quad x_j\in\mathbb Z\ (j\in\mathcal I),
+\end{equation}
+其中集合和参数 $p$ 来自工程模型，变量/约束 ID 必须稳定地映射回母线、支路、机组和时段。
+AML 的职责是形成等价数学对象并保留求解状态；后端的 barrier、simplex、branch-and-cut 或
+NLP 局部收敛性质不能由 builder 自行升级。
+
+对连续可微问题，KKT 条件包括
+\begin{align}
+ \nabla f(x)+J_E(x)^\mathsf T\lambda+J_I(x)^\mathsf T\mu&=0,\\
+ c_E(x)=0,\quad c_I(x)&\le0,\quad \mu\ge0,\\
+ \mu_i c_{I,i}(x)&=0.
+\end{align}
+凸问题满足适当约束资格时 KKT 可作为全局最优证书；非凸 ACOPF 的 KKT 只证明局部驻点。
+
+\subsection{极坐标 ACOPF}
+母线电压为 $V_i\angle\theta_i$，网络导纳 $Y=G+jB$。节点注入为
+\begin{align}
+ P_i(V,\theta)&=V_i\sum_jV_j[G_{ij}\cos\theta_{ij}+B_{ij}\sin\theta_{ij}],\\
+ Q_i(V,\theta)&=V_i\sum_jV_j[G_{ij}\sin\theta_{ij}-B_{ij}\cos\theta_{ij}].
+\end{align}
+平衡约束为 $\sum_{g\in i}P_g-P_i^d-P_i(V,\theta)=0$ 及无功对应式，另有限制
+发电、母线电压与支路视在功率。二次费用目标
+$\sum_g(c_{2g}P_g^2+c_{1g}P_g+c_{0g})$ 一般形成非凸 NLP。
+
+\subsection{混合 AC/DC 与换流器}
+电阻型 DC 网络的节点平衡可写为
+\begin{equation}
+ P_i^{dc}=V_i^{dc}\sum_jG_{ij}^{dc}(V_i^{dc}-V_j^{dc}).
+\end{equation}
+VSC 连接 AC/DC 两域，满足端口功率与损耗关系
+\begin{equation}
+ P_{ac}+P_{dc}+P_{loss}=0,\qquad
+ P_{loss}=a+bI+cI^2.
+\end{equation}
+完整双向模型必须对电流方向、效率分段和容量圆保持一致；用单一光滑前向式替代符号切换是
+模型近似，必须在 scope 中声明。
+
+\subsection{DCOPF 的凸性和 LMP}
+固定电压幅值、小角差且忽略电阻时，支路潮流
+\begin{equation}
+ f_{ij}=b_{ij}(\theta_i-\theta_j),\qquad |f_{ij}|\le\bar f_{ij}.
+\end{equation}
+线性费用下 DCOPF 是 LP。节点平衡对偶 $\lambda_i$ 在可行 LP 最优点表示需求边际成本；
+若线路不拥塞且网络连通，LMP 在忽略损耗时相同。两母线拥塞解析案例中，便宜机组受
+$\bar f$ 限制，剩余需求由受端机组供给。
+
+\subsection{LinDistFlow}
+对根节点定向的辐射网，忽略 $I^2r$ 损耗后
+\begin{align}
+ P_{ij}&=p_j^d+\sum_{k:j\to k}P_{jk},\\
+ Q_{ij}&=q_j^d+\sum_{k:j\to k}Q_{jk},\\
+ v_j&=v_i-2(r_{ij}P_{ij}+x_{ij}Q_{ij}),
+\end{align}
+其中 $v_i=|V_i|^2$。该线性递推适于径向、压降和损耗较小的配网；盒式
+$|P|,|Q|\le S_{max}$ 只是视在功率圆的外近似或内近似分量约束，不能称为精确热限。
+
+\subsection{SCUC 与价格分离}
+系统级 SCUC 的基本模型为
+\begin{align}
+ \min\;&\sum_{g,t}(c_gp_{gt}+C_g^uu_{gt}+C_g^ss_{gt}),\\
+ \text{s.t. }&\sum_gp_{gt}=D_t,\\
+ &\underline P_gu_{gt}\le p_{gt}\le\overline P_gu_{gt},\\
+ &-R_g^d\le p_{gt}-p_{g,t-1}\le R_g^u,\qquad u_{gt}\in\{0,1\}.
+\end{align}
+最小开停机和备用继续连接时段。MILP 平衡约束的“对偶”一般不是经济可解释价格；应固定
+承诺后重新求 LP/SCED 才能得到一致边际价格。
+
+\begin{gapnote}
+本模块 AML builder 是实验路径。独立 oracle 当前覆盖 DCOPF LP、LinDistFlow LP 和系统级
+SCUC MILP；非线性 ACOPF/ACDCOPF 只有内部残差和间接回归，尚无本模块专属的独立 KKT/
+外部求解器数值证书。生产 OPF/市场能力必须查对应模块结果，不能由 AML 案例外推。
+\end{gapnote}
+
+\subsection{与实现的对应}
+\begin{center}\footnotesize
+\begin{longtable}{@{}L{6.1cm}L{9.1cm}@{}}
+\toprule 理论条目 & 实现状态\\\midrule
+\endfirsthead\toprule 理论条目 & 实现状态\\\midrule\endhead
+极坐标 ACOPF & \implfull{src/power\_models/acopf\_builder.cpp:solve\_acopf}\\
+混合 AC/DC OPF & \implpart{VSC 和 DC/DC 为实验光滑模型，不含完整双向符号切换}\\
+DCOPF LP 与 LMP & \implfull{src/power\_models/dc\_opf\_builder.cpp:solve\_dc\_opf}\\
+LinDistFlow LP & \implfull{src/power\_models/lindistflow\_builder.cpp:solve\_lindistflow}\\
+系统平衡 SCUC & \implfull{src/power\_models/scuc\_builder.cpp:solve\_scuc}\\
+固定承诺重新定价 & \implnone\\
+\bottomrule
+\end{longtable}
+\end{center}

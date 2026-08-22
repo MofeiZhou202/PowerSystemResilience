@@ -172,6 +172,19 @@ if(TARGET model_projection_xref AND Python3_EXECUTABLE AND
     LABELS "model;projection;cross_validation;python_oracle"
     TIMEOUT 120)
 endif()
+
+if(TARGET power_models_xref AND Python3_EXECUTABLE AND
+   EXISTS "${CMAKE_SOURCE_DIR}/tools/power_models_validation/run_cross_validation.py")
+  add_test(NAME power_models_cross_validation
+    COMMAND "${Python3_EXECUTABLE}"
+            "${CMAKE_SOURCE_DIR}/tools/power_models_validation/run_cross_validation.py"
+            --executable "$<TARGET_FILE:power_models_xref>"
+            --out "${CMAKE_CURRENT_BINARY_DIR}/power_models_cross_validation.json"
+            --markdown "${CMAKE_CURRENT_BINARY_DIR}/power_models_cross_validation.md")
+  set_tests_properties(power_models_cross_validation PROPERTIES
+    LABELS "power_models;cross_validation;python_oracle"
+    TIMEOUT 120)
+endif()
 hacdcpf_add_test(test_sppt_fault_campaign  test_sppt_fault_campaign.cpp)
 hacdcpf_add_test(test_sppt_agent           test_sppt_agent.cpp)
 

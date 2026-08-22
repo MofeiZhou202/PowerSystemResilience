@@ -1,0 +1,109 @@
+% theory_dynamic_traffic_power.tex -- EV/traffic/power general theory
+\section{动态交通流、均衡与电网耦合理论}\label{sec:evpt-theory}
+
+\begin{theorynote}
+本章给出 CTM、LTM、动态用户均衡、社会福利优化与充电电网耦合的通用理论。
+它用于推导守恒量、离散稳定条件和最优性证书；A--H 各入口实际使用的近似、变量与
+拒绝分支以源码等价章为准，不能把本章的统一表述解释为一个已投产的全局模型。
+\end{theorynote}
+
+\subsection{三角基本图与 CTM 守恒}
+对路段 $a$，密度 $k_a$ 的三角基本图为
+\begin{equation}
+ q_a(k)=\min\{v_a^f k,\bar q_a,w_a(k_a^{jam}-k)\}.
+\end{equation}
+把路段离散为长度 $\delta_{am}$ 的元胞，时间步长为 $\Delta t$。发送量和接收量为
+\begin{align}
+ S_{am}^n&=\Delta t\min\{v_a^f n_{am}^n/\delta_{am},\bar q_a\},\\
+ R_{am}^n&=\Delta t\min\{\bar q_a,w_a(N_{am}^{jam}-n_{am}^n)/\delta_{am}\},
+\end{align}
+边界通量 $y_{am}^n=\min(S_{am}^n,R_{a,m+1}^n)$，于是
+\begin{equation}
+ n_{am}^{n+1}=n_{am}^n+y_{a,m-1}^n-y_{am}^n.
+\end{equation}
+对所有元胞求和后内部边界通量相消，因此总车辆变化只等于边界流入减流出。这是数值
+准入中必须独立重算的守恒式。
+
+单调 CTM 的 CFL 条件至少要求
+\begin{equation}
+ \Delta t\le\min_{a,m}\left\{\frac{\delta_{am}}{v_a^f},
+ \frac{\delta_{am}}{w_a}\right\}.
+\end{equation}
+违反 CFL 时，即使程序返回有限数值，也不能解释为物理可信的传播结果。
+
+\subsection{LTM 累积曲线}
+LTM 用累积进入/离开曲线 $N_a^{in}(n)$、$N_a^{out}(n)$ 代替空间元胞。离散自由流与
+反向波延迟为
+\begin{equation}
+ \tau_a^{ff}=\left\lceil\frac{L_a}{v_a^f\Delta t}\right\rceil,
+ \qquad
+ \tau_a^{bw}=\left\lceil\frac{L_a}{w_a\Delta t}\right\rceil.
+\end{equation}
+发送和接收上界为
+\begin{align}
+ S_a^n&=\min\{N_a^{in}(n-\tau_a^{ff})-N_a^{out}(n),\bar q_a\Delta t\}_+,\\
+ R_a^n&=\min\{N_a^{out}(n-\tau_a^{bw})+N_a^{jam}-N_a^{in}(n),
+                    \bar q_a\Delta t\}_+.
+\end{align}
+CTM 与 LTM 共享连续守恒理论，但有限步长下存在不同启动延迟和容量偏差；二者相互比较是
+离散模型交叉诊断，不是“任一结果自动成为真值”。
+
+\subsection{Wardrop 均衡与变分不等式}
+令 $\mathcal X$ 为满足 OD 守恒和非负性的路径流集合，$c(x)$ 为交通传播、排队、充电价格
+共同生成的广义成本。动态用户均衡满足变分不等式
+\begin{equation}
+ c(x^*)^\mathsf T(x-x^*)\ge0,\qquad \forall x\in\mathcal X.
+\end{equation}
+若成本可积且 Jacobian 对称半正定，该问题等价于 Beckmann 势函数最小化；一般动态交通
+和价格反馈不保证这些条件。MSA 更新
+\begin{equation}
+ x^{k+1}=x^k+\alpha_k(y^k-x^k),\qquad \alpha_k=\frac1{k+1},
+\end{equation}
+只在适当单调性和精确全有或全无子问题下具有经典收敛保证。报告的 relative gap/VI gap
+必须与全局最优性证书分开。
+
+\subsection{充电站库存与电网功率}
+站点等待、服务和离开人口满足离散守恒，例如
+\begin{align}
+ Q_{s,n+1}&=Q_{s,n}+u_{s,n}-b_{s,n},\\
+ B_{s,n+1}&=B_{s,n}+b_{s,n}-c_{s,n},\\
+ H_{s,n+1}&=H_{s,n}+c_{s,n}-o_{s,n}.
+\end{align}
+若车辆 $v$ 以 $p_{v,n}^{ch}$ 充电、以 $p_{v,n}^{dis}$ 放电，则电量递推为
+\begin{equation}
+ E_{v,n+1}=E_{v,n}+\eta_v^{ch}p_{v,n}^{ch}\Delta t
+ -p_{v,n}^{dis}\Delta t/\eta_v^{dis}-e_{v,n}^{drive}.
+\end{equation}
+站点对电网的有功注入按 kW 到 MW 换算；价格从 \texttt{\$/MWh} 换算到
+\texttt{\$/kWh} 时除以 1000。
+交通车辆数、站点 kW 与电网 MW 三种量纲不得直接相加。
+
+\subsection{社会福利、MPEC 与证书层级}
+联合规划的通式可写为
+\begin{equation}
+ \max\;B_{travel}-C_{time}-C_{queue}-C_{generation}-C_{infrastructure},
+\end{equation}
+并同时满足交通守恒、充电库存和电网平衡。Wardrop 条件可作为 VI、互补约束或有限路径
+PWL/MILP 近似嵌入。LP 的最优状态、MILP 的全局 gap、NLP 的局部 KKT 残差和启发式固定点
+属于不同证据层级，不能用同一个 \fld{converged} 混合表达。
+
+\begin{gapnote}
+当前没有一个入口同时对连续动态交通、非线性 AC/DC 电网、离散站点建设、个体 SOC 与
+全局 Wardrop 互补给出统一全局证书。认证型 MILP 只认证其有限路径和 PWL 模型；NLP 只提供
+局部驻点；顶层 A 为分解仿真。该边界由结果中的模型验证和证书字段保持可见。
+\end{gapnote}
+
+\subsection{与实现的对应}
+\begin{center}\footnotesize
+\begin{longtable}{@{}L{6.2cm}L{9.0cm}@{}}
+\toprule 理论条目 & 实现状态\\\midrule
+\endfirsthead\toprule 理论条目 & 实现状态\\\midrule\endhead
+CTM 三角基本图与守恒 & \implfull{src/ev\_power\_traffic/ctm\_propagation.cpp:ctm\_forward\_pass}\\
+LTM 累积曲线与站点库存 & \implfull{src/ev\_power\_traffic/ltm\_propagation.cpp:simulate\_ltm\_network}\\
+DUE--VI 与 MSA/线搜索 & \implfull{src/ev\_power\_traffic/ctm\_due\_vi.cpp:solve\_ctm\_due\_vi}\\
+价格协调与 DCOPF & \implpart{分解迭代；只认证价格不动点，不是统一社会福利最优}\\
+有限模型 LP/MILP/MPEC & \implfull{src/ev\_power\_traffic/joint\_optimizer.cpp:solve\_joint\_optimizer}\\
+全连续 AC/DC--交通全局证书 & \implnone\\
+\bottomrule
+\end{longtable}
+\end{center}

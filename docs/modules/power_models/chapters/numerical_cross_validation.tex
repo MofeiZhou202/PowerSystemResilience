@@ -1,0 +1,51 @@
+% numerical_cross_validation.tex -- independent AML builder oracle
+\section{解析小算例、独立方程复算与准入}\label{sec:power-models-numerical}
+
+注册目标 \srcpath{power\_models\_cross\_validation} 每次固定执行 5 个重复：先由 C++ 证据
+生成器通过公开 builder 求解，再由独立 Python 脚本从每次结果重算平衡、潮流、压降、成本和
+整数性，最后按检查项取最坏值。DCOPF 固定请求 \srcpath{NativeDualSimplex}，LinDistFlow
+显式交替 \srcpath{NativeDualSimplex}/\srcpath{NativeIPMLP}，SCUC 固定请求
+\srcpath{StrictHiGHS}，且全部关闭 fallback。macOS Release 本轮 CTest 观测用时不超过 1.71 s，在预先
+固定的 $10^{-7}$ 门槛下通过；后端契约错误为 0，五次最大误差均为
+$3.73311195\times10^{-8}$。
+
+\subsection{DCOPF 拥塞解析解}
+两母线案例的负荷为 80 MW，送端/受端机组边际成本为 10/50 \$/MWh，线路限值 40 MW。
+解析最优解是送端 40 MW、受端 40 MW，目标 2400 \$/h。实测误差为：节点平衡
+$2.627\times10^{-10}$ MW，解析调度 $8.676\times10^{-10}$ MW，潮流方程和线路越限均为 0，
+目标误差 $3.733\times10^{-8}$。
+
+\subsection{LinDistFlow 递推解析解}
+三母线径向案例的末端负荷为 $(0.5,0.1)$ MW/Mvar，中间负荷为 $(1.0,0.2)$。解析支路流为
+$(P_{12},Q_{12})=(1.5,0.3)$、$(P_{23},Q_{23})=(0.5,0.1)$，平方电压为
+$v_1=1$、$v_2=0.958$、$v_3=0.938$。五次运行覆盖 \srcpath{NativeSimplex} 与
+\srcpath{NativeIPMLP} 两条内部 LP 后端路径；最坏流量误差 $6.108\times10^{-13}$，
+平方电压误差 $8.737\times10^{-12}$，电压降残差 $5.886\times10^{-12}$。
+
+\subsection{SCUC merit-order 解析解}
+两时段需求 30/70 MW，两台机组容量各 50 MW，边际成本 10/30 \$/MWh，启停和空载费用为 0。
+解析调度为 $(30,0)$ 与 $(50,20)$，总费用 1400。实测平衡、容量、整数性、解析调度和费用
+误差全部为 0；同时验证 \fld{price\_valid=false} 且原因包含 uncertified，防止把 MILP 对偶
+伪装成市场价格。
+
+\begin{center}\small
+\begin{tabular}{@{}L{5.2cm}rrL{4.7cm}@{}}
+\toprule 案例 & 最大方程误差 & 解析量误差 & 证书\\\midrule
+DCOPF LP & $2.627\times10^{-10}$ & $3.733\times10^{-8}$ & optimal\\
+LinDistFlow LP & $5.886\times10^{-12}$ & $8.737\times10^{-12}$ & optimal\\
+SCUC MILP & 0 & 0 & optimal，价格无效\\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\subsection{独立性和剩余边界}
+Python oracle 不调用 AML 约束对象或 builder 内部残差函数，仅消费 C++ 输出并按本手册理论式
+重算，因此独立于生产装配顺序。重复运行实际覆盖两个内部 LP 后端，但 C++ 和 Python 仍共享
+同一输入数据，也没有调用第三方商业求解器，不能称为外部 oracle。非线性 ACOPF 和 ACDCOPF
+未进入本 oracle，不能由三个线性/混合整数小算例外推其 KKT 精度。SCUC 仍是无网络系统平衡
+模型，DCOPF/LinDistFlow 结果类型仍缺统一 \fld{model\_scope} 字段，这些限制保持显式。
+
+失配审计还显式请求过 \srcpath{NativeIPMLP} 求解 DCOPF：平衡误差
+$2.160\times10^{-9}$ MW、调度误差 $7.050\times10^{-9}$ MW，但 2400 \texttt{\$/h}
+目标的绝对误差为 $1.7402\times10^{-7}$，超过既定门槛。因此该组合未进入通过矩阵；门槛没有
+事后放宽，也不能把“最优状态”单独当作准入证书。

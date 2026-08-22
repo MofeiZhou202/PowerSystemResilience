@@ -1,0 +1,43 @@
+% numerical_cross_validation.tex -- EV power-traffic numerical evidence
+\section{数值结果、交叉模型诊断与准入边界}\label{sec:evpt-numerical}
+
+本轮直接运行 macOS Release 二进制。四个聚焦目标全部通过：
+\srcpath{test\_ctm\_ltm\_comparison} 为 5 cases/118 assertions，
+\srcpath{test\_ltm\_traffic} 为 7/897，
+\srcpath{test\_ev\_power\_traffic\_formulations\_e\_f\_g\_h} 为 10/139，
+\srcpath{test\_ev\_power\_traffic\_ctm\_due} 为 16/172。
+
+\subsection{CTM--LTM 交叉诊断}
+合法 CFL 的 20 车脉冲案例中，CTM 和 LTM 都得到 entered=20、exited=20、in-transit=0，
+闭合车辆守恒。持续容量 freeway 案例（$L=10$ km、$v_f=100$ km/h、$\Delta t=5$ min）
+得到 LTM 退出 8833 辆、CTM 退出 13133 辆；差异来自当前离散启动延迟和 LTM 填充/排空
+振荡，测试明确把它登记为模型差异，而不是强行要求两者相等。
+
+故意违反 CFL 的 $L=0.5$ km 案例给出下表。细 CTM 恢复近容量结果，而粗 CTM 和 LTM
+分别呈现不同病态，证明“有限输出”不等于“物理有效”。
+\begin{center}\small
+\begin{tabular}{@{}L{5.3cm}rrL{4.5cm}@{}}
+\toprule 模型 & 吞吐 veh/h & 额定占比 & 解释\\\midrule
+LTM（5 min） & 150 & 7.5\% & $\tau_{ff}=\tau_{bw}=1$ 塌缩\\
+粗 CTM（5 min） & 1967 & 98.3\% & CFL 违反，数值满容量但物理无效\\
+细 CTM（0.2 min） & 1998 & 99.9\% & $v_f\Delta t<L$，CFL 合法\\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\subsection{交通、排队与充电结果}
+三路 LTM 走廊累计流入 4062、末端流出 3822，吞吐率 94.0916\%；瓶颈峰值占有量
+182 辆，恰等于该链接 jam storage。EV 渗透率 10/30/50/70\% 时最大队列分别为
+448.609/1936.38/3425.82/4915.26 辆，显示固定插头配置下队列随渗透率增长，但这些数值
+是构造算例敏感性，不是城市实测标定。
+
+DUE 充电案例在 1 次迭代达到 relative gap=0，4 辆车请求和交付均为 40 kWh、未服务电量
+为 0，站点峰值负荷 42.11 kW。SOC 可行性过滤把短路线路分配 4 辆、长路线路分配 0 辆；
+这验证过滤与能量单位，不构成一般 DUE 唯一性证明。
+
+\subsection{证据等级与未覆盖范围}
+CTM--LTM 属于独立离散模型交叉诊断，守恒/CFL/基本图属于解析校核；A--H 目标属于公共入口
+回归。当前没有 SUMO、MATSim 或实测交通检测器 oracle，也没有第三方交通--电网联合全局
+求解器。因此本章不宣称路线选择的现场准确率、全局社会福利最优或长时域个体 SOC 标定。
+任何 CFL 失败、未服务需求、求解时限、局部证书或近似模式都必须通过结果字段阻止升级为
+“已验证全局解”。
