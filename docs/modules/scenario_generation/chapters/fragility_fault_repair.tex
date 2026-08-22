@@ -1,0 +1,130 @@
+\section{线路分段、易损度、故障抽样与修复}
+\label{sec:fragility-fault-repair}
+
+\subsection{自动分段与资产类型}
+\srcpath{generate\_typhoon\_line\_segments} 遍历 AC/DC branches。若有母线坐标，沿端点线性插值
+构造段；否则围绕 case center 按 bus ID 派生 fallback 坐标，并置
+\fld{used\_fallback\_coordinates}。段数近似为支路长度除目标段长，再钳在
+\fld{min\_segments\_per\_branch} 与 \fld{max\_segments\_per\_branch}。无法得到实际几何时置
+\fld{used\_synthetic\_segments}。
+
+段资产类型为 OverheadLine、Cable 或 Mixed。案例缺少元数据时按
+\fld{default\_overhead\_fraction} / \fld{default\_cable\_fraction} 选择默认易损参数；这不是从
+线路名称猜测结构类型。
+
+\subsection{风雨等效风速}
+架空段先将阵风和降雨组合。令 $v_m=V/1.42$：
+\begin{align}
+ f_1&=e^{0.006462v_m}-1.2486e^{-0.2769v_m},\\
+ f_2&=\begin{cases}0.09376R^{0.7087},&R>0,\\0,&R=0,\end{cases}\\
+ V_{eq}&=\max(0,(v_m+\max(0,f_1f_2))1.42).
+\end{align}
+
+\subsection{对数正态风易损度}
+当 $V_{eq}\le V_d$ 时 $p_w=0$。否则
+\begin{align}
+ z&=\frac{\ln V_{eq}-\ln V_{50}}{\sigma_{\ln V}},\\
+ s&=\begin{cases}
+ 1,&V_c>0\land V_{eq}\ge V_c,\\
+ \Phi(z),&\text{其他},
+ \end{cases}\\
+ \ell_e&=\operatorname{clip}(\ell,0,5),\\
+ p_w&=\operatorname{clip}\left(1-e^{-0.015s\ell_e\Delta t},0,1\right).
+\end{align}
+$V_c=$\fld{collapse\_wind\_ms} 的饱和分支防止超高风速下数值尾部行为逆转。非正的中位风速或
+sigma 由底层 CDF 防御为零 severity。
+
+\subsection{风雨联合段暴露}
+令 $r_V=V/V_d$（$V_d\le0$ 时为 0）、$r_R=R/R_d$（$R_d\le0$ 时为 0）：
+\begin{align}
+ \lambda_s&=\ell^2\exp(a r_V+b r_R+c),\\
+ p_s&=\begin{cases}
+ \operatorname{clip}(1-e^{-\lambda_s\Delta t},0,1),&V>V_d\lor R>R_d,\\
+ 0,&\text{其他},
+ \end{cases}\\
+ p_o&=\operatorname{clip}(1-(1-p_w)(1-p_s),0,1).
+\end{align}
+该合成假设两个条件机制独立，仅是模型结构，不是由数据估计出的独立性结论。
+
+\subsection{电缆水文与失效概率}
+对 Curve Number $CN$：
+\begin{align}
+ CN'&=\operatorname{clip}(CN,1,99),\quad S=25400/CN'-254,\quad I_a=0.2S,\\
+ Q&=\begin{cases}(R-I_a)^2/\max(10^{-9},R-I_a+S),&R>I_a,\\0,&R\le I_a,\end{cases}\\
+ I&=\max(0,R-Q),\quad q=Q/(1000\cdot3600),\\
+ h&=\left(\frac{q n}{\sqrt{\max(10^{-9},S_0)}}\right)^{0.6},\\
+ \theta&=\min\left(\phi,\theta_0+\frac{I}{\max(10^{-9},1000Z)}\right),\\
+ p_c&=\operatorname{clip}\left(\frac{p_{c,0}}{10}
+ e^{130h+8\theta/\max(10^{-9},\phi)},0,1\right).
+\end{align}
+Cable 返回 $p_c$，Overhead 返回 $p_o$，Mixed 返回 $1-(1-p_o)(1-p_c)$ 后再钳制。
+
+\subsection{段到支路聚合}
+同一支路各段按条件独立并联失效：
+\begin{equation}
+ p_{b,t}=\operatorname{clip}\left(1-\prod_{s\in b}(1-p_{s,t}),0,1\right).
+\end{equation}
+结果逐支路保存峰值风速、峰值雨强和峰值失效概率。段越多会提高并联暴露，因此目标段长会
+改变支路概率；必须与易损参数共同校准。
+
+\subsection{抽样支持门}
+对尚未故障的支路逐步生成 $U\sim U(0,1)$。只有
+\begin{equation}
+ p_{b,t}\ge p_{min}\quad\text{且}\quad U<p_{b,t}
+\end{equation}
+时记录首次故障。\fld{min\_fault\_probability} 是抽样支持门，不是风险报告过滤器：低于门槛
+的 $p_{b,t}$ 仍进入 branch risk。固定案例把 gate 设为 1，实测峰值概率 0.798910，因此
+fault count 为 0，但风险保留。
+
+\subsection{修复时长}
+基础 MTTR 优先取资产的正值，否则用 \fld{default\_repair\_time\_hr}：
+\begin{align}
+ T_r'&=T_r\left[1+k_w\frac{\max(0,V_{peak}-25)}{25}\right],\\
+ T_r''&=\operatorname{clip}(T_r',\max(10^{-6},\Delta t),T_{r,max}).
+\end{align}
+故障事件保存 fault hour 和 repair hour，供下游恢复模块消费。
+
+\subsection{分阶段抢修}
+准备时刻为最后故障时刻加非负 delay；维修槽宽
+\begin{equation}
+ \Delta t_c=\max(\Delta t,\texttt{repair\_crew\_time\_per\_branch\_hr}).
+\end{equation}
+在精确预算内，每轮试验恢复一条故障支路，依据恢复供电增量及确定性破同分项：
+\begin{equation}
+ score=impact+10^{-3}p_{peak}+10^{-5}V_{peak}+10^{-6}\ell.
+\end{equation}
+这是一阶段贪心，不是全时域组合最优。当故障数超过内部精确预算，改按源距离、故障时间、
+峰值概率、支路类型和稳定 ID 排序，置 \fld{used\_approximate\_repair\_order=true}。
+
+\subsection{算法流程}
+\begin{enumerate}
+  \item 生成/接收线路分段；对每个轨迹步计算段中点风雨；
+  \item 依资产类型计算段概率并聚合为支路概率；
+  \item 更新支路峰值风险，应用 sampling gate 和首次故障抽样；
+  \item 计算 MTTR 风速修正；需要时执行 staged repair；
+  \item 生成 renewable profile multiplier 和完整 validity flags。
+\end{enumerate}
+
+\subsection{复杂度和边界}
+风雨/易损链为 $O(TL_s)$。精确 staged repair 的供电增量试验可达 $O(F^2G)$，其中 $F$ 为故障
+数、$G$ 为图评估成本；超过预算后排序为 $O(F\log F)$。
+
+\begin{gapnote}
+当前没有杆塔级相关失效、飞散物路径、保护动作、维修队空间路由、多队并行资源约束或全局
+最优修复调度。分段独立性、默认易损参数和 sampling gate 都必须作为案例假设披露。
+\end{gapnote}
+
+\subsection{实现锚点}
+\begin{center}\small
+\begin{tabular}{@{}L{5.1cm}L{8.6cm}@{}}
+\toprule
+对象 & 源码锚点\\
+\midrule
+自动分段 & \srcpath{typhoon\_resilience.cpp:generate\_typhoon\_line\_segments}\\
+架空/电缆概率 & \srcpath{overhead\_segment\_probability}、
+\srcpath{cable\_segment\_probability}\\
+支路聚合与抽样 & \srcpath{generate\_typhoon\_fault\_sequence}\\
+修复排序 & \srcpath{apply\_staged\_post\_disaster\_repairs}\\
+\bottomrule
+\end{tabular}
+\end{center}

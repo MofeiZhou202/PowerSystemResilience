@@ -45,6 +45,8 @@
 | 组件模型与参数 | 实现参考 | [模型手册](modules/model/model_manual.tex) |
 | 交直流与三相潮流 | 实现参考 | [潮流计算手册](modules/power_flow/power_flow_manual.tex) |
 | AC/DC、混合与三相 OPF | 实现参考 | [最优潮流手册](modules/optimal_power_flow/opf_manual.tex) |
+| 灾害恢复、MESS 与动态认证 | 实现参考 | [弹性恢复专著](modules/resilience/resilience_manual.tex) |
+| 常规/可靠性/弹性场景与台风交通耦合 | 实现参考 | [场景生成手册](modules/scenario_generation/scenario_generation_manual.tex) |
 | 谐波潮流、标准与跨引擎验证 | 实现参考 | [谐波潮流专著](modules/harmonics_power_flow/harmonics_power_flow_manual.tex) |
 | 全部源码模块技术手册 | 实现参考 | [模块手册索引](modules/README.md) |
 | HTTP 路由与响应边界 | 契约 | [运行时 API](reference/runtime_api.md) |

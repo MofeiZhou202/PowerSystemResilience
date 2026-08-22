@@ -1,0 +1,101 @@
+\section{台风--交通耦合：坐标、积水、速度与容量}
+\label{sec:traffic-coupling}
+
+\subsection{输入与输出定位}
+\srcpath{apply\_typhoon\_traffic\_impact} 接收 TrafficGraph、台风轨迹和选项，返回受影响图及
+逐 link/step 审计。它更新 free-flow time、capacity 和 availability profile，不求解 CTM/LTM、
+用户均衡、车辆路径或 MESS 调度。
+
+\subsection{坐标模式}
+\begin{itemize}
+  \item Geographic：把节点 $x,y$ 解释为 longitude, latitude；
+  \item AffineToStudyArea：把网络包围盒仿射映射到指定研究中心和 span；
+  \item Auto：若坐标范围合理且网络到轨迹最近距离不超过
+        \fld{auto\_geographic\_track\_distance\_km}，使用 Geographic，否则 affine。
+\end{itemize}
+使用 affine 时置 \fld{used\_affine\_georeferencing=true}。该映射只为暴露计算提供相对空间，
+不声称恢复真实道路经纬度。
+
+\subsection{轨迹时间采样}
+第 $t$ 个交通步对应 hour
+\begin{equation}
+ \tau_t=\texttt{start\_hour}+t\Delta t.
+\end{equation}
+实现选择对应轨迹点并在 link 中点计算 Holland 风和降雨。每条 link 的中点、风、雨均保留在
+\fld{TyphoonTrafficLinkStep}，便于独立复算。
+
+\subsection{零维积水递推}
+对 link $e$，若存在 per-link drainage/runoff 覆盖则优先使用，否则使用全局值。令
+$c_e=c_r m_e$、$d_e$ 为排水率：
+\begin{equation}
+ W_{e,t+1}=\operatorname{clip}\left(
+ W_{e,t}+(c_eR_{e,t}-d_e)\Delta t,0,W_{max}\right).
+\end{equation}
+单位为 mm。它不含上游汇流、坡面传播或相邻 link 水交换。
+
+\subsection{深度--速度曲线}
+源码先计算
+\begin{equation}
+ v(W)=aW^2+bW+c,qquad
+ f_v=\operatorname{clip}\left(\frac{v(W)}{\max(\epsilon,c)},f_{v,min},1\right).
+\end{equation}
+默认系数来自 Pregnolato 型经验曲线，$W$ 为 mm、$v$ 为 km/h。新 free-flow time 为
+\begin{equation}
+ \tau_e'=\frac{\tau_e^0}{\max(f_{v,min},f_v)}.
+\end{equation}
+
+\subsection{风容量因子}
+当 $V\le V_s$，$f_w=1$；否则
+\begin{equation}
+ f_w=1-\operatorname{clip}\left(
+ \frac{V-V_s}{\max(\epsilon,V_f-V_s)},0,1\right)
+ (1-\operatorname{clip}(f_{w,min},0,1)).
+\end{equation}
+综合容量因子为
+\begin{equation}
+ f_c=\operatorname{clip}(f_v^{\max(0,\gamma)}f_w,f_{c,min},1).
+\end{equation}
+
+\subsection{闭锁逻辑}
+link 可用当且仅当：原图 link 可用、$W<W_{close}$，且未启用极端风闭锁或 $V<V_{close}$。
+闭锁时容量为 0；否则为 $C_e^0f_c$。三个 profile 是否写回分别受
+\fld{apply\_free\_flow\_time\_profile}、\fld{apply\_capacity\_profile}、
+\fld{apply\_availability\_profile} 控制，计算审计仍保留逐步值。
+
+\subsection{结果聚合}
+结果给出至少闭锁一次的 link ID、峰值风/雨/水深、最小速度/容量因子、closed link-step 数和
+\fld{model\_scope}。逐步结果的 \fld{link\_index} 是稳定交通 link ID，不是 vector position。
+
+\subsection{固定案例}
+固定 4 km、1200 veh/h link，$\Delta t=1$ h，雨强 32.584999 mm/h，runoff 0.85、排水
+25 mm/h 时，水深序列为
+\begin{equation}
+ 2.69724947,\ 5.39449893,\ 8.09174840,\ 10.78899787\ \mathrm{mm}.
+\end{equation}
+对应容量因子为 0.63889991、0.62789772、0.61699343、0.60618705，未达到 300 mm 闭锁。
+独立 oracle 最大水深误差 $6.39\times10^{-14}$。
+
+\subsection{输入验证}
+实现拒绝非法时间步、负上限、反向 clamp 区间和不物理水文边界；测试
+\texttt{Typhoon road impact rejects invalid clamp and hydrology bounds} 锁定这些失败语义。
+
+\subsection{复杂度和边界}
+对 $E$ 条 link、$T$ 步，成本 $O(ET)$，输出存储 $O(ET)$。
+\begin{gapnote}
+当前模型是边级零维水量平衡；不包含二维 Saint--Venant 方程、排水管网、交通需求重分配、
+拥堵反馈或抢修车辆可达性自动反馈。affine 坐标只适合缺坐标基准的近似暴露筛查。
+\end{gapnote}
+
+\subsection{实现锚点}
+\begin{center}\small
+\begin{tabular}{@{}L{5.0cm}L{8.7cm}@{}}
+\toprule
+对象 & 源码锚点\\
+\midrule
+坐标选择 & \srcpath{typhoon\_traffic\_impact.cpp:traffic\_node\_locations}\\
+风容量因子 & \srcpath{typhoon\_traffic\_impact.cpp:wind\_capacity\_factor}\\
+积水/速度/闭锁递推 & \srcpath{typhoon\_traffic\_impact.cpp:apply\_typhoon\_traffic\_impact}\\
+CTM/LTM profile 消费 & \srcpath{tests/test\_typhoon\_traffic\_impact.cpp:CTM reads road profiles by parent simulation step}\\
+\bottomrule
+\end{tabular}
+\end{center}

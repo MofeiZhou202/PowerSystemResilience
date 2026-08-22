@@ -563,6 +563,41 @@ bool has_active_fault(const DynamicSystem& sys) {
                      [](const DynamicFaultShunt& fault) { return fault.active; });
 }
 
+std::vector<char> dc_voltage_health_scope(const DynamicSystem& sys) {
+  const int bus_count = sys.network.dcBusCount();
+  std::vector<char> active(static_cast<std::size_t>(bus_count), 0);
+  std::vector<int> queue;
+  for (const auto& device : sys.devices) {
+    if (!device || device->type() != "DCVoltageSource") continue;
+    const auto output = device->output(sys.x, sys.y);
+    const auto in_service = output.values.find("in_service");
+    if (in_service != output.values.end() && in_service->second <= 0.5) {
+      continue;
+    }
+    const int bus_pos = sys.network.dcBusPosition(output.bus);
+    if (bus_pos >= 0 && bus_pos < bus_count &&
+        !active[static_cast<std::size_t>(bus_pos)]) {
+      active[static_cast<std::size_t>(bus_pos)] = 1;
+      queue.push_back(bus_pos);
+    }
+  }
+  for (std::size_t head = 0; head < queue.size(); ++head) {
+    const int bus = queue[head];
+    for (const auto& branch : sys.network.dc_branches) {
+      if (!branch.in_service) continue;
+      int neighbor = -1;
+      if (branch.from_pos == bus) neighbor = branch.to_pos;
+      if (branch.to_pos == bus) neighbor = branch.from_pos;
+      if (neighbor >= 0 && neighbor < bus_count &&
+          !active[static_cast<std::size_t>(neighbor)]) {
+        active[static_cast<std::size_t>(neighbor)] = 1;
+        queue.push_back(neighbor);
+      }
+    }
+  }
+  return active;
+}
+
 bool check_numerical_health(const DynamicSystem& sys,
                             double t,
                             std::string& error) {
@@ -603,8 +638,10 @@ bool check_numerical_health(const DynamicSystem& sys,
   }
 
   if (sys.y.Vdc.size() > 0) {
+    const auto health_scope = dc_voltage_health_scope(sys);
     double min_v = std::numeric_limits<double>::infinity();
     double max_v = 0.0;
+    bool observed_energized_bus = false;
     for (Eigen::Index i = 0; i < sys.y.Vdc.size(); ++i) {
       const double v = sys.y.Vdc[i];
       if (!std::isfinite(v)) {
@@ -612,8 +649,18 @@ bool check_numerical_health(const DynamicSystem& sys,
                 std::to_string(t) + "s";
         return false;
       }
+      if (i >= static_cast<Eigen::Index>(health_scope.size()) ||
+          !health_scope[static_cast<std::size_t>(i)]) {
+        continue;
+      }
+      observed_energized_bus = true;
       min_v = std::min(min_v, std::abs(v));
       max_v = std::max(max_v, std::abs(v));
+    }
+    if (!observed_energized_bus) {
+      error = "DC voltage health check found no active voltage-forming source at t=" +
+              std::to_string(t) + "s";
+      return false;
     }
     if (!skip_low_voltage && min_v < opt.voltage_collapse_min_dc_pu) {
       error = "DC voltage health check failed at t=" + std::to_string(t) +

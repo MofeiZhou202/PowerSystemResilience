@@ -1,0 +1,97 @@
+\section{可复现数值案例与交叉验证}\label{sec:res-numerical}
+
+\subsection{案例、环境与证据文件}
+端到端案例由 \srcpath{tools/distribution\_resilience\_review\_case.cpp} 构造：4 个 AC 母线、2 个 DC
+母线、2 个微网、3 个关键负荷，含 AC/DC 支路、VSC、固定储能和构网资源。固定种子 203007 的
+24 点 Holland 轨迹作用于 15 个合成线路段，产生 4 个故障，峰值风速
+$60.9840\,\mathrm{m/s}$。本轮 Release 实测证据为
+\srcpath{external\_data/resilience\_validation/review\_case\_results.json}、风险/恢复 CSV 及外部快照证据；
+求解器采用单线程 HiGHS，避免运行配置漂移。
+
+\subsection{预事件状态与恢复结果}
+预事件 UC 可行，两个储能 24 小时终端 SOC 均回到 0.75，gap 为 0。恢复结果如下。
+\begin{table}[H]\centering\small
+\caption{固定台风事件下的恢复结果（2026-08-22 本地 Release 运行）}
+\begin{tabular}{lrrrrrr}
+\toprule
+模型 & 需求/MWh & 供电/MWh & ENS/MWh & 峰值切负荷/MW & $R_E$ & 动作数\\\midrule
+启发式 & 51.740 & 50.500 & 1.240 & 0.640 & 0.976034 & 6\\
+严格 MIP & 68.400 & 67.150 & 1.250 & 0.250 & 0.981725 & 6\\
+\bottomrule
+\end{tabular}
+\end{table}
+两行需求总量不同，原因是两个入口对丰富组件聚合/负荷口径不同，故不能仅按 ENS 大小断言谁“更优”。
+严格 MIP 的关键失供为 1.25 MWh，全部位于 DC 域；优先级目标为 $1.25\times10^6$ 罚权 MWh。
+HiGHS 状态为 \texttt{StrictHiGHS Optimal run=0}，报告 gap 0，模型墙钟约 0.037 s；运行时间不作
+跨机器性能承诺。
+
+\subsection{动态二次认证与自动反馈结果}
+首个 MIP incumbent 的最终状态得到 proof-valid Unsafe；系统把精确拓扑签名写成 1 条 no-good/service
+反馈割并重求解。共执行 2 次恢复 MIP、1 个反馈轮次，第二个方案的两个表示动作均为 L3 Safe：
+\begin{table}[H]\centering\small
+\caption{恢复 MIP 到 DAE 的动作级认证}
+\begin{tabular}{rrlrr}
+\toprule
+from & to & 标签/证明 & 最低频率/Hz & 最低 AC 电压/pu\\\midrule
+4 & 5 & Safe / true & 50.686552 & 0.996237\\
+23 & 23 & Safe / true & 50.012250 & 0.998483\\
+\bottomrule
+\end{tabular}
+\end{table}
+最终结果为 \fld{proof\_valid=true}、\fld{all\_transitions\_safe=true}、
+\fld{feedback\_closed\_loop\_complete=true} 和 \fld{safe\_plan\_found=true}；普通与动态可授信供电量均为
+67.15 MWh。这是给定 0.25 s DAE 时域、阈值和设备模型的场景证书，不是全局稳定性证明。
+
+\subsection{配对风险交叉验证}
+反事实措施是在关键 DC 母线加入 $0.30\,\mathrm{MW}/2.0\,\mathrm{MWh}$ 构网储能。对种子
+从种子 203100 起按几何检查点做配对同情景求解，在 2048 对时满足停止规则，全部两臂可行：
+\begin{table}[H]\centering\small
+\caption{2048 对事件条件风险样本}
+\begin{tabular}{lrrr}
+\toprule
+系统 & 均值 ENS/MWh & $VaR_{0.95}$/MWh & $CVaR_{0.95}$/MWh\\\midrule
+基线 & 1.146187 & 1.750000 & 2.482422\\
+DC 储能干预 & 0.049942 & 0.230000 & 0.962422\\
+绝对下降 & 1.096245 & 1.520000 & 1.520000\\
+相对下降 & 95.64\% & 86.86\% & 61.23\%\\
+\bottomrule
+\end{tabular}
+\end{table}
+该比较同时交叉验证了：同一灾害序列下基线/干预的模型输入一致；DC 域 ENS 的归因与干预位置一致；
+均值和尾部指标方向一致。但它不是独立软件交叉验证，也不是年风险估计。
+
+\subsection{收敛诊断}
+检查点为 $N=16,32,64,128,256,512,1024,2048,4096$；若提前满足规则则停止。预先声明规则要求
+从 $N\ge64$ 起连续两个检查点同时满足两臂均值最大相对变化 $<5\%$ 和两臂 CVaR95 最大相对变化
+$<10\%$。1024 点最大变化分别为 3.6896\% 和约 0；2048 点分别为 0.7329\% 和 3.1397\%，
+因此连续第二次通过并令 \fld{converged=true}，未运行 4096 点。样本数不是事后挑选。
+
+\subsection{可重复命令}
+\begin{verbatim}
+cmake --build build/macos-release --target \
+  distribution_resilience_review_case -j2
+./build/macos-release/distribution_resilience_review_case \
+  external_data/resilience_validation
+jq '.restoration,.dynamic_certificate,.held_out_risk' \
+  external_data/resilience_validation/review_case_results.json
+\end{verbatim}
+重新运行必须比较结构化字段，而非整文件字节：runtime 与日志可变，固定种子下的故障、ENS、动作和风险
+统计应一致到数值容差。
+
+\subsection{OpenDSS/GridLAB-D 冻结时步对照}
+实际执行 \texttt{pre\_event}、\texttt{post\_fault}、\texttt{restored\_final} 三组冻结快照。后两组从
+MIP 结果提取母线 3--4 的最大多母线有源 AC 岛和支路 5 的实际闭合状态；负荷与电源取
+\fld{bus\_supply\_*} 归因。三个引擎均求解同一平衡恒功率 AC 等值。
+\begin{table}[H]\centering\small
+\caption{三快照外部引擎对照的最大母线误差}
+\begin{tabular}{lrrr}
+\toprule
+引擎 & 实际快照数 & $\max|\Delta V|$/pu & $\max|\Delta\theta|$/deg\\\midrule
+OpenDSS C-API 0.14.5 & 3/3 & $6.0712\times10^{-4}$ & 0.071191\\
+GridLAB-D 5.3.0 & 3/3 & $7.9037\times10^{-7}$ & $3.8190\times10^{-6}$\\
+\bottomrule
+\end{tabular}
+\end{table}
+两者都通过 $|\Delta V|<5\times10^{-3}$ pu、$|\Delta\theta|<0.5^{\circ}$ 的预声明门。
+证据位于 \srcpath{external\_snapshot\_comparison.json/csv}。该对照不认证 DC 网络、换流器内部、
+保护、控制、开关暂态或 DAE 稳定性，也不把外部潮流引擎称为恢复优化器的同构 oracle。

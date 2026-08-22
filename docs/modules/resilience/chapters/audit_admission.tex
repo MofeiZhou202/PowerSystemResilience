@@ -1,0 +1,51 @@
+\section{系统审计、准入门与已知边界}\label{sec:res-audit}
+
+\subsection{理论—实现—证据矩阵}
+\begin{center}\small
+\begin{tabular}{@{}L{3.2cm}L{4.4cm}L{3.4cm}L{3.2cm}@{}}
+\toprule
+命题 & 实现位置 & 证据 & 当前结论\\\midrule
+启发式时序恢复 & \srcpath{resilience\_assessment.cpp} & 单故障、联络、MESS 测试 & 已闭合，非最优\\
+严格多时段 MIP & \srcpath{resilience\_restoration\_mip.cpp} & hybrid、投影、后端测试+复核案例 & 已闭合于声明模型\\
+RA 分阶段拓扑 & \srcpath{resilience\_stage\_milp.cpp} & 隔离、修复、MESS 测试 & 已闭合于声明模型\\
+MESS 时空/SOC & 两个 MIP 实现 & 路由、等待、SOC 测试 & 放电模型闭合，无充电\\
+MIP--DAE 映射 & \srcpath{resilience\_dynamic\_certification.inc} & transition/load-service 测试 & 支持事件闭合\\
+DAE 异常边界 & \srcpath{certified\_restoration.cpp} & fail-closed 6 断言 & 已闭合\\
+DAE 反馈重求解 & \srcpath{resilience\_dynamic\_certification.inc} & proof-valid Unsafe 割与重求解测试 & 已闭合于有限 master\\
+随机风险收敛 & review tool & 几何检查点与停止准则 & 见机器证据\\
+外部冻结 AC 比较 & review tool + I/O bridges & 三快照 OpenDSS/GridLAB-D 实跑 & 已闭合于声明 AC 范围\\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\subsection{研究结果准入条件}
+用于论文、报告或控制建议前，必须同时满足：
+\begin{enumerate}
+ \item 输入通过 SolverReady/Strict 校验，故障稳定 ID 全部匹配；
+ \item \fld{feasible=true} 且有有效 incumbent，报告 gap、时限与后端；
+ \item 所需物理能力的 \fld{ValidityFlags} 为 true；
+ \item 逐步能量守恒、SOC、位置和动作序列通过数值审计；
+ \item 若声称动态安全，则每个授信动作 \fld{proof\_valid=true} 且 label=Safe；
+ \item 若声称风险收敛，则满足预先声明的样本停止准则；
+ \item 文档数值可由冻结命令和机器可读产物重建。
+\end{enumerate}
+任一条件不满足，结果仍可用于诊断，但标题和结论必须标记近似、未解析或未收敛。
+
+\subsection{当前不应跨越的边界}
+严格 MIP 是平衡、有功、线性电压包络模型：不含无功、相不平衡、换流器损耗、保护选择性和暂态约束；
+固定储能与 MESS 无充电变量；\fld{renewable\_curtailment\_cost} 当前未进入严格 MIP 目标；启发式
+\fld{restoration\_time\_hr} 不是首次完全恢复时刻。上述字段若被业务层用作相反含义，应直接拒绝。
+
+\subsection{本轮发现并修复的缺口}
+本轮关闭的实现缺口包括：DAE 异常 fail-closed；proof-valid Unsafe 自动转为恢复 master 的精确
+topology/service 割并重求解；微电网构网语义在 canonical 投影和 DAE 初始化中的保留；零出力构网
+储能的功率/可用能量门；母线级 MIP 调度向全部兼容设备容器的一次性重放；以及拓扑感知 DC 健康
+范围。目录 master 与恢复 MIP 的 StrictHiGHS 调用均在一次性线程中执行，防止同进程 TLS scratch
+状态污染后续求解。OpenDSS 导出同时移除了非法 \texttt{Set baseMVA}，并显式生成
+\texttt{VoltageBases}/\texttt{CalcVoltageBases}，保证 C-API 的标幺电压有定义。
+
+\subsection{不得夸大的结论}
+动态闭环只证明给定模型、场景、阈值与有限时域内找到的恢复方案通过 L3 阈值 oracle，不是全局
+暂态稳定定理。外部软件对照只认证共同覆盖的平衡正序冻结 AC 稳态，不认证 DC、换流器内部、保护、
+控制或 DAE。风险结果是固定灾害生成器下的事件条件经验分布，不是年概率校准。把这些边界显式列出，
+是模型契约的一部分，不是可省略的 roadmap。

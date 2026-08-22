@@ -592,10 +592,19 @@ void add_equivalent_static_gen_from_microgrid(const Microgrid& mg,
   sg.pmax_mw   = mg.p_export_max_mw > 1e-9 ? mg.p_export_max_mw : mg.p_exchange_max_mw;
   sg.pmin_mw   = mg.p_import_max_mw > 1e-9 ? -mg.p_import_max_mw : mg.p_exchange_min_mw;
   sg.controllable = true;
+  sg.grid_forming = mg.islanding_capability;
+  sg.anti_islanding = !mg.islanding_capability;
+  sg.v_ref_pu = mg.v_set_pu > 0.0 ? mg.v_set_pu : 1.0;
+  sg.f_ref_hz = mg.f_set_hz > 0.0 ? mg.f_set_hz : 50.0;
+  sg.k_p = std::max(0.0, mg.k_droop);
+  sg.k_q = std::max(0.0, mg.k_droop);
   sg.dynamic_model =
       projected_dynamic_profile(mg.dynamic_model,
                                 "Microgrid:" + std::to_string(mg.index),
                                 "Projected from microgrid into canonical static generator");
+  if (sg.grid_forming && sg.dynamic_model.model_name.empty()) {
+    sg.dynamic_model.model_name = "GridFormingNortonDroop";
+  }
 
   ac.static_generators.push_back(sg);
 }

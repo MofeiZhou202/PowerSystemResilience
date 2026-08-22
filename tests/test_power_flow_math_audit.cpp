@@ -1997,6 +1997,81 @@ TEST_CASE("Audit B9: island graph retains pure DC, LCC and ER connectivity",
   }
 }
 
+TEST_CASE("Audit B9: zero-dispatch grid-forming sources require physical headroom",
+          "[power_flow][math_audit][B9][grid_forming_storage]") {
+  HybridPowerSystem system;
+  ACBus bus;
+  bus.index = 91;
+  bus.bus_type = BusType::PQ;
+  bus.in_service = true;
+  system.ac.buses = {bus};
+
+  SECTION("GFM storage with discharge capacity and usable energy is a source") {
+    Storage storage;
+    storage.index = 1;
+    storage.bus = 91;
+    storage.in_service = true;
+    storage.controllable = true;
+    storage.grid_forming = true;
+    storage.p_mw = 0.0;
+    storage.pmax_mw = 1.0;
+    storage.e_rated_mwh = 2.0;
+    storage.e_mwh = 1.0;
+    storage.soc_min = 0.2;
+    system.ac.storage = {storage};
+    const auto islands = hacdcpf::powerflow::detect_islands(system);
+    REQUIRE(islands.size() == 1);
+    CHECK(islands.front().has_generators);
+  }
+
+  SECTION("zero PCS capacity cannot form a source") {
+    Storage storage;
+    storage.index = 1;
+    storage.bus = 91;
+    storage.in_service = true;
+    storage.controllable = true;
+    storage.grid_forming = true;
+    storage.e_rated_mwh = 2.0;
+    storage.e_mwh = 1.0;
+    storage.soc_min = 0.2;
+    system.ac.storage = {storage};
+    const auto islands = hacdcpf::powerflow::detect_islands(system);
+    REQUIRE(islands.size() == 1);
+    CHECK_FALSE(islands.front().has_generators);
+  }
+
+  SECTION("energy at the minimum SOC cannot form a source") {
+    Storage storage;
+    storage.index = 1;
+    storage.bus = 91;
+    storage.in_service = true;
+    storage.controllable = true;
+    storage.grid_forming = true;
+    storage.pmax_mw = 1.0;
+    storage.e_rated_mwh = 2.0;
+    storage.soc_min = 0.2;
+    storage.e_mwh = 0.4;
+    system.ac.storage = {storage};
+    const auto islands = hacdcpf::powerflow::detect_islands(system);
+    REQUIRE(islands.size() == 1);
+    CHECK_FALSE(islands.front().has_generators);
+  }
+
+  SECTION("zero-dispatch GFM static source with capacity is a source") {
+    StaticGenerator source;
+    source.index = 2;
+    source.bus = 91;
+    source.in_service = true;
+    source.controllable = true;
+    source.grid_forming = true;
+    source.pmax_mw = 1.5;
+    system.ac.static_generators = {source};
+    const auto islands = hacdcpf::powerflow::detect_islands(system);
+    REQUIRE(islands.size() == 1);
+    CHECK(islands.front().has_generators);
+  }
+}
+
 TEST_CASE("Audit B10: AC-only approximations reject hybrid assets without hiding AC loads",
           "[power_flow][math_audit][B10]") {
   HybridPowerSystem ac_only;

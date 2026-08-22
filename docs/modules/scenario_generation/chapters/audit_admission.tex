@@ -1,0 +1,92 @@
+\section{系统审计、准入规则与未闭合边界}
+\label{sec:scenario-audit-admission}
+
+\subsection{理论--实现--结果闭环矩阵}
+\begin{longtable}{@{}L{3.6cm}L{4.0cm}L{3.6cm}L{3.2cm}@{}}
+\toprule
+对象 & 实现锚点 & 数值/测试证据 & 状态\\
+\midrule\endfirsthead
+\toprule 对象 & 实现锚点 & 数值/测试证据 & 状态\\\midrule\endhead
+族内条件概率 & 三族 generate 函数 & probability error=0 & 已闭环\\
+二元 AR(1) & correlated noise factors & 4096 步 lag/cross & 已闭环\\
+block interpolation & 同上 & 单元统计测试 & 已闭环；逐时参数有偏差\\
+气候形变 & climate morph 函数族 & known/unknown SSP tests & 已闭环；非气候预报\\
+component profiles & candidate builder & standard TS test & 已闭环；大案例 aggregate fallback\\
+储能 SOC & storage SOC profiles & profile/schema tests & 已闭环；时域内常值\\
+N--1 目录 & enumerate contingencies & 大目录与 review IDs & 已闭环；无故障率先验\\
+台风目录 & catalog build/sample & 并发 snapshot test & 已闭环；无历史概率校准\\
+Holland/雨量 & wind/rain kernels & Python error $<10^{-10}$ & 已闭环\\
+架空易损 & overhead probability & Python error $6.7\times10^{-16}$ & 已闭环；默认参数未校准\\
+电缆水文 & cable probability & 单元分支覆盖 & 公式闭环；缺独立固定点表\\
+sampling gate & fault sequence & risk retained, fault=0 & 已闭环\\
+staged repair & repair ordering & 大故障集 test & 已闭环；非全局最优\\
+交通积水/容量 & traffic impact & Python error $<10^{-10}$ & 已闭环\\
+tail anchors & risk metadata/select & boundary test & 已闭环\\
+k-medoids & clustering core & 128→12 独立复算 & 已闭环；局部最优\\
+JSON v3 & bundle normalize/validate & 3 schema tests & 已闭环\\
+HTTP & production routes & 路由源码合同 & 已实现；缺专项 E2E 数值\\
+workbook & scenario bundle I/O & schema/编译门 & 已实现；大规模 round-trip 待测\\
+OpenDSS/GridLAB-D & 无等价生成内核 & 未伪造数值 & 不适用直接认证\\
+下游 decision regret & 无 & 无 & 未实现\\
+\bottomrule
+\end{longtable}
+
+\subsection{结果准入硬门}
+发布、导出或引用结果前必须同时满足：
+\begin{enumerate}
+  \item 每个条件组候选/代表概率有限、非负，概率和误差 $<10^{-12}$；
+  \item profile 数值有限，SOC 在 $[0,1]$，multiplier 非负，长度匹配 num steps；
+  \item 稳定组件/支路 ID 可回溯，AC/DC 域未混用，member 数无遗漏；
+  \item 实际方法、候选数、代表数、seed、资源来源和 audit 随结果保存；
+  \item 所有 fallback/approximate 标志与 warnings 未被 HTTP/导出层删除；
+  \item 固定公式 oracle 在预声明 $10^{-10}$ 数值容差内；统计检验使用预声明有限样本容差；
+  \item 若用于下游 PF/OPF/可靠性/弹性结论，另有该下游任务的可行性和外样本验证。
+\end{enumerate}
+
+\subsection{必须降级口径的情形}
+出现以下任一情形，结果仍可用于探索，但必须降低 model scope：未知 SSP/year 零形变；缺组件
+profile 使用 aggregate；缺坐标或真实线段；使用默认未校准 fragility；类别 fallback；锚点截断；
+全部 medoid 冻结；修复近似排序；达到聚类迭代上限；工作簿 position fallback；下游求解不收敛。
+
+\subsection{不得作出的声明}
+\begin{itemize}
+  \item 不得把固定 seed 重现称为统计收敛；
+  \item 不得把族内等概率称为历史发生概率；
+  \item 不得把 SSP label 称为 SSP 概率；
+  \item 不得把 Holland 固定点公式吻合称为台风预报准确；
+  \item 不得把默认易损曲线称为 IEC、国标或现场认证；
+  \item 不得把 greedy/排序修复称为全局最优抢修；
+  \item 不得把 hybrid 尾部覆盖提升称为缩减全面优越；
+  \item 不得把 OpenDSS/GridLAB-D profile replay 称为场景生成内核交叉认证；
+  \item 不得把 \texttt{success=true} 称为 PF/OPF 可行或工程可投产。
+\end{itemize}
+
+\subsection{已知未闭合研究边界}
+本版如实保留以下边界：
+\begin{enumerate}
+  \item 没有多变量空间天气场、copula/VAR、极值尾部校准和概率预报评分；
+  \item 没有历史台风后验、登陆率、类别/月度先验和观测风雨空间验证；
+  \item 没有结构/电缆易损参数的现场数据校准与置信区间；
+  \item 没有相关故障、保护/通信共因和动态修复 Markov 模型；
+  \item 没有二维水动力、交通需求重分配、抢修可达性闭环；
+  \item 没有 decision-aware reduction、PF/OPF regret 或自适应样本收敛；
+  \item 没有对生产 HTTP 的场景生成专项大案例 E2E，也没有大工作簿性能基线。
+\end{enumerate}
+这些不是“已完成但未写文档”的能力；它们当前不在实现中。
+
+\subsection{变更准入流程}
+后续修改场景模块必须依次完成：
+\begin{enumerate}
+  \item 在理论章写出概率对象、方程、单位、假设和复杂度预测；
+  \item 在实现函数附近引用方程/文献，并消费所有新增公开字段；
+  \item 增加正常、边界、fallback、无效输入和确定性测试；
+  \item 对可独立复算的数值核增加外部 oracle，不与主库共享实现；
+  \item 更新结果 audit/model scope、JSON/HTTP/workbook 和本手册；
+  \item 复跑 Catch2、CTest、静态字段审计、PDF 编译和逐页渲染；
+  \item 实测偏离理论预测时执行重新推导，不移动阈值或删除负面结果。
+\end{enumerate}
+
+\subsection{本版准入结论}
+本版可以声明：三族条件生成、二元相关扰动、参数化台风灾害链、交通递推、混合缩减和 v3
+数据契约均有源码和测试，核心固定公式/聚类输出有独立数值复算。不能声明：气候/台风预测、
+易损度现场校准、场景样本统计收敛、下游决策最优性或 OpenDSS/GridLAB-D 等价算法认证。

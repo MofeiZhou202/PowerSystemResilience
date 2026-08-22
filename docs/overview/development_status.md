@@ -6,6 +6,40 @@ This is the living handoff for verified build state and active engineering work.
 Update it in place; do not create dated copies. Source, registered tests, and
 the current Git worktrees remain authoritative.
 
+## Resilience dynamic-feedback and cross-validation closure (current worktree)
+
+The resilience monograph now follows the theory/implementation/interface/
+numerical/admission chain for heuristic, strict hybrid AC/DC, RA-stage, MESS and
+MIP-to-DAE restoration. The implementation replays domain-qualified bus service
+and generator/renewable/storage dispatch, preserves grid-forming microgrid
+semantics through canonical projection, and applies topology-aware DC voltage
+health checks. DAE initialization/build/integration failures are fail-closed.
+
+`run_certified_distribution_resilience_mip` closes the finite master loop: only
+proof-valid Unsafe L3 results produce an exact topology no-good and any
+applicable bus-service upper bound; Failed/Unresolved never produce an
+operational cut. The review case required two restoration MIP solves and one
+applied cut. Its final `4->5` and `23->23` transitions are Safe with
+`proof_valid=true`; minimum frequency was 50.686552/50.012250 Hz and minimum AC
+voltage was 0.996237/0.998483 pu. Same-process catalog-master and restoration
+MIP calls are isolated on fresh joined threads; the full 11-case certificate
+tag passes 110 assertions.
+
+The fixed-seed Release review completed 2048/2048 feasible paired risk samples
+and stopped only after two consecutive declared checkpoints passed the mean
+(5%) and CVaR95 (10%) relative-change limits. Baseline/intervention mean ENS was
+1.146187/0.049942 MWh; VaR95 was 1.75/0.23 MWh; CVaR95 was
+2.482422/0.962422 MWh. Strict restoration served 67.15/68.40 MWh with 1.25 MWh
+ENS and zero reported MIP gap.
+
+Three frozen AC snapshots (`pre_event`, `post_fault`, `restored_final`) were
+actually solved by HySim, DSS C-API 0.14.5 and the local GridLAB-D 5.3.0 binary.
+All passed the declared 0.005 pu/0.5 degree gates. Maximum OpenDSS errors were
+0.0006072 pu and 0.071191 degrees; GridLAB-D maxima were 7.904e-7 pu and
+3.819e-6 degrees. This certifies only the common balanced positive-sequence AC
+steady-state scope, not DC, protection, controls, switching transients or DAE.
+Machine evidence is under `external_data/resilience_validation/`.
+
 ## Time-series closure repair (current worktree)
 
 The annual/lifecycle repair pass is source-backed and intentionally narrower
@@ -1441,10 +1475,23 @@ Focused runtime contracts now cover `graph/`, `scenario_generation/`,
 `carbon_analysis/`, `integrated_energy/`, and `sppt/`; the canonical links are
 in [docs/README.md](README.md).
 
+`scenario_generation` 手册已按《潮流计算》《最优潮流计算》的结构重写为 16 个专章、56 页，
+覆盖条件概率、二元 AR(1)、缩减理论，常规/可靠性/弹性三族，台风风雨--易损--故障--修复--
+交通链，全部公开选项/结果和 JSON/HTTP/workbook 契约。固定 review case 使用 64 个候选、6 个
+代表；4096 步统计实验得到 load lag-1=0.743753（目标 0.75）、全天 load--wind 同期相关
+-0.290252（目标 -0.25）。PV 白天子样本 -0.341279 超过原 0.08 门限，未放宽阈值，而改用全天
+非零风电验证完整 AR(1) 样本并保留 PV 偏差。128→12 独立聚类复算概率/距离误差为 0；hybrid
+全局尾覆盖由 0 提高到 1，但 transport mean 从 1.188380 恶化到 2.148101、regime mass L1
+从 0.046875 恶化到 1.640625，文档按真实取舍报告。Holland 风速误差 0、雨量误差
+7.82e-14、易损概率误差 6.66e-16、最大积水误差 6.39e-14；证据位于
+`external_data/scenario_generation_validation/`。该记录不宣称气象预报、二维水动力、结构可靠度标定或
+OpenDSS/GridLAB-D 全模型认证；MIPSolvers 当前 HEAD 与记录 pin 不一致，不能称作 pinned
+release baseline。
+
 Current-source Debug verification rebuilt all affected targets. The focused
 and contract suites passed: typhoon traffic/catalog 5 cases/35 assertions,
 campus IES 6/106, harmonics 52/359, EV Formulation D 15/196,
-graph/Kron/round-trip 55/461, scenario generation/schema 12/105,
+graph/Kron/round-trip 55/461, scenario generation 12/4214 plus schema 3/9,
 carbon snapshot/annual/GEC 41/574, SPPT 33/213, and the shared
 resilience/reliability executable 39/360. `run_gui_server` also rebuilt and
 linked successfully.

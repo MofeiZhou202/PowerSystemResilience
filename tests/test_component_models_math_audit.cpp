@@ -798,6 +798,38 @@ TEST_CASE("R-01/R-02: DC dead islands are stripped and recorded on the certifica
   CHECK(reported);
 }
 
+TEST_CASE("Grid-forming microgrid projection preserves its source contract",
+          "[model_audit][projection][microgrid][grid_forming]") {
+  HybridPowerSystem system;
+  system.base_mva = system.ac.base_mva = 10.0;
+  system.ac.buses = {make_bus(41, BusType::PQ)};
+  Microgrid microgrid;
+  microgrid.index = 17;
+  microgrid.name = "islandable campus";
+  microgrid.pcc_bus = 41;
+  microgrid.in_service = true;
+  microgrid.islanding_capability = true;
+  microgrid.p_exchange_mw = 0.0;
+  microgrid.p_export_max_mw = 2.5;
+  microgrid.p_import_max_mw = 1.0;
+  microgrid.v_set_pu = 1.025;
+  microgrid.f_set_hz = 49.9;
+  microgrid.k_droop = 0.04;
+  system.microgrids = {microgrid};
+
+  const auto projected = project_to_canonical_models(system, false);
+  REQUIRE(projected.ac.static_generators.size() == 1);
+  const auto& source = projected.ac.static_generators.front();
+  CHECK(source.grid_forming);
+  CHECK_FALSE(source.anti_islanding);
+  CHECK(source.controllable);
+  CHECK_THAT(source.pmax_mw, WithinAbs(2.5, 1e-12));
+  CHECK_THAT(source.v_ref_pu, WithinAbs(1.025, 1e-12));
+  CHECK_THAT(source.f_ref_hz, WithinAbs(49.9, 1e-12));
+  CHECK_THAT(source.k_p, WithinAbs(0.04, 1e-12));
+  CHECK(source.dynamic_model.model_name == "GridFormingNortonDroop");
+}
+
 TEST_CASE("R-01/R-02: unproject_dc_bus_vector recovers stripped DC positions",
           "[model_audit][projection][dc][dead_island]") {
   ProjectionCertificate cert;

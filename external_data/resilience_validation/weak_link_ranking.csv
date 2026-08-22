@@ -1,0 +1,4 @@
+branch_index,fragility_probability,graph_bridge,max_loading_percent,fmea_eens_mwh_yr,matched_unserved_mwh,severity,consensus,pareto,dominant_dimension,relation
+1,0.9999991402012944,1,0.0,0.7746951859019622,0.0,1.0,0.0,1,reliability,conflict
+4,0.9999999998769323,1,0.0,0.2571279582548696,0.0,0.331908553111119,0.0,0,reliability,watch
+2,0.9999999453997745,1,0.0,3.92262526953327e-07,0.0,5.063443456107496e-07,0.0,0,reliability,watch

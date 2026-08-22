@@ -1,0 +1,5 @@
+domain,branch_index,peak_wind_ms,peak_rain_mm_hr,peak_failure_probability
+AC,4,69.3921,41.7748,1
+AC,2,69.3698,41.8103,1
+AC,1,69.0031,37.4462,0.999999
+DC,101,69.1573,41.8554,0.999689

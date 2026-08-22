@@ -1,0 +1,171 @@
+\section{验证目录、数值恒等式与对照协议}\label{sec:res-verification-catalog}
+
+本章把“测试通过”拆成模型构造、优化可行性、结果恢复、动态证书、统计重复性和外部物理回放六层。
+只有与研究结论对应的层全部满足，结果才可准入。单一手算例、HTTP 200 或 solver optimal 均不足以
+替代这一证据链。
+
+\subsection{验证金字塔}
+
+\begin{enumerate}
+ \item \textbf{解析/输入层}：非法时域、空系统、未知域限定故障必须显式失败；
+ \item \textbf{构造层}：rich 组件投影、AC/DC 同号 ID、变量/约束规模和 validity 必须匹配；
+ \item \textbf{解析解层}：零故障、单支路、单岛、SOC 和 MESS 到达案例可独立手算；
+ \item \textbf{优化层}：Native/HiGHS 等后端对同一 MILP 的目标、可行性和状态一致；
+ \item \textbf{物理层}：冻结恢复拓扑/调度后由 PF/DAE 检查电压、残差和阈值；
+ \item \textbf{统计层}：固定种子重复、配对情景、均值/尾部停止准则和不收敛声明；
+ \item \textbf{接口层}：C++、HTTP/JSON、CSV/PDF 数值和索引空间一致。
+\end{enumerate}
+
+\subsection{Release 注册测试目录}
+
+\begin{center}\small
+\begin{longtable}{@{}L{4.0cm}L{3.0cm}L{6.2cm}@{}}
+\toprule
+测试组 & 当前数量 & 覆盖义务\\\midrule\endhead
+输入/基础指标 & 8 cases & 空系统、非法选项、零故障、单故障、比例范围、步数、旧字段同步\\
+启发式重构 & 5 cases & 故障切负荷、修复、联络开关、profile、取消回调\\
+RA 分阶段 & 7 cases & 虚拟 breaker、贪心修复、阶段 profile、初始 tie 恢复、MESS 轨迹\\
+严格恢复 MIP & 7 cases & 零故障、hybrid/DC 故障、后端状态隔离、未知故障、canonical rich 组件\\
+MESS 可用性 & 4 cases & 无收益不移动、外部到达门、顺序/严格入口一致性\\
+动态证书 & 8 cases & master 门、fail-closed、MESS 物化、拓扑/服务映射、E2E、unsupported\\
+完整 resilience assessment target & 39 cases/364 assertions & 该二进制还含共享 reliability/FMEA 回归\\
+完整 certificate filter & 8 cases/68 assertions & \texttt{[resilience][certificate]}\\
+restoration 名称过滤 & 3 cases/30 assertions & master、E2E 与恢复相关路径\\
+\bottomrule
+\end{longtable}
+\end{center}
+
+精确命令为
+\begin{verbatim}
+cmake --build --preset macos-release --target \
+  test_resilience_assessment test_transient_dynamics \
+  distribution_resilience_review_case
+./build/macos-release/tests/test_resilience_assessment
+./build/macos-release/tests/test_transient_dynamics \
+  '[resilience][certificate]'
+./build/macos-release/tests/test_transient_dynamics '*restoration*'
+\end{verbatim}
+
+\subsection{模型内守恒检查}
+
+每个时步至少检查
+\begin{align}
+ D_t-P_t^{srv}-P_t^{shed}&\simeq0,\\
+ 0\le P_t^{shed}&\le D_t,\\
+ 0\le R_t=P_t^{srv}/D_t&\le1,\\
+ E_s^{t+1}-E_s^t+P_{s,t}^{dis}\Delta t/\eta_s^{dis}&\simeq0.
+\end{align}
+MESS 还须检查位置唯一性、时空弧连续性、到达前零放电、行驶耗能和最大里程。支路状态必须满足故障
+可用性，动作计数必须等于相邻状态变化。聚合层检查
+\begin{align}
+ \sum_tD_t\Delta t&=\fld{total\_demand\_mwh},\\
+ \sum_tP_t^{shed}\Delta t&=\fld{total\_shed\_mwh},\\
+ \max_tP_t^{shed}&=\fld{peak\_shed\_mw}.
+\end{align}
+
+\subsection{投影和归因检查}
+
+每个 branch/component row 必须满足：domain 与 component type 不为空；stable ID 可在原 rich 系统找到；
+canonical ID 可在求解模型找到；Transformer3W 的 pair number 在 0--2；同一 canonical 等值若展开到多个
+作者组件，不能以 vector position 代替 stable ID。AC/DC 同号 bus 的供电、故障、割点和 DAE load
+event 必须落入不同域限定键。
+
+对零阻抗合并，恢复变量作用于 canonical 节点，但供电归因必须通过 BusMergeMap 回到所有原始负荷。
+若映射无法无损恢复，结果必须标记 limitation，而不是省略组件或生成虚假零值。
+
+\subsection{后端交叉验证}
+
+Native 与 HiGHS 对照时冻结：模型输入、profile、故障序列、MIP gap、时限、线程数和优先级罚权。
+比较对象为
+\begin{equation}
+ (\text{feasible},z,u,s,E,x,\text{objective},\text{gap}),
+\end{equation}
+其中二进制变量允许存在等价最优解，故主要比较目标、ENS、服务量、SOC 守恒和每个后端自己的可行性
+残差，不要求动作序列逐元素完全相同。若一方 time limit，应比较 incumbent 与 bound，不得写成“求解器
+不一致”。
+
+当前复核案例只执行 HiGHS。注册回归包含 Native/HiGHS 同进程有序调用，证明后端可变状态不会让后续
+strict solve 丢失 incumbent；它不是全案例矩阵或 Gurobi 对照。
+
+\subsection{固定种子重复性协议}
+
+端到端工具必须至少运行两次。结构化比较排除 runtime、wall runtime 和日志顺序，只比较：
+\begin{itemize}
+ \item hazard seed、线路段数、故障稳定 ID/起止时间；
+ \item strict MIP demand/served/ENS、peak shed、动作数、gap；
+ \item 直到停止点的每对 seed/fault count/两臂 ENS；
+ \item mean、VaR95、CVaR95、不可行 pair 数和 converged；
+ \item DAE transition from/to、label、proof valid 和 feedback applied。
+\end{itemize}
+本轮两次运行在上述字段完全复现；线程固定为 1。该结果说明案例可重复，不说明其他线程数、后端或平台
+都按位确定。
+
+\subsection{经验风险的独立重算}
+
+给定样本 $L_1,\ldots,L_N$，独立脚本应重算
+\begin{align}
+ \widehat\mu_N&=N^{-1}\sum_nL_n,\\
+ \widehat{VaR}_{.95}&=L_{(\lceil0.95N\rceil)},\\
+ \widehat{CVaR}_{.95}&=\frac{1}{N-k+1}\sum_{n=k}^{N}L_{(n)},
+ \quad k=\lceil0.95N\rceil.
+\end{align}
+必须记录采用的经验分位数定义；小样本下不同插值规则可给出不同 VaR/CVaR。配对干预效果按同一 seed
+计算 $\Delta L_n=L_n^{base}-L_n^{imp}$，不能用两组独立种子均值代替配对实验。
+
+停止准则必须在运行前声明。本案例在
+$N=16,32,64,128,256,512,1024,2048,4096$ 检查，要求 $N\ge64$ 后连续两个检查点同时满足
+两臂均值相对变化的最大值 $<5\%$ 和两臂 CVaR 相对变化的最大值 $<10\%$。程序在满足时停止，
+否则必须运行到 4096 并报告 \fld{converged=false}。
+
+\subsection{OpenDSS/GridLAB-D 物理回放协议}
+
+外部工具没有同构恢复 MIP，合理比较单位是“冻结的单个时步物理状态”，而不是优化器整体。协议为：
+\begin{enumerate}
+ \item 从指定 $t$ 导出已闭合 AC 拓扑、负荷服务比例、源/DER/储能有功和电压基准；
+ \item 对换流器/DC 边，要么使用有文献依据的等值注入，要么把该时步标为 AC-only 可比较；
+ \item 在 HySim、OpenDSS、GridLAB-D 使用相同负荷模型、相序、变压器接线、tap、基准和容差；
+ \item 当前准入量比较各共同 AC bus 的正序 $|V|$ 与相角，门限分别为 $5\times10^{-3}$ pu 和
+       $0.5^{\circ}$；支路功率/损耗在建立完全同构导出前不纳入本轮门；
+ \item 对不可同构的 DC、MESS 路由、离散动作和 DAE 证书单独列为 not comparable；
+ \item 固定最大误差门，并让未执行 external case 导致 gate skip/fail，而不是零案例通过。
+\end{enumerate}
+
+本轮实际生成并执行 \texttt{pre\_event}、\texttt{post\_fault} 和
+\texttt{restored\_final} 三个快照。后两者从恢复结果提取最大多母线有源 AC 岛，使用
+\fld{component\_states} 的实际闭合状态和 \fld{bus\_supply\_*} 的服务/出力归因；同一冻结模型依次由
+HySim、DSS C-API 与本机 GridLAB-D 求解。机器证据为
+\srcpath{external\_snapshot\_comparison.json/csv} 和 \srcpath{external\_snapshots/}。该结论仅为
+平衡正序冻结 AC 稳态一致，不能转移到 DC、保护、控制、DAE 或恢复优化器整体。
+
+\subsection{DAE 证书复核}
+
+每个 transition 独立检查：事件数和标签、unsupported 列表、executability、simulation success、
+初始化、轨迹快照、残差、观测资格、margin 和最终 label。异常路径的单元测试强制一个不可初始化的
+VSC NCP 模型，并断言调用不抛出、label Failed、proof false、simulation false、limitations 含拒绝原因。
+这证明 fail-closed 进程安全，不证明该 VSC 情景动态可行。
+
+\subsection{研究结论与最低证据映射}
+
+\begin{center}\small
+\begin{tabular}{@{}L{4.0cm}L{5.0cm}L{4.2cm}@{}}
+\toprule
+拟声明结论 & 最低证据 & 当前案例\\\midrule
+静态恢复 MIP 可行 & valid incumbent、残差、gap、scope & 满足\\
+hybrid AC/DC 有功恢复 & DC/VSC validity、域归因、故障测试 & 满足声明的线性范围\\
+AC 电压可行 & 后验 AC PF 或更高保真模型 & 三个冻结快照满足声明门限\\
+动态安全恢复 & 每个授信 transition L3 Safe/proof true & 最终闭环方案满足案例时域\\
+动态约束优化闭环 & feedback cut 已施加并重求解认证 & 2 次 MIP、1 条割\\
+风险改善 & 配对样本与方向一致 & 事件条件样本支持\\
+尾部风险收敛 & 预声明停止准则满足 & 见最终机器证据\\
+跨软件一致 & OpenDSS/GridLAB-D 固定门通过 & 三快照 AC-only 通过\\
+年度韧性风险 & 年事件率/联合分布/暴露模型 & 不属于本案例\\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\subsection{PDF 与机器可读证据一致性}
+
+手册中的数值表必须从 \srcpath{external\_data/resilience\_validation/review\_case\_results.json}
+及 CSV 重建。PDF 编译后检查 unresolved reference、overfull box、missing glyph 和 fatal error；全部页面
+渲染为位图，检查表格裁切、公式重叠、空白页和小字号不可读。PDF 是报告载体，JSON/CSV 才是数值证据；
+两者冲突时，应重新生成 PDF，而不是手工修改结果表。

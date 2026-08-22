@@ -1,0 +1,60 @@
+\section{C++、HTTP 与 JSON 契约}\label{sec:res-http}
+
+\subsection{C++ 入口}
+\begin{center}\small
+\begin{tabular}{@{}L{5.0cm}L{8.2cm}@{}}
+\toprule
+入口 & 语义\\\midrule
+\srcpath{run\_distribution\_resilience\_assessment} & 按 \fld{model} 分派启发式、严格 MIP 或 RA 分阶段入口\\
+\srcpath{run\_distribution\_resilience\_mip\_assessment} & 直接求严格多时段 hybrid AC/DC 恢复 MIP\\
+\srcpath{run\_distribution\_resilience\_stage\_milp\_assessment} & 直接求 RA 分阶段拓扑与 MESS 子问题\\
+\srcpath{certify\_distribution\_resilience\_dynamics} & 把已有恢复序列映射为 DAE 认证结果\\
+\srcpath{run\_certified\_distribution\_resilience\_mip} & 严格 MIP 后执行一次动态二次认证；不自动反馈重求解\\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\subsection{生产 HTTP 路由}
+生产路由为 \texttt{POST /api/session/run\_distribution\_resilience}，实现位于
+\srcpath{tests/run\_gui\_server.cpp}。请求前必须已有 session system；并发分析返回 HTTP 409。
+典型请求为
+\begin{verbatim}
+{
+  "model": "MultiPeriodMIPLinDistFlow",
+  "mip_solver": "HiGHS",
+  "horizon_hours": 24,
+  "time_step_hr": 1.0,
+  "mip_gap": 0.0,
+  "mip_time_limit_s": 120,
+  "mip_num_threads": 1,
+  "allow_reconfiguration": true,
+  "allow_mess_dispatch": true,
+  "apply_demo_data": false,
+  "faults": [
+    {"domain":"DC", "branch_index":101,
+     "outage_start_hr":0.0, "repair_duration_hr":6.0}
+  ]
+}
+\end{verbatim}
+\fld{apply\_demo\_data=true} 会改变请求本地系统副本，只适合演示；正式研究必须设为 false 并提交完整
+网络数据。
+
+\subsection{输入归一化}
+HTTP 层接受模型与求解器别名，裁剪时域和数值范围，并解析聚合、按位置、按稳定 ID、按母线的负荷
+曲线。发生多种映射时，组件级/母线级优先级必须按生产代码解释；文档示例不另造一套解析规则。
+所有 profile 数值过滤 NaN/Inf 并截断为非负值。
+
+\subsection{结果最小检查集}
+客户端不得只检查 HTTP 200。至少读取：
+\begin{equation}
+ \{\fld{feasible},\fld{status},\fld{effective\_model},
+ \fld{solver\_status},\fld{mip\_gap},\fld{model\_scope},
+ \fld{validity},\fld{steps}\}.
+\end{equation}
+每步供电向量必须联合解释 kind/index/position/demand/served/shed；单位为 MW，聚合量乘
+\fld{time\_step\_hr} 后为 MWh。优先级加权目标的单位是“优先级罚权$\times$MWh”，不是物理能量或货币。
+
+\subsection{错误与回退}
+无系统、JSON 解析失败和非法参数返回 HTTP 400；session 忙返回 409。后端不可用、time limit、MIP
+无有效 incumbent 或 RA MESS 回退必须反映在状态和模型字段中。调用方不得用空 solver status 推断
+最优，也不得把启发式结果标为 MIP。

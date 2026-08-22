@@ -1,0 +1,57 @@
+{
+  "passed": true,
+  "regular": {
+    "candidate_probability_error": 0.0,
+    "cluster_probability_error": 0.0,
+    "load_pv_correlation": -0.36636443653286127,
+    "deterministic_repeat": true,
+    "ar1": {
+      "load_factor_statistics": {
+        "count": 4096,
+        "maximum": 1.171514502106441,
+        "mean": 0.9980420033179815,
+        "minimum": 0.8386429305261732,
+        "sample_stddev": 0.04915001803142081
+      },
+      "load_lag1_correlation": 0.7437531769218291,
+      "load_pv_contemporaneous_correlation": -0.3412794816361664,
+      "load_wind_contemporaneous_correlation": -0.2902516783773065,
+      "pv_factor_statistics": {
+        "count": 1879,
+        "maximum": 1.2708044671525038,
+        "mean": 1.0047141032347153,
+        "minimum": 0.7351782202583724,
+        "sample_stddev": 0.08273484873958488
+      },
+      "steps": 4096,
+      "target_cross_correlation": -0.25,
+      "target_temporal_correlation": 0.75,
+      "wind_factor_statistics": {
+        "count": 4096,
+        "maximum": 1.2708044671525038,
+        "mean": 1.0008810258581218,
+        "minimum": 0.7351782202583724,
+        "sample_stddev": 0.08094124208212915
+      }
+    },
+    "reduction": {
+      "probability_error": 0.0,
+      "member_total": 128,
+      "max_average_distance_error": 0.0,
+      "max_radius_error": 0.0,
+      "transport_mean": 2.1481012067797156,
+      "transport_max": 7.1692926197947795,
+      "tail_anchor_count": 12,
+      "frozen_medoid_count": 12
+    }
+  },
+  "hazard": {
+    "wind_error": 0.0,
+    "rainfall_error": 7.815970093361102e-14,
+    "fragility_error": 6.661338147750939e-16,
+    "failure_probability": 0.7989101008439488
+  },
+  "traffic": {
+    "max_depth_error": 6.394884621840902e-14
+  }
+}

@@ -2307,8 +2307,14 @@ void DynamicLoad::handleEvent(const DynamicEvent& event, DynamicState&, NetworkS
       event.component_index != params_.component_index) {
     return;
   }
-  const auto it = event.params.find("scale");
-  params_.scale = std::max(0.0, it == event.params.end() ? event.value : it->second);
+  if (const auto ratio = event.params.find("service_ratio");
+      ratio != event.params.end()) {
+    params_.scale = params_.service_base_scale * std::max(0.0, ratio->second);
+  } else {
+    const auto it = event.params.find("scale");
+    params_.scale =
+        std::max(0.0, it == event.params.end() ? event.value : it->second);
+  }
 }
 
 std::string DynamicLoad::name() const {
@@ -2552,8 +2558,14 @@ void ThreePhaseDynamicLoad::handleEvent(const DynamicEvent& event,
       event.component_index != params_.component_index) {
     return;
   }
-  const auto it = event.params.find("scale");
-  params_.scale = std::max(0.0, it == event.params.end() ? event.value : it->second);
+  if (const auto ratio = event.params.find("service_ratio");
+      ratio != event.params.end()) {
+    params_.scale = params_.service_base_scale * std::max(0.0, ratio->second);
+  } else {
+    const auto it = event.params.find("scale");
+    params_.scale =
+        std::max(0.0, it == event.params.end() ? event.value : it->second);
+  }
 }
 
 std::string ThreePhaseDynamicLoad::name() const {
@@ -2635,8 +2647,14 @@ void DCDynamicLoad::handleEvent(const DynamicEvent& event, DynamicState&, Networ
       event.component_index != params_.component_index) {
     return;
   }
-  const auto it = event.params.find("scale");
-  params_.scale = std::max(0.0, it == event.params.end() ? event.value : it->second);
+  if (const auto ratio = event.params.find("service_ratio");
+      ratio != event.params.end()) {
+    params_.scale = params_.service_base_scale * std::max(0.0, ratio->second);
+  } else {
+    const auto it = event.params.find("scale");
+    params_.scale =
+        std::max(0.0, it == event.params.end() ? event.value : it->second);
+  }
 }
 
 std::string DCDynamicLoad::name() const {

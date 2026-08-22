@@ -1,0 +1,106 @@
+\section{聚类内核：源码等价流程、预算与审计}
+\label{sec:clustering-implementation}
+
+\subsection{方法选择}
+\fld{method} 等于 \texttt{hybrid\_kmedoids\_tail\_5pct} 或别名
+\texttt{hybrid\_kmedoids\_tail} 时进入混合路径；其他字符串使用 weighted k-medoids。
+解析器不因未知字符串抛错，因此结果 audit 中的实际 \fld{clustering\_method} 是最终口径。
+
+\subsection{候选数与代表数}
+空候选直接返回空簇。实际代表数
+\begin{equation}
+ K'=\min(\max(1,K),N).
+\end{equation}
+当 $K'\ge N$ 时每个候选自成一簇，概率保持原值，距离为 0；无需进入迭代。
+
+\subsection{连续特征列顺序}
+\srcpath{feature\_summary} 从 profile 计算首值、总量、峰值、缺额和净负荷等候选摘要。
+\srcpath{scaled\_features} 按确定性字段名顺序构造矩阵，避免 unordered map 遍历顺序影响距离。
+开启 robust scale 时对每列应用 median/IQR；关闭时原值直接进入欧氏距离。
+
+\subsection{风险元数据丰富}
+\srcpath{raw\_risk\_source\_scores} 对 regular、reliability、resilience 使用相应风险源：负荷、
+净负荷、PV/wind/renewable deficit、故障概率、停运影响等。随后
+\srcpath{enrich\_candidate\_risk\_metadata}：
+\begin{enumerate}
+  \item 对每个源计算分位数、中位数和 IQR；
+  \item 写入候选 \fld{risk\_source\_scores} 和综合 \fld{risk\_score}；
+  \item 标记 global/source/coupling tail；
+  \item 标记 global/source decision boundary；
+  \item 汇总 \fld{anchor\_reasons} 并设置 \fld{tail\_anchor}。
+\end{enumerate}
+
+\subsection{锚点选择与截断}
+\srcpath{select\_tail\_anchors} 合并风险锚点、有故障候选和 regime 极值候选并去重。若超过
+$K'$，先按“含故障”布尔降序，再按 risk score 降序，最后按稳定候选顺序破同分，截断到
+$K'$。audit 的 \fld{anchor\_ids} 是实际保留锚点，而非截断前全集。
+
+\subsection{冻结语义}
+仅当混合方法、\fld{include\_tail\_anchors=true} 且 \fld{freeze\_anchors=true} 时，选中锚点
+成为 frozen medoid。冻结中心参与分配但不参与更新。候选本身的 \fld{tail\_anchor} 与
+\fld{frozen\_medoid} 是不同字段：前者说明风险原因，后者说明优化状态。
+
+\subsection{初始化}
+锚点先进入 medoid 集；剩余位置由加权 k-means++ 型抽样填充。若总抽样权重退化为零，使用
+尚未选取的确定性候选 fallback。seed 固定初始化，迭代无随机步骤。
+
+\subsection{分配步}
+每个候选计算到所有 medoid 的混合距离，选择严格更小者；完全相等时保留先出现的 medoid。
+这使 medoid 排列成为破同分规则的一部分。距离同时使用连续欧氏、outage Hamming 和 regime
+惩罚，签名短缺位按 0。
+
+\subsection{更新步}
+对每个非冻结非空簇，枚举簇成员 $j$，计算
+\begin{equation}
+ C_j=\sum_{i\in A_k}\pi_i d(i,j),
+\end{equation}
+选最小者作为新 medoid。空簇保持原 medoid。若所有 medoid 不变则提前停止，否则最多执行
+$\max(1,\texttt{max\_iterations})$ 轮。
+
+\subsection{簇结果}
+每簇返回 cluster ID、representative ID、完整代表候选、成员概率和、成员数/ID、加权平均距离、
+最大距离、冻结标志和 anchor reasons。平均距离为
+\begin{equation}
+ \bar d_k=\frac{\sum_{i\in A_k}\pi_i d(i,m_k)}{\Pi_k},
+\end{equation}
+仅在 $\Pi_k>0$ 时计算。所有簇概率最后按正总和归一。
+
+\subsection{审计指标}
+\srcpath{compute\_reduction\_metrics} 计算 transport mean/max、全局/源/耦合尾部覆盖和 regime
+mass L1。\fld{compare\_baseline=true} 时，对同一候选再运行无锚点 weighted k-medoids，并保存
+两组指标及 delta。它是同输入同距离的算法消融，不是与外部软件对照。
+
+\subsection{固定 128→12 复算}
+固定 seed=17、\fld{regime\_weight}=0、\fld{boundary\_fraction}=0.10 时，混合方法 12 个 medoid
+全部冻结。独立 Python 从序列化候选重新计算 robust scale、成员距离、加权平均半径和全局运输
+指标，最大误差为 0（容差 $10^{-10}$）。结果揭示：
+\begin{center}\small
+\begin{tabular}{@{}L{4.4cm}rr@{}}
+\toprule
+指标 & Hybrid tail-anchor & Weighted baseline\\
+\midrule
+transport mean & 2.148101 & 1.188380\\
+transport max & 7.169293 & 3.061194\\
+global tail coverage & 1.000000 & 0.000000\\
+coupling tail coverage & 0.450000 & 0.150000\\
+wind deficit tail coverage & 1.000000 & 0.000000\\
+regime mass L1 & 1.640625 & 0.046875\\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\subsection{选择建议}
+\begin{itemize}
+  \item 平均 profile 重构优先：weighted baseline 或提高 $K$；
+  \item 极端后果筛查优先：hybrid，并同时报告 transport/regime 退化；
+  \item 停运组合重要：提高 outage Hamming weight；
+  \item regime 质量重要：提高 regime weight，但必须检查 transport 变化；
+  \item 特征量纲不一致：开启 robust scale；已有物理归一化时可关闭以做审计复算。
+\end{itemize}
+
+\subsection{失败和边界}
+聚类不返回“收敛到全局最优”的状态；达到迭代上限只表示停止。结果没有下游 PF/OPF 后果误差。
+\begin{gapnote}
+锚点数量等于 $K$ 时，所有中心被冻结，算法事实上不再优化平均距离。必须通过
+\fld{frozen\_medoid\_count}、transport 和 baseline comparison 识别该边界。
+\end{gapnote}

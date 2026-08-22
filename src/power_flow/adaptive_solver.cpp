@@ -342,7 +342,19 @@ AdaptiveSolveResult AdaptiveSolver::solve(const HybridPowerSystem& sys,
 
   // Single-island fast path: solve the whole system directly without
   // subsystem extraction to avoid any data loss.
-  const bool single_island = (out.islands.size() == 1 && out.islands[0].has_generators);
+  const bool has_inactive_bus =
+      std::any_of(working.ac.buses.begin(), working.ac.buses.end(),
+                  [](const ACBus& bus) {
+                    return !bus.in_service || bus.bus_type == BusType::ISOLATED;
+                  }) ||
+      std::any_of(working.dc.buses.begin(), working.dc.buses.end(),
+                  [](const DCBus& bus) {
+                    return !bus.in_service ||
+                           bus.bus_type == DCBusType::DC_ISOLATED;
+                  });
+  const bool single_island =
+      out.islands.size() == 1 && out.islands[0].has_generators &&
+      !has_inactive_bus;
   if (out.islands.empty() || single_island) {
     SolverData data = make_solver_data(working, opt.loss_model);
     NewtonSolver solver;

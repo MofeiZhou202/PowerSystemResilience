@@ -1,0 +1,326 @@
+\section{公共 API 全字段契约}\label{sec:res-public-contract}
+
+本章以三个公共头文件为准，逐项声明默认值、单位、索引空间、赋值条件和解释边界。它补充
+第~\ref{sec:res-io}~章的快速参数表；当 C++ 默认值、HTTP 默认值和 GUI 默认值不同，必须以具体入口
+为准，不能把其中一层的默认值推广到另一层。
+
+\subsection{模型与求解器枚举}
+
+\begin{center}\small
+\begin{tabular}{@{}L{4.2cm}L{4.2cm}L{4.8cm}@{}}
+\toprule
+类型/值 & 选择语义 & 关键边界\\\midrule
+\fld{HeuristicSequential} & AC 顺序启发式 & 不保证最优；DC 只在图诊断等共享链路出现\\
+\texttt{MultiPeriodMIP}\allowbreak\texttt{LinDistFlow} & hybrid AC/DC 多时段严格 MIP & 有功/LinDistFlow，不含动态约束\\
+\fld{RAStyleStageMILP} & 灾害隔离—重构—修复阶段模型 & 阶段拓扑模型能力不同于严格 MIP\\
+\fld{Native} & 本地 branch-and-cut & 节点策略/CGLP 只作用于该后端\\
+\fld{HiGHS} & HiGHS 适配器 & 复核工具固定单线程，库默认自动线程\\
+\fld{Gurobi} & Gurobi 适配器 & 后端不可用时必须读取 solver status\\
+\bottomrule
+\end{tabular}
+\end{center}
+
+统一 C++ 分派优先级不是单纯的 \fld{model} switch：只要
+\fld{model=RAStyleStageMILP}、\fld{use\_ra\_style\_stage\_milp=true} 或
+\fld{enable\_disaster\_stages=true} 任一成立，就进入 RA 入口；否则
+\fld{model=MultiPeriodMIPLinDistFlow} 进入严格 MIP，其余进入启发式。调用方应避免同时给出冲突标志。
+
+\subsection{研究时域与公共控制项}
+
+\begin{paramtable}
+\fld{model} & -- & -- & enum & Heuristic & 按上述优先级选择入口\\
+\fld{horizon\_hours} & $H$ & h & 正整数 & 48 & 研究时域；HTTP 默认 8\\
+\fld{time\_step\_hr} & $\Delta t$ & h & $>0$ & 1.0 & 步数为 $\lceil H/\Delta t\rceil$\\
+\fld{load\_scale\_factor} & $\lambda_D$ & -- & 建议 $\ge0$ & 1.0 & 负值在需求聚合中被截为非负结果，并非推荐输入\\
+\fld{allow\_reconfiguration} & -- & -- & bool & true & HTTP 默认 false\\
+\fld{allow\_mess\_dispatch} & -- & -- & bool & true & 禁止移动、放电和 MESS 根\\
+\fld{max\_reconfig\_iterations} & -- & -- & integer & 50 & 仅启发式贪心循环\\
+\fld{use\_electrical\_graph\_as\_transport\_proxy} & -- & -- & bool & true & 无显式道路时以电气图距离代理\\
+\fld{mess\_travel\_speed\_kmph} & $v_m$ & km/h & 正数 & 40 & MIP 内至少按 1 km/h 防除零\\
+\fld{default\_fault\_count} & -- & -- & integer & 2 & 无显式 faults 时自动生成\\
+\fld{default\_repair\_time\_hr} & $\tau^{rep}$ & h & 正数建议 & 6 & 自动故障修复时长\\
+\fld{auto\_fault\_stagger\_hr} & -- & h & $\ge0$ 建议 & 0 & 自动故障错峰\\
+\fld{auto\_fault\_start\_hr} & -- & h & $\ge0$ 建议 & 0 & 自动首故障时刻\\
+\fld{run\_power\_flow} & -- & -- & bool & false & 启发式逐步 AC PF；不是 strict MIP 后验 PF 证书\\
+\fld{progress\_callback} & -- & -- & function & empty & 返回 false 取消启发式研究\\
+\fld{verbose} & -- & -- & bool & false & 兼容控制；不得假定所有后端都有输出\\
+\end{paramtable}
+
+\subsection{时间序列与负荷映射}
+
+\begin{paramtable}
+\fld{load\_profile} & $\lambda_t^D$ & pu & 非负向量 & 内置 24h & 聚合负荷曲线\\
+\fld{renewable\_profile} & $\lambda_t^{RES}$ & pu & 非负向量 & 内置 24h & 聚合 RES 曲线\\
+\fld{pv\_profile} & $\lambda_t^{PV}$ & pu & 非负向量 & RES fallback & PV 专用曲线\\
+\fld{wind\_profile} & $\lambda_t^{W}$ & pu & 非负向量 & RES fallback & 风电专用曲线\\
+\fld{ac\_load\_profiles\_by\_position} & -- & pu & map & empty & AC load vector position 键\\
+\fld{ac\_load\_profiles\_by\_index} & -- & pu & map & empty & AC load stable index 键\\
+\fld{ac\_load\_profiles\_by\_bus} & -- & pu & map & empty & AC bus stable ID 键\\
+\fld{dc\_load\_profiles\_by\_position} & -- & pu & map & empty & DC load vector position 键\\
+\fld{dc\_load\_profiles\_by\_index} & -- & pu & map & empty & DC load stable index 键\\
+\fld{dc\_load\_profiles\_by\_bus} & -- & pu & map & empty & DC bus stable ID 键\\
+\fld{ac\_bus\_load\_profiles\_by\_bus} & -- & pu & map & empty & AC bus POD 负荷专用键\\
+\fld{dc\_bus\_load\_profiles\_by\_bus} & -- & pu & map & empty & DC bus POD 负荷专用键\\
+\end{paramtable}
+
+profile 以小时为相位循环采样；HTTP 结果重构使用相邻点线性插值。多级映射发生时，生产路由按
+aggregate $\to$ position $\to$ stable index $\to$ bus 的代码顺序覆盖；同号 AC/DC bus 必须进入不同 map。
+position 是当前 vector 位置，不是稳定接口，持久化场景应优先用 stable index 或域限定 bus ID。
+
+\subsection{故障、道路与外部 MESS 可用性}
+
+\begin{center}\small
+\begin{longtable}{@{}L{3.6cm}L{2.4cm}L{2.2cm}L{6.0cm}@{}}
+\toprule
+字段 & 默认 & 单位/空间 & 契约\\\midrule\endhead
+\fld{faults} & empty & vector & 空时才允许自动故障\\
+\fld{branch\_kind} & AC & enum & AC/DC 域限定\\
+\fld{branch\_index} & 0 & stable ID & 新接口的作者空间支路 ID\\
+\fld{ac\_branch\_index} & 0 & stable ID & 旧兼容字段；只按 AC 解释\\
+\fld{outage\_start\_hr} & 0 & h & 故障开始\\
+\fld{repair\_duration\_hr} & 6 & h & 修复持续时间，不是恢复完成时间\\
+\fld{name} & empty & text & 报告标签，不参与电气身份\\
+\fld{transport\_edges} & empty & vector & 显式道路边\\
+\fld{from\_bus}/\fld{to\_bus} & 0 & bus ID & 当前运输接口没有独立域字段，复杂 AC/DC 道路应避免同号歧义\\
+\fld{distance\_km} & 1 & km & 最短路权重\\
+\fld{available} & true & bool & 灾后道路可用性\\
+\fld{mobile\_storage\_available\_from\_hr} & empty & map stable storage ID$\to$h & 外部路由完成后的最早参与时刻\\
+\bottomrule
+\end{longtable}
+\end{center}
+
+\subsection{RA 阶段选项}
+
+\begin{paramtable}
+\fld{use\_ra\_style\_stage\_milp} & -- & -- & bool & false & 旧触发开关，优先级高于 model\\
+\fld{enable\_disaster\_stages} & -- & -- & bool & false & 首选阶段触发开关\\
+\fld{post\_fault\_reconfig\_window\_hr} & -- & h & $\ge0$ 建议 & 2 & 首选重构窗口\\
+\fld{disaster\_post\_fault\_reconfig\_window\_hr} & -- & h & $\ge0$ 建议 & 2 & 旧拼写兼容字段\\
+\fld{use\_switch\_based\_fault\_isolation} & -- & -- & bool & true & 以开关隔离故障\\
+\fld{allow\_stage1\_open\_switches} & -- & -- & bool & true & 阶段 1 允许分闸\\
+\fld{allow\_stage2\_close\_ties} & -- & -- & bool & true & 阶段 2 允许合联络\\
+\fld{require\_switch\_for\_nonfault\_branch\_operation} & -- & -- & bool & true & 非故障边动作需设备资格\\
+\fld{allow\_branch\_operation\_without\_switch} & -- & -- & bool & false & 允许虚拟边动作\\
+\fld{use\_remote\_switch\_only} & -- & -- & bool & false & 动作限远方开关\\
+\fld{use\_strict\_mip\_for\_mess} & -- & -- & bool & true & RA 残余失供的 MESS 子问题\\
+\fld{fallback\_to\_stage\_mess\_dispatch} & -- & -- & bool & true & 子问题失败后的显式贪心回退\\
+\end{paramtable}
+
+\subsection{旧兼容选项}
+
+\fld{fault\_duration\_hr}、\fld{curtailment\_penalty}、\fld{enable\_islanding}、
+\fld{enable\_storage\_dispatch}、\fld{max\_restoration\_hr} 和外层 \fld{verbose} 保留旧 API
+兼容性。是否被具体入口消费必须以实现为准；它们不能覆盖严格 MIP 的
+\fld{mip} 子结构。新研究配置应使用 faults、horizon/time-step 和明确的模型选项，避免旧字段造成
+“已设置但无模型作用”的错觉。
+
+\subsection{MIP 后端和数值选项}
+
+\begin{paramtable}
+\fld{v\_min\_pu}/\fld{v\_max\_pu} & $\underline v,\bar v$ & pu & 正且有序 & 0.95/1.05 & AC 平方电压包络\\
+\fld{big\_m\_voltage} & $M$ & pu$^2$ & 正数 & 4 & 断开边/根锚 big-M\\
+\fld{default\_branch\_rate\_mva} & $\bar S$ & MVA & 正数 & 10 & 缺额定值 fallback\\
+\fld{shed\_penalty\_critical} & $\pi_C$ & weight & 非负 & $10^6$ & 关键切负荷权重\\
+\fld{shed\_penalty\_high} & $\pi_H$ & weight & 非负 & $10^4$ & 高优先级\\
+\fld{shed\_penalty\_medium} & $\pi_M$ & weight & 非负 & $10^2$ & 中优先级\\
+\fld{shed\_penalty\_low} & $\pi_L$ & weight & 非负 & 1 & 低优先级\\
+\fld{switching\_cost} & $c_{sw}$ & weight per action & 非负 & 5 & 分合动作权重\\
+\fld{mess\_travel\_cost\_per\_km} & $c_{km}$ & weight/km & 非负 & 0.1 & 移动弧权重\\
+\fld{renewable\_curtailment\_cost} & $c_{curt}$ & weight per MWh & 声明未消费 & 10 & 当前不进目标\\
+\fld{allow\_multi\_root\_forest} & -- & -- & bool & true & 多根孤岛意图\\
+\fld{allow\_grid\_forming\_storage\_roots} & -- & -- & bool & true & 固定储能根上界\\
+\fld{allow\_mess\_black\_start} & -- & -- & bool & true & MESS 根上界\\
+\fld{mip\_gap} & $\epsilon_{gap}$ & relative & $\ge0$ & 0.02 & HTTP 默认 0.03\\
+\fld{max\_time\_s} & -- & s & positive & 120 & HTTP 默认 180\\
+\fld{max\_nodes} & -- & nodes & positive & 50000 & B\&C 节点限\\
+\fld{num\_threads} & -- & threads & $\le0$/positive & -1 & 自动最多 8；复核工具为 1\\
+\fld{solver} & -- & -- & enum & Native & HTTP 默认 Gurobi\\
+\fld{native\_node\_selection} & -- & -- & enum & BestFirst & Native 的 Hybrid/BestFirst\\
+\fld{verbose} & -- & -- & bool & false & 后端日志\\
+\fld{enable\_cglp\_cuts} & -- & -- & bool & false & 仅 Native CGLP\\
+\end{paramtable}
+
+\subsection{逐步结果：标量与拓扑动作}
+
+\begin{center}\small
+\begin{longtable}{@{}L{3.8cm}L{2.4cm}L{2.2cm}L{5.8cm}@{}}
+\toprule
+字段 & 单位/空间 & 赋值 & 解释\\\midrule\endhead
+\fld{step\_index} & 0-based & all & 离散步\\
+\fld{hour} & h & all & $t\Delta t$\\
+\fld{load/res/pv/wind\_multiplier} & pu & all & 实际采样倍率\\
+\fld{total\_demand\_mw} & MW & all & 当前总需求\\
+\fld{served\_mw}/\fld{shed\_mw} & MW & all & 当前供电/切负荷\\
+\fld{restoration\_ratio} & -- & all & served/demand，无需求时 1\\
+\fld{weighted\_shed\_mw} & weight$\cdot$MW & all & 非物理能量\\
+\fld{total\_res\_mw} & MW & model-specific & 当前 RES 使用/可用聚合口径依入口\\
+\fld{island\_count} & count & all & 当前带电/拓扑分量口径依入口\\
+\fld{active/repaired\_faults} & count & all & 时步故障状态\\
+\fld{switch\_actions} & count & all & 总分合变化\\
+\fld{disaster\_stage} & text & RA/all default & Normal/Isolation/Reconfig/Repair\\
+\fld{open\_ac/dc\_branch\_ids} & stable IDs & all where represented & 域分离的开断边\\
+\fld{closed\_tie\_branch\_ids} & stable IDs & model-specific & AC 联络合闸\\
+\fld{closed\_dc\_tie\_branch\_ids} & stable IDs & strict/RA & DC 联络合闸\\
+\fld{isolation\_open\_ac/dc\_branch\_ids} & stable IDs & RA & 隔离动作，不是所有开断\\
+\fld{open/closed\_switch\_ids} & stable IDs & RA/strict & 作者空间开关 ID\\
+\fld{switched\_open/closed\_ids} & stable IDs & RA & 本步变化集合\\
+\fld{closed\_tie\_switch\_ids} & stable IDs & RA & 合上的联络开关\\
+\fld{open\_breaker\_ids} & stable IDs & strict/RA & 分闸断路器\\
+\fld{closed\_tie\_breaker\_ids} & stable IDs & strict/RA & 合联络断路器\\
+\fld{switch\_open/close\_actions} & count & RA/strict & 分开计数\\
+\texttt{isolation/}\allowbreak\fld{reconfiguration\_switch\_actions} & count & RA & 阶段归因\\
+\fld{fault\_zone\_ac/dc\_bus\_ids} & stable IDs & RA & 故障区域，域分离\\
+\bottomrule
+\end{longtable}
+\end{center}
+
+\subsection{逐步结果：供电、潮流与图诊断}
+
+\fld{shed\_by\_priority} 固定按 $[Critical,High,Medium,Low]$ 排列，单位 MW。
+\fld{bus\_supply\_kind/index} 与 demand/served/shed/priority/importance 向量必须同长度联合解释；
+kind 与 stable index 共同构成负荷身份。不得只用 index 跨 AC/DC 或跨组件类型关联。
+严格 MIP 还以同一行序给出 \fld{bus\_supply\_energized/root}、
+\fld{bus\_supply\_base\_source\_mw}、\fld{bus\_supply\_dispatchable\_generation\_mw}、
+\fld{bus\_supply\_renewable\_mw} 和 \fld{bus\_supply\_fixed\_storage\_mw}。这些量来自实际 MIP
+变量并用于 DAE 初态重放；启发式路径保持为空，不伪造不存在的 MIP 归因。
+
+\fld{pf\_converged}、\fld{pf\_residual}、\fld{bus\_voltages}、\fld{branch\_flows} 只有执行相应
+后验潮流时才具有物理校验含义。\fld{BranchFlowStep} 同时保留 rich
+\fld{branch\_index}、内部 canonical ID、三绕组 \fld{pair\_number}、component type、domain、端点、
+$P/Q$ 和 loading。严格 MIP 自身的 active-power 结果主要进入
+\fld{ResilienceComponentStateStep}；\fld{active\_power\_valid=false} 时数值不得解释为零潮流。
+
+\fld{cut\_vertex\_bus\_ids} 是旧裸 ID 向量；新的
+\fld{cut\_vertex\_ac\_bus\_ids}/\fld{cut\_vertex\_dc\_bus\_ids} 才是无歧义接口。
+\fld{bridge\_branch\_ids} 保存作者空间支路 ID，但具体覆盖取决于图构建包含的组件族。
+
+\subsection{MESS 逐步结果}
+
+\fld{MESSStateStep} 的 \fld{storage\_index} 是稳定资产 ID，\fld{bus}/\fld{target\_bus} 是报告母线 ID；
+\fld{status} 可表示 AwaitingArrival、移动、等待或已连接。\fld{dispatch\_mw} 为非负放电，
+\fld{energy\_mwh} 为绝对能量，\fld{soc}$=E/E_{rated}$，\fld{arrival\_time\_hr} 为计划到达时刻，
+\fld{remaining\_travel\_hr} 为当前剩余旅行时间。不能由 \fld{target\_bus} 推断已经到达。
+
+\subsection{聚合结果}
+
+\begin{center}\small
+\begin{longtable}{@{}L{3.8cm}L{2.4cm}L{6.8cm}@{}}
+\toprule
+字段 & 单位 & 契约\\\midrule\endhead
+\fld{steps} & vector & 逐步结果，索引为离散时步\\
+\fld{fault\_sequence} & stable IDs+h & 实际使用的显式或自动故障\\
+\fld{model}/\fld{model\_stats} & -- & 有效模型与求解证据\\
+\fld{total\_demand\_mwh} & MWh & $\sum_tD_t\Delta t$\\
+\fld{total\_served\_mwh} & MWh & $\sum_tP_t^{srv}\Delta t$\\
+\fld{total\_shed\_mwh} & MWh & $\sum_tP_t^{shed}\Delta t$\\
+\fld{weighted\_unserved\_mwh} & weight$\cdot$MWh & 优先级目标，不是物理 ENS\\
+\fld{resilience\_index} & -- & served/demand\\
+\fld{avg\_restoration\_ratio} & -- & 未按需求加权的逐步比例平均\\
+\fld{final\_restoration\_ratio} & -- & 最后一个模拟步比例\\
+\fld{peak\_shed\_mw} & MW & 最大逐步切负荷\\
+\fld{mess\_energy\_delivered\_mwh} & MWh & MESS 放电积分\\
+\fld{mess\_travel\_distance\_km} & km & 已选择移动弧距离总和\\
+\fld{total\_switch\_actions} & count & 逐步动作总和\\
+\fld{total\_repaired\_faults} & count & 最大累计修复数\\
+\fld{feasible} & bool & 入口/求解/取消综合状态\\
+\fld{mess\_dispatch\_model} & text & strict\_mip/stage/fallback/disabled/none 等来源\\
+\fld{completed} & bool & 旧兼容，通常同步 feasible\\
+\fld{total\_ens\_mwh} & MWh & 旧兼容，等于 total shed\\
+\fld{max\_curtailment\_mw} & MW & 旧命名，当前同步 peak shed\\
+\fld{restoration\_time\_hr} & h & 当前是末步 hour，不是首次完全恢复时刻\\
+\fld{status} & text & 必须与 feasible、solver status 联合读取\\
+\bottomrule
+\end{longtable}
+\end{center}
+
+数值恒等式应满足
+\begin{align}
+ E_D&=E_{srv}+E_{shed},\\
+ R_E&=E_{srv}/E_D,\\
+ \fld{total\_ens\_mwh}&=E_{shed}.
+\end{align}
+浮点比较应使用与能量规模相称的容差。
+
+\subsection{模型统计与能力标志}
+
+\fld{DistributionResilienceModelStats} 报告 model、变量/二进制/整数/等式/不等式数、目标、gap、
+runtime、built/solved、solver name/status、formulation notes 和 CGLP cut 数。
+\fld{model\_scope} 默认 \texttt{hybrid-acdc-restoration-milp}，不能替代逐能力布尔量。
+
+\begin{center}\small
+\begin{longtable}{@{}L{4.5cm}L{8.5cm}@{}}
+\toprule
+Validity flag & 为 true 时的最小含义\\\midrule\endhead
+\fld{dc\_network\_modelled} & canonical DC 母线/边进入有功模型\\
+\fld{vsc/lcc/dcdc\_dispatch\_modelled} & 相应换流器成为有功传输边\\
+\fld{energy\_router\_modelled} & 能量路由器等值边进入模型\\
+\fld{transformers\_modelled} & 变压器 canonical 等值边进入模型\\
+\fld{switches\_and\_breakers\_modelled} & 可操作设备状态进入模型\\
+\fld{rich\_loads\_modelled} & rich AC/DC load 聚合进入需求\\
+\fld{ac\_dc\_storage\_modelled} & AC/DC 固定/移动储能进入放电模型\\
+\fld{aggregated\_resources\_modelled} & 聚合资源被投影/聚合\\
+\fld{canonical\_projection\_used} & rich 到 canonical 映射实际执行\\
+\fld{ac/dc\_branch\_flow\_limits\_enforced} & 相应有功边容量门控执行\\
+\fld{converter\_transfer\_limits\_enforced} & 换流器有功容量门控执行\\
+\fld{lindistflow\_voltage\_envelope\_enforced} & AC 平方电压线性包络执行\\
+\fld{radial\_topology\_enforced} & 森林计数与商品流约束执行\\
+\fld{converter\_losses\_modelled} & 当前 false\\
+\fld{reactive\_power\_modelled} & 当前 false\\
+\fld{protection\_logic\_modelled} & 当前 false\\
+\fld{transient\_limits\_modelled} & 当前 false\\
+\fld{mip\_gap\_within\_tolerance} & 有效 solve 且 achieved gap 不超过请求值\\
+\bottomrule
+\end{longtable}
+\end{center}
+
+\subsection{动态动作与证书结果字段}
+
+\fld{CertifiedRestorationAction} 的 id/description 是报告身份；objective 越大越优，
+tie-break priority 决定同目标次序；dynamic events 是实际 DAE 动作。三个 cyber 布尔量分别是路径、
+授权和确认。MESS 字段依次给出是否需要/是否要求构网、旅行时间/截止时间、需要/可用能量、构网能力、
+稳定 storage ID、目标 AC bus 与 $P/Q$ 调度。
+
+\fld{MultiFidelityCertificate} 必须按以下组读取：
+\begin{itemize}
+ \item 身份和等级：action ID、fidelity level/scope、label；
+ \item 成功与证明：simulation success、proof valid、constants valid/global；
+ \item MESS/换流器观测：materialized、device observed、current observed/active；
+ \item 数值残差：$r_f,r_g,\kappa_g,L_F,e_0,e_{num},D_{rec}$；
+ \item 误差传播：forcing/eta method、eta、谱横坐标、转移增益/增长率、状态尺度范围；
+ \item 安全输出：margin vector 及各自 lower/upper/method；
+ \item 适用域：constant scope、limitations、完整 trajectory。
+\end{itemize}
+NaN/Inf 表示未能形成有限证据，不能替换为零。
+
+\subsection{DAE bridge 选项和反馈字段}
+
+\begin{paramtable}
+\fld{switching\_time\_s} & -- & s & $\ge0$ & 0.1 & 事件施加时刻\\
+\fld{fidelity\_level} & -- & level & 1--3 & 3 & 证书层级\\
+\fld{certify\_initial\_transition} & -- & -- & bool & true & 认证初始故障/状态\\
+\fld{certify\_final\_state} & -- & -- & bool & true & 加入末状态动作\\
+\fld{require\_supported\_transitions} & -- & -- & bool & true & unsupported 阻止安全证明\\
+\fld{replay\_mip\_load\_service} & -- & -- & bool & true & 回放域限定母线服务比例\\
+\fld{max\_transitions} & -- & count & positive & 64 & 最大动作数\\
+\fld{enable\_feedback\_loop} & -- & -- & bool & true & proof-valid Unsafe 后重求恢复 MIP\\
+\fld{max\_feedback\_iterations} & -- & count & nonnegative & 8 & 最大反馈重求轮数\\
+\fld{command\_path\_available} & -- & -- & bool & true & 全局命令路径门\\
+\fld{authorization\_valid} & -- & -- & bool & true & 全局授权门\\
+\fld{acknowledgement\_available} & -- & -- & bool & true & 全局确认门\\
+\end{paramtable}
+
+\fld{DistributionResilienceDAECertificateResult} 的 attempted、all transitions safe、proof valid、status、
+model scope、limitations、transition vector 和 feedback vector 构成完整结果。还必须联合读取
+\fld{feedback\_closed\_loop\_complete}、\fld{safe\_plan\_found}、
+\fld{feedback\_iterations}、\fld{restoration\_mip\_solves} 与
+\fld{feedback\_cuts\_applied}。单条 feedback 的
+\fld{applied\_to\_restoration\_mip=true} 只表示该历史反例已生成并施加约束；最终安全仍要求闭环标志与
+新方案全部转换证书同时通过。
+
+\subsection{HTTP 与 C++ 默认值差异}
+
+生产 HTTP 路由默认 apply demo data=true、模型 RA、求解器 Gurobi、时域 8h、禁止重构、gap 0.03、
+时限 180s；C++ POD 默认则是启发式、Native、48h、允许重构、gap 0.02、时限 120s。
+HTTP 对未知 model 字符串退到 RA，对未知 solver 字符串退到 Gurobi，而不是返回解析错误。
+因此可复现研究必须显式提交这些字段并回读 \fld{requested\_model}、\fld{effective\_model}、
+\fld{requested\_solver}、\fld{solver\_name/status}。使用隐式默认值的 HTTP 示例不能充当 C++ 默认契约。

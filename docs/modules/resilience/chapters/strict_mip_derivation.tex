@@ -1,0 +1,221 @@
+\section{严格多时段恢复 MIP 的逐约束推导}\label{sec:res-strict-derivation}
+
+本章把 \srcpath{src/resilience/resilience\_restoration\_mip.cpp:build\_mip\_skeleton}
+实际送入 AML/求解器的线性模型完整写出。这里的“严格”表示：模型不是启发式代理，二进制变量、
+等式、不等式和求解器 incumbent 均被直接检查；它\emph{不}表示 AC 非线性物理、暂态稳定或保护
+配合已经被严格证明。物理覆盖仍由 \fld{ValidityFlags} 决定。
+
+\subsection{集合、索引和时间离散}
+
+令 $\mathcal N=\mathcal N^{ac}\cup\mathcal N^{dc}$ 为 canonical 母线集合，
+$\mathcal E$ 为 AC 支路、DC 支路、投影变压器、VSC、LCC、DC/DC、能量路由器及可操作开关形成的
+有功传输边集合。$\mathcal S$、$\mathcal M$ 分别为固定储能与 MESS 集合。离散时刻为
+\begin{equation}
+ \mathcal T=\{0,\ldots,T-1\},\qquad
+ T=\max\!\left(1,\left\lceil\frac{H}{\Delta t}\right\rceil\right),
+\end{equation}
+其中 $H=\fld{horizon\_hours}$，$\Delta t=\fld{time\_step\_hr}$。若 $H\le0$ 或
+$\Delta t\le0$，入口在建模前返回 \fld{feasible=false}。最后一个离散区间仍按完整 $\Delta t$
+积分，因此 $H/\Delta t$ 非整数时，聚合能量覆盖到 $T\Delta t\ge H$；报告应保留这一离散化口径。
+
+母线和支路在模型内部使用 0-based position。对外 \fld{branch\_index}、
+\fld{component\_index} 必须经投影映射恢复为作者空间稳定 ID；AC/DC 同号母线由域标签区分。
+
+\subsection{变量全集}
+
+下表与实现中的 \texttt{MIPIndex} 一一对应。$v_{it}$ 是电压幅值平方，不是幅值本身。
+\begin{center}\small
+\begin{longtable}{@{}L{2.2cm}L{3.1cm}L{2.4cm}L{6.2cm}@{}}
+\toprule
+变量 & 类型/范围 & 实现名 & 含义\\\midrule\endhead
+$z_{et}$ & binary & \texttt{z} & 边闭合且可用\\
+$y^+_{et},y^-_{et}$ & binary & \texttt{y\_on,y\_off} & 本步合、分动作\\
+$p_{et}$ & $[-\bar P_e,\bar P_e]$ & \texttt{p\_branch} & 定向有功传输\\
+$f_{et}$ & $[-|\mathcal N|,|\mathcal N|]$ & \texttt{f\_branch} & 连通性商品流\\
+$v_{it}$ & $[0,\bar v^2]$ & \texttt{v\_bus} & 电压幅值平方\\
+$u_{it}$ & binary & \texttt{u\_bus} & 母线带电状态\\
+$r_{it}$ & binary & \texttt{root\_bus} & 孤岛根节点\\
+$r^0_{it}$ & binary & \texttt{root\_base} & 基础电源根被选中\\
+$F^0_{it}$ & $[0,|\mathcal N|]$ & \texttt{root\_flow} & 根注入商品流\\
+$P^0_{it}$ & $[0,\bar P^0_i]$ & \texttt{p\_source} & 外部/基础电源出力\\
+$s_{it}$ & $[0,D_{it}]$ & \texttt{shed} & 切负荷\\
+$P^{ren}_{it}$ & $[0,\bar P^{ren}_{it}]$ & \texttt{ren} & 实际使用可再生有功（索引族 \texttt{renewable\_used}）\\
+$P^g_{it}$ & $[0,\bar P^g_i]$ & \texttt{gen\_dispatch} & 可调资源聚合出力\\
+$P^{dis}_{st}$ & $[0,\bar P_s]$ & \texttt{fs\_dis} & 固定储能放电\\
+$E_{st}$ & $[\underline E_s,\bar E_s]$ & \texttt{fs\_e} & 固定储能能量\\
+$r^s_{st}$ & binary & \texttt{fs\_root} & 固定构网储能根\\
+$E^m_{mt}$ & $[\underline E_m,\bar E_m]$ & \texttt{mess\_e} & MESS 能量\\
+$x_{mit}$ & binary & \texttt{mess\_x} & MESS 位于母线 $i$\\
+$r^m_{mit}$ & binary & \texttt{mess\_root} & MESS 在 $i$ 形成根\\
+$P^m_{mit}$ & $[0,\bar P_m]$ & \texttt{mess\_dis} & MESS 在 $i$ 放电\\
+$a_{m\alpha}$ & binary & \texttt{mess\_arc\_var} & 选择时空弧 $\alpha$\\
+\bottomrule
+\end{longtable}
+\end{center}
+
+故障直接把相应 $z_{et}$ 上界置零；\fld{allow\_reconfiguration=false} 时，$z_{et}$ 的上下界
+固定为“初始闭合且可用”。因此故障不可通过动作变量重新闭合。
+
+\subsection{目标函数与量纲}
+
+实现目标为
+\begin{align}
+\min\quad
+ &\sum_{t\in\mathcal T}\sum_{i\in\mathcal N}
+       \pi_i s_{it}\Delta t
+ +c_{sw}\sum_{t,e}(y^+_{et}+y^-_{et}) \\
+ &+\sum_{m,\alpha\in\mathcal A_m^{move}}
+       (c_{km}d_{m\alpha}+\epsilon_{move})a_{m\alpha}
+ +\epsilon_{dis}\sum_{t,m,i}P^m_{mit}\Delta t .
+\end{align}
+$\pi_i$ 取 Critical/High/Medium/Low 四级罚权。第一项单位是“罚权乘 MWh”，并非货币；
+$c_{sw}$ 与 $c_{km}$ 也只有相对优化权重意义。$\epsilon_{move}$、$\epsilon_{dis}$ 是确定性破平项。
+
+\begin{gapnote}
+公开选项 \fld{renewable\_curtailment\_cost} 当前没有进入上述目标。模型可通过
+$0\le P^{ren}_{it}\le\bar P^{ren}_{it}$ 弃电，但不会按该字段计价。文档、HTTP 和研究报告不得宣称
+已经优化弃风弃光成本；若依赖这一成本，必须先补代码和回归。
+\end{gapnote}
+
+\subsection{动作递推与边容量}
+
+初始闭合参数为 $z_e^{-1}$。动作方程和互斥约束是
+\begin{align}
+ z_{e0}-y^+_{e0}+y^-_{e0}&=z_e^{-1},\\
+ z_{et}-z_{e,t-1}-y^+_{et}+y^-_{et}&=0,\quad t>0,\\
+ y^+_{et}+y^-_{et}&\le1.
+\end{align}
+传输与商品流均由 $z$ 门控：
+\begin{align}
+ -\bar P_ez_{et}\le p_{et}&\le\bar P_ez_{et},\\
+ -|\mathcal N|z_{et}\le f_{et}&\le|\mathcal N|z_{et},\\
+ z_{et}&\le u_{i(e)t},\qquad z_{et}\le u_{j(e)t}.
+\end{align}
+支路容量优先取作者额定值；缺失时使用 \fld{default\_branch\_rate\_mva} 转为有功上界。
+换流器和投影设备在本模型中是无损双向有功边，故 \fld{converter\_transfer\_limits\_enforced}
+可以为 true，而 \fld{converter\_losses\_modelled} 仍为 false。
+
+\subsection{LinDistFlow 电压包络}
+
+对标记 \texttt{enforce\_voltage\_drop} 的 AC 等值边，使用
+\begin{equation}
+ -M(1-z_{et})\le
+ v_{j(e)t}-v_{i(e)t}+2r_ep_{et}
+ \le M(1-z_{et}).
+\end{equation}
+带电母线满足
+\begin{equation}
+ \underline v^2u_{it}\le v_{it}\le\bar v^2,
+\end{equation}
+根节点另由 big-M 约束锚定 $v_{it}=1$。模型没有 $q_{et}$、电抗压降、线路损耗和相不平衡；
+因此它是有功 LinDistFlow 包络，不是 AC 潮流可行性证书。DC 和换流器边不执行这一 AC 压降行。
+
+\subsection{节点有功平衡}
+
+每个域限定母线执行
+\begin{equation}
+ P^0_{it}+P^g_{it}+P^{ren}_{it}+s_{it}
+ +\sum_{e:j(e)=i}p_{et}-\sum_{e:i(e)=i}p_{et}
+ +\sum_{s:b(s)=i}P^{dis}_{st}+\sum_mP^m_{mit}=D_{it}.
+\end{equation}
+切负荷是平衡式中的非负松弛量。进一步的门控包括
+\begin{align}
+ P^0_{it}&\le\bar P^0_i r^0_{it},&
+ P^g_{it}&\le\bar P^g_i u_{it},\\
+ P^{ren}_{it}&\le\bar P^{ren}_{it}u_{it},&
+ s_{it}&\ge D_{it}(1-u_{it}).
+\end{align}
+最后一行保证失电母线的需求全部被切除。它不禁止带电母线部分切负荷。
+
+\subsection{辐射森林与多根供电}
+
+对每个时刻，只添加一次全局森林计数式
+\begin{equation}
+ \sum_{e\in\mathcal E}z_{et}+\sum_{i\in\mathcal N}r_{it}
+ =\sum_{i\in\mathcal N}u_{it}.
+\end{equation}
+商品流守恒为
+\begin{equation}
+ F^0_{it}+\sum_{e:j(e)=i}f_{et}-\sum_{e:i(e)=i}f_{et}=u_{it},
+ \qquad 0\le F^0_{it}\le|\mathcal N|r_{it}.
+\end{equation}
+并有 $r_{it}\le u_{it}$。根必须由基础电源、固定构网储能或 MESS 支撑：
+\begin{equation}
+ r_{it}\le r^0_{it}+\sum_{s:b(s)=i}r^s_{st}+\sum_m r^m_{mit}.
+\end{equation}
+这组“边数 + 商品流”约束排除孤立的无根环路。\fld{allow\_multi\_root\_forest} 的公开语义是
+允许多个带电岛根；研究解释仍应通过逐步 \fld{island\_count} 检查实际根数。
+
+\subsection{固定储能：只放电递推}
+
+固定储能初始化和递推为
+\begin{align}
+ E_{s0}&=E_s^{init},\\
+ E_{s,t+1}&=E_{st}-\frac{\Delta t}{\eta_s^{dis}}P^{dis}_{st},\\
+ \underline E_s\le E_{st}&\le\bar E_s,\qquad
+ P^{dis}_{st}\le\bar P_su_{b(s)t}.
+\end{align}
+本实现没有充电变量、充电效率、终端 SOC 或跨事件恢复能量补给。构网根还要求能量高于最小值，
+但使用 $10^{-3}$ 的线性联结常数而不是物理持续时间证明。故“可形成根”只是一项静态能量门。
+
+\subsection{MESS 时空网络}
+
+每个 MESS 在每个时刻恰处于一个位置：
+\begin{equation}
+ \sum_i x_{mit}=1,qquad x_{mi0}=\mathbb 1[i=i_m^0].
+\end{equation}
+等待弧 $(i,t)\to(i,t+1)$ 总是候选；移动弧的离散旅行步数为
+\begin{equation}
+ n_{ij}=\max\!\left(1,\left\lceil
+ \frac{d_{ij}/\max(v_{mess},1)}{\Delta t}\right\rceil\right),
+\end{equation}
+到达时刻越出 $\mathcal T$、不可达或超过资产最大里程的弧被删除。节点流守恒把出发、到达与
+$x_{mit}$ 关联；同一时刻不能同时选择多条活动弧。外部到达约束
+\fld{mobile\_storage\_available\_from\_hr} 被上取整为最早可用步，在此之前移动、放电和构网
+上界为零。
+
+能量递推同时扣除放电与上一步出发移动弧的行驶耗能：
+\begin{equation}
+ E^m_{m,t+1}=E^m_{mt}
+ -\frac{\Delta t}{\eta_m^{dis}}\sum_iP^m_{mit}
+ -\sum_{\alpha:\,t_\alpha^{dep}=t}e^{travel}_{m\alpha}a_{m\alpha}.
+\end{equation}
+放电和构网均受当前位置门控。与固定储能相同，MESS 也没有充电变量。
+
+\subsection{模型规模与计算复杂度}
+
+忽略时空弧，变量规模为
+\begin{equation}
+ O\!\left(T(|\mathcal E|+|\mathcal N|+|\mathcal S|
+ +|\mathcal M||\mathcal N|)\right).
+\end{equation}
+若每个 MESS 对所有母线对都可移动，弧数最坏为
+$O(T|\mathcal M||\mathcal N|^2)$。二进制量主要来自支路状态/动作、根、位置和时空弧；
+因此长时域与全连接运输代理会主导分支定界难度。运行报告必须给出
+\fld{num\_variables}、\fld{num\_binary\_variables}、约束数、节点/时限和 achieved gap，不能只报墙钟。
+
+\subsection{incumbent 的数值验收}
+
+求解后实现重新计算目标，并检查：变量界、等式残差、不等式残差、整数性及“目标系数非负时目标
+不得显著为负”。只有后端报告成功且这些检查通过，结果才接受为有效 incumbent。此后才从
+$x$ 恢复逐步供电、支路/组件状态、SOC、动作及 aggregate 指标。\fld{mip\_gap\_within\_tolerance}
+仅表示 achieved gap 不大于请求值；当请求值非零时，它不等于全局最优证明。
+
+\subsection{逐约束实现覆盖表}
+
+\begin{center}\small
+\begin{tabular}{@{}L{4.0cm}L{4.0cm}L{5.4cm}@{}}
+\toprule
+理论对象 & 当前状态 & 不得外推的内容\\\midrule
+有功节点平衡 & \implfull{resilience\_restoration\_mip.cpp:build\_mip\_skeleton} & 无功、损耗、相不平衡\\
+AC/DC/换流器传输限 & \implfull{resilience\_restoration\_mip.cpp:build\_mip\_skeleton} & 换流器损耗与控制模式\\
+AC LinDistFlow 电压 & \implpart{只含有功电阻压降和平方电压包络} & 非线性 AC 可行性\\
+径向多根森林 & \implfull{resilience\_restoration\_mip.cpp:build\_mip\_skeleton} & 保护区和同步并列校验\\
+固定储能/MESS 放电 SOC & \implpart{只放电，无充电和终端 SOC} & 充电、终端 SOC、退化\\
+MESS 路由与行驶耗能 & \implfull{resilience\_restoration\_mip.cpp:build\_mip\_skeleton} & 交通拥堵与道路灾损随机性\\
+切负荷优先级 & \implfull{resilience\_restoration\_mip.cpp:penalty\_from\_priority} & 罚权的货币解释\\
+可再生弃电量 & \implpart{可限制使用量，但公开弃电成本未进入目标} & 公开弃电成本字段的目标作用\\
+动态安全约束 & \implnone & 必须由第~\ref{sec:res-dynamic-derivation}~章的二次认证另行判断\\
+\bottomrule
+\end{tabular}
+\end{center}

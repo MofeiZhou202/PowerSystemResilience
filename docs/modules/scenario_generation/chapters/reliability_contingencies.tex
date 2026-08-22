@@ -1,0 +1,86 @@
+\section{可靠性场景：FMEA 兼容 N--1 目录}
+\label{sec:reliability-scenarios}
+
+\subsection{条件语义}
+可靠性场景描述
+\begin{equation}
+ \widehat P(d\omega\mid C=c,\mathcal I),
+\end{equation}
+其中 $C=c$ 是一个已枚举的单元件停运。模块不根据 MTBF/故障率计算 $P(C=c)$；每个
+contingency group 内的候选等概率。若下游需要 EENS 或年故障频率，必须从可靠性模块引入
+故障率和修复时间。
+
+\subsection{目录来源与资产覆盖}
+\srcpath{enumerate\_n1\_contingencies} 复用已实现的可靠性 FMEA 目录和 resolver，而不是单独
+发明一套元件枚举。公开类型包含 AC/DC branch、VSC、DC/DC、AC/DC bus、发电机、静态发电、
+新能源、PV、负荷、储能、mobile storage、两/三绕组变压器、VPP 与 microgrid。
+
+公开 include 标志控制 AC/DC branch、VSC、DC/DC、bus、generator、load 和 storage 类别。
+\fld{include\_vpps} 与 \fld{include\_microgrids} 为兼容字段，默认 false，当前不会把目录扩展到
+可靠性 assessment 已实现范围之外。文档不能因为 enum 中存在类型就宣称目录一定产生该类型。
+
+\subsection{稳定 ID 与影响集合}
+每个 \fld{ContingencyDefinition} 含：
+\begin{itemize}
+  \item 稳定字符串 \fld{id}、枚举 \fld{type}、稳定 \fld{component\_index} 和显示名；
+  \item 受影响 AC/DC branches、converters、DC/DC converters、buses、generators、loads、storage；
+  \item 影响列表使用带域前缀的字符串，避免 AC/DC 同号 ID 冲突。
+\end{itemize}
+outage signature 根据统一目录位置构造，仅用于聚类 Hamming 距离；对外报告仍返回稳定 ID。
+
+\subsection{目录截断}
+若 \fld{max\_contingencies}>0，只保留确定性枚举顺序中的前 $M$ 个目录项。该截断是工作预算，
+不是风险排序。大目录时 audit 样本也有界，但完整 contingency coverage 不因 audit 截断而丢失；
+分别由测试
+\texttt{Large reliability catalog bounds audit samples without dropping contingencies} 与
+\texttt{Very large reliability catalogs preserve N-1 coverage within work budgets} 验证。
+
+\subsection{候选构造}
+对每个 contingency：
+\begin{enumerate}
+  \item 使用单步 \fld{num\_steps}=1；JSON 解析完成后也强制为 1；
+  \item 生成 \fld{candidates\_per\_contingency} 个负荷/新能源/SOC 扰动候选；
+  \item 写入 contingency、outage signature 和 regime label；
+  \item 组内赋 $1/N_c$ 概率；
+  \item 用最多 \fld{cluster\_count\_per\_contingency} 个 medoid 缩减；
+  \item 保存组级 audit，再累计 \fld{cluster\_total}。
+\end{enumerate}
+可靠性场景生成只标记停运条件，不实际调用 PF、孤岛检测或负荷削减。
+
+\subsection{元件筛选和在运状态}
+目录遵循可靠性 resolver 的可停运/在运判定；已停运、无效或不可解析资产不会被静默映射到
+另一位置。显示名只用于可读性，身份由类型和稳定 index 决定。
+
+\subsection{概率和报告口径}
+若有 $C$ 个 contingency、每组 $N_c$ 个候选，则所有候选 \fld{probability} 的全局和为 $C$，
+不是 1：
+\begin{equation}
+ \sum_{c=1}^C\sum_{i=1}^{N_c}\pi_{i\mid c}=C.
+\end{equation}
+因此 HTTP/JSON 使用嵌套 group 结构保留条件边界。任何把 groups flatten 后重新归一的调用方
+都改变了语义，必须显式提供 contingency prior。
+
+\subsection{复杂度}
+设目录大小 $C$，每组候选 $N_c$，特征维数 $S$，代表数 $K_c$。生成约 $O(CN_c)$，聚类
+保守最坏 $O(CIK_cN_c^2S)$。\fld{max\_contingencies} 只限制 $C$；它不自动降低每组候选。
+
+\subsection{已知边界}
+\begin{gapnote}
+当前路径不是 N--k、共因失效、保护拒动、时序 Markov 修复或概率潮流；bus outage 对支路和
+设备的拓扑传播依赖 resolver 已实现语义。候选不含故障率权重，不能直接计算年可靠性指标。
+\end{gapnote}
+
+\subsection{实现对应}
+\begin{center}\small
+\begin{tabular}{@{}L{5.2cm}L{8.5cm}@{}}
+\toprule
+步骤 & 源码锚点\\
+\midrule
+FMEA 兼容目录 & \srcpath{scenario\_generation.cpp:enumerate\_n1\_contingencies}\\
+候选生成与单步强制 & \srcpath{scenario\_generation.cpp:generate\_reliability\_scenarios}\\
+JSON options 强制 num steps=1 & \srcpath{scenario\_generation.cpp:scenario\_generation\_options\_from\_json}\\
+组级缩减 & \srcpath{scenario\_generation.cpp:cluster\_candidates}\\
+故障率和年指标 & \implnone（属于 reliability 模块）\\
+\bottomrule
+\end{tabular}
+\end{center}

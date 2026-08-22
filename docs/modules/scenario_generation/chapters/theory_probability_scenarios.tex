@@ -1,0 +1,111 @@
+\section{场景概率理论与条件经验分布}
+\label{sec:scenario-probability-theory}
+
+\begin{theorynote}
+场景生成的数学对象不是一组任意曲线，而是给定信息集下、带离散概率质量的有限支持分布。
+本章先定义概率口径，再说明风险估计和缩减后概率守恒；实现中的等概率、截断和分组规则见
+第~\ref{sec:regular-implementation}--\ref{sec:clustering-implementation} 章。
+\end{theorynote}
+
+\subsection{概率空间与信息条件化}
+令 $\mathcal I_g$ 表示场景族 $g$ 的输入信息：系统资产、确定性 profile、SSP/year、
+contingency 或台风强度、随机种子和算法选项。长度为 $T$ 的场景写为
+\begin{equation}
+ \omega=(z_0,\ldots,z_{T-1},e),\qquad
+ z_t=(P^L_t,P^{PV}_t,P^W_t,P^R_t,E^{st}_t),
+\end{equation}
+其中 $e$ 可包含故障、修复、轨迹与停运签名。模块输出的是
+\begin{equation}
+ \widehat P_g(d\omega\mid\mathcal I_g)
+ =\sum_{i=1}^{N_g}\pi_i^{(g)}\delta_{\omega_i}(d\omega),
+ \quad \pi_i^{(g)}\ge0,
+ \quad \sum_i\pi_i^{(g)}=1.
+\end{equation}
+它是算法产生的条件经验分布，不是现实世界无条件频率。若需要跨族期望，调用方必须提供
+$\alpha_g=P(G=g)$，再构造 $P=\sum_g\alpha_g\widehat P_g$；本模块不推断 $\alpha_g$。
+
+\subsection{等概率候选与分层条件概率}
+当前三个生成分支在各有效组内采用等概率候选：
+\begin{equation}
+ \pi_{i\mid h}=\frac1{N_h},
+\end{equation}
+其中 $h$ 分别代表 SSP--year、contingency 或 typhoon intensity 分组。可靠性结果中
+$P(\omega_i\mid C=c)$ 与 $P(C=c)$ 是不同对象；若直接把所有 contingency 下的候选概率
+相加，会得到 contingency 数量而不是 1。弹性族同理，不把 TY、STY、SuperTY 的条件样本
+误认为类别发生概率。
+
+\subsection{缩减映射与概率守恒}
+设 $m_k\in\{1,\dots,N\}$ 为第 $k$ 个 medoid，$A_k$ 是 Voronoi 分配集合：
+\begin{equation}
+ A_k=\{i:k=\arg\min_j d(\omega_i,\omega_{m_j})\}.
+\end{equation}
+缩减分布为
+\begin{equation}
+ \widehat Q_K=\sum_{k=1}^K\Pi_k\delta_{\omega_{m_k}},\qquad
+ \Pi_k=\sum_{i\in A_k}\pi_i.
+\end{equation}
+若 $\{A_k\}$ 构成候选集合的划分，则
+\begin{equation}
+ \sum_k\Pi_k=\sum_k\sum_{i\in A_k}\pi_i=\sum_i\pi_i=1.
+\end{equation}
+实现对有限正总质量再做一次归一化，以抵抗浮点累加；数值验证要求误差小于 $10^{-12}$。
+
+\subsection{统计量、风险函数与下游估计}
+对任意可积后果 $f(\omega)$，候选与缩减期望分别为
+\begin{equation}
+ \widehat\mu_N=\sum_i\pi_i f(\omega_i),\qquad
+ \widehat\mu_K=\sum_k\Pi_k f(\omega_{m_k}).
+\end{equation}
+两者差异由距离和 $f$ 对该距离的敏感性共同决定。若 $f$ 对 $d$ 是 $L_f$-Lipschitz，
+则有启发式上界
+\begin{equation}
+ |\widehat\mu_N-\widehat\mu_K|
+ \le L_f\sum_k\sum_{i\in A_k}\pi_i d(\omega_i,\omega_{m_k}).
+\end{equation}
+右侧是 transport mean 的理论动机；但当前代码不估计 $L_f$，因此不能把 transport mean
+直接转成 PF/OPF 误差界。
+
+尾部概率和条件尾均值可写为
+\begin{align}
+ \widehat p_q&=\sum_i\pi_i\mathbf1\{R_i\ge q\},\\
+ \widehat{\operatorname{CVaR}}_\alpha(R)
+ &=\min_\eta\left[\eta+\frac1{1-\alpha}
+   \sum_i\pi_i(R_i-\eta)_+\right].
+\end{align}
+当前缩减器保留风险分位点和风险源尾部锚点，但不直接优化 CVaR 误差。
+
+\subsection{候选数与蒙特卡洛误差}
+对独立同分布样本，均值标准误为 $s/\sqrt N$，Bernoulli 事件概率的近似标准误为
+$\sqrt{\widehat p(1-\widehat p)/N}$。但当前候选受条件分组、截断、AR(1) 和确定性 profile
+影响，不应机械套用独立样本公式。尤其单条 4096 步 AR(1) 序列的有效样本量近似为
+\begin{equation}
+ N_{\rm eff}\approx N\frac{1-\rho}{1+\rho},
+\end{equation}
+当 $\rho=0.75$ 时只有约 $N/7$，这解释了相关系数有限样本偏差为何比白噪声更大。
+
+\subsection{可复现性定义}
+固定以下全部条件时，模块要求结果确定性复现：系统资产值及顺序、所有选项、随机种子、
+外部气候/SST 资源内容、代码版本和依赖浮点行为。跨编译器或平台若遇精确并列距离，medoid
+破同分可能受浮点末位影响；因此可复现性不是跨平台 bitwise 保证。
+
+\begin{gapnote}
+当前实现没有为候选分布估计置信区间，也没有自适应增加 $N$ 直到统计收敛；
+\fld{candidate\_count} 和目录采样数是预算，不是精度声明。下游若需要概率风险证书，必须另行
+执行独立重复、批均值或序贯停止检验。
+\end{gapnote}
+
+\subsection{理论--实现对应}
+\begin{center}\small
+\begin{tabular}{@{}L{5.0cm}L{8.7cm}@{}}
+\toprule
+理论对象 & 当前实现锚点\\
+\midrule
+三族条件经验分布 & \srcpath{scenario\_generation.cpp:generate\_regular\_scenarios}、
+\srcpath{generate\_reliability\_scenarios}、\srcpath{generate\_resilience\_scenarios}\\
+组内等概率 & 三个生成函数中的 candidate probability 赋值\\
+medoid 概率聚合 & \srcpath{scenario\_generation.cpp:cluster\_candidates\_core}\\
+风险统计与分位点 & \srcpath{scenario\_generation.cpp:enrich\_candidate\_risk\_metadata}\\
+跨族先验与置信区间 & \implnone\\
+\bottomrule
+\end{tabular}
+\end{center}

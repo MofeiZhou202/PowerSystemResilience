@@ -1,0 +1,120 @@
+\section{常规场景：资产聚合、profile 与气候形变}
+\label{sec:regular-implementation}
+
+\subsection{入口前置条件与组合展开}
+\srcpath{generate\_regular\_scenarios} 对 \fld{candidate\_count}、\fld{cluster\_count} 和
+\fld{num\_steps} 取至少 1。SSP 集合优先使用非空 \fld{ssp\_levels}，否则使用单值
+\fld{ssp}；年份集合同理。每个 $(ssp,year)$ 组合独立生成候选并聚类，最后把各组合簇拼接到
+\fld{RegularScenarioResult.clusters}。因此结果的 \fld{candidate\_count} 是所有组合候选总数，
+而不是单组合配置值。
+
+\subsection{负荷资产聚合}
+\srcpath{collect\_load\_sites} 的顺序与 fallback 如下：
+\begin{enumerate}
+  \item 若存在 AC Load，逐个聚合在运负荷 $P=p_{mw}\,scaling$；否则从在运 AC Bus 的
+        \fld{pd\_mw} 构造 \texttt{ac\_bus\_load} fallback；
+  \item DC 侧同理：优先 DC Load，否则使用 DC Bus 的 \fld{pd\_mw}；
+  \item 非正功率站点被丢弃；坐标从对应域母线读取；
+  \item 组件 ID 由域和稳定 \fld{index} 构造，不把 AC/DC 同号 bus 合并。
+\end{enumerate}
+总负荷为
+\begin{equation}
+ P_L^0=\sum_{j\in\mathcal L_{ac}}\max(0,p_j scaling_j)
+       +\sum_{j\in\mathcal L_{dc}}\max(0,p_j scaling_j).
+\end{equation}
+
+\subsection{新能源资产分类}
+\srcpath{renewable\_breakdown\_mw} 遍历 AC RenewableGen、PVSystem、AC StaticGenerator、
+DC PVArray 与 DCStaticGenerator。容量优先使用正的额定/上限字段，否则回退当前出力；静态
+发电还乘 \fld{scaling}。按显式 RenewableType 或静态机类型字符串分为 PV、Wind、Other。
+\begin{equation}
+ P_R^0=P_{PV}^0+P_W^0+P_O^0.
+\end{equation}
+常规候选分别保存 \texttt{pv\_mw}、\texttt{wind\_mw}、
+\texttt{other\_renewable\_mw} 和合计值，避免把所有新能源强制视为 PV。
+
+\subsection{确定性负荷形状}
+令 $h=t\bmod24$，$d=\lfloor t/24\rfloor$。源码基线为
+\begin{align}
+ s_L(h)&=0.84+0.18\sin\frac{2\pi(h-7)}{24}
+              +0.10\sin\frac{4\pi(h-18)}{24},\\
+ s_{season}(d)&=\begin{cases}
+ 1+0.10\cos\frac{2\pi(d-213)}{365},&T\ge8760,\\1,&T<8760,
+ \end{cases}\\
+ P^L_t&=P_L^0\max(0.2,s_L(h))s_{season}(d).
+\end{align}
+逐负荷 profile 用同一形状乘各资产基线，再按步求和。该曲线是内置参考形状，不是读取到的
+AMI 计量序列。
+
+\subsection{PV、风电与其他新能源形状}
+PV 基线：
+\begin{align}
+ g(h)&=\max\left(0,\sin\frac{\pi(h-6)}{12}\right),\\
+ s_{PV}(d)&=\begin{cases}0.90+0.18\sin\frac{2\pi(d-80)}{365},&T\ge8760,\\1,&T<8760,
+ \end{cases}\\
+ P^{PV}_t&=P_{PV}^0 g(h)\max(0.15,s_{PV}(d)).
+\end{align}
+风电组合日内、天气尺度和季节项，并把低于 0.08 的 availability 置零，否则钳至 1.20；
+短于年度时域时 calm-weather 和 season 取 1。其他新能源仅使用弱季节正弦。完整赋值见
+\srcpath{synthesize\_base\_pv}、\srcpath{synthesize\_base\_wind} 和
+\srcpath{synthesize\_base\_other\_renewable}。
+
+\subsection{气候资源查找}
+\srcpath{load\_climate\_morph\_factors} 查找 SSP/year 对应的月度温度和 GHI 增量；成功时 audit
+写入 12 个 \fld{climate\_month\_delta\_T}、\fld{climate\_month\_delta\_GHI}、年平均与资源
+来源。找不到资源时：
+\begin{itemize}
+  \item 所有增量置零；
+  \item \fld{climate\_data\_found=false}；
+  \item source 写为 \texttt{zero\_delta\_missing:ssp:year}；
+  \item 若提供 warnings 指针，则返回可见 warning。
+\end{itemize}
+缺失资源不会被伪装成“已找到零变化气候情景”。
+
+\subsection{负荷分项气候形变}
+源码把 regular load profile 分成基础、采暖、制冷等分项并分别形变，再聚合；逐组件 profile
+存在时同步修改，只有 aggregate 时保留 fallback。气候随机项由 \fld{climate\_seed} 驱动，
+其标准差字段分别控制温度、GHI 和负荷百分比扰动。变形输出及来源写入 candidate audit，
+而不是只改变总功率后丢失归因。
+
+\subsection{相关随机倍率的应用顺序}
+每个候选以组合索引和候选索引派生 RNG；先构造负荷/新能源相关倍率，再依次作用于各 profile：
+\begin{align}
+ \widetilde P^L_t&=P^L_t m^L_t,\\
+ \widetilde P^{PV}_t&=P^{PV}_t m^R_t,\\
+ \widetilde P^W_t&=P^W_t m^R_t,\\
+ \widetilde P^O_t&=P^O_t m^R_t.
+\end{align}
+所有新能源共享 $m^R_t$。若对应 enable 为 false，倍率向量为 1。倍率在 profile 基线为零时
+不可由结果相除恢复，这一点对夜间 PV 尤其重要。
+
+\subsection{储能与 standard time series}
+在运且额定能量为正的 AC/DC Storage 进入 SOC 聚合。每个候选产生
+\texttt{storage\_soc} 和 \texttt{storage\_energy\_mwh}；当前值在时域内保持常数。
+\srcpath{build\_standard\_time\_series} 同时生成面向下游的 multiplier profile：负荷、PV、风、
+其他新能源和储能均保留 base 值与 capacity 字段。基线近零时使用约定 fallback，并写 warning。
+
+\subsection{候选特征和聚类输入}
+\srcpath{make\_candidate\_with\_load\_components} 构造 \fld{TimeSeriesData}、组件负荷 profiles、
+standard time series 和 feature summary。特征至少包含 load/PV/wind/renewable/net-load 的能量
+或摘要量、SOC 与气候源信息。候选 ID 由 family、SSP、year、序号构成，固定输入和 seed 下稳定。
+
+\subsection{算法流程}
+\begin{enumerate}
+  \item 聚合负荷、新能源和储能资产；生成确定性 profile；
+  \item 展开 SSP/year 组合并读取气候资源；
+  \item 对每个候选生成相关 multiplier 和储能 SOC；
+  \item 执行气候形变、构造候选、标准 profile 与特征；
+  \item 组内赋等概率，计算风险元数据，执行聚类；
+  \item 累积组合 audit、warnings、候选数和簇数。
+\end{enumerate}
+
+\subsection{预算和大规模 fallback}
+年度 $T=8760$ 且候选很多时，完整逐组件 JSON 会迅速膨胀。实现对大规模年度候选使用有界
+aggregate profile 路径，audit 明确记录没有丢弃候选但降低了逐组件覆盖。该行为由测试
+\texttt{Large annual scenario generation uses bounded aggregate load profiles} 锁定。
+
+\subsection{失败语义与边界}
+无资产仍可生成零/基线 profile，但 warning 说明覆盖不足；非法计数被钳到最小 1，而不是抛出。
+未知 SSP/year 使用零气候增量。模块不读取实测天气、不拟合负荷预测模型、不执行调度，
+也不保证生成 profile 经过 PF 后可行。

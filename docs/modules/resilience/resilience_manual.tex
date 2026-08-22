@@ -1,7 +1,7 @@
 % !TEX program = xelatex
 % 编译方式：在本目录执行两遍 xelatex（详见 docs/_manual_common/README.md）。
 % 章节源文件位于 chapters/，由本文件 \input 引入。
-% 源码依据（行号以 2026-08-17 检出为准）：
+% 源码依据（以符号锚点为准，最后核实 2026-08-22）：
 %   include/hacdcpf/resilience/{resilience_assessment,certified_restoration,resilience_dynamic_certification}.hpp
 %   src/resilience/{resilience_assessment,resilience_restoration_mip,resilience_stage_milp,certified_restoration}.cpp
 \documentclass[UTF8,fontset=fandol,a4paper,11pt]{ctexart}
@@ -24,8 +24,9 @@ MILP——以及移动储能（MESS）时空路由、有限动作认证恢复（
 默认值、验证依据及已知局限。文档风格与《潮流计算技术手册》《最优潮流技术手册》一致。
 
 \smallskip
-\noindent\textbf{核心口径}：恢复 MILP 为 LinDistFlow/有功口径，\fld{model\_scope}=
-\texttt{"hybrid-acdc-restoration-milp"}；\fld{mip\_gap\_within\_tolerance} \emph{不等于}全局最优；
+\noindent\textbf{核心口径}：恢复 MILP 为 LinDistFlow/有功口径，\fld{model\_scope} 为
+\texttt{"hybrid-acdc-restoration-\allowbreak milp"}；\fld{mip\_gap\_within\_tolerance}
+\emph{不等于}全局最优；
 认证恢复的 L3 \fld{proof\_valid} 只在“已仿真情景/阈值/模型/时域”范围内成立，\textbf{非}全局
 暂态稳定证明；L1/L2 常量为采样估计（\fld{constants\_are\_global\_bounds}=false）。全部近似与
 回退写入 \fld{model\_scope}、\fld{model\_limitations} 与 \fld{ValidityFlags}。
@@ -35,14 +36,23 @@ MILP——以及移动储能（MESS）时空路由、有限动作认证恢复（
 \newpage
 
 \input{chapters/overview}
-% ── 通用理论层（修订版 2 新增，工程参考级）──
 \input{chapters/theory_resilience_foundations}
-% ── 实现转写层（源码等价）──
+\input{chapters/hazard_fault_repair}
 \input{chapters/heuristic}
 \input{chapters/source_equivalent_model}
+\input{chapters/strict_mip_derivation}
 \input{chapters/stage_milp}
+\input{chapters/mess_routing_storage}
+\input{chapters/projection_identity}
+\input{chapters/dynamic_certification}
+\input{chapters/dynamic_certificate_derivation}
 \input{chapters/options_results}
+\input{chapters/public_contract_reference}
+\input{chapters/http_json_contract}
+\input{chapters/numerical_validation}
 \input{chapters/verification}
+\input{chapters/verification_catalog}
+\input{chapters/audit_admission}
 
 \input{../../_manual_common/industrial_evaluation}
 

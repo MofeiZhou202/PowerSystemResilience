@@ -1,0 +1,53 @@
+{
+  "branches": [
+    {
+      "from_bus": 1,
+      "index": 1,
+      "r_pu": 0.01,
+      "to_bus": 2,
+      "x_pu": 0.1
+    },
+    {
+      "from_bus": 2,
+      "index": 2,
+      "r_pu": 0.01,
+      "to_bus": 3,
+      "x_pu": 0.1
+    },
+    {
+      "from_bus": 2,
+      "index": 4,
+      "r_pu": 0.015,
+      "to_bus": 4,
+      "x_pu": 0.08
+    }
+  ],
+  "buses": [
+    {
+      "index": 1,
+      "pd_mw": 0.0,
+      "qd_mvar": 0.0,
+      "type": 3
+    },
+    {
+      "index": 2,
+      "pd_mw": 1.0,
+      "qd_mvar": 0.2,
+      "type": 1
+    },
+    {
+      "index": 3,
+      "pd_mw": 1.0,
+      "qd_mvar": 0.2,
+      "type": 1
+    },
+    {
+      "index": 4,
+      "pd_mw": 0.6,
+      "qd_mvar": 0.12,
+      "type": 1
+    }
+  ],
+  "slack_bus": 1,
+  "snapshot": "pre_event"
+}

@@ -23,8 +23,8 @@
 | `power_flow` | [潮流计算手册](../modules/power_flow/power_flow_manual.tex) | 十一个实现章节；线性 DC 移相式已按现行源码复核 |
 | `power_models` | [AML 建模层手册](../modules/power_models/power_models_manual.tex) | `source_equivalent_builders.tex`，本模块唯一 builder 公式源 |
 | `reliability` | [可靠性手册](../modules/reliability/reliability_manual.tex) | `source_equivalent_model.tex` |
-| `resilience` | [弹性手册](../modules/resilience/resilience_manual.tex) | `source_equivalent_model.tex` |
-| `scenario_generation` | [场景生成手册](../modules/scenario_generation/scenario_generation_manual.tex) | `source_equivalent_model.tex` |
+| `resilience` | [弹性恢复专著](../modules/resilience/resilience_manual.tex) | 十八个模块专章加统一工业评价基线：理论、灾害/修复、启发式、严格 MIP 逐约束推导、RA MILP、MESS、投影身份、DAE 证书逐公式推导、全字段契约、HTTP、数值验证与准入审计 |
+| `scenario_generation` | [场景生成手册](../modules/scenario_generation/scenario_generation_manual.tex) | 16 专章/56 页：条件概率、AR(1)、缩减理论，常规/可靠性/弹性，台风风雨--易损--修复--交通，全字段契约、独立复算与审计准入 |
 | `server` | [服务端手册](../modules/server/server_manual.tex) | ETag、revision、缓存和作业状态契约 |
 | `short_circuit` | [短路手册](../modules/short_circuit/short_circuit_manual.tex) | 十五个模块专章加统一工业评价基线：对称分量/IEC/换流器理论、AC 概览与详细序网、DC 故障、投影身份、稀疏批量、完整 I/O、HTTP/GUI、验证架构、数值交叉验证与深度审计 |
 | `sppt` | [SPPT 手册](../modules/sppt/sppt_manual.tex) | `source_equivalent_relations.tex` |

@@ -1,0 +1,99 @@
+\section{阅读指南、约定与模块全景}
+\label{sec:scenario-overview}
+
+\subsection{手册边界与证据等级}
+本手册把内容分为四层，避免把教材理论、代码行为和数值证据混为一谈：
+\begin{enumerate}
+  \item \textbf{理论层}：给出条件经验分布、随机过程、场景缩减和灾害链的数学定义；
+  \item \textbf{源码等价层}：逐项转写当前实现的分支、截断、排序、预算和 fallback；
+  \item \textbf{公共契约层}：覆盖公开选项、结果、JSON、HTTP 与工作簿字段；
+  \item \textbf{验证层}：区分单元测试、确定性复现、独立公式 oracle 和系统集成测试。
+\end{enumerate}
+任何“已实现”结论必须同时能指向公开结构、实现函数与测试；任何数值结论必须说明输入、
+随机种子、样本数、容差和输出文件。文献中的扩展模型若未进入源码，只能标为理论参考。
+
+\subsection{源码和测试范围}
+主要依据如下：
+\begin{itemize}
+  \item \srcpath{include/hacdcpf/analysis/scenario\_generation.hpp} 与
+        \srcpath{src/scenario\_generation/scenario\_generation.cpp}：三族生成、特征与缩减；
+  \item \srcpath{include/hacdcpf/analysis/typhoon\_resilience.hpp} 与
+        \srcpath{src/scenario\_generation/typhoon\_resilience.cpp}：轨迹、风雨、易损与修复；
+  \item \srcpath{include/hacdcpf/analysis/typhoon\_traffic\_impact.hpp} 与同名实现：道路影响；
+  \item \srcpath{include/hacdcpf/io/scenario\_bundle\_io.hpp} 与
+        \srcpath{src/io/scenario\_bundle\_io.cpp}：场景包验证、规范化和工作簿；
+  \item \srcpath{tests/test\_scenario\_generation.cpp}、
+        \srcpath{tests/test\_typhoon\_traffic\_impact.cpp}、
+        \srcpath{tests/test\_scenario\_bundle\_schema.cpp}：回归合同；
+  \item \srcpath{tools/scenario\_generation\_review\_case.cpp} 与
+        \srcpath{tests/scenario\_generation\_cross\_validation.py}：固定数值案例和独立复算。
+\end{itemize}
+
+\subsection{场景族和入口选择}
+\begin{center}\footnotesize
+\begin{tabular}{@{}L{2.3cm}L{4.0cm}L{4.2cm}L{4.0cm}@{}}
+\toprule
+场景族 & 条件信息 & 候选语义 & 公共入口\\
+\midrule
+Regular & SSP、年份、资产基线、扰动种子 & 多步负荷/新能源/储能 SOC 时序 &
+\srcpath{generate\_regular\_scenarios}\\
+Reliability & 已实现 FMEA 兼容 N--1 元件目录 & 给定单一元件停运的条件时序 &
+\srcpath{generate\_reliability\_scenarios}\\
+Resilience & 台风强度、轨迹样本、风雨、故障修复 & 给定灾害强度族的条件事件时序 &
+\srcpath{generate\_resilience\_scenarios}\\
+组合入口 & 三族 enable 标志 & 分别生成，不推断族间先验 & \srcpath{generate\_scenarios}\\
+\bottomrule
+\end{tabular}
+\end{center}
+三个族均先生成候选，再按同一聚类内核缩减；可靠性按 contingency 分组，弹性按 intensity
+分组，常规族按 SSP--year 组合分组。组间概率不自动混合。
+
+\subsection{端到端数据流}
+\begin{center}
+\begin{tikzpicture}[node distance=8mm and 7mm,
+box/.style={draw,rounded corners=2pt,align=center,minimum height=8mm,text width=2.7cm},
+arr/.style={-{Stealth[length=2mm]}}]
+\node[box] (rich) {系统资产\\稳定组件 ID};
+\node[box,right=of rich] (base) {资产聚合\\确定性基线};
+\node[box,right=of base] (cand) {条件扰动\\候选集合};
+\node[box,below=of cand] (risk) {特征、风险源\\尾部/边界锚点};
+\node[box,left=of risk] (reduce) {混合 k-medoids\\概率聚合};
+\node[box,left=of reduce] (contract) {Result / JSON v3\\HTTP / workbook};
+\draw[arr] (rich)--(base); \draw[arr] (base)--(cand);
+\draw[arr] (cand)--(risk); \draw[arr] (risk)--(reduce); \draw[arr] (reduce)--(contract);
+\end{tikzpicture}
+\end{center}
+模块本身不执行 PF、OPF、可靠性指标或弹性恢复优化。代表场景进入这些下游模块后，才会
+产生电压、潮流、成本、失负荷和恢复时间等物理/决策结果。
+
+\subsection{单位、符号和索引空间}
+\begin{itemize}
+  \item 功率为 MW/Mvar，能量为 MWh，SOC 和 multiplier 为无量纲；
+  \item 时间输入为 h，常规时序步序号不自动代表日历时区；风速 m/s、雨强 mm/h；
+  \item 气压亏损 hPa，线路/半径 km，经纬度为度；交通容量保持输入单位；
+  \item $N$ 为候选数，$K$ 为代表数，$T$ 为时步数，$S$ 为连续特征维数；
+  \item 对外 contingency 与 branch 引用使用稳定组件 \fld{index}；vector position 和图索引
+        只可在实现内部使用；AC/DC 同号母线必须保留域限定。
+\end{itemize}
+
+\subsection{诚实口径总表}
+\begin{center}\small
+\begin{tabular}{@{}L{4.3cm}L{5.1cm}L{5.1cm}@{}}
+\toprule
+对象 & 当前能声明 & 当前不能声明\\
+\midrule
+概率 & 给定输入和种子下的族内条件经验分布 & 三族联合的无条件发生概率\\
+气候 & SSP/year 查表形变及缺失回退 & 区域气候模式或天气预报\\
+易损度 & 参数化段级条件概率 & 经现场数据校准的结构可靠度\\
+交通 & 边级零维积水与能力递推 & 二维水动力、交通均衡或路由最优性\\
+缩减 & 指定距离下的 medoid 局部优化与尾部保留 & 全局最优量化或下游决策误差上界\\
+交叉验证 & 独立公式和输出结构复算 & OpenDSS/GridLAB-D 场景生成认证\\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\subsection{复杂度总览}
+确定性 profile 和候选生成约为 $O(NT)$；风险特征约为 $O(NS)$；距离矩阵若按需反复求值，
+每次完整分配为 $O(NKS)$。当前 medoid 更新枚举簇内候选并计算簇内加权距离，保守最坏上界
+为 $O(IKN^2S)$，$I$ 为迭代上限。台风故障链约为 $O(TL_s)$，$L_s$ 为线段数；超过精确抢修
+预算时切换到排序近似。空间与候选预算是资源边界，不是统计收敛证书。

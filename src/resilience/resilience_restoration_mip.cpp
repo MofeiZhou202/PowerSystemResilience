@@ -8,6 +8,7 @@
 #include <numeric>
 #include <queue>
 #include <sstream>
+#include <stdexcept>
 #include <string>
 #include <thread>
 #include <unordered_map>
@@ -1248,6 +1249,96 @@ BuildArtifacts build_mip_skeleton(const HybridPowerSystem& sys,
     b_vals.push_back(rhs);
   };
 
+  // Geoffrion (1972), generalized Benders decomposition: a proof-valid DAE
+  // counterexample is returned to the integer master as a logical no-good cut.
+  // For a binary signature L with n1 closed literals, the exact incumbent is
+  // excluded by sum(closed z) - sum(open z) <= n1 - 1. Service feedback uses
+  // demand - shed <= certified upper bound. Derivation and scope:
+  // docs/modules/resilience/chapters/dynamic_certificate_derivation.tex.
+  for (const auto& feedback_cut : opts.dynamic_feedback_cuts) {
+    std::unordered_map<int, bool> literal_values;
+    for (const auto& literal : feedback_cut.topology_literals) {
+      if (literal.step < 0 || literal.step >= T) {
+        throw std::invalid_argument(
+            "DAE feedback topology literal step is outside the restoration horizon");
+      }
+      const bool dc_domain = literal.domain == "DC";
+      if (!dc_domain && literal.domain != "AC" && literal.domain != "AC-DC") {
+        throw std::invalid_argument(
+            "DAE feedback topology literal has unsupported domain '" +
+            literal.domain + "'");
+      }
+      const auto branch = std::find_if(
+          out.branches.begin(), out.branches.end(), [&](const BranchData& row) {
+            const bool row_dc = row.domain == ResilienceBranchKind::DC &&
+                                row.component_type != "vsc_converter" &&
+                                row.component_type != "lcc_converter";
+            return row.index == literal.component_index &&
+                   row.pair_number == literal.pair_number &&
+                   row.component_type == literal.component_type &&
+                   (literal.domain == "AC-DC" || row_dc == dc_domain);
+          });
+      if (branch == out.branches.end()) {
+        throw std::invalid_argument(
+            "DAE feedback topology literal does not resolve to a canonical MIP component: " +
+            literal.component_type + ":" + literal.domain + ":" +
+            std::to_string(literal.component_index));
+      }
+      const int branch_pos = static_cast<int>(branch - out.branches.begin());
+      const int variable = out.idx.bt(branch_pos, literal.step);
+      const auto [it, inserted] = literal_values.emplace(variable, literal.closed);
+      if (!inserted && it->second != literal.closed) {
+        throw std::invalid_argument(
+            "DAE feedback topology cut contains contradictory literals");
+      }
+    }
+
+    if (!literal_values.empty()) {
+      std::vector<std::pair<int, double>> terms;
+      terms.reserve(literal_values.size());
+      int closed_count = 0;
+      for (const auto& [variable, closed] : literal_values) {
+        terms.push_back({variable, closed ? 1.0 : -1.0});
+        if (closed) ++closed_count;
+      }
+      add_le(terms, static_cast<double>(closed_count - 1));
+      ++out.stats.dynamic_feedback_cuts_added;
+    }
+
+    for (const auto& bound : feedback_cut.service_upper_bounds) {
+      if (bound.step < 0 || bound.step >= T || !std::isfinite(bound.served_mw) ||
+          bound.served_mw < -kEps) {
+        throw std::invalid_argument(
+            "DAE feedback service bound has an invalid step or served-MW value");
+      }
+      const bool dc_domain = bound.domain == "DC";
+      if (!dc_domain && bound.domain != "AC") {
+        throw std::invalid_argument(
+            "DAE feedback service bound has unsupported domain '" +
+            bound.domain + "'");
+      }
+      const auto bus = std::find_if(
+          out.buses.begin(), out.buses.end(), [&](const BusData& row) {
+            return row.index == bound.bus_index && row.dc_side == dc_domain;
+          });
+      if (bus == out.buses.end()) {
+        throw std::invalid_argument(
+            "DAE feedback service bound does not resolve to a domain-qualified MIP bus");
+      }
+      const int bus_pos = static_cast<int>(bus - out.buses.begin());
+      const double demand = out.demand_mw[static_cast<std::size_t>(bound.step)]
+                                         [static_cast<std::size_t>(bus_pos)];
+      const double cap = std::clamp(bound.served_mw, 0.0, demand);
+      add_le({{out.idx.shedv(bus_pos, bound.step), -1.0}}, cap - demand);
+      ++out.stats.dynamic_feedback_cuts_added;
+    }
+
+    if (feedback_cut.topology_literals.empty() &&
+        feedback_cut.service_upper_bounds.empty()) {
+      throw std::invalid_argument("DAE feedback cut is empty");
+    }
+  }
+
   for (int t = 0; t < T; ++t) {
     for (int b = 0; b < n_branch; ++b) {
       const double z_prev = (t == 0) ? (out.branches[static_cast<size_t>(b)].initial_closed ? 1.0 : 0.0)
@@ -1532,7 +1623,8 @@ DistributionResilienceResult run_distribution_resilience_mip_assessment(
         "in the canonical restoration model";
     return result;
   }
-  if (built.faults.empty() && opts.faults.empty() && opts.default_fault_count <= 0) {
+  if (built.faults.empty() && opts.faults.empty() &&
+      opts.default_fault_count <= 0 && opts.dynamic_feedback_cuts.empty()) {
     return make_no_fault_baseline_result(built, opts);
   }
 
@@ -1711,6 +1803,25 @@ DistributionResilienceResult run_distribution_resilience_mip_assessment(
       sr.bus_supply_demand_mw.push_back(demand);
       sr.bus_supply_served_mw.push_back(served);
       sr.bus_supply_shed_mw.push_back(shed);
+      sr.bus_supply_energized.push_back(
+          x[idx.ub(static_cast<int>(i), t)] > 0.5);
+      sr.bus_supply_root.push_back(
+          x[idx.rb(static_cast<int>(i), t)] > 0.5);
+      sr.bus_supply_base_source_mw.push_back(
+          std::max(0.0, x[idx.psrc(static_cast<int>(i), t)]));
+      sr.bus_supply_dispatchable_generation_mw.push_back(
+          std::max(0.0, x[idx.gen(static_cast<int>(i), t)]));
+      sr.bus_supply_renewable_mw.push_back(
+          std::max(0.0, x[idx.ren(static_cast<int>(i), t)]));
+      double fixed_storage_mw = 0.0;
+      for (std::size_t storage = 0; storage < built.fixed_storage.size();
+           ++storage) {
+        if (built.fixed_storage[storage].bus_pos == static_cast<int>(i)) {
+          fixed_storage_mw +=
+              std::max(0.0, x[idx.fsd(static_cast<int>(storage), t)]);
+        }
+      }
+      sr.bus_supply_fixed_storage_mw.push_back(fixed_storage_mw);
       sr.bus_supply_priority_tier.push_back(pidx);
       sr.bus_supply_importance.push_back(built.buses[i].importance);
 

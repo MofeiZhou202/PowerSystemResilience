@@ -2,9 +2,11 @@
 
 #include <algorithm>
 #include <cmath>
+#include <future>
 #include <limits>
 #include <numeric>
 #include <string>
+#include <thread>
 #include <utility>
 
 #include <Eigen/Dense>
@@ -874,8 +876,18 @@ MasterSelection solve_master(
 
   engine::BCOptions options;
   options.gap_tol = 1.0e-9;
-  engine::StrictHighsBranchAndCutAdapter adapter(options);
-  const engine::SolveResult solved = adapter.solve_milp(model);
+  // MIPSolvers adapters retain thread-local branch-and-cut scratch state.
+  // A catalog solve must not affect a later restoration master in the same
+  // process, so give this finite selection MIP a fresh, joined thread exactly
+  // as the restoration MIP does for StrictHiGHS.
+  std::packaged_task<engine::SolveResult()> task(
+      [&model, options] {
+        engine::StrictHighsBranchAndCutAdapter adapter(options);
+        return adapter.solve_milp(model);
+      });
+  auto future = task.get_future();
+  std::jthread worker(std::move(task));
+  const engine::SolveResult solved = future.get();
 
   MasterSelection result;
   result.status = solved.stats.status;
@@ -1007,11 +1019,21 @@ MultiFidelityCertificate MultiFidelityCertificateEngine::evaluate(
   }
   certificate.mess_materialized_in_dae = action.requires_mess;
 
+  // A certificate oracle is fail-closed: model construction, power-flow
+  // initialization, trajectory integration, and replay diagnostics may reject
+  // an authored model, but that rejection must become an explicit failed
+  // certificate rather than escape the resilience study. The mathematical
+  // contract is documented in the resilience manual's certification chapter.
+  std::string oracle_stage = "dynamic model construction";
+  try {
   dynamics::DynamicModelBuilder builder;
   DynamicSystem simulation = builder.build(action_system, simulation_options);
+  oracle_stage = "dynamic event installation";
   simulation.events = action.dynamic_events;
+  oracle_stage = "DAE initialization and integration";
   dynamics::DynamicSolver solver;
   certificate.trajectory = solver.solve(simulation);
+  oracle_stage = "trajectory post-processing";
   certificate.simulation_success = certificate.trajectory.success;
   for (const auto& snapshot : certificate.trajectory.snapshots) {
     certificate.mess_dynamic_device_observed =
@@ -1364,6 +1386,39 @@ MultiFidelityCertificate MultiFidelityCertificateEngine::evaluate(
         "L3 validity is scenario- and horizon-specific full-DAE threshold verification, not a global analytic guarantee");
   }
   return certificate;
+  } catch (const std::exception& error) {
+    certificate.label = CertificateLabel::Failed;
+    certificate.proof_valid = false;
+    certificate.simulation_success = false;
+    certificate.limitations.push_back(
+        "DAE certificate oracle failed during " + oracle_stage + ": " +
+        error.what());
+    return certificate;
+  } catch (const std::string& error) {
+    certificate.label = CertificateLabel::Failed;
+    certificate.proof_valid = false;
+    certificate.simulation_success = false;
+    certificate.limitations.push_back(
+        "DAE certificate oracle failed during " + oracle_stage + ": " + error);
+    return certificate;
+  } catch (const char* error) {
+    certificate.label = CertificateLabel::Failed;
+    certificate.proof_valid = false;
+    certificate.simulation_success = false;
+    certificate.limitations.push_back(
+        "DAE certificate oracle failed during " + oracle_stage + ": " +
+        (error == nullptr ? std::string("null C-string exception")
+                          : std::string(error)));
+    return certificate;
+  } catch (...) {
+    certificate.label = CertificateLabel::Failed;
+    certificate.proof_valid = false;
+    certificate.simulation_success = false;
+    certificate.limitations.push_back(
+        "DAE certificate oracle failed during " + oracle_stage +
+        " with an unrecognized non-standard or cross-ABI exception");
+    return certificate;
+  }
 }
 
 CertifiedRestorationResult CertifiedRestorationCoordinator::solve(

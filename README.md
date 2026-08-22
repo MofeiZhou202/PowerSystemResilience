@@ -5,7 +5,7 @@
 
 本文档面向工程使用者和开发者，说明 HySim-XJTU-HRPES 从“工程场景建模”到“规范模型求解”、再到“结果回投”的完整链路。当前合同与实现参考统一从 `docs/README.md` 进入；历史审计、理论提案和旧技术总笔记隔离在 `docs/archive/`，不代表当前行为。
 
-## 文档同步状态（2026-08-21）
+## 文档同步状态（2026-08-22）
 
 - `docs/README.md` 是当前文档的唯一导航入口，明确区分运行契约与理论参考。
 - `main` 提供统一 Trial 能力清单、后端 fail-closed 403 防绕过、五阶段
@@ -134,7 +134,7 @@ powershell -ExecutionPolicy Bypass -File tools/package_trial_windows.ps1
 | 电力市场 | 已实现（交直流线性商业模型） | 日前混合 SCUC → 固定组合/换流与储能方向 SCED → AC/DC LMP → DC 储能跨期优化 → 结算/uplift → 非线性交直流认证；实时双结算与重复博弈。N-1 采用 AC 支路预防式切平面、发电机能力约束和全覆盖元件纠正式 SCED 校核。 |
 | 园区综合能源 | 已实现 | 电-热-氢-燃料多能流 MILP 调度（CHP、热泵、电解/燃料电池、多层氢储能、CCUS、碳预算）。 |
 | 承载力、薄弱环节与反事实规划 | 已实现 | DL/T 2041-2025 分布式电源承载力（含工程校核）、多维薄弱环节辨识、五类措施反事实对比。 |
-| 场景生成与台风弹性 | 已实现 | 常规/可靠性/弹性三族场景生成与聚类缩减，Holland 风场台风故障序列。 |
+| 场景生成与台风弹性 | 已实现并完成声明范围文档/数值闭环 | 16 专章/56 页手册覆盖三族条件概率、二元 AR(1)、风险边界锚点、Holland 风雨--易损--故障/修复--交通链与全字段契约；4096 步统计、128→12 聚类和固定公式由独立 Python 复算，hybrid 的尾部收益与运输/regime 退化同时披露。气象预报、易损现场校准及外部引擎等价认证不在声明范围。 |
 | 碳流追踪 | 已实现并持续回归 | 比例/矩阵碳流追踪、年度碳核算（含储能碳库存动态）与用户/节点绿电证书（GEC）核算。 |
 | EV-电力-交通耦合 | 已实现（持续扩展） | CTM/LTM 传播、Formulation A–H 联合优化家族、选址定容 MILP 与滚动时域 MPC；结果按“可证伪证书”口径区分全局最优/局部驻点/启发式。 |
 | SPPT 可执行理论层 | 已实现（研究验证性质） | MR1–MR8 证伪套件、MR3 证书语料（CSV/LaTeX）、准入守卫与 agent 循环；当前缺少受版本控制的独立理论/运行契约，见 `docs/module_documentation_map.md`。 |
@@ -287,7 +287,7 @@ Canonical 层的一个重要设计原则是：求解器只看到必要的数学�
 | 可靠性 MC/F&D | `run_nonsequential_mc`, `run_sequential_mc`, `run_frequency_duration_analysis`, `scan_ac_hlii_n2_states` | component outage sampling + HL-II DC OPF；在线机组从 0 再调度；两阶段字典序最小切负荷；独立两状态机组精确容量状态 COPT | EENS、LOLE、LOLF、CoV、严格经验 VaR/CVaR；COPT 状态概率/频率与缺失 MTTR 诊断；N-0/N-1/N-2 确定性零失败证书。状态求解失败直接报错，不计入 EENS |
 | FMEA 与信息/保护可靠性 | `run_distribution_fmea`, `run_failure_mode_fmea`, `evaluate_physical_network_reliability`, `evaluate_joint_information_reliability`, `generate_protection_cyber_classes`, `compare_protection_cyber_reliability` | 全 rich-model 失效模式目录 + N-1/N-2 二阶交互；运行年/日历年频率换算；物理/信息成功路径容斥、QoS、共因与供电依赖的精确状态；给定轨迹的 L2 保护/FRT 联合事件树 | EENS/EDNS/SAIFI/SAIDI、二阶完整性、稳定 ID 最小割集、静态 FMEA/仅保护/联合 EENS/LOLE/LOLF 对比与有效性边界 |
 | 三阶段可靠性 | `run_three_stage_reliability` | native C++ 联合 AC/DC LinDistFlow MILP；交流支路视在功率内接多边形；VSC/DC-DC 双向效率，AC/DC/DER/移动储能/VPP 调度与跨阶段 SOC；会话保护配置按自动重合、主保护、后备保护和未清除事件调节频率、清除时间、停运区与恢复准入 | 三阶段失负荷、热限边数与最大视在功率比、保护场景审计、有符号 VSC 调度、节点可靠性指标与有效性标志；该路由是概率条件化恢复 MILP，继电整定与 DER-FRT 动态由独立的在线保护—信息物理三级对照入口执行 |
-| 配电弹性 | `run_distribution_resilience_assessment`, `run_distribution_resilience_mip_assessment`, `run_certified_distribution_resilience_mip` | heuristic sequential 或 multi-period hybrid AC/DC MIP；可将拓扑/MESS 转换送入多保真 DAE oracle | 恢复曲线、元件/MESS 状态、故障序列、弹性指标、逐转换动态证书及模型边界 |
+| 配电弹性 | `run_distribution_resilience_assessment`, `run_distribution_resilience_mip_assessment`, `run_distribution_resilience_stage_milp_assessment`, `run_certified_distribution_resilience_mip` | heuristic sequential、multi-period hybrid AC/DC MIP 或 RA 分阶段拓扑/MESS；恢复状态与母线级调度送入多保真 DAE oracle，proof-valid Unsafe 自动形成 topology/service 割并重求解，异常 fail-closed | 恢复曲线、域限定元件/MESS 状态、故障序列、弹性指标、逐转换证书与已施加反馈；复杂案例 2 次 MIP/1 条割闭环，2048 对风险样本满足预声明准则，三冻结 AC 快照通过 OpenDSS/GridLAB-D 门。外部对照不覆盖 DC/保护/控制/DAE |
 | 短路分析 | `compute_short_circuit`, `run_short_circuit_detailed`, `dc_bus_fault_level`, `dc_bus_fault_levels` | 稀疏 Z-bus IEC 60909 概览 / 详细序网（c 因子、κ/ip/ib/ik/ith、相电流、变压器修正、电机与换流器贡献）；DC 为电阻性刚性源准稳态批量模型，收缩理想导体并由故障后电压恢复 DCCB 实际边电流 | authored 母线/设备故障电流、IEC 指标、数值质量、DC 故障水平与准稳态开断 duty；EMT 与控制动态显式列为限制 |
 | 谐波潮流 | `solve_harmonic_power_flow`（及 `_newton` / `_3ph` / `_3ph_hybrid` / `_hybrid_newton` 变体）, `frequency_scan`, `check_harmonic_limits` | 频域穿透（NIC 双端口桥）、Newton 非线性、三相 abc、AC/DC 耦合 | 谐波电压/电流、频扫/谐振、IEEE 519 / GB/T 14549 合规、K 因子/TDD |
 | 暂态仿真 | `run_transient_simulation`, `small_signal_analysis`, `computeFrequencyReport` | 机电暂态 DAE（7 类求解器，含 MassMatrixDae 同时式） | 轨迹、事件、COI/孤岛频率、小信号摘要 |
@@ -298,7 +298,7 @@ Canonical 层的一个重要设计原则是：求解器只看到必要的数学�
 | 承载力评估 | `assess_hosting_capacity`（DL/T 2041-2025） | 设备级区间公式 + 可选 PF/短路/谐波工程校核 | 逐变压器/逐区域承载区间与分级 |
 | 薄弱环节辨识 | `run_multidimensional_weak_link_assessment` | 多维压力证据评分（severity / consensus / Pareto） | 薄弱环节排序与模式对比 |
 | 反事实规划 | `run_counterfactual_planning_assessment` | 扩容/储能/联络/自动化/DER 五类措施多维对比 | 反事实指标与两两协同分析 |
-| 场景生成 | `generate_scenarios`, `generate_typhoon_fault_sequence`, `enumerate_n1_contingencies` | 常规/可靠性/弹性三族场景 + Holland 风场台风模型 + k-medoids 缩减 | 场景目录、台风故障序列 |
+| 场景生成 | `generate_scenarios`, `generate_typhoon_fault_sequence`, `enumerate_n1_contingencies` | 常规/可靠性/弹性三族场景 + 二元相关扰动 + Holland 风场/交通耦合 + k-medoids/边界锚点 | 场景目录、台风故障/修复序列、交通影响与验证审计 |
 | EV-交通耦合 | `simulate_ev_power_traffic`（A）、`_ctm_due`（B+）、`_ctm_joint`（C）、`solve_joint_optimizer`（D）、`solve_ctm_so_lp`/`solve_ltm_so_lp`（E）、`solve_ctm_due_vi`（F）、`solve_infra_design_milp`（G）、`solve_ltm_mpc`（H） | CTM/LTM 交通传播 + DC-OPF/LMP 联合优化 | 耦合仿真结果与最优性证书（区分全局/局部/启发式） |
 | SPPT 验证层 | `sppt::run_core_metamorphic_suite`, `certify_corpus`, `guard_system`, `run_agent_loop` | MR1–MR8 蜕变关系、独立残差证书、三道准入守卫 | 证伪/认证产物（CSV/LaTeX，研究验证性质） |
 

@@ -1,0 +1,115 @@
+\section{随机过程、相关结构与气候形变理论}
+\label{sec:scenario-stochastic-theory}
+
+\begin{theorynote}
+本章推导当前二元相关过程及 profile 乘法形变。核心区分是：确定性季节/日内基线描述条件均值，
+随机倍率描述围绕该均值的离散不确定性；气候形变改变条件均值，不能与随机噪声混为一项。
+\end{theorynote}
+
+\subsection{乘法分解}
+对资产族 $a\in\{L,PV,W,R\}$，场景功率写为
+\begin{equation}
+ P^a_t=P^{a,0}\,s^a_t\,c^a_t(\mathrm{SSP},y)\,m^a_t\,h^a_t,
+\end{equation}
+其中 $P^{a,0}$ 为资产基准，$s_t$ 为确定性日内/季节形状，$c_t$ 为气候形变，$m_t$ 为随机
+倍率，$h_t$ 为台风等事件影响。未启用某层时对应因子取 1。PV 的夜间 $s^{PV}_t=0$，因此
+不能通过 $P_t/P^0_t$ 在夜间恢复随机倍率。
+
+\subsection{平稳二元 AR(1)}
+令 $x_t=(x^L_t,x^R_t)^\mathsf T$，同一时间相关参数作用于两维：
+\begin{equation}
+ x_t=\rho_t x_{t-1}+\sqrt{1-\rho_t^2}\,\varepsilon_t,
+ \qquad |\rho_t|<1.
+\end{equation}
+创新由两个独立标准正态变量 $u_t,v_t$ 构造：
+\begin{equation}
+ \varepsilon^L_t=u_t,\qquad
+ \varepsilon^R_t=\rho_{LR}u_t+\sqrt{1-\rho_{LR}^2}\,v_t.
+\end{equation}
+所以 $\operatorname{Var}(\varepsilon^L)=\operatorname{Var}(\varepsilon^R)=1$，且
+$\operatorname{Corr}(\varepsilon^L,\varepsilon^R)=\rho_{LR}$。若初始状态也服从同一二元标准
+正态，则
+\begin{align}
+ \operatorname{Var}(x_t)&=\rho_t^2 I+(1-\rho_t^2)I=I,\\
+ \operatorname{Cov}(x_t,x_{t-\ell})&=\rho_t^\ell I,\\
+ \operatorname{Corr}(x^L_t,x^R_t)&=\rho_{LR}.
+\end{align}
+这给出实现所需的目标时间相关和同期交叉相关。
+
+\subsection{块结点与线性插值}
+若 \fld{block\_hours} 为 $b>1$，AR(1) 在结点 $j$ 上生成，再对 $t=jb+r$ 做
+\begin{equation}
+ \widetilde x_t=(1-r/b)x_j+(r/b)x_{j+1}.
+\end{equation}
+插值改变逐时边际方差和 lag-1 相关；因此 $\rho_t$ 是结点过程参数，不保证插值后每小时样本
+相关恰等于输入值。数值相关性验证使用 $b=1$，以隔离 AR(1) 本身。
+
+\subsection{倍率截断与矩偏差}
+实现采用仿射映射和硬截断
+\begin{align}
+ m^L_t&=\operatorname{clip}(1+\sigma_Lx^L_t,l_L,u_L),\\
+ m^R_t&=\operatorname{clip}(1+\sigma_Rx^R_t,l_R,u_R).
+\end{align}
+未触发截断时，$E[m]=1$、$\operatorname{sd}(m)=\sigma$；截断后均值、方差和相关性均发生
+偏移。截断概率可由标准正态 CDF 估计：
+\begin{equation}
+ P_{clip}=\Phi\!\left(\frac{l-1}{\sigma}\right)
+ +1-\Phi\!\left(\frac{u-1}{\sigma}\right).
+\end{equation}
+因此统计测试必须同时报告 multiplier 的最小、最大、均值和样本标准差，不能只检查相关系数。
+
+\subsection{PV 周期性选择偏差}
+若仅在 $s^{PV}_t>0$ 时用 $P^{PV}_t/P^{PV,base}_t$ 恢复新能源倍率，观测索引集合
+$D=\{t:s^{PV}_t>0\}$ 是确定性的周期性子样本。对自相关过程，
+\begin{equation}
+ \widehat\rho_D=\operatorname{Corr}(x^L_t,x^R_t\mid t\in D)
+\end{equation}
+仍以 $\rho_{LR}$ 为总体目标，但有效样本量和有限样本偏差不同。固定算例实测全天风电相关
+-0.290252，而 PV 白天子样本为 -0.341279；后者只作诊断，不作为 AR(1) 准入门。
+
+\subsection{储能 SOC 扰动}
+对储能设备 $j$，先在 multiplier 空间做最多 128 次截断正态拒绝抽样，再回退 clip：
+\begin{equation}
+ \widetilde s_j=\operatorname{clip}(s^0_jm_j,s_j^{min},s_j^{max}).
+\end{equation}
+聚合能量和 SOC 为
+\begin{equation}
+ E^{st}=\sum_j E_j^{rated}\widetilde s_j,\qquad
+ s^{agg}=\frac{E^{st}}{\sum_jE_j^{rated}}.
+\end{equation}
+当前生成器把该值填充到整个候选时域，不模拟充放电动态；动态 SOC 必须由 time-series
+调度/PF 流水线计算。
+
+\subsection{气候形变与随机气候扰动}
+月度温升 $\Delta T_m$ 和辐照变化 $\Delta GHI_m$ 来自资源查找；缺失时采用零增量并记录
+\fld{climate\_data\_found=false}。对负荷，可概括为
+\begin{equation}
+ c^L_t=1+\beta_T\Delta T_{m(t)}+\eta^L_{m(t)},
+\end{equation}
+对 PV 则先改变辐照参考，再施加温度效率项。随机气候扰动使用独立
+\fld{climate\_seed}；它与二元 AR(1) 的 seed 空间分离。
+
+\begin{gapnote}
+当前模型没有空间高斯场、copula、多变量 VAR、极值尾部拼接、天气状态隐马尔可夫模型，
+也没有把 SSP 解释为概率权重。负荷与所有新能源共享一个随机 renewable multiplier，不能
+表达 PV、风、其他新能源之间的独立相关矩阵。
+\end{gapnote}
+
+\subsection{理论--实现对应}
+\begin{center}\small
+\begin{tabular}{@{}L{5.0cm}L{8.7cm}@{}}
+\toprule
+理论条目 & 实现函数与偏差\\
+\midrule
+二元平稳 AR(1) & \srcpath{scenario\_generation.cpp:correlated\_noise\_factors}\\
+块插值与 multiplier clip & 同一函数；插值后逐时相关不等于结点参数\\
+确定性 load/PV/wind/other profile & \srcpath{synthesize\_base\_load}、
+\srcpath{synthesize\_base\_pv}、\srcpath{synthesize\_base\_wind}、
+\srcpath{synthesize\_base\_other\_renewable}\\
+储能聚合 SOC & \srcpath{make\_storage\_soc\_profiles}；时域内常值\\
+气候查找与形变 & \srcpath{load\_climate\_morph\_factors}、
+\srcpath{morph\_regular\_load\_profile}、\srcpath{morph\_regular\_pv}\\
+完整多变量天气生成器 & \implnone\\
+\bottomrule
+\end{tabular}
+\end{center}

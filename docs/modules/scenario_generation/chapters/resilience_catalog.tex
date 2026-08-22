@@ -1,0 +1,97 @@
+\section{弹性场景：强度分组、台风目录与事件定义}
+\label{sec:resilience-scenarios}
+
+\subsection{条件语义与分组}
+弹性族输出
+\begin{equation}
+ \widehat P(d\omega\mid H=h,\mathcal I),
+\end{equation}
+其中 $H$ 是请求的台风强度类别。默认只生成 TY；可选 TD、TS、STS、TY、STY、SuperTY。
+每个强度使用 \fld{cluster\_count\_by\_intensity} 的覆盖值，否则用
+\fld{default\_cluster\_count}。组间没有类别先验。
+
+\subsection{目录生成}
+\fld{TyphoonCatalogOptions} 指定月份范围、每月样本数、基准 seed、时域、步长、随机开关、
+月度默认和 SST 资源。\srcpath{build\_typhoon\_catalog} 为每月/样本派生确定性 seed，调用
+\srcpath{generate\_typhoon\_track\_sample}，按最大风速分类并建立
+\fld{by\_category} 索引。若指定 catalog path，可加载或保存资源；
+\fld{loaded\_from\_disk} 和 \fld{source\_path} 保留来源。
+
+\subsection{线程安全缓存}
+\srcpath{get\_or\_build\_typhoon\_catalog} 按影响目录内容的选项建立缓存 key，并返回
+指向不可变目录的共享指针。混合选项并发刷新必须得到各自一致快照，测试
+\texttt{Typhoon catalog snapshots survive concurrent mixed-option refreshes} 防止共享可变目录
+被另一线程覆盖。
+
+\subsection{类别采样与 fallback}
+\srcpath{sample\_typhoon\_catalog} 先在请求类别索引中按 selection seed 抽样。若类别为空，
+实现选择可用的替代类别并置 \fld{used\_category\_fallback=true}；事件同时保留
+\fld{requested\_intensity} 和 \fld{selected\_intensity}，不得只返回后者。选中样本的
+\fld{selected\_sample\_id}、\fld{selected\_track\_max\_vmax\_ms} 和
+\fld{used\_catalog\_sample} 进入结果。
+
+\subsection{轨迹生成与预计算轨迹}
+\fld{TyphoonScenarioOptions.use\_precomputed\_track=true} 时直接消费
+\fld{precomputed\_track}；否则从初始纬经度、气压亏损、RMW、航向、平移速度、月份和 SST
+生成轨迹。预计算路径用于确定性测试和外部轨迹接入，避免为了复算 Holland 核而再次随机生成。
+
+\subsection{事件定义}
+\fld{ResilienceEventDefinition} 完整保存：事件 ID、请求/选中强度、样本 ID、fallback 标志、
+修复近似标志、故障数、月份、faults、track、branch risks、PV/wind/renewable/load 台风倍率，
+以及可选 stage-1 起止步。它是条件场景元数据，不是恢复优化结果。
+
+\subsection{候选生成流程}
+对每一 intensity 和候选：
+\begin{enumerate}
+  \item 派生台风 selection seed，选择目录样本或生成轨迹；
+  \item 复用预计算线路分段，计算风雨、支路风险、故障与修复；
+  \item 计算 PV、wind、renewable 和 load 台风倍率；
+  \item 与常规基线、随机倍率和储能 SOC 合成多步 time series；
+  \item 写入事件、outage signature、regime label 与风险源；
+  \item 组内赋等概率，执行尾部锚定聚类并记录 audit。
+\end{enumerate}
+
+\subsection{设备影响倍率}
+PV 风致降额由 \fld{pv\_cutout\_start\_ms}、\fld{pv\_cutout\_full\_ms}、
+\fld{pv\_max\_reduction} 和过渡小时控制；风电使用 cut-in/rated/cut-out 和 ramp exponent；
+负荷从 \fld{load\_wind\_start} 到 \fld{load\_wind\_full} 线性降至最大削减量。新能源总倍率
+按 PV、风、其他容量加权，不把 PV 倍率直接复制给全部新能源。
+
+\subsection{空间预算}
+线路自动分段在每个候选前预计算并复用，避免 $N$ 次重复几何构造。每支路段数由
+\fld{target\_segment\_length\_km} 推导，并钳在 min/max 之间。没有坐标时使用 case center 与
+bus spacing fallback；没有几何长度时产生 synthetic segment。对应标志进入 fault result。
+
+\subsection{概率与强度分类}
+最大轨迹风速由 \srcpath{max\_track\_vmax\_ms} 计算；默认可跳过首点以避免初始化值污染。
+\srcpath{classify\_typhoon\_intensity} 将最大风速映射到公开类别。分类只是标签，不产生类别
+发生概率；目录中的 category count 只描述生成样本数量。
+
+\subsection{复杂度和并行性}
+设强度数 $H$、每类候选 $N_h$、轨迹步 $T$、总线段 $L_s$，故障链成本约
+$O(\sum_hN_hTL_s)$，随后再加各组聚类成本。目录缓存降低轨迹批量构造成本，但结果仍依赖
+选择 seed。线路分段复用是主要空间计算优化。
+
+\subsection{已知边界}
+\begin{gapnote}
+目录样本不是历史台风重分析集合，也未按登陆率、月份频率或海温后验加权。类别 fallback
+只保证可运行，不代表物理相邻类别的概率替代。故障和修复进入场景定义，但不自动反馈到
+恢复 MIP、DAE 或交通路由求解。
+\end{gapnote}
+
+\subsection{实现对应}
+\begin{center}\small
+\begin{tabular}{@{}L{5.2cm}L{8.5cm}@{}}
+\toprule
+步骤 & 源码锚点\\
+\midrule
+轨迹样本和目录 & \srcpath{typhoon\_resilience.cpp:generate\_typhoon\_track\_sample}、
+\srcpath{build\_typhoon\_catalog}\\
+目录缓存/分类采样 & \srcpath{get\_or\_build\_typhoon\_catalog}、
+\srcpath{sample\_typhoon\_catalog}\\
+强度候选与倍率合成 & \srcpath{scenario\_generation.cpp:generate\_resilience\_scenarios}\\
+设备台风影响 & \srcpath{scenario\_generation.cpp:apply\_typhoon\_impact}\\
+类别先验与历史校准 & \implnone\\
+\bottomrule
+\end{tabular}
+\end{center}

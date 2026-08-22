@@ -119,6 +119,11 @@ Findings closed by the short-circuit theory-to-code implementation pass:
 | AUD-008 | Every public HPF result family reports requested/converged base PF, stored-operating-point use, and model limitations. | `test_harmonics_power_flow` fallback cases |
 | AUD-009 | Topology cycles explicitly contain graph-edge positions; cut vertices and propagated resilience results expose AC/DC-qualified IDs. | `test_graph` same-ID topology case |
 | AUD-010 | CSV uses full-field integer parsing and quoted-field state-machine parsing; trailing text and malformed quotes are rejected. | `test_carbonflow_dynamic_storage` CSV cases |
+| AUD-074 | DAE initialization/build/integration/replay exceptions become fail-closed Failed certificates and cannot abort the surrounding resilience study. | `test_transient_dynamics` `[resilience][certificate][fail_closed]` case plus completed review executable |
+| AUD-075 | Proof-valid Unsafe DAE candidates generate exact topology/service cuts and trigger restoration-MIP re-optimization; Failed/Unresolved remain non-cutting. | `[resilience][certificate][mip_dae_feedback]`; review case 2 MIP solves/1 cut |
+| AUD-076 | Grid-forming microgrid/source semantics, zero-dispatch storage P/E eligibility, and bus-level dispatch replay survive projection into PF/DAE. | projection B9 and `[dispatch_attribution]` regressions |
+| AUD-077 | Resilience external comparison executes three frozen AC snapshots in both DSS C-API and GridLAB-D with nonzero rows and fixed voltage gates. | `external_snapshot_comparison.json/csv`, 3/3 + 3/3 pass |
+| AUD-078 | Risk sampling uses geometric checkpoints and stops only after two consecutive mean/CVaR criteria pass. | 2048/2048 pairs; final max changes 0.7329%/3.1397% |
 | AUD-011 | StrictHiGHS B&C calls execute on fresh joined threads, isolating them from Native adapter TLS while Native retains the caller thread's required stack capacity. | `test_resilience_assessment` five-cycle ordered backend case |
 | AUD-054 | HPF linear and Newton result families derive `ok` from per-order solution or final convergence; a failed factorization/iteration cannot report success. | `test_harmonics_power_flow` invalid-option and forced non-convergence cases |
 | AUD-055 | AC harmonic terminal currents reuse the exact pi/tap/phase-shift Ybus stamp; copper loss uses series current and `R(h)`. | 1.1-tap/17-degree/charging analytic regression |
@@ -206,6 +211,25 @@ the review record. The table above is the current status.
 - Required closure: identify and reset or isolate mutable solver state across
   Native/StrictHiGHS calls; register a same-process ordered regression and run
   it under sanitizers and the production server execution model.
+
+#### AUD-074: DAE certificate initialization exception escaped the resilience study
+
+- Module: `resilience/`.
+- Evidence: the end-to-end review case terminated during
+  `MultiFidelityCertificateEngine::evaluate` when dynamic power-flow
+  initialization rejected a represented restoration state. The public
+  certificate interface had no exception-to-result boundary.
+- Impact: a single uninitializable action aborted the remaining weak-link and
+  risk study, leaving partial artifacts and no structured failure
+  certificate.
+- Closure: `src/resilience/certified_restoration.cpp` now maps standard and
+  cross-ABI exceptions to `CertificateLabel::Failed`, with
+  `proof_valid=false` and `simulation_success=false`. The focused
+  `[resilience][certificate][fail_closed]` test passes 6 assertions. The full
+  review then completed 2048 paired samples, while the dynamic feedback loop
+  separately cut a proof-valid Unsafe incumbent and certified the replacement.
+  Fail-closed itself establishes process safety only; dynamic feasibility comes
+  from the later proof-valid Safe certificates.
 
 ### Medium
 
@@ -323,7 +347,7 @@ the review record. The table above is the current status.
 | `graph/` | Focused | Deep | AUD-009 closed; AUD-024--AUD-031 open across domain-safe planning, option drift, mapping/recovery, edge identity, island status, and rich-component coverage. Focused Release rebuild: three direct targets pass 56 cases / 467 assertions; numerical chapter records Kron/current/recovery and PF/OPF round-trip errors. |
 | `network_reconfiguration/` | Focused | Deep | AUD-018--AUD-023 open: HTTP loss units, validity timing, solver-comment drift, unpopulated result fields, hidden ONR fallback, and unreachable legacy model. Focused Release rebuild: five focused targets pass 30 cases / 401 assertions; numerical chapter records exhaustive, BFS, PF and pipeline cross-validation with proxy limitations. |
 | `reliability/` | Focused | Deep | AUD-015 closed: tail-risk LOLE-vs-EENS length guard and ASAI `[0,1]` clamp; result-scope invariants checked. |
-| `resilience/` | Distributed | Deep | AUD-011 closed; AUD-009 propagation now exposes AC/DC cut-vertex lists. |
+| `resilience/` | Distributed | Deep | AUD-011/AUD-074--078 closed; DAE feedback, 2048-pair convergence and three-snapshot external AC comparison are admitted only within their declared scopes. |
 | `analysis/` | Distributed | Sampled | Focused submodule documents exist; no umbrella result contract. |
 | `scenario_generation/` | Focused | Deep | AUD-001 and AUD-002 closed. |
 | `short_circuit/` | Focused | Deep | AUD-032--AUD-053 are closed with zero open findings in the detailed IEC 60909 calculation scope. Release direct short-circuit targets pass 57 cases / 917 assertions; focused JSON passes 3/48. IEC §6.2 plus a 13-bus comprehensive network, 50 OpenDSS complete-network cases, mandatory 35-case GridLAB-D 5.3.0 gate, IEEE 13/34/123 external-Thevenin fault kernels, 77-check production API E2E, authored identity, analytic DCCB division and a 1000-bus sparse batch benchmark are recorded in the manual. EMT, controller, protection and IEC 61660 studies belong to their dedicated model families and are not represented as unfinished IEC 60909 work. |

@@ -1,0 +1,3690 @@
+{
+  "case": {
+    "ac_buses": 4,
+    "critical_loads": 3,
+    "dc_buses": 2,
+    "microgrids": 2,
+    "name": "networked hybrid microgrid benchmark"
+  },
+  "debug_restoration_steps": [
+    {
+      "bus_supply": [
+        {
+          "base_source_mw": 0.0,
+          "bus": 1,
+          "demand_mw": 0.0,
+          "dispatchable_generation_mw": 0.0,
+          "domain": "AC",
+          "energized": false,
+          "fixed_storage_mw": 0.0,
+          "renewable_mw": 0.0,
+          "root": false,
+          "served_mw": 0.0
+        },
+        {
+          "base_source_mw": 0.0,
+          "bus": 2,
+          "demand_mw": 1.0,
+          "dispatchable_generation_mw": 1.0,
+          "domain": "AC",
+          "energized": true,
+          "fixed_storage_mw": 0.0,
+          "renewable_mw": 0.0,
+          "root": true,
+          "served_mw": 1.0
+        },
+        {
+          "base_source_mw": 0.0,
+          "bus": 3,
+          "demand_mw": 1.0,
+          "dispatchable_generation_mw": 0.0,
+          "domain": "AC",
+          "energized": true,
+          "fixed_storage_mw": 0.0,
+          "renewable_mw": 0.0,
+          "root": false,
+          "served_mw": 1.0
+        },
+        {
+          "base_source_mw": 0.0,
+          "bus": 4,
+          "demand_mw": 0.6,
+          "dispatchable_generation_mw": 0.5999999999999999,
+          "domain": "AC",
+          "energized": true,
+          "fixed_storage_mw": 0.0,
+          "renewable_mw": 0.0,
+          "root": false,
+          "served_mw": 0.6
+        },
+        {
+          "base_source_mw": 1.0,
+          "bus": 1,
+          "demand_mw": 0.0,
+          "dispatchable_generation_mw": 0.0,
+          "domain": "DC",
+          "energized": true,
+          "fixed_storage_mw": 0.0,
+          "renewable_mw": 0.0,
+          "root": true,
+          "served_mw": 0.0
+        },
+        {
+          "base_source_mw": 0.0,
+          "bus": 2,
+          "demand_mw": 0.25,
+          "dispatchable_generation_mw": 0.0,
+          "domain": "DC",
+          "energized": false,
+          "fixed_storage_mw": 0.0,
+          "renewable_mw": 0.0,
+          "root": false,
+          "served_mw": 0.0
+        }
+      ],
+      "component_states": [
+        {
+          "available": false,
+          "canonical_component_index": 1,
+          "closed": false,
+          "component_index": 1,
+          "component_type": "ac_branch",
+          "domain": "AC",
+          "flow_mw": -0.0
+        },
+        {
+          "available": false,
+          "canonical_component_index": 2,
+          "closed": false,
+          "component_index": 2,
+          "component_type": "ac_branch",
+          "domain": "AC",
+          "flow_mw": -0.0
+        },
+        {
+          "available": true,
+          "canonical_component_index": 3,
+          "closed": false,
+          "component_index": 3,
+          "component_type": "ac_branch",
+          "domain": "AC",
+          "flow_mw": 0.0
+        },
+        {
+          "available": false,
+          "canonical_component_index": 4,
+          "closed": false,
+          "component_index": 4,
+          "component_type": "ac_branch",
+          "domain": "AC",
+          "flow_mw": -0.0
+        },
+        {
+          "available": true,
+          "canonical_component_index": 5,
+          "closed": true,
+          "component_index": 5,
+          "component_type": "ac_branch",
+          "domain": "AC",
+          "flow_mw": -0.9999999999999998
+        },
+        {
+          "available": false,
+          "canonical_component_index": 101,
+          "closed": false,
+          "component_index": 101,
+          "component_type": "dc_branch",
+          "domain": "DC",
+          "flow_mw": -0.0
+        },
+        {
+          "available": true,
+          "canonical_component_index": 101,
+          "closed": true,
+          "component_index": 101,
+          "component_type": "vsc_converter",
+          "domain": "AC-DC",
+          "flow_mw": -1.0
+        }
+      ],
+      "hour": 0.0,
+      "step": 0
+    },
+    {
+      "bus_supply": [
+        {
+          "base_source_mw": 0.0,
+          "bus": 1,
+          "demand_mw": 0.0,
+          "dispatchable_generation_mw": 0.0,
+          "domain": "AC",
+          "energized": false,
+          "fixed_storage_mw": 0.0,
+          "renewable_mw": 0.0,
+          "root": false,
+          "served_mw": 0.0
+        },
+        {
+          "base_source_mw": 0.0,
+          "bus": 2,
+          "demand_mw": 1.0,
+          "dispatchable_generation_mw": 1.0,
+          "domain": "AC",
+          "energized": true,
+          "fixed_storage_mw": 0.0,
+          "renewable_mw": 0.0,
+          "root": true,
+          "served_mw": 1.0
+        },
+        {
+          "base_source_mw": 0.0,
+          "bus": 3,
+          "demand_mw": 1.0,
+          "dispatchable_generation_mw": 0.0,
+          "domain": "AC",
+          "energized": true,
+          "fixed_storage_mw": 0.0,
+          "renewable_mw": 0.0,
+          "root": false,
+          "served_mw": 1.0
+        },
+        {
+          "base_source_mw": 0.0,
+          "bus": 4,
+          "demand_mw": 0.6,
+          "dispatchable_generation_mw": 0.6000000000000001,
+          "domain": "AC",
+          "energized": true,
+          "fixed_storage_mw": 0.0,
+          "renewable_mw": 0.0,
+          "root": false,
+          "served_mw": 0.6
+        },
+        {
+          "base_source_mw": 1.0,
+          "bus": 1,
+          "demand_mw": 0.0,
+          "dispatchable_generation_mw": 0.0,
+          "domain": "DC",
+          "energized": true,
+          "fixed_storage_mw": 0.0,
+          "renewable_mw": 0.0,
+          "root": true,
+          "served_mw": 0.0
+        },
+        {
+          "base_source_mw": 0.0,
+          "bus": 2,
+          "demand_mw": 0.25,
+          "dispatchable_generation_mw": 0.0,
+          "domain": "DC",
+          "energized": false,
+          "fixed_storage_mw": 0.0,
+          "renewable_mw": 0.0,
+          "root": false,
+          "served_mw": 0.0
+        }
+      ],
+      "component_states": [
+        {
+          "available": false,
+          "canonical_component_index": 1,
+          "closed": false,
+          "component_index": 1,
+          "component_type": "ac_branch",
+          "domain": "AC",
+          "flow_mw": -0.0
+        },
+        {
+          "available": false,
+          "canonical_component_index": 2,
+          "closed": false,
+          "component_index": 2,
+          "component_type": "ac_branch",
+          "domain": "AC",
+          "flow_mw": -0.0
+        },
+        {
+          "available": true,
+          "canonical_component_index": 3,
+          "closed": false,
+          "component_index": 3,
+          "component_type": "ac_branch",
+          "domain": "AC",
+          "flow_mw": 0.0
+        },
+        {
+          "available": false,
+          "canonical_component_index": 4,
+          "closed": false,
+          "component_index": 4,
+          "component_type": "ac_branch",
+          "domain": "AC",
+          "flow_mw": -0.0
+        },
+        {
+          "available": true,
+          "canonical_component_index": 5,
+          "closed": true,
+          "component_index": 5,
+          "component_type": "ac_branch",
+          "domain": "AC",
+          "flow_mw": -1.0
+        },
+        {
+          "available": false,
+          "canonical_component_index": 101,
+          "closed": false,
+          "component_index": 101,
+          "component_type": "dc_branch",
+          "domain": "DC",
+          "flow_mw": -0.0
+        },
+        {
+          "available": true,
+          "canonical_component_index": 101,
+          "closed": true,
+          "component_index": 101,
+          "component_type": "vsc_converter",
+          "domain": "AC-DC",
+          "flow_mw": -1.0
+        }
+      ],
+      "hour": 1.0,
+      "step": 1
+    },
+    {
+      "bus_supply": [
+        {
+          "base_source_mw": 0.0,
+          "bus": 1,
+          "demand_mw": 0.0,
+          "dispatchable_generation_mw": 0.0,
+          "domain": "AC",
+          "energized": false,
+          "fixed_storage_mw": 0.0,
+          "renewable_mw": 0.0,
+          "root": false,
+          "served_mw": 0.0
+        },
+        {
+          "base_source_mw": 0.0,
+          "bus": 2,
+          "demand_mw": 1.0,
+          "dispatchable_generation_mw": 1.0,
+          "domain": "AC",
+          "energized": true,
+          "fixed_storage_mw": 0.0,
+          "renewable_mw": 0.0,
+          "root": true,
+          "served_mw": 1.0
+        },
+        {
+          "base_source_mw": 0.0,
+          "bus": 3,
+          "demand_mw": 1.0,
+          "dispatchable_generation_mw": 0.0,
+          "domain": "AC",
+          "energized": true,
+          "fixed_storage_mw": 0.0,
+          "renewable_mw": 0.48636097275437074,
+          "root": false,
+          "served_mw": 1.0
+        },
+        {
+          "base_source_mw": 0.0,
+          "bus": 4,
+          "demand_mw": 0.6,
+          "dispatchable_generation_mw": 0.11363902724562935,
+          "domain": "AC",
+          "energized": true,
+          "fixed_storage_mw": 0.0,
+          "renewable_mw": 0.0,
+          "root": false,
+          "served_mw": 0.6
+        },
+        {
+          "base_source_mw": 1.0,
+          "bus": 1,
+          "demand_mw": 0.0,
+          "dispatchable_generation_mw": 0.0,
+          "domain": "DC",
+          "energized": true,
+          "fixed_storage_mw": 0.0,
+          "renewable_mw": 0.0,
+          "root": true,
+          "served_mw": 0.0
+        },
+        {
+          "base_source_mw": 0.0,
+          "bus": 2,
+          "demand_mw": 0.25,
+          "dispatchable_generation_mw": 0.0,
+          "domain": "DC",
+          "energized": false,
+          "fixed_storage_mw": 0.0,
+          "renewable_mw": 0.0,
+          "root": false,
+          "served_mw": 0.0
+        }
+      ],
+      "component_states": [
+        {
+          "available": true,
+          "canonical_component_index": 1,
+          "closed": false,
+          "component_index": 1,
+          "component_type": "ac_branch",
+          "domain": "AC",
+          "flow_mw": 0.0
+        },
+        {
+          "available": false,
+          "canonical_component_index": 2,
+          "closed": false,
+          "component_index": 2,
+          "component_type": "ac_branch",
+          "domain": "AC",
+          "flow_mw": -0.0
+        },
+        {
+          "available": true,
+          "canonical_component_index": 3,
+          "closed": false,
+          "component_index": 3,
+          "component_type": "ac_branch",
+          "domain": "AC",
+          "flow_mw": 0.0
+        },
+        {
+          "available": false,
+          "canonical_component_index": 4,
+          "closed": false,
+          "component_index": 4,
+          "component_type": "ac_branch",
+          "domain": "AC",
+          "flow_mw": -0.0
+        },
+        {
+          "available": true,
+          "canonical_component_index": 5,
+          "closed": true,
+          "component_index": 5,
+          "component_type": "ac_branch",
+          "domain": "AC",
+          "flow_mw": -0.5136390272456293
+        },
+        {
+          "available": false,
+          "canonical_component_index": 101,
+          "closed": false,
+          "component_index": 101,
+          "component_type": "dc_branch",
+          "domain": "DC",
+          "flow_mw": -0.0
+        },
+        {
+          "available": true,
+          "canonical_component_index": 101,
+          "closed": true,
+          "component_index": 101,
+          "component_type": "vsc_converter",
+          "domain": "AC-DC",
+          "flow_mw": -1.0
+        }
+      ],
+      "hour": 2.0,
+      "step": 2
+    },
+    {
+      "bus_supply": [
+        {
+          "base_source_mw": 0.0,
+          "bus": 1,
+          "demand_mw": 0.0,
+          "dispatchable_generation_mw": 0.0,
+          "domain": "AC",
+          "energized": false,
+          "fixed_storage_mw": 0.0,
+          "renewable_mw": 0.0,
+          "root": false,
+          "served_mw": 0.0
+        },
+        {
+          "base_source_mw": 0.0,
+          "bus": 2,
+          "demand_mw": 1.0,
+          "dispatchable_generation_mw": 1.0,
+          "domain": "AC",
+          "energized": true,
+          "fixed_storage_mw": 0.0,
+          "renewable_mw": 0.0,
+          "root": true,
+          "served_mw": 1.0
+        },
+        {
+          "base_source_mw": 0.0,
+          "bus": 3,
+          "demand_mw": 1.0,
+          "dispatchable_generation_mw": 0.0,
+          "domain": "AC",
+          "energized": true,
+          "fixed_storage_mw": 0.0,
+          "renewable_mw": 0.5253204988913016,
+          "root": false,
+          "served_mw": 1.0
+        },
+        {
+          "base_source_mw": 0.0,
+          "bus": 4,
+          "demand_mw": 0.6,
+          "dispatchable_generation_mw": 0.8,
+          "domain": "AC",
+          "energized": true,
+          "fixed_storage_mw": 0.0,
+          "renewable_mw": 0.0,
+          "root": false,
+          "served_mw": 0.6
+        },
+        {
+          "base_source_mw": 0.27467950110869843,
+          "bus": 1,
+          "demand_mw": 0.0,
+          "dispatchable_generation_mw": 0.0,
+          "domain": "DC",
+          "energized": true,
+          "fixed_storage_mw": 0.0,
+          "renewable_mw": 0.0,
+          "root": true,
+          "served_mw": 0.0
+        },
+        {
+          "base_source_mw": 0.0,
+          "bus": 2,
+          "demand_mw": 0.25,
+          "dispatchable_generation_mw": 0.0,
+          "domain": "DC",
+          "energized": false,
+          "fixed_storage_mw": 0.0,
+          "renewable_mw": 0.0,
+          "root": false,
+          "served_mw": 0.0
+        }
+      ],
+      "component_states": [
+        {
+          "available": true,
+          "canonical_component_index": 1,
+          "closed": false,
+          "component_index": 1,
+          "component_type": "ac_branch",
+          "domain": "AC",
+          "flow_mw": 0.0
+        },
+        {
+          "available": true,
+          "canonical_component_index": 2,
+          "closed": false,
+          "component_index": 2,
+          "component_type": "ac_branch",
+          "domain": "AC",
+          "flow_mw": 0.0
+        },
+        {
+          "available": true,
+          "canonical_component_index": 3,
+          "closed": false,
+          "component_index": 3,
+          "component_type": "ac_branch",
+          "domain": "AC",
+          "flow_mw": 0.0
+        },
+        {
+          "available": false,
+          "canonical_component_index": 4,
+          "closed": false,
+          "component_index": 4,
+          "component_type": "ac_branch",
+          "domain": "AC",
+          "flow_mw": -0.0
+        },
+        {
+          "available": true,
+          "canonical_component_index": 5,
+          "closed": true,
+          "component_index": 5,
+          "component_type": "ac_branch",
+          "domain": "AC",
+          "flow_mw": -0.4746795011086985
+        },
+        {
+          "available": false,
+          "canonical_component_index": 101,
+          "closed": false,
+          "component_index": 101,
+          "component_type": "dc_branch",
+          "domain": "DC",
+          "flow_mw": -0.0
+        },
+        {
+          "available": true,
+          "canonical_component_index": 101,
+          "closed": true,
+          "component_index": 101,
+          "component_type": "vsc_converter",
+          "domain": "AC-DC",
+          "flow_mw": -0.27467950110869843
+        }
+      ],
+      "hour": 3.0,
+      "step": 3
+    },
+    {
+      "bus_supply": [
+        {
+          "base_source_mw": 0.0,
+          "bus": 1,
+          "demand_mw": 0.0,
+          "dispatchable_generation_mw": 0.0,
+          "domain": "AC",
+          "energized": false,
+          "fixed_storage_mw": 0.0,
+          "renewable_mw": 0.0,
+          "root": false,
+          "served_mw": 0.0
+        },
+        {
+          "base_source_mw": 0.0,
+          "bus": 2,
+          "demand_mw": 1.0,
+          "dispatchable_generation_mw": 1.0,
+          "domain": "AC",
+          "energized": true,
+          "fixed_storage_mw": 0.0,
+          "renewable_mw": 0.0,
+          "root": true,
+          "served_mw": 1.0
+        },
+        {
+          "base_source_mw": 0.0,
+          "bus": 3,
+          "demand_mw": 1.0,
+          "dispatchable_generation_mw": 0.0,
+          "domain": "AC",
+          "energized": true,
+          "fixed_storage_mw": 0.0,
+          "renewable_mw": 0.0,
+          "root": false,
+          "served_mw": 1.0
+        },
+        {
+          "base_source_mw": 0.0,
+          "bus": 4,
+          "demand_mw": 0.6,
+          "dispatchable_generation_mw": 0.6,
+          "domain": "AC",
+          "energized": true,
+          "fixed_storage_mw": 0.0,
+          "renewable_mw": 0.0,
+          "root": false,
+          "served_mw": 0.6
+        },
+        {
+          "base_source_mw": 1.0,
+          "bus": 1,
+          "demand_mw": 0.0,
+          "dispatchable_generation_mw": 0.0,
+          "domain": "DC",
+          "energized": true,
+          "fixed_storage_mw": 0.0,
+          "renewable_mw": 0.0,
+          "root": true,
+          "served_mw": 0.0
+        },
+        {
+          "base_source_mw": 0.0,
+          "bus": 2,
+          "demand_mw": 0.25,
+          "dispatchable_generation_mw": 0.0,
+          "domain": "DC",
+          "energized": false,
+          "fixed_storage_mw": 0.0,
+          "renewable_mw": 0.0,
+          "root": false,
+          "served_mw": 0.0
+        }
+      ],
+      "component_states": [
+        {
+          "available": true,
+          "canonical_component_index": 1,
+          "closed": false,
+          "component_index": 1,
+          "component_type": "ac_branch",
+          "domain": "AC",
+          "flow_mw": 0.0
+        },
+        {
+          "available": true,
+          "canonical_component_index": 2,
+          "closed": false,
+          "component_index": 2,
+          "component_type": "ac_branch",
+          "domain": "AC",
+          "flow_mw": 0.0
+        },
+        {
+          "available": true,
+          "canonical_component_index": 3,
+          "closed": false,
+          "component_index": 3,
+          "component_type": "ac_branch",
+          "domain": "AC",
+          "flow_mw": 0.0
+        },
+        {
+          "available": true,
+          "canonical_component_index": 4,
+          "closed": false,
+          "component_index": 4,
+          "component_type": "ac_branch",
+          "domain": "AC",
+          "flow_mw": 0.0
+        },
+        {
+          "available": true,
+          "canonical_component_index": 5,
+          "closed": true,
+          "component_index": 5,
+          "component_type": "ac_branch",
+          "domain": "AC",
+          "flow_mw": -1.0
+        },
+        {
+          "available": false,
+          "canonical_component_index": 101,
+          "closed": false,
+          "component_index": 101,
+          "component_type": "dc_branch",
+          "domain": "DC",
+          "flow_mw": -0.0
+        },
+        {
+          "available": true,
+          "canonical_component_index": 101,
+          "closed": true,
+          "component_index": 101,
+          "component_type": "vsc_converter",
+          "domain": "AC-DC",
+          "flow_mw": -1.0
+        }
+      ],
+      "hour": 4.0,
+      "step": 4
+    },
+    {
+      "bus_supply": [
+        {
+          "base_source_mw": 0.0,
+          "bus": 1,
+          "demand_mw": 0.0,
+          "dispatchable_generation_mw": 0.0,
+          "domain": "AC",
+          "energized": false,
+          "fixed_storage_mw": 0.0,
+          "renewable_mw": 0.0,
+          "root": false,
+          "served_mw": 0.0
+        },
+        {
+          "base_source_mw": 0.0,
+          "bus": 2,
+          "demand_mw": 1.0,
+          "dispatchable_generation_mw": 1.0,
+          "domain": "AC",
+          "energized": true,
+          "fixed_storage_mw": 0.0,
+          "renewable_mw": 0.0,
+          "root": true,
+          "served_mw": 1.0
+        },
+        {
+          "base_source_mw": 0.0,
+          "bus": 3,
+          "demand_mw": 1.0,
+          "dispatchable_generation_mw": 0.0,
+          "domain": "AC",
+          "energized": true,
+          "fixed_storage_mw": 1.0,
+          "renewable_mw": 0.050000000000000266,
+          "root": false,
+          "served_mw": 1.0
+        },
+        {
+          "base_source_mw": 0.0,
+          "bus": 4,
+          "demand_mw": 0.6,
+          "dispatchable_generation_mw": 0.0,
+          "domain": "AC",
+          "energized": true,
+          "fixed_storage_mw": 0.8,
+          "renewable_mw": 0.0,
+          "root": true,
+          "served_mw": 0.6
+        },
+        {
+          "base_source_mw": 0.0,
+          "bus": 1,
+          "demand_mw": 0.0,
+          "dispatchable_generation_mw": 0.0,
+          "domain": "DC",
+          "energized": true,
+          "fixed_storage_mw": 0.0,
+          "renewable_mw": 0.0,
+          "root": false,
+          "served_mw": 0.0
+        },
+        {
+          "base_source_mw": 0.0,
+          "bus": 2,
+          "demand_mw": 0.25,
+          "dispatchable_generation_mw": 0.0,
+          "domain": "DC",
+          "energized": true,
+          "fixed_storage_mw": 0.0,
+          "renewable_mw": 0.0,
+          "root": false,
+          "served_mw": 0.25
+        }
+      ],
+      "component_states": [
+        {
+          "available": true,
+          "canonical_component_index": 1,
+          "closed": false,
+          "component_index": 1,
+          "component_type": "ac_branch",
+          "domain": "AC",
+          "flow_mw": 0.0
+        },
+        {
+          "available": true,
+          "canonical_component_index": 2,
+          "closed": false,
+          "component_index": 2,
+          "component_type": "ac_branch",
+          "domain": "AC",
+          "flow_mw": 0.0
+        },
+        {
+          "available": true,
+          "canonical_component_index": 3,
+          "closed": false,
+          "component_index": 3,
+          "component_type": "ac_branch",
+          "domain": "AC",
+          "flow_mw": 0.0
+        },
+        {
+          "available": true,
+          "canonical_component_index": 4,
+          "closed": false,
+          "component_index": 4,
+          "component_type": "ac_branch",
+          "domain": "AC",
+          "flow_mw": 0.0
+        },
+        {
+          "available": true,
+          "canonical_component_index": 5,
+          "closed": true,
+          "component_index": 5,
+          "component_type": "ac_branch",
+          "domain": "AC",
+          "flow_mw": 0.050000000000000266
+        },
+        {
+          "available": true,
+          "canonical_component_index": 101,
+          "closed": true,
+          "component_index": 101,
+          "component_type": "dc_branch",
+          "domain": "DC",
+          "flow_mw": 0.25
+        },
+        {
+          "available": true,
+          "canonical_component_index": 101,
+          "closed": true,
+          "component_index": 101,
+          "component_type": "vsc_converter",
+          "domain": "AC-DC",
+          "flow_mw": 0.25
+        }
+      ],
+      "hour": 5.0,
+      "step": 5
+    },
+    {
+      "bus_supply": [
+        {
+          "base_source_mw": 0.0,
+          "bus": 1,
+          "demand_mw": 0.0,
+          "dispatchable_generation_mw": 0.0,
+          "domain": "AC",
+          "energized": false,
+          "fixed_storage_mw": 0.0,
+          "renewable_mw": 0.0,
+          "root": false,
+          "served_mw": 0.0
+        },
+        {
+          "base_source_mw": 0.0,
+          "bus": 2,
+          "demand_mw": 1.0,
+          "dispatchable_generation_mw": 1.0,
+          "domain": "AC",
+          "energized": true,
+          "fixed_storage_mw": 0.0,
+          "renewable_mw": 0.0,
+          "root": true,
+          "served_mw": 1.0
+        },
+        {
+          "base_source_mw": 0.0,
+          "bus": 3,
+          "demand_mw": 1.0,
+          "dispatchable_generation_mw": 0.0,
+          "domain": "AC",
+          "energized": true,
+          "fixed_storage_mw": 0.0,
+          "renewable_mw": 0.0,
+          "root": false,
+          "served_mw": 1.0
+        },
+        {
+          "base_source_mw": 0.0,
+          "bus": 4,
+          "demand_mw": 0.6,
+          "dispatchable_generation_mw": 0.6000000000000001,
+          "domain": "AC",
+          "energized": true,
+          "fixed_storage_mw": 0.0,
+          "renewable_mw": 0.0,
+          "root": false,
+          "served_mw": 0.6
+        },
+        {
+          "base_source_mw": 1.25,
+          "bus": 1,
+          "demand_mw": 0.0,
+          "dispatchable_generation_mw": 0.0,
+          "domain": "DC",
+          "energized": true,
+          "fixed_storage_mw": 0.0,
+          "renewable_mw": 0.0,
+          "root": true,
+          "served_mw": 0.0
+        },
+        {
+          "base_source_mw": 0.0,
+          "bus": 2,
+          "demand_mw": 0.25,
+          "dispatchable_generation_mw": 0.0,
+          "domain": "DC",
+          "energized": true,
+          "fixed_storage_mw": 0.0,
+          "renewable_mw": 0.0,
+          "root": false,
+          "served_mw": 0.25
+        }
+      ],
+      "component_states": [
+        {
+          "available": true,
+          "canonical_component_index": 1,
+          "closed": false,
+          "component_index": 1,
+          "component_type": "ac_branch",
+          "domain": "AC",
+          "flow_mw": 0.0
+        },
+        {
+          "available": true,
+          "canonical_component_index": 2,
+          "closed": false,
+          "component_index": 2,
+          "component_type": "ac_branch",
+          "domain": "AC",
+          "flow_mw": 0.0
+        },
+        {
+          "available": true,
+          "canonical_component_index": 3,
+          "closed": false,
+          "component_index": 3,
+          "component_type": "ac_branch",
+          "domain": "AC",
+          "flow_mw": 0.0
+        },
+        {
+          "available": true,
+          "canonical_component_index": 4,
+          "closed": false,
+          "component_index": 4,
+          "component_type": "ac_branch",
+          "domain": "AC",
+          "flow_mw": 0.0
+        },
+        {
+          "available": true,
+          "canonical_component_index": 5,
+          "closed": true,
+          "component_index": 5,
+          "component_type": "ac_branch",
+          "domain": "AC",
+          "flow_mw": -1.0
+        },
+        {
+          "available": true,
+          "canonical_component_index": 101,
+          "closed": true,
+          "component_index": 101,
+          "component_type": "dc_branch",
+          "domain": "DC",
+          "flow_mw": 0.25
+        },
+        {
+          "available": true,
+          "canonical_component_index": 101,
+          "closed": true,
+          "component_index": 101,
+          "component_type": "vsc_converter",
+          "domain": "AC-DC",
+          "flow_mw": -1.0
+        }
+      ],
+      "hour": 6.0,
+      "step": 6
+    },
+    {
+      "bus_supply": [
+        {
+          "base_source_mw": 0.0,
+          "bus": 1,
+          "demand_mw": 0.0,
+          "dispatchable_generation_mw": 0.0,
+          "domain": "AC",
+          "energized": false,
+          "fixed_storage_mw": 0.0,
+          "renewable_mw": 0.0,
+          "root": false,
+          "served_mw": 0.0
+        },
+        {
+          "base_source_mw": 0.0,
+          "bus": 2,
+          "demand_mw": 1.0,
+          "dispatchable_generation_mw": 1.0,
+          "domain": "AC",
+          "energized": true,
+          "fixed_storage_mw": 0.0,
+          "renewable_mw": 0.0,
+          "root": true,
+          "served_mw": 1.0
+        },
+        {
+          "base_source_mw": 0.0,
+          "bus": 3,
+          "demand_mw": 1.0,
+          "dispatchable_generation_mw": 0.0,
+          "domain": "AC",
+          "energized": true,
+          "fixed_storage_mw": 1.0,
+          "renewable_mw": 0.050000000000000266,
+          "root": false,
+          "served_mw": 1.0
+        },
+        {
+          "base_source_mw": 0.0,
+          "bus": 4,
+          "demand_mw": 0.6,
+          "dispatchable_generation_mw": 0.0,
+          "domain": "AC",
+          "energized": true,
+          "fixed_storage_mw": 0.8,
+          "renewable_mw": 0.0,
+          "root": true,
+          "served_mw": 0.6
+        },
+        {
+          "base_source_mw": 0.0,
+          "bus": 1,
+          "demand_mw": 0.0,
+          "dispatchable_generation_mw": 0.0,
+          "domain": "DC",
+          "energized": true,
+          "fixed_storage_mw": 0.0,
+          "renewable_mw": 0.0,
+          "root": false,
+          "served_mw": 0.0
+        },
+        {
+          "base_source_mw": 0.0,
+          "bus": 2,
+          "demand_mw": 0.25,
+          "dispatchable_generation_mw": 0.0,
+          "domain": "DC",
+          "energized": true,
+          "fixed_storage_mw": 0.0,
+          "renewable_mw": 0.0,
+          "root": false,
+          "served_mw": 0.25
+        }
+      ],
+      "component_states": [
+        {
+          "available": true,
+          "canonical_component_index": 1,
+          "closed": false,
+          "component_index": 1,
+          "component_type": "ac_branch",
+          "domain": "AC",
+          "flow_mw": 0.0
+        },
+        {
+          "available": true,
+          "canonical_component_index": 2,
+          "closed": false,
+          "component_index": 2,
+          "component_type": "ac_branch",
+          "domain": "AC",
+          "flow_mw": 0.0
+        },
+        {
+          "available": true,
+          "canonical_component_index": 3,
+          "closed": false,
+          "component_index": 3,
+          "component_type": "ac_branch",
+          "domain": "AC",
+          "flow_mw": 0.0
+        },
+        {
+          "available": true,
+          "canonical_component_index": 4,
+          "closed": false,
+          "component_index": 4,
+          "component_type": "ac_branch",
+          "domain": "AC",
+          "flow_mw": 0.0
+        },
+        {
+          "available": true,
+          "canonical_component_index": 5,
+          "closed": true,
+          "component_index": 5,
+          "component_type": "ac_branch",
+          "domain": "AC",
+          "flow_mw": 0.050000000000000266
+        },
+        {
+          "available": true,
+          "canonical_component_index": 101,
+          "closed": true,
+          "component_index": 101,
+          "component_type": "dc_branch",
+          "domain": "DC",
+          "flow_mw": 0.25
+        },
+        {
+          "available": true,
+          "canonical_component_index": 101,
+          "closed": true,
+          "component_index": 101,
+          "component_type": "vsc_converter",
+          "domain": "AC-DC",
+          "flow_mw": 0.25
+        }
+      ],
+      "hour": 7.0,
+      "step": 7
+    },
+    {
+      "bus_supply": [
+        {
+          "base_source_mw": 0.0,
+          "bus": 1,
+          "demand_mw": 0.0,
+          "dispatchable_generation_mw": 0.0,
+          "domain": "AC",
+          "energized": false,
+          "fixed_storage_mw": 0.0,
+          "renewable_mw": 0.0,
+          "root": false,
+          "served_mw": 0.0
+        },
+        {
+          "base_source_mw": 0.0,
+          "bus": 2,
+          "demand_mw": 1.0,
+          "dispatchable_generation_mw": 1.0,
+          "domain": "AC",
+          "energized": true,
+          "fixed_storage_mw": 0.0,
+          "renewable_mw": 0.0,
+          "root": true,
+          "served_mw": 1.0
+        },
+        {
+          "base_source_mw": 0.0,
+          "bus": 3,
+          "demand_mw": 1.0,
+          "dispatchable_generation_mw": 0.0,
+          "domain": "AC",
+          "energized": true,
+          "fixed_storage_mw": 0.0,
+          "renewable_mw": 0.6000000000000001,
+          "root": false,
+          "served_mw": 1.0
+        },
+        {
+          "base_source_mw": 0.0,
+          "bus": 4,
+          "demand_mw": 0.6,
+          "dispatchable_generation_mw": 0.0,
+          "domain": "AC",
+          "energized": true,
+          "fixed_storage_mw": 0.0,
+          "renewable_mw": 0.0,
+          "root": false,
+          "served_mw": 0.6
+        },
+        {
+          "base_source_mw": 1.25,
+          "bus": 1,
+          "demand_mw": 0.0,
+          "dispatchable_generation_mw": 0.0,
+          "domain": "DC",
+          "energized": true,
+          "fixed_storage_mw": 0.0,
+          "renewable_mw": 0.0,
+          "root": true,
+          "served_mw": 0.0
+        },
+        {
+          "base_source_mw": 0.0,
+          "bus": 2,
+          "demand_mw": 0.25,
+          "dispatchable_generation_mw": 0.0,
+          "domain": "DC",
+          "energized": true,
+          "fixed_storage_mw": 0.0,
+          "renewable_mw": 0.0,
+          "root": false,
+          "served_mw": 0.25
+        }
+      ],
+      "component_states": [
+        {
+          "available": true,
+          "canonical_component_index": 1,
+          "closed": false,
+          "component_index": 1,
+          "component_type": "ac_branch",
+          "domain": "AC",
+          "flow_mw": 0.0
+        },
+        {
+          "available": true,
+          "canonical_component_index": 2,
+          "closed": false,
+          "component_index": 2,
+          "component_type": "ac_branch",
+          "domain": "AC",
+          "flow_mw": 0.0
+        },
+        {
+          "available": true,
+          "canonical_component_index": 3,
+          "closed": false,
+          "component_index": 3,
+          "component_type": "ac_branch",
+          "domain": "AC",
+          "flow_mw": 0.0
+        },
+        {
+          "available": true,
+          "canonical_component_index": 4,
+          "closed": false,
+          "component_index": 4,
+          "component_type": "ac_branch",
+          "domain": "AC",
+          "flow_mw": 0.0
+        },
+        {
+          "available": true,
+          "canonical_component_index": 5,
+          "closed": true,
+          "component_index": 5,
+          "component_type": "ac_branch",
+          "domain": "AC",
+          "flow_mw": -0.3999999999999999
+        },
+        {
+          "available": true,
+          "canonical_component_index": 101,
+          "closed": true,
+          "component_index": 101,
+          "component_type": "dc_branch",
+          "domain": "DC",
+          "flow_mw": 0.25
+        },
+        {
+          "available": true,
+          "canonical_component_index": 101,
+          "closed": true,
+          "component_index": 101,
+          "component_type": "vsc_converter",
+          "domain": "AC-DC",
+          "flow_mw": -1.0
+        }
+      ],
+      "hour": 8.0,
+      "step": 8
+    },
+    {
+      "bus_supply": [
+        {
+          "base_source_mw": 0.0,
+          "bus": 1,
+          "demand_mw": 0.0,
+          "dispatchable_generation_mw": 0.0,
+          "domain": "AC",
+          "energized": false,
+          "fixed_storage_mw": 0.0,
+          "renewable_mw": 0.0,
+          "root": false,
+          "served_mw": 0.0
+        },
+        {
+          "base_source_mw": 0.0,
+          "bus": 2,
+          "demand_mw": 1.0,
+          "dispatchable_generation_mw": 1.0,
+          "domain": "AC",
+          "energized": true,
+          "fixed_storage_mw": 0.0,
+          "renewable_mw": 0.0,
+          "root": true,
+          "served_mw": 1.0
+        },
+        {
+          "base_source_mw": 0.0,
+          "bus": 3,
+          "demand_mw": 1.0,
+          "dispatchable_generation_mw": 0.0,
+          "domain": "AC",
+          "energized": true,
+          "fixed_storage_mw": 0.0,
+          "renewable_mw": 0.0,
+          "root": false,
+          "served_mw": 1.0
+        },
+        {
+          "base_source_mw": 0.0,
+          "bus": 4,
+          "demand_mw": 0.6,
+          "dispatchable_generation_mw": 0.6000000000000001,
+          "domain": "AC",
+          "energized": true,
+          "fixed_storage_mw": 0.0,
+          "renewable_mw": 0.0,
+          "root": false,
+          "served_mw": 0.6
+        },
+        {
+          "base_source_mw": 1.25,
+          "bus": 1,
+          "demand_mw": 0.0,
+          "dispatchable_generation_mw": 0.0,
+          "domain": "DC",
+          "energized": true,
+          "fixed_storage_mw": 0.0,
+          "renewable_mw": 0.0,
+          "root": true,
+          "served_mw": 0.0
+        },
+        {
+          "base_source_mw": 0.0,
+          "bus": 2,
+          "demand_mw": 0.25,
+          "dispatchable_generation_mw": 0.0,
+          "domain": "DC",
+          "energized": true,
+          "fixed_storage_mw": 0.0,
+          "renewable_mw": 0.0,
+          "root": false,
+          "served_mw": 0.25
+        }
+      ],
+      "component_states": [
+        {
+          "available": true,
+          "canonical_component_index": 1,
+          "closed": false,
+          "component_index": 1,
+          "component_type": "ac_branch",
+          "domain": "AC",
+          "flow_mw": 0.0
+        },
+        {
+          "available": true,
+          "canonical_component_index": 2,
+          "closed": false,
+          "component_index": 2,
+          "component_type": "ac_branch",
+          "domain": "AC",
+          "flow_mw": 0.0
+        },
+        {
+          "available": true,
+          "canonical_component_index": 3,
+          "closed": false,
+          "component_index": 3,
+          "component_type": "ac_branch",
+          "domain": "AC",
+          "flow_mw": 0.0
+        },
+        {
+          "available": true,
+          "canonical_component_index": 4,
+          "closed": false,
+          "component_index": 4,
+          "component_type": "ac_branch",
+          "domain": "AC",
+          "flow_mw": 0.0
+        },
+        {
+          "available": true,
+          "canonical_component_index": 5,
+          "closed": true,
+          "component_index": 5,
+          "component_type": "ac_branch",
+          "domain": "AC",
+          "flow_mw": -1.0
+        },
+        {
+          "available": true,
+          "canonical_component_index": 101,
+          "closed": true,
+          "component_index": 101,
+          "component_type": "dc_branch",
+          "domain": "DC",
+          "flow_mw": 0.25
+        },
+        {
+          "available": true,
+          "canonical_component_index": 101,
+          "closed": true,
+          "component_index": 101,
+          "component_type": "vsc_converter",
+          "domain": "AC-DC",
+          "flow_mw": -1.0
+        }
+      ],
+      "hour": 9.0,
+      "step": 9
+    },
+    {
+      "bus_supply": [
+        {
+          "base_source_mw": 0.0,
+          "bus": 1,
+          "demand_mw": 0.0,
+          "dispatchable_generation_mw": 0.0,
+          "domain": "AC",
+          "energized": false,
+          "fixed_storage_mw": 0.0,
+          "renewable_mw": 0.0,
+          "root": false,
+          "served_mw": 0.0
+        },
+        {
+          "base_source_mw": 0.0,
+          "bus": 2,
+          "demand_mw": 1.0,
+          "dispatchable_generation_mw": 1.0,
+          "domain": "AC",
+          "energized": true,
+          "fixed_storage_mw": 0.0,
+          "renewable_mw": 0.0,
+          "root": true,
+          "served_mw": 1.0
+        },
+        {
+          "base_source_mw": 0.0,
+          "bus": 3,
+          "demand_mw": 1.0,
+          "dispatchable_generation_mw": 0.0,
+          "domain": "AC",
+          "energized": true,
+          "fixed_storage_mw": 0.6000000000000001,
+          "renewable_mw": 0.0,
+          "root": false,
+          "served_mw": 1.0
+        },
+        {
+          "base_source_mw": 0.0,
+          "bus": 4,
+          "demand_mw": 0.6,
+          "dispatchable_generation_mw": 0.0,
+          "domain": "AC",
+          "energized": true,
+          "fixed_storage_mw": 0.0,
+          "renewable_mw": 0.0,
+          "root": false,
+          "served_mw": 0.6
+        },
+        {
+          "base_source_mw": 1.25,
+          "bus": 1,
+          "demand_mw": 0.0,
+          "dispatchable_generation_mw": 0.0,
+          "domain": "DC",
+          "energized": true,
+          "fixed_storage_mw": 0.0,
+          "renewable_mw": 0.0,
+          "root": true,
+          "served_mw": 0.0
+        },
+        {
+          "base_source_mw": 0.0,
+          "bus": 2,
+          "demand_mw": 0.25,
+          "dispatchable_generation_mw": 0.0,
+          "domain": "DC",
+          "energized": true,
+          "fixed_storage_mw": 0.0,
+          "renewable_mw": 0.0,
+          "root": false,
+          "served_mw": 0.25
+        }
+      ],
+      "component_states": [
+        {
+          "available": true,
+          "canonical_component_index": 1,
+          "closed": false,
+          "component_index": 1,
+          "component_type": "ac_branch",
+          "domain": "AC",
+          "flow_mw": 0.0
+        },
+        {
+          "available": true,
+          "canonical_component_index": 2,
+          "closed": false,
+          "component_index": 2,
+          "component_type": "ac_branch",
+          "domain": "AC",
+          "flow_mw": 0.0
+        },
+        {
+          "available": true,
+          "canonical_component_index": 3,
+          "closed": false,
+          "component_index": 3,
+          "component_type": "ac_branch",
+          "domain": "AC",
+          "flow_mw": 0.0
+        },
+        {
+          "available": true,
+          "canonical_component_index": 4,
+          "closed": false,
+          "component_index": 4,
+          "component_type": "ac_branch",
+          "domain": "AC",
+          "flow_mw": 0.0
+        },
+        {
+          "available": true,
+          "canonical_component_index": 5,
+          "closed": true,
+          "component_index": 5,
+          "component_type": "ac_branch",
+          "domain": "AC",
+          "flow_mw": -0.3999999999999999
+        },
+        {
+          "available": true,
+          "canonical_component_index": 101,
+          "closed": true,
+          "component_index": 101,
+          "component_type": "dc_branch",
+          "domain": "DC",
+          "flow_mw": 0.25
+        },
+        {
+          "available": true,
+          "canonical_component_index": 101,
+          "closed": true,
+          "component_index": 101,
+          "component_type": "vsc_converter",
+          "domain": "AC-DC",
+          "flow_mw": -1.0
+        }
+      ],
+      "hour": 10.0,
+      "step": 10
+    },
+    {
+      "bus_supply": [
+        {
+          "base_source_mw": 0.0,
+          "bus": 1,
+          "demand_mw": 0.0,
+          "dispatchable_generation_mw": 0.0,
+          "domain": "AC",
+          "energized": false,
+          "fixed_storage_mw": 0.0,
+          "renewable_mw": 0.0,
+          "root": false,
+          "served_mw": 0.0
+        },
+        {
+          "base_source_mw": 0.0,
+          "bus": 2,
+          "demand_mw": 1.0,
+          "dispatchable_generation_mw": 1.0,
+          "domain": "AC",
+          "energized": true,
+          "fixed_storage_mw": 0.0,
+          "renewable_mw": 0.0,
+          "root": true,
+          "served_mw": 1.0
+        },
+        {
+          "base_source_mw": 0.0,
+          "bus": 3,
+          "demand_mw": 1.0,
+          "dispatchable_generation_mw": 0.0,
+          "domain": "AC",
+          "energized": true,
+          "fixed_storage_mw": 0.774,
+          "renewable_mw": 0.276,
+          "root": true,
+          "served_mw": 1.0
+        },
+        {
+          "base_source_mw": 0.0,
+          "bus": 4,
+          "demand_mw": 0.6,
+          "dispatchable_generation_mw": 0.8,
+          "domain": "AC",
+          "energized": true,
+          "fixed_storage_mw": 0.0,
+          "renewable_mw": 0.0,
+          "root": false,
+          "served_mw": 0.6
+        },
+        {
+          "base_source_mw": 0.0,
+          "bus": 1,
+          "demand_mw": 0.0,
+          "dispatchable_generation_mw": 0.0,
+          "domain": "DC",
+          "energized": true,
+          "fixed_storage_mw": 0.0,
+          "renewable_mw": 0.0,
+          "root": false,
+          "served_mw": 0.0
+        },
+        {
+          "base_source_mw": 0.0,
+          "bus": 2,
+          "demand_mw": 0.25,
+          "dispatchable_generation_mw": 0.0,
+          "domain": "DC",
+          "energized": true,
+          "fixed_storage_mw": 0.0,
+          "renewable_mw": 0.0,
+          "root": false,
+          "served_mw": 0.25
+        }
+      ],
+      "component_states": [
+        {
+          "available": true,
+          "canonical_component_index": 1,
+          "closed": false,
+          "component_index": 1,
+          "component_type": "ac_branch",
+          "domain": "AC",
+          "flow_mw": 0.0
+        },
+        {
+          "available": true,
+          "canonical_component_index": 2,
+          "closed": false,
+          "component_index": 2,
+          "component_type": "ac_branch",
+          "domain": "AC",
+          "flow_mw": 0.0
+        },
+        {
+          "available": true,
+          "canonical_component_index": 3,
+          "closed": false,
+          "component_index": 3,
+          "component_type": "ac_branch",
+          "domain": "AC",
+          "flow_mw": 0.0
+        },
+        {
+          "available": true,
+          "canonical_component_index": 4,
+          "closed": false,
+          "component_index": 4,
+          "component_type": "ac_branch",
+          "domain": "AC",
+          "flow_mw": 0.0
+        },
+        {
+          "available": true,
+          "canonical_component_index": 5,
+          "closed": true,
+          "component_index": 5,
+          "component_type": "ac_branch",
+          "domain": "AC",
+          "flow_mw": 0.050000000000000044
+        },
+        {
+          "available": true,
+          "canonical_component_index": 101,
+          "closed": true,
+          "component_index": 101,
+          "component_type": "dc_branch",
+          "domain": "DC",
+          "flow_mw": 0.25
+        },
+        {
+          "available": true,
+          "canonical_component_index": 101,
+          "closed": true,
+          "component_index": 101,
+          "component_type": "vsc_converter",
+          "domain": "AC-DC",
+          "flow_mw": 0.25
+        }
+      ],
+      "hour": 11.0,
+      "step": 11
+    },
+    {
+      "bus_supply": [
+        {
+          "base_source_mw": 0.0,
+          "bus": 1,
+          "demand_mw": 0.0,
+          "dispatchable_generation_mw": 0.0,
+          "domain": "AC",
+          "energized": false,
+          "fixed_storage_mw": 0.0,
+          "renewable_mw": 0.0,
+          "root": false,
+          "served_mw": 0.0
+        },
+        {
+          "base_source_mw": 0.0,
+          "bus": 2,
+          "demand_mw": 1.0,
+          "dispatchable_generation_mw": 1.0,
+          "domain": "AC",
+          "energized": true,
+          "fixed_storage_mw": 0.0,
+          "renewable_mw": 0.0,
+          "root": true,
+          "served_mw": 1.0
+        },
+        {
+          "base_source_mw": 0.0,
+          "bus": 3,
+          "demand_mw": 1.0,
+          "dispatchable_generation_mw": 0.0,
+          "domain": "AC",
+          "energized": true,
+          "fixed_storage_mw": 0.0,
+          "renewable_mw": 0.8,
+          "root": false,
+          "served_mw": 1.0
+        },
+        {
+          "base_source_mw": 0.0,
+          "bus": 4,
+          "demand_mw": 0.6,
+          "dispatchable_generation_mw": 0.8,
+          "domain": "AC",
+          "energized": true,
+          "fixed_storage_mw": 0.0,
+          "renewable_mw": 0.0,
+          "root": false,
+          "served_mw": 0.6
+        },
+        {
+          "base_source_mw": 0.25,
+          "bus": 1,
+          "demand_mw": 0.0,
+          "dispatchable_generation_mw": 0.0,
+          "domain": "DC",
+          "energized": true,
+          "fixed_storage_mw": 0.0,
+          "renewable_mw": 0.0,
+          "root": true,
+          "served_mw": 0.0
+        },
+        {
+          "base_source_mw": 0.0,
+          "bus": 2,
+          "demand_mw": 0.25,
+          "dispatchable_generation_mw": 0.0,
+          "domain": "DC",
+          "energized": true,
+          "fixed_storage_mw": 0.0,
+          "renewable_mw": 0.0,
+          "root": false,
+          "served_mw": 0.25
+        }
+      ],
+      "component_states": [
+        {
+          "available": true,
+          "canonical_component_index": 1,
+          "closed": false,
+          "component_index": 1,
+          "component_type": "ac_branch",
+          "domain": "AC",
+          "flow_mw": 0.0
+        },
+        {
+          "available": true,
+          "canonical_component_index": 2,
+          "closed": false,
+          "component_index": 2,
+          "component_type": "ac_branch",
+          "domain": "AC",
+          "flow_mw": 0.0
+        },
+        {
+          "available": true,
+          "canonical_component_index": 3,
+          "closed": false,
+          "component_index": 3,
+          "component_type": "ac_branch",
+          "domain": "AC",
+          "flow_mw": 0.0
+        },
+        {
+          "available": true,
+          "canonical_component_index": 4,
+          "closed": false,
+          "component_index": 4,
+          "component_type": "ac_branch",
+          "domain": "AC",
+          "flow_mw": 0.0
+        },
+        {
+          "available": true,
+          "canonical_component_index": 5,
+          "closed": true,
+          "component_index": 5,
+          "component_type": "ac_branch",
+          "domain": "AC",
+          "flow_mw": -0.19999999999999996
+        },
+        {
+          "available": true,
+          "canonical_component_index": 101,
+          "closed": true,
+          "component_index": 101,
+          "component_type": "dc_branch",
+          "domain": "DC",
+          "flow_mw": 0.25
+        },
+        {
+          "available": true,
+          "canonical_component_index": 101,
+          "closed": true,
+          "component_index": 101,
+          "component_type": "vsc_converter",
+          "domain": "AC-DC",
+          "flow_mw": 0.0
+        }
+      ],
+      "hour": 12.0,
+      "step": 12
+    },
+    {
+      "bus_supply": [
+        {
+          "base_source_mw": 0.0,
+          "bus": 1,
+          "demand_mw": 0.0,
+          "dispatchable_generation_mw": 0.0,
+          "domain": "AC",
+          "energized": false,
+          "fixed_storage_mw": 0.0,
+          "renewable_mw": 0.0,
+          "root": false,
+          "served_mw": 0.0
+        },
+        {
+          "base_source_mw": 0.0,
+          "bus": 2,
+          "demand_mw": 1.0,
+          "dispatchable_generation_mw": 1.0,
+          "domain": "AC",
+          "energized": true,
+          "fixed_storage_mw": 0.0,
+          "renewable_mw": 0.0,
+          "root": true,
+          "served_mw": 1.0
+        },
+        {
+          "base_source_mw": 0.0,
+          "bus": 3,
+          "demand_mw": 1.0,
+          "dispatchable_generation_mw": 0.0,
+          "domain": "AC",
+          "energized": true,
+          "fixed_storage_mw": 0.0,
+          "renewable_mw": 0.8,
+          "root": false,
+          "served_mw": 1.0
+        },
+        {
+          "base_source_mw": 0.0,
+          "bus": 4,
+          "demand_mw": 0.6,
+          "dispatchable_generation_mw": 0.8,
+          "domain": "AC",
+          "energized": true,
+          "fixed_storage_mw": 0.0,
+          "renewable_mw": 0.0,
+          "root": false,
+          "served_mw": 0.6
+        },
+        {
+          "base_source_mw": 0.25,
+          "bus": 1,
+          "demand_mw": 0.0,
+          "dispatchable_generation_mw": 0.0,
+          "domain": "DC",
+          "energized": true,
+          "fixed_storage_mw": 0.0,
+          "renewable_mw": 0.0,
+          "root": true,
+          "served_mw": 0.0
+        },
+        {
+          "base_source_mw": 0.0,
+          "bus": 2,
+          "demand_mw": 0.25,
+          "dispatchable_generation_mw": 0.0,
+          "domain": "DC",
+          "energized": true,
+          "fixed_storage_mw": 0.0,
+          "renewable_mw": 0.0,
+          "root": false,
+          "served_mw": 0.25
+        }
+      ],
+      "component_states": [
+        {
+          "available": true,
+          "canonical_component_index": 1,
+          "closed": false,
+          "component_index": 1,
+          "component_type": "ac_branch",
+          "domain": "AC",
+          "flow_mw": 0.0
+        },
+        {
+          "available": true,
+          "canonical_component_index": 2,
+          "closed": false,
+          "component_index": 2,
+          "component_type": "ac_branch",
+          "domain": "AC",
+          "flow_mw": 0.0
+        },
+        {
+          "available": true,
+          "canonical_component_index": 3,
+          "closed": false,
+          "component_index": 3,
+          "component_type": "ac_branch",
+          "domain": "AC",
+          "flow_mw": 0.0
+        },
+        {
+          "available": true,
+          "canonical_component_index": 4,
+          "closed": false,
+          "component_index": 4,
+          "component_type": "ac_branch",
+          "domain": "AC",
+          "flow_mw": 0.0
+        },
+        {
+          "available": true,
+          "canonical_component_index": 5,
+          "closed": true,
+          "component_index": 5,
+          "component_type": "ac_branch",
+          "domain": "AC",
+          "flow_mw": -0.19999999999999996
+        },
+        {
+          "available": true,
+          "canonical_component_index": 101,
+          "closed": true,
+          "component_index": 101,
+          "component_type": "dc_branch",
+          "domain": "DC",
+          "flow_mw": 0.25
+        },
+        {
+          "available": true,
+          "canonical_component_index": 101,
+          "closed": true,
+          "component_index": 101,
+          "component_type": "vsc_converter",
+          "domain": "AC-DC",
+          "flow_mw": 0.0
+        }
+      ],
+      "hour": 13.0,
+      "step": 13
+    },
+    {
+      "bus_supply": [
+        {
+          "base_source_mw": 0.0,
+          "bus": 1,
+          "demand_mw": 0.0,
+          "dispatchable_generation_mw": 0.0,
+          "domain": "AC",
+          "energized": false,
+          "fixed_storage_mw": 0.0,
+          "renewable_mw": 0.0,
+          "root": false,
+          "served_mw": 0.0
+        },
+        {
+          "base_source_mw": 0.0,
+          "bus": 2,
+          "demand_mw": 1.0,
+          "dispatchable_generation_mw": 1.0,
+          "domain": "AC",
+          "energized": true,
+          "fixed_storage_mw": 0.0,
+          "renewable_mw": 0.0,
+          "root": true,
+          "served_mw": 1.0
+        },
+        {
+          "base_source_mw": 0.0,
+          "bus": 3,
+          "demand_mw": 1.0,
+          "dispatchable_generation_mw": 0.0,
+          "domain": "AC",
+          "energized": true,
+          "fixed_storage_mw": 0.0,
+          "renewable_mw": 0.0,
+          "root": false,
+          "served_mw": 1.0
+        },
+        {
+          "base_source_mw": 0.0,
+          "bus": 4,
+          "demand_mw": 0.6,
+          "dispatchable_generation_mw": 0.6000000000000001,
+          "domain": "AC",
+          "energized": true,
+          "fixed_storage_mw": 0.0,
+          "renewable_mw": 0.0,
+          "root": false,
+          "served_mw": 0.6
+        },
+        {
+          "base_source_mw": 1.25,
+          "bus": 1,
+          "demand_mw": 0.0,
+          "dispatchable_generation_mw": 0.0,
+          "domain": "DC",
+          "energized": true,
+          "fixed_storage_mw": 0.0,
+          "renewable_mw": 0.0,
+          "root": true,
+          "served_mw": 0.0
+        },
+        {
+          "base_source_mw": 0.0,
+          "bus": 2,
+          "demand_mw": 0.25,
+          "dispatchable_generation_mw": 0.0,
+          "domain": "DC",
+          "energized": true,
+          "fixed_storage_mw": 0.0,
+          "renewable_mw": 0.0,
+          "root": false,
+          "served_mw": 0.25
+        }
+      ],
+      "component_states": [
+        {
+          "available": true,
+          "canonical_component_index": 1,
+          "closed": false,
+          "component_index": 1,
+          "component_type": "ac_branch",
+          "domain": "AC",
+          "flow_mw": 0.0
+        },
+        {
+          "available": true,
+          "canonical_component_index": 2,
+          "closed": false,
+          "component_index": 2,
+          "component_type": "ac_branch",
+          "domain": "AC",
+          "flow_mw": 0.0
+        },
+        {
+          "available": true,
+          "canonical_component_index": 3,
+          "closed": false,
+          "component_index": 3,
+          "component_type": "ac_branch",
+          "domain": "AC",
+          "flow_mw": 0.0
+        },
+        {
+          "available": true,
+          "canonical_component_index": 4,
+          "closed": false,
+          "component_index": 4,
+          "component_type": "ac_branch",
+          "domain": "AC",
+          "flow_mw": 0.0
+        },
+        {
+          "available": true,
+          "canonical_component_index": 5,
+          "closed": true,
+          "component_index": 5,
+          "component_type": "ac_branch",
+          "domain": "AC",
+          "flow_mw": -1.0
+        },
+        {
+          "available": true,
+          "canonical_component_index": 101,
+          "closed": true,
+          "component_index": 101,
+          "component_type": "dc_branch",
+          "domain": "DC",
+          "flow_mw": 0.25
+        },
+        {
+          "available": true,
+          "canonical_component_index": 101,
+          "closed": true,
+          "component_index": 101,
+          "component_type": "vsc_converter",
+          "domain": "AC-DC",
+          "flow_mw": -1.0
+        }
+      ],
+      "hour": 14.0,
+      "step": 14
+    },
+    {
+      "bus_supply": [
+        {
+          "base_source_mw": 0.0,
+          "bus": 1,
+          "demand_mw": 0.0,
+          "dispatchable_generation_mw": 0.0,
+          "domain": "AC",
+          "energized": false,
+          "fixed_storage_mw": 0.0,
+          "renewable_mw": 0.0,
+          "root": false,
+          "served_mw": 0.0
+        },
+        {
+          "base_source_mw": 0.0,
+          "bus": 2,
+          "demand_mw": 1.0,
+          "dispatchable_generation_mw": 1.0,
+          "domain": "AC",
+          "energized": true,
+          "fixed_storage_mw": 0.0,
+          "renewable_mw": 0.0,
+          "root": true,
+          "served_mw": 1.0
+        },
+        {
+          "base_source_mw": 0.0,
+          "bus": 3,
+          "demand_mw": 1.0,
+          "dispatchable_generation_mw": 0.0,
+          "domain": "AC",
+          "energized": true,
+          "fixed_storage_mw": 1.0,
+          "renewable_mw": 0.050000000000000266,
+          "root": true,
+          "served_mw": 1.0
+        },
+        {
+          "base_source_mw": 0.0,
+          "bus": 4,
+          "demand_mw": 0.6,
+          "dispatchable_generation_mw": 0.8,
+          "domain": "AC",
+          "energized": true,
+          "fixed_storage_mw": 0.0,
+          "renewable_mw": 0.0,
+          "root": false,
+          "served_mw": 0.6
+        },
+        {
+          "base_source_mw": 0.0,
+          "bus": 1,
+          "demand_mw": 0.0,
+          "dispatchable_generation_mw": 0.0,
+          "domain": "DC",
+          "energized": true,
+          "fixed_storage_mw": 0.0,
+          "renewable_mw": 0.0,
+          "root": false,
+          "served_mw": 0.0
+        },
+        {
+          "base_source_mw": 0.0,
+          "bus": 2,
+          "demand_mw": 0.25,
+          "dispatchable_generation_mw": 0.0,
+          "domain": "DC",
+          "energized": true,
+          "fixed_storage_mw": 0.0,
+          "renewable_mw": 0.0,
+          "root": false,
+          "served_mw": 0.25
+        }
+      ],
+      "component_states": [
+        {
+          "available": true,
+          "canonical_component_index": 1,
+          "closed": false,
+          "component_index": 1,
+          "component_type": "ac_branch",
+          "domain": "AC",
+          "flow_mw": 0.0
+        },
+        {
+          "available": true,
+          "canonical_component_index": 2,
+          "closed": false,
+          "component_index": 2,
+          "component_type": "ac_branch",
+          "domain": "AC",
+          "flow_mw": 0.0
+        },
+        {
+          "available": true,
+          "canonical_component_index": 3,
+          "closed": false,
+          "component_index": 3,
+          "component_type": "ac_branch",
+          "domain": "AC",
+          "flow_mw": 0.0
+        },
+        {
+          "available": true,
+          "canonical_component_index": 4,
+          "closed": false,
+          "component_index": 4,
+          "component_type": "ac_branch",
+          "domain": "AC",
+          "flow_mw": 0.0
+        },
+        {
+          "available": true,
+          "canonical_component_index": 5,
+          "closed": true,
+          "component_index": 5,
+          "component_type": "ac_branch",
+          "domain": "AC",
+          "flow_mw": 0.050000000000000266
+        },
+        {
+          "available": true,
+          "canonical_component_index": 101,
+          "closed": true,
+          "component_index": 101,
+          "component_type": "dc_branch",
+          "domain": "DC",
+          "flow_mw": 0.25
+        },
+        {
+          "available": true,
+          "canonical_component_index": 101,
+          "closed": true,
+          "component_index": 101,
+          "component_type": "vsc_converter",
+          "domain": "AC-DC",
+          "flow_mw": 0.25
+        }
+      ],
+      "hour": 15.0,
+      "step": 15
+    },
+    {
+      "bus_supply": [
+        {
+          "base_source_mw": 0.0,
+          "bus": 1,
+          "demand_mw": 0.0,
+          "dispatchable_generation_mw": 0.0,
+          "domain": "AC",
+          "energized": false,
+          "fixed_storage_mw": 0.0,
+          "renewable_mw": 0.0,
+          "root": false,
+          "served_mw": 0.0
+        },
+        {
+          "base_source_mw": 0.0,
+          "bus": 2,
+          "demand_mw": 1.0,
+          "dispatchable_generation_mw": 1.0,
+          "domain": "AC",
+          "energized": true,
+          "fixed_storage_mw": 0.0,
+          "renewable_mw": 0.0,
+          "root": true,
+          "served_mw": 1.0
+        },
+        {
+          "base_source_mw": 0.0,
+          "bus": 3,
+          "demand_mw": 1.0,
+          "dispatchable_generation_mw": 0.0,
+          "domain": "AC",
+          "energized": true,
+          "fixed_storage_mw": 0.0,
+          "renewable_mw": 0.0,
+          "root": false,
+          "served_mw": 1.0
+        },
+        {
+          "base_source_mw": 0.0,
+          "bus": 4,
+          "demand_mw": 0.6,
+          "dispatchable_generation_mw": 0.6000000000000001,
+          "domain": "AC",
+          "energized": true,
+          "fixed_storage_mw": 0.0,
+          "renewable_mw": 0.0,
+          "root": false,
+          "served_mw": 0.6
+        },
+        {
+          "base_source_mw": 1.25,
+          "bus": 1,
+          "demand_mw": 0.0,
+          "dispatchable_generation_mw": 0.0,
+          "domain": "DC",
+          "energized": true,
+          "fixed_storage_mw": 0.0,
+          "renewable_mw": 0.0,
+          "root": true,
+          "served_mw": 0.0
+        },
+        {
+          "base_source_mw": 0.0,
+          "bus": 2,
+          "demand_mw": 0.25,
+          "dispatchable_generation_mw": 0.0,
+          "domain": "DC",
+          "energized": true,
+          "fixed_storage_mw": 0.0,
+          "renewable_mw": 0.0,
+          "root": false,
+          "served_mw": 0.25
+        }
+      ],
+      "component_states": [
+        {
+          "available": true,
+          "canonical_component_index": 1,
+          "closed": false,
+          "component_index": 1,
+          "component_type": "ac_branch",
+          "domain": "AC",
+          "flow_mw": 0.0
+        },
+        {
+          "available": true,
+          "canonical_component_index": 2,
+          "closed": false,
+          "component_index": 2,
+          "component_type": "ac_branch",
+          "domain": "AC",
+          "flow_mw": 0.0
+        },
+        {
+          "available": true,
+          "canonical_component_index": 3,
+          "closed": false,
+          "component_index": 3,
+          "component_type": "ac_branch",
+          "domain": "AC",
+          "flow_mw": 0.0
+        },
+        {
+          "available": true,
+          "canonical_component_index": 4,
+          "closed": false,
+          "component_index": 4,
+          "component_type": "ac_branch",
+          "domain": "AC",
+          "flow_mw": 0.0
+        },
+        {
+          "available": true,
+          "canonical_component_index": 5,
+          "closed": true,
+          "component_index": 5,
+          "component_type": "ac_branch",
+          "domain": "AC",
+          "flow_mw": -1.0
+        },
+        {
+          "available": true,
+          "canonical_component_index": 101,
+          "closed": true,
+          "component_index": 101,
+          "component_type": "dc_branch",
+          "domain": "DC",
+          "flow_mw": 0.25
+        },
+        {
+          "available": true,
+          "canonical_component_index": 101,
+          "closed": true,
+          "component_index": 101,
+          "component_type": "vsc_converter",
+          "domain": "AC-DC",
+          "flow_mw": -1.0
+        }
+      ],
+      "hour": 16.0,
+      "step": 16
+    },
+    {
+      "bus_supply": [
+        {
+          "base_source_mw": 0.0,
+          "bus": 1,
+          "demand_mw": 0.0,
+          "dispatchable_generation_mw": 0.0,
+          "domain": "AC",
+          "energized": false,
+          "fixed_storage_mw": 0.0,
+          "renewable_mw": 0.0,
+          "root": false,
+          "served_mw": 0.0
+        },
+        {
+          "base_source_mw": 0.0,
+          "bus": 2,
+          "demand_mw": 1.0,
+          "dispatchable_generation_mw": 1.0,
+          "domain": "AC",
+          "energized": true,
+          "fixed_storage_mw": 0.0,
+          "renewable_mw": 0.0,
+          "root": true,
+          "served_mw": 1.0
+        },
+        {
+          "base_source_mw": 0.0,
+          "bus": 3,
+          "demand_mw": 1.0,
+          "dispatchable_generation_mw": 0.0,
+          "domain": "AC",
+          "energized": true,
+          "fixed_storage_mw": 0.0,
+          "renewable_mw": 0.8,
+          "root": false,
+          "served_mw": 1.0
+        },
+        {
+          "base_source_mw": 0.0,
+          "bus": 4,
+          "demand_mw": 0.6,
+          "dispatchable_generation_mw": 0.8,
+          "domain": "AC",
+          "energized": true,
+          "fixed_storage_mw": 0.0,
+          "renewable_mw": 0.0,
+          "root": false,
+          "served_mw": 0.6
+        },
+        {
+          "base_source_mw": 0.25,
+          "bus": 1,
+          "demand_mw": 0.0,
+          "dispatchable_generation_mw": 0.0,
+          "domain": "DC",
+          "energized": true,
+          "fixed_storage_mw": 0.0,
+          "renewable_mw": 0.0,
+          "root": true,
+          "served_mw": 0.0
+        },
+        {
+          "base_source_mw": 0.0,
+          "bus": 2,
+          "demand_mw": 0.25,
+          "dispatchable_generation_mw": 0.0,
+          "domain": "DC",
+          "energized": true,
+          "fixed_storage_mw": 0.0,
+          "renewable_mw": 0.0,
+          "root": false,
+          "served_mw": 0.25
+        }
+      ],
+      "component_states": [
+        {
+          "available": true,
+          "canonical_component_index": 1,
+          "closed": false,
+          "component_index": 1,
+          "component_type": "ac_branch",
+          "domain": "AC",
+          "flow_mw": 0.0
+        },
+        {
+          "available": true,
+          "canonical_component_index": 2,
+          "closed": false,
+          "component_index": 2,
+          "component_type": "ac_branch",
+          "domain": "AC",
+          "flow_mw": 0.0
+        },
+        {
+          "available": true,
+          "canonical_component_index": 3,
+          "closed": false,
+          "component_index": 3,
+          "component_type": "ac_branch",
+          "domain": "AC",
+          "flow_mw": 0.0
+        },
+        {
+          "available": true,
+          "canonical_component_index": 4,
+          "closed": false,
+          "component_index": 4,
+          "component_type": "ac_branch",
+          "domain": "AC",
+          "flow_mw": 0.0
+        },
+        {
+          "available": true,
+          "canonical_component_index": 5,
+          "closed": true,
+          "component_index": 5,
+          "component_type": "ac_branch",
+          "domain": "AC",
+          "flow_mw": -0.19999999999999996
+        },
+        {
+          "available": true,
+          "canonical_component_index": 101,
+          "closed": true,
+          "component_index": 101,
+          "component_type": "dc_branch",
+          "domain": "DC",
+          "flow_mw": 0.25
+        },
+        {
+          "available": true,
+          "canonical_component_index": 101,
+          "closed": true,
+          "component_index": 101,
+          "component_type": "vsc_converter",
+          "domain": "AC-DC",
+          "flow_mw": 0.0
+        }
+      ],
+      "hour": 17.0,
+      "step": 17
+    },
+    {
+      "bus_supply": [
+        {
+          "base_source_mw": 0.0,
+          "bus": 1,
+          "demand_mw": 0.0,
+          "dispatchable_generation_mw": 0.0,
+          "domain": "AC",
+          "energized": false,
+          "fixed_storage_mw": 0.0,
+          "renewable_mw": 0.0,
+          "root": false,
+          "served_mw": 0.0
+        },
+        {
+          "base_source_mw": 0.0,
+          "bus": 2,
+          "demand_mw": 1.0,
+          "dispatchable_generation_mw": 1.0,
+          "domain": "AC",
+          "energized": true,
+          "fixed_storage_mw": 0.0,
+          "renewable_mw": 0.0,
+          "root": true,
+          "served_mw": 1.0
+        },
+        {
+          "base_source_mw": 0.0,
+          "bus": 3,
+          "demand_mw": 1.0,
+          "dispatchable_generation_mw": 0.0,
+          "domain": "AC",
+          "energized": true,
+          "fixed_storage_mw": 0.0,
+          "renewable_mw": 0.8,
+          "root": false,
+          "served_mw": 1.0
+        },
+        {
+          "base_source_mw": 0.0,
+          "bus": 4,
+          "demand_mw": 0.6,
+          "dispatchable_generation_mw": 0.8,
+          "domain": "AC",
+          "energized": true,
+          "fixed_storage_mw": 0.0,
+          "renewable_mw": 0.0,
+          "root": false,
+          "served_mw": 0.6
+        },
+        {
+          "base_source_mw": 0.25,
+          "bus": 1,
+          "demand_mw": 0.0,
+          "dispatchable_generation_mw": 0.0,
+          "domain": "DC",
+          "energized": true,
+          "fixed_storage_mw": 0.0,
+          "renewable_mw": 0.0,
+          "root": true,
+          "served_mw": 0.0
+        },
+        {
+          "base_source_mw": 0.0,
+          "bus": 2,
+          "demand_mw": 0.25,
+          "dispatchable_generation_mw": 0.0,
+          "domain": "DC",
+          "energized": true,
+          "fixed_storage_mw": 0.0,
+          "renewable_mw": 0.0,
+          "root": false,
+          "served_mw": 0.25
+        }
+      ],
+      "component_states": [
+        {
+          "available": true,
+          "canonical_component_index": 1,
+          "closed": false,
+          "component_index": 1,
+          "component_type": "ac_branch",
+          "domain": "AC",
+          "flow_mw": 0.0
+        },
+        {
+          "available": true,
+          "canonical_component_index": 2,
+          "closed": false,
+          "component_index": 2,
+          "component_type": "ac_branch",
+          "domain": "AC",
+          "flow_mw": 0.0
+        },
+        {
+          "available": true,
+          "canonical_component_index": 3,
+          "closed": false,
+          "component_index": 3,
+          "component_type": "ac_branch",
+          "domain": "AC",
+          "flow_mw": 0.0
+        },
+        {
+          "available": true,
+          "canonical_component_index": 4,
+          "closed": false,
+          "component_index": 4,
+          "component_type": "ac_branch",
+          "domain": "AC",
+          "flow_mw": 0.0
+        },
+        {
+          "available": true,
+          "canonical_component_index": 5,
+          "closed": true,
+          "component_index": 5,
+          "component_type": "ac_branch",
+          "domain": "AC",
+          "flow_mw": -0.19999999999999996
+        },
+        {
+          "available": true,
+          "canonical_component_index": 101,
+          "closed": true,
+          "component_index": 101,
+          "component_type": "dc_branch",
+          "domain": "DC",
+          "flow_mw": 0.25
+        },
+        {
+          "available": true,
+          "canonical_component_index": 101,
+          "closed": true,
+          "component_index": 101,
+          "component_type": "vsc_converter",
+          "domain": "AC-DC",
+          "flow_mw": 0.0
+        }
+      ],
+      "hour": 18.0,
+      "step": 18
+    },
+    {
+      "bus_supply": [
+        {
+          "base_source_mw": 0.0,
+          "bus": 1,
+          "demand_mw": 0.0,
+          "dispatchable_generation_mw": 0.0,
+          "domain": "AC",
+          "energized": false,
+          "fixed_storage_mw": 0.0,
+          "renewable_mw": 0.0,
+          "root": false,
+          "served_mw": 0.0
+        },
+        {
+          "base_source_mw": 0.0,
+          "bus": 2,
+          "demand_mw": 1.0,
+          "dispatchable_generation_mw": 1.0,
+          "domain": "AC",
+          "energized": true,
+          "fixed_storage_mw": 0.0,
+          "renewable_mw": 0.0,
+          "root": true,
+          "served_mw": 1.0
+        },
+        {
+          "base_source_mw": 0.0,
+          "bus": 3,
+          "demand_mw": 1.0,
+          "dispatchable_generation_mw": 0.0,
+          "domain": "AC",
+          "energized": true,
+          "fixed_storage_mw": 1.0,
+          "renewable_mw": 0.8,
+          "root": true,
+          "served_mw": 1.0
+        },
+        {
+          "base_source_mw": 0.0,
+          "bus": 4,
+          "demand_mw": 0.6,
+          "dispatchable_generation_mw": 0.0,
+          "domain": "AC",
+          "energized": true,
+          "fixed_storage_mw": 0.050000000000000266,
+          "renewable_mw": 0.0,
+          "root": false,
+          "served_mw": 0.6
+        },
+        {
+          "base_source_mw": 0.0,
+          "bus": 1,
+          "demand_mw": 0.0,
+          "dispatchable_generation_mw": 0.0,
+          "domain": "DC",
+          "energized": true,
+          "fixed_storage_mw": 0.0,
+          "renewable_mw": 0.0,
+          "root": false,
+          "served_mw": 0.0
+        },
+        {
+          "base_source_mw": 0.0,
+          "bus": 2,
+          "demand_mw": 0.25,
+          "dispatchable_generation_mw": 0.0,
+          "domain": "DC",
+          "energized": true,
+          "fixed_storage_mw": 0.0,
+          "renewable_mw": 0.0,
+          "root": false,
+          "served_mw": 0.25
+        }
+      ],
+      "component_states": [
+        {
+          "available": true,
+          "canonical_component_index": 1,
+          "closed": false,
+          "component_index": 1,
+          "component_type": "ac_branch",
+          "domain": "AC",
+          "flow_mw": 0.0
+        },
+        {
+          "available": true,
+          "canonical_component_index": 2,
+          "closed": false,
+          "component_index": 2,
+          "component_type": "ac_branch",
+          "domain": "AC",
+          "flow_mw": 0.0
+        },
+        {
+          "available": true,
+          "canonical_component_index": 3,
+          "closed": false,
+          "component_index": 3,
+          "component_type": "ac_branch",
+          "domain": "AC",
+          "flow_mw": 0.0
+        },
+        {
+          "available": true,
+          "canonical_component_index": 4,
+          "closed": false,
+          "component_index": 4,
+          "component_type": "ac_branch",
+          "domain": "AC",
+          "flow_mw": 0.0
+        },
+        {
+          "available": true,
+          "canonical_component_index": 5,
+          "closed": true,
+          "component_index": 5,
+          "component_type": "ac_branch",
+          "domain": "AC",
+          "flow_mw": 0.8
+        },
+        {
+          "available": true,
+          "canonical_component_index": 101,
+          "closed": true,
+          "component_index": 101,
+          "component_type": "dc_branch",
+          "domain": "DC",
+          "flow_mw": 0.25
+        },
+        {
+          "available": true,
+          "canonical_component_index": 101,
+          "closed": true,
+          "component_index": 101,
+          "component_type": "vsc_converter",
+          "domain": "AC-DC",
+          "flow_mw": 0.25
+        }
+      ],
+      "hour": 19.0,
+      "step": 19
+    },
+    {
+      "bus_supply": [
+        {
+          "base_source_mw": 0.0,
+          "bus": 1,
+          "demand_mw": 0.0,
+          "dispatchable_generation_mw": 0.0,
+          "domain": "AC",
+          "energized": false,
+          "fixed_storage_mw": 0.0,
+          "renewable_mw": 0.0,
+          "root": false,
+          "served_mw": 0.0
+        },
+        {
+          "base_source_mw": 0.0,
+          "bus": 2,
+          "demand_mw": 1.0,
+          "dispatchable_generation_mw": 1.0,
+          "domain": "AC",
+          "energized": true,
+          "fixed_storage_mw": 0.0,
+          "renewable_mw": 0.0,
+          "root": true,
+          "served_mw": 1.0
+        },
+        {
+          "base_source_mw": 0.0,
+          "bus": 3,
+          "demand_mw": 1.0,
+          "dispatchable_generation_mw": 0.0,
+          "domain": "AC",
+          "energized": true,
+          "fixed_storage_mw": 0.8760000000000002,
+          "renewable_mw": 0.0,
+          "root": true,
+          "served_mw": 1.0
+        },
+        {
+          "base_source_mw": 0.0,
+          "bus": 4,
+          "demand_mw": 0.6,
+          "dispatchable_generation_mw": 0.8,
+          "domain": "AC",
+          "energized": true,
+          "fixed_storage_mw": 0.17399999999999977,
+          "renewable_mw": 0.0,
+          "root": false,
+          "served_mw": 0.6
+        },
+        {
+          "base_source_mw": 0.0,
+          "bus": 1,
+          "demand_mw": 0.0,
+          "dispatchable_generation_mw": 0.0,
+          "domain": "DC",
+          "energized": true,
+          "fixed_storage_mw": 0.0,
+          "renewable_mw": 0.0,
+          "root": false,
+          "served_mw": 0.0
+        },
+        {
+          "base_source_mw": 0.0,
+          "bus": 2,
+          "demand_mw": 0.25,
+          "dispatchable_generation_mw": 0.0,
+          "domain": "DC",
+          "energized": true,
+          "fixed_storage_mw": 0.0,
+          "renewable_mw": 0.0,
+          "root": false,
+          "served_mw": 0.25
+        }
+      ],
+      "component_states": [
+        {
+          "available": true,
+          "canonical_component_index": 1,
+          "closed": false,
+          "component_index": 1,
+          "component_type": "ac_branch",
+          "domain": "AC",
+          "flow_mw": 0.0
+        },
+        {
+          "available": true,
+          "canonical_component_index": 2,
+          "closed": false,
+          "component_index": 2,
+          "component_type": "ac_branch",
+          "domain": "AC",
+          "flow_mw": 0.0
+        },
+        {
+          "available": true,
+          "canonical_component_index": 3,
+          "closed": false,
+          "component_index": 3,
+          "component_type": "ac_branch",
+          "domain": "AC",
+          "flow_mw": 0.0
+        },
+        {
+          "available": true,
+          "canonical_component_index": 4,
+          "closed": false,
+          "component_index": 4,
+          "component_type": "ac_branch",
+          "domain": "AC",
+          "flow_mw": 0.0
+        },
+        {
+          "available": true,
+          "canonical_component_index": 5,
+          "closed": true,
+          "component_index": 5,
+          "component_type": "ac_branch",
+          "domain": "AC",
+          "flow_mw": -0.12399999999999978
+        },
+        {
+          "available": true,
+          "canonical_component_index": 101,
+          "closed": true,
+          "component_index": 101,
+          "component_type": "dc_branch",
+          "domain": "DC",
+          "flow_mw": 0.25
+        },
+        {
+          "available": true,
+          "canonical_component_index": 101,
+          "closed": true,
+          "component_index": 101,
+          "component_type": "vsc_converter",
+          "domain": "AC-DC",
+          "flow_mw": 0.25
+        }
+      ],
+      "hour": 20.0,
+      "step": 20
+    },
+    {
+      "bus_supply": [
+        {
+          "base_source_mw": 0.0,
+          "bus": 1,
+          "demand_mw": 0.0,
+          "dispatchable_generation_mw": 0.0,
+          "domain": "AC",
+          "energized": false,
+          "fixed_storage_mw": 0.0,
+          "renewable_mw": 0.0,
+          "root": false,
+          "served_mw": 0.0
+        },
+        {
+          "base_source_mw": 0.0,
+          "bus": 2,
+          "demand_mw": 1.0,
+          "dispatchable_generation_mw": 1.0,
+          "domain": "AC",
+          "energized": true,
+          "fixed_storage_mw": 0.0,
+          "renewable_mw": 0.0,
+          "root": true,
+          "served_mw": 1.0
+        },
+        {
+          "base_source_mw": 0.0,
+          "bus": 3,
+          "demand_mw": 1.0,
+          "dispatchable_generation_mw": 0.0,
+          "domain": "AC",
+          "energized": true,
+          "fixed_storage_mw": 0.25,
+          "renewable_mw": 0.8,
+          "root": true,
+          "served_mw": 1.0
+        },
+        {
+          "base_source_mw": 0.0,
+          "bus": 4,
+          "demand_mw": 0.6,
+          "dispatchable_generation_mw": 0.8,
+          "domain": "AC",
+          "energized": true,
+          "fixed_storage_mw": 0.0,
+          "renewable_mw": 0.0,
+          "root": false,
+          "served_mw": 0.6
+        },
+        {
+          "base_source_mw": 0.0,
+          "bus": 1,
+          "demand_mw": 0.0,
+          "dispatchable_generation_mw": 0.0,
+          "domain": "DC",
+          "energized": true,
+          "fixed_storage_mw": 0.0,
+          "renewable_mw": 0.0,
+          "root": false,
+          "served_mw": 0.0
+        },
+        {
+          "base_source_mw": 0.0,
+          "bus": 2,
+          "demand_mw": 0.25,
+          "dispatchable_generation_mw": 0.0,
+          "domain": "DC",
+          "energized": true,
+          "fixed_storage_mw": 0.0,
+          "renewable_mw": 0.0,
+          "root": false,
+          "served_mw": 0.25
+        }
+      ],
+      "component_states": [
+        {
+          "available": true,
+          "canonical_component_index": 1,
+          "closed": false,
+          "component_index": 1,
+          "component_type": "ac_branch",
+          "domain": "AC",
+          "flow_mw": 0.0
+        },
+        {
+          "available": true,
+          "canonical_component_index": 2,
+          "closed": false,
+          "component_index": 2,
+          "component_type": "ac_branch",
+          "domain": "AC",
+          "flow_mw": 0.0
+        },
+        {
+          "available": true,
+          "canonical_component_index": 3,
+          "closed": false,
+          "component_index": 3,
+          "component_type": "ac_branch",
+          "domain": "AC",
+          "flow_mw": 0.0
+        },
+        {
+          "available": true,
+          "canonical_component_index": 4,
+          "closed": false,
+          "component_index": 4,
+          "component_type": "ac_branch",
+          "domain": "AC",
+          "flow_mw": 0.0
+        },
+        {
+          "available": true,
+          "canonical_component_index": 5,
+          "closed": true,
+          "component_index": 5,
+          "component_type": "ac_branch",
+          "domain": "AC",
+          "flow_mw": 0.050000000000000044
+        },
+        {
+          "available": true,
+          "canonical_component_index": 101,
+          "closed": true,
+          "component_index": 101,
+          "component_type": "dc_branch",
+          "domain": "DC",
+          "flow_mw": 0.25
+        },
+        {
+          "available": true,
+          "canonical_component_index": 101,
+          "closed": true,
+          "component_index": 101,
+          "component_type": "vsc_converter",
+          "domain": "AC-DC",
+          "flow_mw": 0.25
+        }
+      ],
+      "hour": 21.0,
+      "step": 21
+    },
+    {
+      "bus_supply": [
+        {
+          "base_source_mw": 0.0,
+          "bus": 1,
+          "demand_mw": 0.0,
+          "dispatchable_generation_mw": 0.0,
+          "domain": "AC",
+          "energized": false,
+          "fixed_storage_mw": 0.0,
+          "renewable_mw": 0.0,
+          "root": false,
+          "served_mw": 0.0
+        },
+        {
+          "base_source_mw": 0.0,
+          "bus": 2,
+          "demand_mw": 1.0,
+          "dispatchable_generation_mw": 1.0,
+          "domain": "AC",
+          "energized": true,
+          "fixed_storage_mw": 0.0,
+          "renewable_mw": 0.0,
+          "root": true,
+          "served_mw": 1.0
+        },
+        {
+          "base_source_mw": 0.0,
+          "bus": 3,
+          "demand_mw": 1.0,
+          "dispatchable_generation_mw": 0.0,
+          "domain": "AC",
+          "energized": true,
+          "fixed_storage_mw": 0.0,
+          "renewable_mw": 0.0,
+          "root": false,
+          "served_mw": 1.0
+        },
+        {
+          "base_source_mw": 0.0,
+          "bus": 4,
+          "demand_mw": 0.6,
+          "dispatchable_generation_mw": 0.6000000000000001,
+          "domain": "AC",
+          "energized": true,
+          "fixed_storage_mw": 0.0,
+          "renewable_mw": 0.0,
+          "root": false,
+          "served_mw": 0.6
+        },
+        {
+          "base_source_mw": 1.25,
+          "bus": 1,
+          "demand_mw": 0.0,
+          "dispatchable_generation_mw": 0.0,
+          "domain": "DC",
+          "energized": true,
+          "fixed_storage_mw": 0.0,
+          "renewable_mw": 0.0,
+          "root": true,
+          "served_mw": 0.0
+        },
+        {
+          "base_source_mw": 0.0,
+          "bus": 2,
+          "demand_mw": 0.25,
+          "dispatchable_generation_mw": 0.0,
+          "domain": "DC",
+          "energized": true,
+          "fixed_storage_mw": 0.0,
+          "renewable_mw": 0.0,
+          "root": false,
+          "served_mw": 0.25
+        }
+      ],
+      "component_states": [
+        {
+          "available": true,
+          "canonical_component_index": 1,
+          "closed": false,
+          "component_index": 1,
+          "component_type": "ac_branch",
+          "domain": "AC",
+          "flow_mw": 0.0
+        },
+        {
+          "available": true,
+          "canonical_component_index": 2,
+          "closed": false,
+          "component_index": 2,
+          "component_type": "ac_branch",
+          "domain": "AC",
+          "flow_mw": 0.0
+        },
+        {
+          "available": true,
+          "canonical_component_index": 3,
+          "closed": false,
+          "component_index": 3,
+          "component_type": "ac_branch",
+          "domain": "AC",
+          "flow_mw": 0.0
+        },
+        {
+          "available": true,
+          "canonical_component_index": 4,
+          "closed": false,
+          "component_index": 4,
+          "component_type": "ac_branch",
+          "domain": "AC",
+          "flow_mw": 0.0
+        },
+        {
+          "available": true,
+          "canonical_component_index": 5,
+          "closed": true,
+          "component_index": 5,
+          "component_type": "ac_branch",
+          "domain": "AC",
+          "flow_mw": -1.0
+        },
+        {
+          "available": true,
+          "canonical_component_index": 101,
+          "closed": true,
+          "component_index": 101,
+          "component_type": "dc_branch",
+          "domain": "DC",
+          "flow_mw": 0.25
+        },
+        {
+          "available": true,
+          "canonical_component_index": 101,
+          "closed": true,
+          "component_index": 101,
+          "component_type": "vsc_converter",
+          "domain": "AC-DC",
+          "flow_mw": -1.0
+        }
+      ],
+      "hour": 22.0,
+      "step": 22
+    },
+    {
+      "bus_supply": [
+        {
+          "base_source_mw": 0.0,
+          "bus": 1,
+          "demand_mw": 0.0,
+          "dispatchable_generation_mw": 0.0,
+          "domain": "AC",
+          "energized": false,
+          "fixed_storage_mw": 0.0,
+          "renewable_mw": 0.0,
+          "root": false,
+          "served_mw": 0.0
+        },
+        {
+          "base_source_mw": 0.0,
+          "bus": 2,
+          "demand_mw": 1.0,
+          "dispatchable_generation_mw": 1.0,
+          "domain": "AC",
+          "energized": true,
+          "fixed_storage_mw": 0.0,
+          "renewable_mw": 0.0,
+          "root": true,
+          "served_mw": 1.0
+        },
+        {
+          "base_source_mw": 0.0,
+          "bus": 3,
+          "demand_mw": 1.0,
+          "dispatchable_generation_mw": 0.0,
+          "domain": "AC",
+          "energized": true,
+          "fixed_storage_mw": 1.0,
+          "renewable_mw": 0.8,
+          "root": true,
+          "served_mw": 1.0
+        },
+        {
+          "base_source_mw": 0.0,
+          "bus": 4,
+          "demand_mw": 0.6,
+          "dispatchable_generation_mw": 0.050000000000000266,
+          "domain": "AC",
+          "energized": true,
+          "fixed_storage_mw": 0.0,
+          "renewable_mw": 0.0,
+          "root": false,
+          "served_mw": 0.6
+        },
+        {
+          "base_source_mw": 0.0,
+          "bus": 1,
+          "demand_mw": 0.0,
+          "dispatchable_generation_mw": 0.0,
+          "domain": "DC",
+          "energized": true,
+          "fixed_storage_mw": 0.0,
+          "renewable_mw": 0.0,
+          "root": false,
+          "served_mw": 0.0
+        },
+        {
+          "base_source_mw": 0.0,
+          "bus": 2,
+          "demand_mw": 0.25,
+          "dispatchable_generation_mw": 0.0,
+          "domain": "DC",
+          "energized": true,
+          "fixed_storage_mw": 0.0,
+          "renewable_mw": 0.0,
+          "root": false,
+          "served_mw": 0.25
+        }
+      ],
+      "component_states": [
+        {
+          "available": true,
+          "canonical_component_index": 1,
+          "closed": false,
+          "component_index": 1,
+          "component_type": "ac_branch",
+          "domain": "AC",
+          "flow_mw": 0.0
+        },
+        {
+          "available": true,
+          "canonical_component_index": 2,
+          "closed": false,
+          "component_index": 2,
+          "component_type": "ac_branch",
+          "domain": "AC",
+          "flow_mw": 0.0
+        },
+        {
+          "available": true,
+          "canonical_component_index": 3,
+          "closed": false,
+          "component_index": 3,
+          "component_type": "ac_branch",
+          "domain": "AC",
+          "flow_mw": 0.0
+        },
+        {
+          "available": true,
+          "canonical_component_index": 4,
+          "closed": false,
+          "component_index": 4,
+          "component_type": "ac_branch",
+          "domain": "AC",
+          "flow_mw": 0.0
+        },
+        {
+          "available": true,
+          "canonical_component_index": 5,
+          "closed": true,
+          "component_index": 5,
+          "component_type": "ac_branch",
+          "domain": "AC",
+          "flow_mw": 0.8
+        },
+        {
+          "available": true,
+          "canonical_component_index": 101,
+          "closed": true,
+          "component_index": 101,
+          "component_type": "dc_branch",
+          "domain": "DC",
+          "flow_mw": 0.25
+        },
+        {
+          "available": true,
+          "canonical_component_index": 101,
+          "closed": true,
+          "component_index": 101,
+          "component_type": "vsc_converter",
+          "domain": "AC-DC",
+          "flow_mw": 0.25
+        }
+      ],
+      "hour": 23.0,
+      "step": 23
+    }
+  ],
+  "dynamic_certificate": {
+    "all_transitions_safe": true,
+    "attempted": true,
+    "feedback": [
+      {
+        "action_id": "mip_transition_4_to_5",
+        "applied_to_restoration_mip": false,
+        "event_labels": [
+          "dc_branch_101_close",
+          "mip_bus_service_DC_2_to_1.000000"
+        ],
+        "feedback_type": "dynamic_model_resolution_cut_candidate",
+        "reason": "Transient simulation completed",
+        "recommended_master_action": "do not credit the transition; correct initialization/model support before deriving an operational no-good cut",
+        "to_step": 5
+      },
+      {
+        "action_id": "mip_transition_23_to_23",
+        "applied_to_restoration_mip": true,
+        "event_labels": [],
+        "feedback_type": "dynamic_no_good_cut_candidate",
+        "reason": "the represented transition violated a declared dynamic threshold",
+        "recommended_master_action": "exclude this exact transition combination or impose the returned dynamic margin before re-optimization",
+        "to_step": 23
+      }
+    ],
+    "feedback_closed_loop_complete": true,
+    "feedback_cuts_applied": 1,
+    "feedback_iterations": 1,
+    "limitations": [
+      "Certificate scope is the canonical topology, authored dynamic models, thresholds, and simulated horizon.",
+      "Aggregated MIP generator, renewable, and fixed-storage dispatch is not replayed per device; the DAE uses authored operating setpoints.",
+      "MIP service is replayed as aggregate domain-qualified bus load scaling; allocation among individual loads at the same bus is not recovered.",
+      "Branch outage events are represented as trips/closures, not as an explicit short-circuit waveform unless separately authored."
+    ],
+    "model_scope": "strict restoration MIP topology and aggregate bus-service replay + scenario-specific full-DAE threshold certificates",
+    "proof_valid": true,
+    "restoration_mip_solves": 2,
+    "runtime_sec": 0.319178708,
+    "safe_plan_found": true,
+    "status": "all represented restoration transitions passed scenario-specific DAE threshold certification",
+    "transitions": [
+      {
+        "action_id": "mip_transition_4_to_5",
+        "cyber_executable": true,
+        "event_count": 2,
+        "executable": true,
+        "failed_step": -1,
+        "from_step": 4,
+        "label": "safe",
+        "limitations": [
+          "L3 validity is scenario- and horizon-specific full-DAE threshold verification, not a global analytic guarantee"
+        ],
+        "max_abs_rocof_hz_s": 0.0,
+        "min_ac_voltage_pu": 0.9962373976678052,
+        "min_frequency_hz": 50.68655182033402,
+        "proof_valid": true,
+        "simulation_message": "Transient simulation completed",
+        "simulation_success": true,
+        "to_step": 5,
+        "unsupported_transitions": [],
+        "warnings": [
+          "DC island has no voltage reference and no VSC converter; pinning DC bus 2 as a fixed-voltage slack (non-physical reference)."
+        ]
+      },
+      {
+        "action_id": "mip_transition_23_to_23",
+        "cyber_executable": true,
+        "event_count": 0,
+        "executable": true,
+        "failed_step": -1,
+        "from_step": 23,
+        "label": "safe",
+        "limitations": [
+          "L3 validity is scenario- and horizon-specific full-DAE threshold verification, not a global analytic guarantee"
+        ],
+        "max_abs_rocof_hz_s": 0.0,
+        "min_ac_voltage_pu": 0.998482660393751,
+        "min_frequency_hz": 50.01225015768884,
+        "proof_valid": true,
+        "simulation_message": "Transient simulation completed",
+        "simulation_success": true,
+        "to_step": 23,
+        "unsupported_transitions": [],
+        "warnings": []
+      }
+    ]
+  },
+  "execution_scope": "dynamic-only diagnostic",
+  "hazard": {
+    "branch_risks": [
+      {
+        "branch_index": 4,
+        "domain": "AC",
+        "peak_failure_probability": 0.9999999998769323,
+        "peak_rain_mm_hr": 41.774845903246565,
+        "peak_wind_ms": 69.39214950905597
+      },
+      {
+        "branch_index": 2,
+        "domain": "AC",
+        "peak_failure_probability": 0.9999999453997745,
+        "peak_rain_mm_hr": 41.81034843984878,
+        "peak_wind_ms": 69.36976025394148
+      },
+      {
+        "branch_index": 1,
+        "domain": "AC",
+        "peak_failure_probability": 0.9999991402012944,
+        "peak_rain_mm_hr": 37.44621979472404,
+        "peak_wind_ms": 69.00305089724966
+      },
+      {
+        "branch_index": 101,
+        "domain": "DC",
+        "peak_failure_probability": 0.9996892636937316,
+        "peak_rain_mm_hr": 41.85539531363458,
+        "peak_wind_ms": 69.15732218549755
+      }
+    ],
+    "fault_count": 4,
+    "max_track_wind_ms": 60.9840404818499,
+    "model": "Holland wind field + segment fragility + sampled branch failures",
+    "runtime_sec": 0.000443708,
+    "seed": 203007,
+    "segments": 15,
+    "status": "Generated 4 typhoon-driven branch faults from 15 synthetic line segments",
+    "track_points": 24,
+    "used_fallback_coordinates": false,
+    "used_synthetic_segments": true
+  },
+  "pre_event": {
+    "ac_storage_soc": [
+      [
+        0.75,
+        0.75,
+        0.75,
+        0.75,
+        0.75,
+        0.75,
+        0.75,
+        0.75,
+        0.75,
+        0.75,
+        0.75,
+        0.75,
+        0.75,
+        0.75,
+        0.75,
+        0.75,
+        0.75,
+        0.75,
+        0.75,
+        0.75,
+        0.75,
+        0.75,
+        0.75,
+        0.75
+      ],
+      [
+        0.75,
+        0.75,
+        0.75,
+        0.7499999999999999,
+        0.7499999999999998,
+        0.7499999999999996,
+        0.7499999999999994,
+        0.7499999999999994,
+        0.7499999999999994,
+        0.7499999999999999,
+        0.7499999999999998,
+        0.7499999999999997,
+        0.7499999999999996,
+        0.7499999999999996,
+        0.7499999999999998,
+        0.7499999999999998,
+        0.7499999999999998,
+        0.7499999999999998,
+        0.7499999999999998,
+        0.7499999999999998,
+        0.7499999999999998,
+        0.7499999999999999,
+        0.75,
+        0.75
+      ]
+    ],
+    "horizon_hr": 24,
+    "mip_gap": 0.0,
+    "runtime_sec": 0.008452417,
+    "solver": "HiGHS",
+    "solver_status": "HiGHS optimal",
+    "terminal_soc_cyclic": true,
+    "uc_feasible": true
+  },
+  "restoration": {
+    "heuristic": {
+      "feasible": true,
+      "limitations": {
+        "converter_losses_modelled": false,
+        "protection_logic_modelled": false,
+        "reactive_power_modelled": false,
+        "transient_limits_modelled": false
+      },
+      "mip_gap": 0.0,
+      "model_scope": "hybrid-acdc-restoration-milp",
+      "peak_shed_mw": 0.64,
+      "priority_weighted_objective_unit": "priority-penalty times MWh; not physical energy",
+      "priority_weighted_unserved_objective": 4.96,
+      "resilience_index": 0.9760340162350212,
+      "runtime_sec": 0.0,
+      "solver": "",
+      "solver_status": "",
+      "status": "Completed",
+      "switch_actions": 6,
+      "total_demand_mwh": 51.74000000000001,
+      "total_served_mwh": 50.50000000000001,
+      "total_shed_mwh": 1.24,
+      "wall_runtime_sec": 0.000244416
+    },
+    "strict_mip": {
+      "critical_ac_unserved_mwh": 0.0,
+      "critical_dc_unserved_mwh": 1.25,
+      "critical_unserved_mwh": 1.25,
+      "feasible": true,
+      "limitations": {
+        "converter_losses_modelled": false,
+        "protection_logic_modelled": false,
+        "reactive_power_modelled": false,
+        "transient_limits_modelled": false
+      },
+      "mip_gap": 0.0,
+      "model_scope": "hybrid-acdc-restoration-milp",
+      "peak_shed_mw": 0.25,
+      "priority_weighted_objective_unit": "priority-penalty times MWh; not physical energy",
+      "priority_weighted_unserved_objective": 1250000.0,
+      "resilience_index": 0.9817251461988302,
+      "runtime_sec": 0.169425334,
+      "solver": "HiGHS",
+      "solver_status": "StrictHiGHS Optimal run=0",
+      "status": "Strict multi-period MIP/LinDistFlow restoration skeleton solved",
+      "switch_actions": 6,
+      "total_demand_mwh": 68.40000000000002,
+      "total_served_mwh": 67.15,
+      "total_shed_mwh": 1.25
+    }
+  },
+  "schema": "hacdcpf.distribution_resilience_review_case.v1"
+}

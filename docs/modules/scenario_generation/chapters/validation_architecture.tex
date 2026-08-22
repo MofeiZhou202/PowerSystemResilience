@@ -1,0 +1,105 @@
+\section{验证架构、测试目录与外部对照边界}
+\label{sec:scenario-validation-architecture}
+
+\subsection{验证金字塔}
+\begin{center}\small
+\begin{tabular}{@{}L{3.2cm}L{5.3cm}L{5.8cm}@{}}
+\toprule
+层级 & 证据 & 能证明的对象\\
+\midrule
+L1 解析/不变量 & 独立公式、概率和、有限数 & 局部方程与守恒\\
+L2 单元回归 & Catch2 固定 seed/边界案例 & 分支、fallback、字段消费\\
+L3 交叉实现 & C++ driver + 独立 Python & 序列化结果可由公开方程复算\\
+L4 接口/模式 & JSON v3、workbook、HTTP & 数据契约和生产路由\\
+L5 下游任务 & PF/OPF/reliability/resilience 回测 & 代表场景对具体决策任务的充分性\\
+\bottomrule
+\end{tabular}
+\end{center}
+当前模块具备 L1--L4 的专项证据；L5 需要按下游模块另行设计，不能由场景生成测试代替。
+
+\subsection{test\_scenario\_generation 测试目录}
+\begin{longtable}{@{}L{8.0cm}L{6.0cm}@{}}
+\toprule
+Catch2 case & 验证对象\\
+\midrule\endfirsthead
+\toprule Catch2 case & 验证对象\\\midrule\endhead
+Regular scenario generation applies SSP/year climate morphing to load and PV & 已知 SSP/year 气候形变\\
+Scenario generation prepares standard multiplier time series internally & multiplier/base/capacity 契约\\
+Regular climate perturbation creates reproducible candidate variation & 固定 seed 与气候随机性\\
+Scenario perturbations realize declared temporal and cross correlations & AR(1) 与跨变量统计目标\\
+Hybrid clustering consumes the declared quantile boundary fraction & boundary fraction 字段消费\\
+Typhoon minimum fault probability gates sampling without hiding risk & sampling gate 与风险保留\\
+Regular climate morphing falls back safely for unknown SSP/year & 零增量 fallback/audit\\
+Large annual scenario generation uses bounded aggregate load profiles & 年度内存预算与 aggregate 降级\\
+Large reliability catalog bounds audit samples without dropping contingencies & audit 预算不删目录\\
+Very large reliability catalogs preserve N-1 coverage within work budgets & 大目录 N--1 覆盖\\
+Typhoon fault generation reuses precomputed topology segments & 空间预计算复用\\
+Large typhoon fault sets use bounded upstream-first repair ordering & 近似修复排序与标志\\
+\bottomrule
+\end{longtable}
+
+\subsection{test\_typhoon\_traffic\_impact 测试目录}
+\begin{longtable}{@{}L{8.0cm}L{6.0cm}@{}}
+\toprule
+Catch2 case & 验证对象\\
+\midrule\endfirsthead
+Typhoon road impact creates common speed, capacity, and closure profiles & 逐 link profile 与闭锁\\
+Typhoon road impact marks affine georeferencing of benchmark topology & Auto/affine fallback 标志\\
+CTM reads road profiles by parent simulation step & 下游时步映射\\
+Typhoon catalog snapshots survive concurrent mixed-option refreshes & 缓存线程安全快照\\
+Typhoon road impact rejects invalid clamp and hydrology bounds & 选项失败语义\\
+\bottomrule
+\end{longtable}
+
+\subsection{test\_scenario\_bundle\_schema 测试目录}
+\begin{longtable}{@{}L{8.0cm}L{6.0cm}@{}}
+\toprule
+Catch2 case & 验证对象\\
+\midrule\endfirsthead
+Scenario bundle validation accepts v3 dimensionless multiplier schema & v3 正常路径\\
+Scenario bundle validation rejects invalid multiplier profiles & 负值/SOC/长度等错误\\
+Scenario bundle normalization upgrades v2 case shape & v2→v3 迁移与 warning\\
+\bottomrule
+\end{longtable}
+
+\subsection{独立 oracle 设计}
+\srcpath{tests/scenario\_generation\_cross\_validation.py} 不链接也不导入 hacdcpf。它从 C++ JSON
+读取公开输入，独立实现 Haversine、Holland、降雨、等效风、架空段失效、交通积水/容量、
+Pearson 统计、median/IQR 缩放和簇距离复算。验证项包括：
+\begin{itemize}
+  \item 候选和代表概率误差 $<10^{-12}$；
+  \item 4096 步 load lag-1 与目标差 $<0.05$；全天 load-wind 同期相关与目标差 $<0.08$；
+  \item 风、雨、易损概率和交通递推误差 $<10^{-10}$；
+  \item 128 个成员无遗漏、代表属于成员、平均/最大距离和 transport 指标误差 $<10^{-10}$；
+  \item sampling gate 下 fault count 为 0 且风险概率仍保留。
+\end{itemize}
+
+\subsection{为什么 cross-correlation 使用风电}
+PV 基线夜间为零，只能在白天恢复 multiplier。第一次预声明容差为 0.08 时，PV 子样本实测
+-0.341279，相对目标 -0.25 偏差 0.091279，验证失败。没有放宽阈值，而是重新推导实验：使用
+全天非零 wind profile 恢复完整 renewable multiplier，实测 -0.290252，偏差 0.040252，通过
+原阈值；PV 值继续报告为周期性子样本诊断。这是测试设计修复，不是结果筛选。
+
+\subsection{OpenDSS 与 GridLAB-D 的正确角色}
+OpenDSS 和 GridLAB-D 能消费确定性负荷/发电 profile 并运行时序潮流，但它们没有与本模块
+等价的 SSP 气候形变、台风目录、易损故障抽样和尾部锚定 k-medoids API。因此：
+\begin{itemize}
+  \item 可以把代表 profile 导出后比较下游电压/潮流；
+  \item 不能把下游潮流一致写成“场景生成算法认证”；
+  \item 本手册没有伪造两软件的聚类或灾害链数值；
+  \item 若未来增加下游 profile replay，应单独记录软件版本、网络转换、控制模式和误差。
+\end{itemize}
+
+\subsection{统计准入与防止移动门槛}
+容差必须在运行前声明。若实测偏差超限，按以下顺序处理：
+\begin{enumerate}
+  \item 检查 oracle 是否独立、输入是否相同、单位/索引是否一致；
+  \item 检查有限样本、AR 有效样本量、clip 和周期性选择；
+  \item 检查 C++ 是否忠实实现理论；
+  \item 只有理论重新推导支持时才修改实验或门槛，并保留失败原因。
+\end{enumerate}
+
+\subsection{未覆盖测试}
+当前尚无：历史台风事件的空间观测评分、校准易损曲线的 out-of-sample 检验、场景数序贯收敛、
+下游 OPF 决策 regret、跨平台 bitwise 重现、v3 工作簿大规模 round-trip 性能基线。这些必须
+列为未认证边界，不能写入“已全面验证”。

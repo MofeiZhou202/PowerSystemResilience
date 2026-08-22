@@ -1,0 +1,347 @@
+\section{公共选项与结果结构完整参考}
+\label{sec:scenario-options-results}
+
+本章以公开头文件为准覆盖全部字段。默认值来自结构体初始化；JSON 解析会对部分字段钳制或
+强制覆盖，另行注明。布尔、枚举、ID 和计数无量纲；典型范围不是自动校验承诺。
+
+\subsection{RegularScenarioOptions}
+\compmeta{RegularScenarioOptions}{include/hacdcpf/analysis/scenario\_generation.hpp}
+\begin{paramtable}
+\fld{enabled} & -- & -- & bool & true & 是否生成常规族\\
+\fld{candidate\_count} & $N$ & 个/组合 & $\ge1$ & 100 & 每个 SSP--year 组合候选数；实现至少取 1\\
+\fld{cluster\_count} & $K$ & 个/组合 & $\ge1$ & 10 & 每组合代表数；不超过候选数\\
+\fld{num\_steps} & $T$ & 步 & $\ge1$ & 8760 & 时序长度\\
+\fld{ssp} & -- & -- & 字符串 & ssp245 & 单一 SSP fallback\\
+\fld{year} & $y$ & 年 & 整数 & 2050 & 单一年份 fallback\\
+\fld{ssp\_levels} & -- & -- & 字符串数组 & 空 & 非空时覆盖单一 SSP\\
+\fld{years} & -- & 年数组 & 整数数组 & 空 & 非空时覆盖单一年份\\
+\end{paramtable}
+
+\subsection{ReliabilityScenarioOptions}
+\compmeta{ReliabilityScenarioOptions}{include/hacdcpf/analysis/scenario\_generation.hpp}
+\begin{paramtable}
+\fld{enabled} & -- & -- & bool & true & 是否生成可靠性族\\
+\fld{candidates\_per\_contingency} & $N_c$ & 个 & $\ge1$ & 30 & 每个 N--1 条件候选数\\
+\fld{cluster\_count\_per\_contingency} & $K_c$ & 个 & $\ge1$ & 5 & 每故障代表数\\
+\fld{num\_steps} & -- & 步 & 固定 & 1 & JSON 解析后强制为 1\\
+\fld{include\_ac\_branches} & -- & -- & bool & true & 包含 AC 支路\\
+\fld{include\_dc\_branches} & -- & -- & bool & true & 包含 DC 支路\\
+\fld{include\_vsc\_converters} & -- & -- & bool & true & 包含 VSC\\
+\fld{include\_dcdc\_converters} & -- & -- & bool & true & 包含 DC/DC\\
+\fld{include\_ac\_buses} & -- & -- & bool & true & 包含 AC 母线\\
+\fld{include\_dc\_buses} & -- & -- & bool & true & 包含 DC 母线\\
+\fld{include\_generators} & -- & -- & bool & true & 包含已实现发电类别\\
+\fld{include\_loads} & -- & -- & bool & true & 包含 AC/DC 负荷\\
+\fld{include\_storage} & -- & -- & bool & true & 包含已实现储能类别\\
+\fld{include\_vpps} & -- & -- & bool & false & API 兼容字段；不扩展 FMEA 目录\\
+\fld{include\_microgrids} & -- & -- & bool & false & API 兼容字段；不扩展 FMEA 目录\\
+\fld{max\_contingencies} & $C_{max}$ & 个 & $\ge0$ & 0 & 0 表示不截断；正值按枚举顺序截断\\
+\end{paramtable}
+
+\subsection{ResilienceScenarioOptions}
+\compmeta{ResilienceScenarioOptions}{include/hacdcpf/analysis/scenario\_generation.hpp}
+\begin{paramtable}
+\fld{enabled} & -- & -- & bool & true & 是否生成弹性族\\
+\fld{intensity\_levels} & -- & -- & enum 数组 & TY & 请求强度列表\\
+\fld{candidates\_per\_intensity} & $N_h$ & 个 & $\ge1$ & 30 & 每强度候选数\\
+\fld{default\_cluster\_count} & $K_h$ & 个 & $\ge1$ & 5 & 无类别覆盖时代表数\\
+\fld{cluster\_count\_by\_intensity} & -- & -- & map & 空 & 类别到代表数覆盖\\
+\fld{num\_steps} & $T_h$ & 步 & $\ge1$ & 48 & 灾害场景时域\\
+\fld{month} & $m$ & 月 & $1\sim12$ & 8 & 轨迹目录月份\\
+\end{paramtable}
+
+\subsection{PerturbationOptions}
+\compmeta{PerturbationOptions}{include/hacdcpf/analysis/scenario\_generation.hpp}
+\begin{paramtable}
+\fld{enable\_load\_perturbation} & -- & -- & bool & true & 启用负荷随机倍率\\
+\fld{enable\_renewable\_perturbation} & -- & -- & bool & true & 启用共享新能源随机倍率\\
+\fld{seed} & -- & -- & uint & 1 & AR(1)/SOC 候选种子基值\\
+\fld{load\_sigma} & $\sigma_L$ & pu & $\ge0$ & 0.08 & 负荷倍率未截断标准差\\
+\fld{renewable\_sigma} & $\sigma_R$ & pu & $\ge0$ & 0.12 & 新能源倍率未截断标准差\\
+\fld{load\_min\_multiplier} & $l_L$ & pu & $\ge0$ & 0.75 & 负荷倍率下限\\
+\fld{load\_max\_multiplier} & $u_L$ & pu & $\ge l_L$ & 1.25 & 负荷倍率上限\\
+\fld{renewable\_min\_multiplier} & $l_R$ & pu & $\ge0$ & 0.0 & 新能源倍率下限\\
+\fld{renewable\_max\_multiplier} & $u_R$ & pu & $\ge l_R$ & 1.20 & 新能源倍率上限\\
+\fld{enable\_storage\_soc\_perturbation} & -- & -- & bool & true & 启用储能初始 SOC 扰动\\
+\fld{storage\_soc\_sigma} & $\sigma_s$ & pu & $\ge0$ & 0.10 & JSON 解析钳至非负\\
+\fld{storage\_soc\_min\_multiplier} & $l_s$ & pu & $\ge0$ & 0.75 & JSON 解析钳至非负\\
+\fld{storage\_soc\_max\_multiplier} & $u_s$ & pu & $\ge0$ & 1.25 & 若小于下限则交换\\
+\fld{enable\_climate\_perturbation} & -- & -- & bool & true & 启用气候随机扰动\\
+\fld{climate\_seed} & -- & -- & uint & 2030 & 气候扰动独立种子\\
+\fld{climate\_temp\_sigma\_c} & -- & $^\circ$C & $\ge0$ & 0.7 & 温度扰动标准差\\
+\fld{climate\_ghi\_sigma\_pct} & -- & \% & $\ge0$ & 8.0 & GHI 扰动标准差\\
+\fld{climate\_load\_sigma\_pct} & -- & \% & $\ge0$ & 3.0 & 气候负荷扰动标准差\\
+\fld{block\_hours} & $b$ & h & $\ge1$ & 24 & AR 结点间隔；实现至少取 1\\
+\fld{temporal\_correlation} & $\rho_t$ & -- & $[-0.999,0.999]$ & 0.75 & JSON 解析钳制\\
+\fld{load\_renewable\_correlation} & $\rho_{LR}$ & -- & $[-0.999,0.999]$ & -0.25 & JSON 解析钳制\\
+\end{paramtable}
+
+\subsection{TyphoonImpactOptions}
+\compmeta{TyphoonImpactOptions}{include/hacdcpf/analysis/scenario\_generation.hpp}
+\begin{paramtable}
+\fld{pv\_transition\_hours} & -- & h & $\ge0$ & 3 & PV 降额平滑过渡\\
+\fld{load\_wind\_start} & $V_{Ls}$ & m/s & 非负 & 25.0 & 负荷降额起点\\
+\fld{load\_wind\_full} & $V_{Lf}$ & m/s & $>V_{Ls}$ & 50.0 & 达最大负荷降额风速\\
+\fld{load\_max\_reduction} & $r_L$ & pu & $0\sim1$ & 0.40 & 最大负荷削减比例\\
+\fld{wind\_cut\_in\_ms} & $V_{ci}$ & m/s & 非负 & 2.5 & 风机切入\\
+\fld{wind\_rated\_ms} & $V_r$ & m/s & $>V_{ci}$ & 11.2 & 风机额定风速\\
+\fld{wind\_cut\_out\_ms} & $V_{co}$ & m/s & $>V_r$ & 25.0 & 风机切出\\
+\fld{wind\_ramp\_exponent} & $\gamma_w$ & -- & 正数 & 2.0 & 切入到额定功率曲线指数\\
+\end{paramtable}
+
+\subsection{ClusteringOptions}
+\compmeta{ClusteringOptions}{include/hacdcpf/analysis/scenario\_generation.hpp}
+\begin{paramtable}
+\fld{method} & -- & -- & 字符串 & {\scriptsize\shortstack[l]{hybrid\_\\kmedoids\_\\tail\_5pct}} & 方法选择\\
+\fld{max\_iterations} & $I$ & 轮 & $\ge1$ & 50 & 实现至少执行一轮\\
+\fld{seed} & -- & -- & uint & 1 & medoid 初始化种子\\
+\fld{continuous\_weight} & $w_c$ & -- & $\ge0$ & 1.0 & JSON 钳至非负\\
+\fld{outage\_hamming\_weight} & $w_o$ & -- & $\ge0$ & 1.0 & 停运签名权重\\
+\fld{robust\_scale} & -- & -- & bool & true & median/IQR 尺度\\
+\fld{include\_tail\_anchors} & -- & -- & bool & true & 选择尾部/边界锚点\\
+\fld{regime\_weight} & $w_r$ & -- & $\ge0$ & 1.0 & regime 不同惩罚\\
+\fld{tail\_fraction} & -- & -- & $[0,0.5]$ & 0.05 & JSON 钳制；与 boundary fraction 不同\\
+\fld{source\_tail\_quantile} & $q_s$ & -- & $[0.5,0.999]$ & 0.95 & 源/全局尾阈值\\
+\fld{coupling\_quantile} & $q_c$ & -- & $[0.5,0.999]$ & 0.90 & 多源耦合阈值\\
+\fld{boundary\_fraction} & $b$ & IQR & $[0,0.5]$ & 0.02 & 分位点邻域宽度\\
+\fld{freeze\_anchors} & -- & -- & bool & true & 锚点是否冻结\\
+\fld{compare\_baseline} & -- & -- & bool & true & 同候选运行 baseline 消融\\
+\end{paramtable}
+
+\subsection{TyphoonScenarioOptions：轨迹与空间}
+\compmeta{TyphoonScenarioOptions}{include/hacdcpf/analysis/typhoon\_resilience.hpp}
+\begin{paramtable}
+\fld{horizon\_hours} & $H$ & h & $\ge1$ & 48 & 轨迹时域\\
+\fld{time\_step\_hr} & $\Delta t$ & h & $>0$ & 1.0 & 时间步\\
+\fld{seed} & -- & -- & uint & 2030 & 轨迹/故障抽样种子\\
+\fld{stochastic} & -- & -- & bool & false & 是否随机轨迹\\
+\fld{use\_precomputed\_track} & -- & -- & bool & false & 使用外部轨迹向量\\
+\fld{precomputed\_track} & -- & -- & point 数组 & 空 & 预计算轨迹\\
+\fld{requested\_category} & -- & -- & enum & Unknown & 请求强度\\
+\fld{selected\_category} & -- & -- & enum & Unknown & 实际选择强度\\
+\fld{selected\_track\_max\_vmax\_ms} & -- & m/s & 非负 & 0 & 选中轨迹最大 vmax\\
+\fld{selected\_sample\_id} & -- & -- & 字符串 & 空 & 目录样本 ID\\
+\fld{used\_category\_fallback} & -- & -- & bool & false & 类别是否回退\\
+\fld{month} & $m$ & 月 & $1\sim12$ & 8 & 月份\\
+\fld{use\_month\_defaults} & -- & -- & bool & false & 使用月度默认参数\\
+\fld{use\_sst\_resource} & -- & -- & bool & true & 尝试使用 SST 资源\\
+\fld{sst\_resource\_path} & -- & -- & 路径 & 空 & SST 资源路径\\
+\fld{initial\_latitude} & $\phi_0$ & deg & $[-90,90]$ & 20.5 & 初始纬度\\
+\fld{initial\_longitude} & $\lambda_0$ & deg & $[-180,180]$ & 114.5 & 初始经度\\
+\fld{initial\_delta\_p\_hpa} & $\Delta p_0$ & hPa & 正数 & 44.0 & 初始气压亏损\\
+\fld{initial\_rmw\_km} & $R_0$ & km & $\ge0$ & 0 & 0 时由气压推导\\
+\fld{initial\_heading\_deg} & -- & deg & 任意 & 0 & 初始航向\\
+\fld{initial\_translation\_speed\_kmph} & -- & km/h & 非负 & 21.6 & 平移速度\\
+\fld{auto\_segment\_lines} & -- & -- & bool & true & 自动线路分段\\
+\fld{target\_segment\_length\_km} & $\ell_s$ & km & 正数 & 0.5 & 目标段长\\
+\fld{min\_segments\_per\_branch} & -- & 个 & $\ge1$ & 1 & 每支路最小段数\\
+\fld{max\_segments\_per\_branch} & -- & 个 & $\ge1$ & 40 & 每支路最大段数\\
+\fld{fallback\_case\_center\_latitude} & -- & deg & 合法纬度 & 22.75 & 缺坐标案例中心\\
+\fld{fallback\_case\_center\_longitude} & -- & deg & 合法经度 & 113.55 & 缺坐标案例中心\\
+\fld{fallback\_bus\_spacing\_km} & -- & km & 正数 & 0.8 & 合成坐标间距\\
+\fld{default\_overhead\_fraction} & -- & pu & $0\sim1$ & 1.0 & 缺资产元数据默认比例\\
+\fld{default\_cable\_fraction} & -- & pu & $0\sim1$ & 0.0 & 缺资产元数据默认比例\\
+\fld{default\_overhead\_fragility} & -- & -- & struct & 见下 & 架空默认易损参数\\
+\fld{default\_cable\_fragility} & -- & -- & struct & 见下 & 电缆默认易损参数\\
+\end{paramtable}
+
+\subsection{TyphoonScenarioOptions：故障、修复与新能源}
+\begin{paramtable}
+\fld{min\_fault\_probability} & $p_{min}$ & pu & $0\sim1$ & 0.05 & 抽样支持门；风险仍报告\\
+\fld{default\_repair\_time\_hr} & $T_r$ & h & 正数 & 6.0 & 资产无 MTTR 时 fallback\\
+\fld{repair\_time\_wind\_factor} & $k_w$ & -- & 非负 & 0.10 & 峰值风速修复放大\\
+\fld{max\_repair\_time\_hr} & $T_{max}$ & h & 正数 & 24.0 & 修复时长上限\\
+\fld{staged\_post\_disaster\_repair} & -- & -- & bool & true & 启用分阶段修复\\
+\fld{post\_disaster\_repair\_delay\_hr} & -- & h & 非负 & 1.0 & 最后故障后准备延迟\\
+\fld{repair\_crew\_time\_per\_branch\_hr} & -- & h & 非负 & 1.0 & 每支路维修槽\\
+\fld{apply\_pv\_wind\_derating} & -- & -- & bool & true & 应用 PV 风致降额\\
+\fld{pv\_cutout\_start\_ms} & -- & m/s & 非负 & 25.0 & PV 降额起点\\
+\fld{pv\_cutout\_full\_ms} & -- & m/s & 大于起点 & 50.0 & PV 最大降额点\\
+\fld{pv\_max\_reduction} & -- & pu & $0\sim1$ & 0.40 & PV 最大降额\\
+\fld{pv\_transition\_hours} & -- & h & $\ge0$ & 3 & 时间平滑\\
+\end{paramtable}
+
+\subsection{TyphoonSegmentFragility}
+\compmeta{TyphoonSegmentFragility}{include/hacdcpf/analysis/typhoon\_resilience.hpp}
+\begin{paramtable}
+\fld{kind} & -- & -- & enum & \shortstack[l]{Overhead\\Line} & 架空/电缆/混合\\
+\fld{design\_wind\_ms} & $V_d$ & m/s & 正数 & 30.0 & 风暴露阈值\\
+\fld{collapse\_wind\_ms} & $V_c$ & m/s & 正数 & 55.0 & severity 饱和阈值\\
+\fld{lognormal\_median\_wind\_ms} & $V_{50}$ & m/s & 正数 & 45.0 & 易损中位风速\\
+\fld{lognormal\_sigma} & $\sigma$ & -- & 正数 & 0.25 & 对数标准差\\
+\fld{design\_rain\_mm\_hr} & $R_d$ & mm/h & 正数 & 60.0 & 风雨暴露雨阈值\\
+\fld{seg\_a\_wind} & $a$ & -- & 实数 & 3.0 & 风暴露系数\\
+\fld{seg\_b\_rain} & $b$ & -- & 实数 & 1.0 & 雨暴露系数\\
+\fld{seg\_c\_bias} & $c$ & -- & 实数 & -7.0 & 暴露偏置\\
+\fld{curve\_number\_cn} & $CN$ & -- & $1\sim99$ & 75.0 & 电缆径流曲线数\\
+\fld{manning\_n} & $n$ & -- & 正数 & 0.035 & Manning 系数\\
+\fld{slope\_s0} & $S_0$ & -- & 正数 & 0.01 & 坡度\\
+\fld{soil\_depth\_z\_m} & $Z$ & m & 正数 & 1.0 & 土层深度\\
+\fld{porosity\_phi} & $\phi$ & pu & 正数 & 0.45 & 孔隙率\\
+\fld{initial\_moisture\_theta} & $\theta_0$ & pu & $0\sim\phi$ & 0.25 & 初始含水量\\
+\fld{base\_cable\_failure\_p} & $p_{c,0}$ & pu & $0\sim1$ & $10^{-4}$ & 电缆基础失效概率\\
+\end{paramtable}
+
+\subsection{TyphoonCatalogOptions}
+\compmeta{TyphoonCatalogOptions}{include/hacdcpf/analysis/typhoon\_resilience.hpp}
+\begin{paramtable}
+\fld{samples\_per\_month} & -- & 个/月 & 正整数 & 100 & 目录采样预算\\
+\fld{first\_month} & -- & 月 & $1\sim12$ & 1 & 起始月\\
+\fld{last\_month} & -- & 月 & $1\sim12$ & 12 & 结束月\\
+\fld{base\_seed} & -- & -- & uint & 203000 & 派生样本种子\\
+\fld{horizon\_hours} & -- & h & 正数 & 48 & 每样本时域\\
+\fld{time\_step\_hr} & -- & h & 正数 & 1.0 & 每样本步长\\
+\fld{stochastic} & -- & -- & bool & true & 随机轨迹\\
+\fld{use\_month\_defaults} & -- & -- & bool & true & 月度默认\\
+\fld{use\_sst\_resource} & -- & -- & bool & true & SST 资源\\
+\fld{sst\_resource\_path} & -- & -- & 路径 & 空 & SST 文件\\
+\fld{catalog\_path} & -- & -- & 路径 & 空 & 目录持久化路径\\
+\end{paramtable}
+
+\subsection{TyphoonTrafficImpactOptions}
+\compmeta{TyphoonTrafficImpactOptions}{include/hacdcpf/analysis/typhoon\_traffic\_impact.hpp}
+\begin{paramtable}
+\fld{num\_steps} & $T$ & 步 & 正整数 & 24 & 交通影响步数\\
+\fld{time\_step\_hr} & $\Delta t$ & h & 正数 & 0.25 & 步长\\
+\fld{start\_hour} & -- & h & 实数 & 0 & 起始轨迹小时\\
+\fld{coordinate\_mode} & -- & -- & enum & Auto & Auto/Geographic/Affine\\
+\fld{study\_center\_latitude} & -- & deg & 合法纬度 & 22.75 & affine 中心\\
+\fld{study\_center\_longitude} & -- & deg & 合法经度 & 113.55 & affine 中心\\
+\fld{affine\_network\_span\_km} & -- & km & 正数 & 20.0 & affine 空间跨度\\
+\fld{auto\_geographic\_track\_distance\_km} & -- & km & 正数 & 500.0 & Auto 地理判定阈值\\
+\fld{rainfall\_runoff\_coefficient} & $c_r$ & -- & 非负 & 0.85 & 全局雨径流系数\\
+\fld{drainage\_rate\_mm\_hr} & $d$ & mm/h & 非负 & 25.0 & 全局排水率\\
+\fld{maximum\_surface\_water\_mm} & $W_{max}$ & mm & 正数 & 500.0 & 水深上限\\
+\fld{drainage\_rate\_by\_link\_mm\_hr} & -- & mm/h & map & 空 & 逐 link 排水覆盖\\
+\fld{runoff\_multiplier\_by\_link} & -- & -- & map & 空 & 逐 link 径流覆盖\\
+\fld{depth\_speed\_quadratic} & $a$ & -- & 实数 & 0.0009 & 深度速度二次项\\
+\fld{depth\_speed\_linear} & $b$ & -- & 实数 & -0.5529 & 一次项\\
+\fld{depth\_speed\_intercept\_km\_hr} & $c$ & km/h & 正数 & 86.9448 & 零水深速度\\
+\fld{minimum\_open\_speed\_factor} & $f_{v,min}$ & pu & $(0,1]$ & 0.05 & 开放 link 速度下限\\
+\fld{flood\_closure\_depth\_mm} & $W_c$ & mm & 非负 & 300.0 & 积水闭锁阈值\\
+\fld{wind\_capacity\_reduction\_start\_ms} & $V_s$ & m/s & 非负 & 15.0 & 风容量降额起点\\
+\fld{wind\_capacity\_reduction\_full\_ms} & $V_f$ & m/s & 大于起点 & 35.0 & 完全降额点\\
+\fld{minimum\_wind\_capacity\_factor} & $f_{w,min}$ & pu & $[0,1]$ & 0.65 & 风容量下限\\
+\fld{close\_on\_extreme\_wind} & -- & -- & bool & false & 风闭锁开关\\
+\fld{wind\_closure\_ms} & $V_c$ & m/s & 非负 & 45.0 & 风闭锁阈值\\
+\fld{apply\_free\_flow\_time\_profile} & -- & -- & bool & true & 写回时耗 profile\\
+\fld{apply\_capacity\_profile} & -- & -- & bool & true & 写回容量 profile\\
+\fld{apply\_availability\_profile} & -- & -- & bool & true & 写回可用性 profile\\
+\fld{capacity\_speed\_exponent} & $\gamma$ & -- & 非负 & 1.0 & 速度到容量指数\\
+\fld{minimum\_open\_capacity\_factor} & $f_{c,min}$ & pu & $(0,1]$ & 0.02 & 开放 link 容量下限\\
+\end{paramtable}
+
+\subsection{核心结果结构}
+\begin{center}\footnotesize
+\begin{longtable}{@{}L{4.8cm}L{4.4cm}L{5.0cm}@{}}
+\toprule
+结构 & 字段 & 语义\\
+\midrule\endfirsthead
+\toprule 结构 & 字段 & 语义\\\midrule\endhead
+\fld{ScenarioCandidate} & id, family, probability & 稳定候选 ID、族、组内概率\\
+ & time\_series & 实际 MW/MWh/SOC profiles\\
+ & contingency, resilience\_event & 条件元数据；按族可选\\
+ & features, outage\_signature, regime\_label & 聚类输入；签名为内部统一目录空间\\
+ & risk\_score, risk\_source\_scores & 综合及分源风险摘要\\
+ & anchor\_reasons, tail\_anchor, frozen\_medoid & 风险原因与优化状态\\
+ & component\_load\_profiles & 稳定组件 ID 归因；大案例可 aggregate fallback\\
+ & standard\_time\_series & 下游 multiplier 契约\\
+\midrule
+\fld{ScenarioCluster} & cluster\_id, representative\_id & 簇号与代表候选 ID\\
+ & representative & 完整代表候选\\
+ & probability & 成员概率和，再归一\\
+ & member\_count, member\_ids & 成员审计\\
+ & average\_distance, max\_distance & 加权平均距离与半径\\
+ & frozen\_medoid, anchor\_reasons & 锚点状态\\
+\midrule
+\fld{RegularScenarioResult} & \fld{candidate\_count}, \fld{cluster\_count}, clusters, audit & 所有 SSP/year 组合总计\\
+\fld{ReliabilityScenarioResult} & \fld{contingency\_count}, \fld{cluster\_total}, contingencies, audit & 条件组嵌套结果\\
+\fld{ResilienceScenarioResult} & \fld{intensity\_count}, \fld{cluster\_total}, intensities, audit & 强度组嵌套结果\\
+\fld{ScenarioGenerationResult} & regular, reliability, resilience, warnings, summary & 组合入口结果\\
+\midrule
+\fld{TyphoonFaultSequenceResult} & track, generated\_segments, faults & 轨迹/分段/故障\\
+ & \fld{branch\_indices}, branch peak arrays, \fld{branch\_risks} & 稳定支路 ID 与峰值风险\\
+ & \fld{renewable\_profile\_multiplier} & 灾害新能源倍率\\
+ & used\_* flags & 坐标、合成段、目录、类别、修复近似\\
+ & requested/selected category, sample metadata & 请求与实际目录样本\\
+ & \fld{monthly\_sst\_c}, \fld{sst\_resource\_path}, seed, status & 资源与状态\\
+\midrule
+\fld{TyphoonTrafficImpactResult} & impacted\_traffic, link\_steps & 写回图与逐 link/step 结果\\
+ & \fld{links\_closed\_at\_least\_once}, \fld{closed\_link\_steps} & 闭锁摘要\\
+ & \fld{used\_affine\_georeferencing} & 坐标 fallback\\
+ & peak wind/rain/water, minimum factors & 聚合极值\\
+ & model\_scope & 模型覆盖声明\\
+\bottomrule
+\end{longtable}
+\end{center}
+
+\subsection{条件、线段、风险与逐步结果逐字段表}
+以下字段是前表中“条件元数据”和“逐步结果”的完整展开，用于保证公开头字段可以按名称检索。
+\begin{center}\footnotesize
+\begin{longtable}{@{}L{4.5cm}L{4.7cm}L{5.0cm}@{}}
+\toprule
+结构 & 字段 & 语义/单位\\
+\midrule\endfirsthead
+\toprule 结构 & 字段 & 语义/单位\\\midrule\endhead
+\fld{ContingencyDefinition} & \fld{display\_name} & 人类可读名称，不作为身份\\
+ & \fld{affected\_ac\_branches} & 带域前缀的稳定 AC 支路引用\\
+ & \fld{affected\_dc\_branches} & 带域前缀的稳定 DC 支路引用\\
+ & \fld{affected\_converters} & 受影响 VSC 等换流器引用\\
+ & \fld{affected\_dcdc\_converters} & 受影响 DC/DC 引用\\
+ & \fld{affected\_buses} & 受影响母线引用，必须保留域\\
+ & \fld{affected\_generators} & 受影响发电资产引用\\
+ & \fld{affected\_loads} & 受影响负荷引用\\
+ & \fld{affected\_storage} & 受影响储能引用\\
+\midrule
+\fld{ResilienceEventDefinition} & \fld{repair\_fault\_count} & 修复排序处理的故障数\\
+ & \fld{pv\_typhoon\_multiplier} & 逐步 PV 台风倍率\\
+ & \fld{wind\_typhoon\_multiplier} & 逐步风电台风倍率\\
+ & \fld{renewable\_typhoon\_multiplier} & 容量加权新能源倍率\\
+ & \fld{load\_typhoon\_multiplier} & 逐步负荷台风倍率\\
+ & \fld{stage1\_start\_step} & 可选第一阶段起始步\\
+ & \fld{stage1\_end\_step} & 可选第一阶段终止步\\
+\midrule
+\fld{TyphoonLineSegment} & \fld{branch\_kind} & AC/DC 支路域\\
+ & \fld{branch\_index} & 稳定支路 index\\
+ & \fld{segment\_index} & 支路内 0-based 段号\\
+ & \fld{from\_latitude}, \fld{from\_longitude} & 段起点坐标（deg）\\
+ & \fld{to\_latitude}, \fld{to\_longitude} & 段终点坐标（deg）\\
+ & \fld{mid\_latitude}, \fld{mid\_longitude} & 风雨求值中点（deg）\\
+ & \fld{length\_km} & 段长（km）\\
+ & \fld{fragility} & 该段完整易损参数\\
+\midrule
+\fld{TyphoonBranchRisk} & \fld{branch\_kind}, \fld{branch\_index} & 稳定带域支路身份\\
+ & \fld{peak\_wind\_ms} & 峰值站点风速（m/s）\\
+ & \fld{peak\_rain\_mm\_hr} & 峰值雨强（mm/h）\\
+ & \fld{peak\_failure\_probability} & 峰值条件失效概率（pu）\\
+\midrule
+\fld{TyphoonCatalog} & \fld{category\_counts} & 各类别目录样本数，非发生概率\\
+\midrule
+\fld{TyphoonFaultSequenceResult} & \fld{branch\_peak\_wind\_ms} & 与 \fld{branch\_indices} 同序，m/s\\
+ & \fld{branch\_peak\_rain\_mm\_hr} & 与 \fld{branch\_indices} 同序，mm/h\\
+ & \fld{branch\_peak\_failure\_probability} & 与 \fld{branch\_indices} 同序，pu\\
+ & \fld{repair\_fault\_count} & 参与修复排序的故障数\\
+\midrule
+\fld{TyphoonTrafficLinkStep} & \fld{midpoint\_latitude}, \fld{midpoint\_longitude} & link 暴露求值中点（deg）\\
+ & \fld{free\_flow\_speed\_factor} & 深度速度因子（pu）\\
+ & \fld{available} & 该 link-step 是否开放\\
+\midrule
+\fld{TyphoonTrafficImpactResult} & \fld{peak\_wind\_ms} & 全 link-step 峰值风速（m/s）\\
+ & \fld{peak\_rainfall\_mm\_hr} & 全 link-step 峰值雨强（mm/h）\\
+ & \fld{peak\_surface\_water\_mm} & 峰值积水深度（mm）\\
+ & \fld{minimum\_speed\_factor} & 最小开放速度因子（pu）\\
+ & \fld{minimum\_capacity\_factor} & 最小容量因子（pu）\\
+\midrule
+\fld{ScenarioBundleIoReport} & \fld{sheet\_counts} & 工作簿表名与记录数\\
+\bottomrule
+\end{longtable}
+\end{center}
+
+\subsection{结果解释纪律}
+\begin{itemize}
+  \item \fld{success=true} 只表示序列化了生成结果，不表示下游 PF/OPF 可行；
+  \item \fld{candidate\_count} 与 \fld{cluster\_count} 是实际计数；可能因多组合而大于单配置；
+  \item \fld{audit} 是模型证据的一部分，不能在 HTTP 层丢弃；
+  \item \fld{warnings}、fallback/approximate 标志必须随导出保留；
+  \item 结果向量的支路/组件引用必须通过稳定 ID 解释，不能按 vector position 对号入座。
+\end{itemize}

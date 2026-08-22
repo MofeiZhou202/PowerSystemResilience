@@ -17,11 +17,11 @@
 \bottomrule
 \end{tabular}
 \end{center}
-入口行号：\srcpath{run\_distribution\_resilience\_assessment}（:run\_distribution\_resilience\_assessment）、
-\srcpath{run\_distribution\_resilience\_mip\_assessment}（:run\_distribution\_resilience\_mip\_assessment）、
-\srcpath{run\_distribution\_resilience\_stage\_milp\_assessment}（:run\_distribution\_resilience\_stage\_milp\_assessment）、
-\srcpath{apply\_distribution\_resilience\_demo\_data}（:apply\_distribution\_resilience\_demo\_data）。未经本轮逐式核验的认证恢复推导
-不纳入主手册数学章节。
+入口符号为 \srcpath{run\_distribution\_resilience\_assessment}、
+\srcpath{run\_distribution\_resilience\_mip\_assessment}、
+\srcpath{run\_distribution\_resilience\_stage\_milp\_assessment} 和
+\srcpath{apply\_distribution\_resilience\_demo\_data}。
+动态认证的逐式契约见第~\ref{sec:res-dynamic}~章。
 
 \subsection{时序数据流}
 \begin{figure}[H]\centering
@@ -53,8 +53,8 @@
 
 \subsection{诚实口径}
 恢复 MILP 的能力由 \fld{DistributionResilienceModelStats::ValidityFlags}（:DistributionResilienceModelStats）逐项声明。
-默认 \fld{model\_scope}=\texttt{"hybrid-acdc-restoration-milp"}；典型缺省下
-\fld{dc\_branch\_flow\_limits\_enforced}=false、\fld{converter\_transfer\_limits\_enforced}=false、
+默认 \fld{model\_scope}=\texttt{"hybrid-acdc-restoration-milp"}。严格 MIP 在存在相应组件时建立
+DC 支路流限与 VSC/LCC/DC--DC 有功传输限，故相应能力标志按模型内容置真；但
 \fld{converter\_losses\_modelled}=false、\fld{reactive\_power\_modelled}=false、
 \fld{protection\_logic\_modelled}=false、\fld{transient\_limits\_modelled}=false，而
 \fld{radial\_topology\_enforced}=true。\fld{mip\_gap\_within\_tolerance} 只表示与已知界的相对

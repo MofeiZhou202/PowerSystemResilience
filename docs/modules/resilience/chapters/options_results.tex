@@ -10,6 +10,8 @@
 \fld{load\_scale\_factor} & — & — & $\ge1$ & 1.0 & 负荷加压系数\\
 \fld{allow\_reconfiguration} & — & — & 布尔 & true & 允许开关重构\\
 \fld{allow\_mess\_dispatch} & — & — & 布尔 & true & 允许 MESS 调度\\
+\fld{auto\_fault\_start\_hr} & — & 小时 & $\ge0$ & 0 & 自动故障首发时刻\\
+\fld{auto\_fault\_stagger\_hr} & — & 小时 & $\ge0$ & 0 & 自动故障错峰间隔\\
 \fld{max\_reconfig\_iterations} & — & — & 整数 & 50 & 贪心重构每步迭代上限\\
 \fld{mess\_travel\_speed\_kmph} & $v$ & km/h & $20\sim60$ & 40 & MESS 行驶速度\\
 \fld{default\_fault\_count} & — & — & 整数 & 2 & 自动生成故障数\\
@@ -18,6 +20,7 @@
 \fld{enable\_disaster\_stages} & — & — & 布尔 & false & 启用分阶段灾害隔离/重构\\
 \fld{post\_fault\_reconfig\_window\_hr} & — & 小时 & — & 2.0 & 灾后重构窗口\\
 \fld{use\_strict\_mip\_for\_mess} & — & — & 布尔 & true & MESS 专用严格 MILP\\
+\fld{fallback\_to\_stage\_mess\_dispatch} & — & — & 布尔 & true & RA MESS 子问题失败时显式回退\\
 \end{paramtable}
 
 \subsection{恢复 MILP 选项 \texttt{DistributionResilienceMIPOptions}}
@@ -36,7 +39,11 @@
 \fld{mip\_gap} & — & — & $0\sim0.05$ & 0.02 & MILP 相对间隙\\
 \fld{max\_time\_s} & — & 秒 & — & 120 & 求解时限\\
 \fld{max\_nodes} & — & — & — & 50000 & B\&C 节点上限\\
+\fld{num\_threads} & — & — & $-1$ 或正整数 & -1 & 小于等于 0 自动，最多 8；正数显式指定\\
 \fld{solver} & — & — & 枚举 & Native & MILP 后端\\
+\fld{allow\_multi\_root\_forest} & — & — & 布尔 & true & 允许多根孤岛森林\\
+\fld{allow\_grid\_forming\_storage\_roots} & — & — & 布尔 & true & 固定构网储能作为根\\
+\fld{allow\_mess\_black\_start} & — & — & 布尔 & true & MESS 构网黑启动根\\
 \fld{enable\_cglp\_cuts} & — & — & 布尔 & false & CGLP 提升-投影割\\
 \end{paramtable}
 
@@ -52,16 +59,24 @@
 \fld{level1\_step\_multiplier} & — & — & — & 4.0 & L1 步长倍数\\
 \fld{level2\_step\_multiplier} & — & — & — & 2.0 & L2 步长倍数\\
 \fld{max\_initial\_dynamic\_residual} & — & — & — & $10^{-6}$ & 初始动态残差上限\\
+\fld{finite\_difference\_relative\_step} & — & — & 正数 & $10^{-6}$ & 采样雅可比相对扰动\\
+\fld{max\_residual\_samples} & — & — & 整数 & 80 & 轨迹残差采样上限\\
+\fld{max\_jacobian\_samples} & — & — & 整数 & 3 & 雅可比采样上限\\
+\fld{directional\_jacobian\_probes} & — & — & 整数 & 12 & 大系统方向导数探针\\
+\fld{transition\_time\_probes} & — & — & 整数 & 8 & 转移增益时间探针\\
 \end{paramtable}
 
 \subsection{结果结构摘要}
 \begin{itemize}
-  \item \fld{DistributionResilienceResult}（:CertifiedRestorationCoordinator）：逐步 \fld{steps}、\fld{fault\_sequence}、
+  \item \fld{DistributionResilienceResult}：逐步 \fld{steps}、\fld{fault\_sequence}、
         \fld{total\_served\_mwh}/\fld{total\_shed\_mwh}/\fld{weighted\_unserved\_mwh}、
         \fld{resilience\_index}、\fld{mess\_energy\_delivered\_mwh}、\fld{model\_stats}；
-  \item \fld{DistributionResilienceStepResult}（:CertifiedRestorationCoordinator）：\fld{restoration\_ratio}、
-        \fld{shed\_by\_priority}、开关动作、\fld{mess\_states}、桥/割点、可选潮流校验；
-  \item \fld{DistributionResilienceModelStats}（:MultiFidelityCertificate）：MILP 规模/状态与 \fld{ValidityFlags}（20+ 标志）；
+  \item \fld{DistributionResilienceStepResult}：\fld{restoration\_ratio}、
+        \fld{shed\_by\_priority}、开关动作、\fld{mess\_states}、桥/割点、可选潮流校验，以及
+        域限定 \fld{bus\_supply\_*} 的需求/服务/energized/root/源分类出力归因；
+  \item \fld{DistributionResilienceModelStats}：MILP 规模/状态与 \fld{ValidityFlags}（20+ 标志）；
   \item \fld{CertifiedRestorationResult}：\fld{optimality\_proven\_over\_catalog}、\fld{no\_good\_cuts}、
         逐轮 \fld{iterations} 与 \fld{MultiFidelityCertificate}。
+  \item \fld{DistributionResilienceDAECertificateResult}：逐转换证书、反馈历史、
+        \fld{feedback\_closed\_loop\_complete}/\fld{safe\_plan\_found}、反馈轮次、MIP 求解次数与割数。
 \end{itemize}

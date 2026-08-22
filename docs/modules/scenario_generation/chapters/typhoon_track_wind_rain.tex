@@ -1,0 +1,112 @@
+\section{台风轨迹、Holland 风场与降雨核}
+\label{sec:typhoon-wind-rain}
+
+\subsection{轨迹点状态}
+\fld{TyphoonTrackPoint} 保存 hour、latitude、longitude、Coriolis 参数 $f_c$、中心气压亏损
+$\Delta p$、Holland $B$、最大风速半径 $R_{mw}$、航向、平移速度、最大风速和 SST。
+这些字段是风雨核的完整公开输入。\fld{vmax\_ms} 用于强度分类；站点风速由 Holland 核重新
+计算，二者不可互换。
+
+\subsection{球面距离}
+对台风中心 $(\phi_1,\lambda_1)$ 和站点 $(\phi_2,\lambda_2)$，实现使用 Haversine：
+\begin{align}
+ a&=\sin^2\frac{\phi_2-\phi_1}{2}
+ +\cos\phi_1\cos\phi_2\sin^2\frac{\lambda_2-\lambda_1}{2},\\
+ r&=2R_E\operatorname{atan2}(\sqrt a,\sqrt{\max(0,1-a)}).
+\end{align}
+角度先转弧度，$R_E=6371.0088$ km；风雨核将半径下限取 1 km，避免中心奇异。
+
+\subsection{RMW 与 Holland B 参数化}
+若 \fld{initial\_rmw\_km}>0，轨迹使用该值；否则
+\begin{equation}
+ R_{mw}=\exp(3.858-7.7\times10^{-5}\Delta p^2).
+\end{equation}
+形状参数为
+\begin{equation}
+ B=\max(0.8,1.881093-0.010917\phi-0.005567R_{mw}).
+\end{equation}
+求值核另以 $B\ge0.5$、$R_{mw}\ge1$ 防御非法外部轨迹。生成下限与求值下限不同，文档和
+测试不得把两者写成同一个值。
+
+\subsection{Holland 梯度风}
+记 $q=(R_{mw}/r)^B$、空气密度 $\rho_a=1.15$ kg/m$^3$。源码压力项为
+\begin{equation}
+ A_p=\frac{B\Delta p\,100}{\rho_a}q e^{-q}.
+\end{equation}
+令 $r_m=1000r$，$c=f_cr_m/2$，则梯度风为
+\begin{equation}
+ V_g=\sqrt{\max(0,A_p+c^2)}-c.
+\end{equation}
+换算至 10 m 阵风：
+\begin{equation}
+ V_{10}=1.75V_g\left(\frac{10}{275}\right)^{1/7}.
+\end{equation}
+若 $V_{10}<0.01$ m/s 返回 0，否则返回 $\max(0,V_{10})$。实现没有叠加台风平移速度矢量，
+也不输出完整气压廓线。
+
+\subsection{Coriolis 参数}
+由纬度生成时
+\begin{equation}
+ f_c=2\Omega\sin\phi,\qquad \Omega=7.2921\times10^{-5}\ \mathrm{s}^{-1}.
+\end{equation}
+预计算轨迹可直接提供 \fld{fc}；固定 oracle 使用同一公开输入，不从 C++ 输出反推。
+
+\subsection{降雨径向多项式}
+令 $q=\operatorname{clip}(R_{mw}/r,0,1.1)$，基础雨强
+\begin{equation}
+ r_r=\max(0,-5.5+110q-390q^2+550q^3-250q^4).
+\end{equation}
+气压强度和变化率修正：
+\begin{align}
+ k&=\max(1,0.0319\Delta p-0.0395),\\
+ \dot p&=\begin{cases}\Delta p_{t-1}-\Delta p_t,&t>0,\\1,&t=0,\end{cases}\\
+ k_1&=\max(1,1-\dot p/100).
+\end{align}
+站点 bearing 与航向相加后归一至 $[0,360)$，按 $45^\circ$ 分成 8 个扇区。扇区倍率同时
+根据平移速度（m/s）小于 4、介于 4--8、大于 8 的离散分支选择。最终
+\begin{equation}
+ R=\max(0,kk_1r_rm_s),
+\end{equation}
+单位 mm/h。
+
+\subsection{轨迹强度分类}
+\srcpath{max\_track\_vmax\_ms} 取轨迹最大 \fld{vmax\_ms}，可跳过首点。分类函数输出
+TD、TS、STS、TY、STY、SuperTY 或 Unknown。类别阈值以
+\srcpath{typhoon\_resilience.cpp:classify\_typhoon\_intensity} 为准；分类结果只用于目录索引
+和分组，不修改站点 Holland 风速。
+
+\subsection{SST 与月度默认}
+轨迹生成可使用 SST 资源或月份默认；实际资源路径和月均 SST 进入 track sample/result。
+资源不可用时使用内置月度参数化并保留来源。\fld{use\_sst\_resource} 不是“已成功读取 SST”
+的证明，必须检查结果 \fld{sst\_resource\_path} 和 sample 元数据。
+
+\subsection{固定数值点}
+固定风暴中心 $(22.75,113.55)$、站点 $(22.75,113.95)$、$\Delta p=70$ hPa、$B=1.2$、
+$R_{mw}=40$ km、平移速度 18 km/h 时，C++ 返回
+\begin{equation}
+ V_{10}=55.24244506292464\ \mathrm{m/s},\qquad
+ R=32.58499937279819\ \mathrm{mm/h}.
+\end{equation}
+独立 Python 逐公式复算误差分别为 0 和 $7.82\times10^{-14}$。
+
+\subsection{实现锚点与边界}
+\begin{center}\small
+\begin{tabular}{@{}L{5.2cm}L{8.5cm}@{}}
+\toprule
+对象 & 源码锚点\\
+\midrule
+距离和站点 bearing & \srcpath{typhoon\_resilience.cpp:haversine\_km}、
+\srcpath{bearing\_sector\_deg}\\
+RMW/B 参数化 & \srcpath{rmw\_from\_delta\_p}、\srcpath{holland\_b}\\
+风速 & \srcpath{holland\_wind\_ms\_impl}、\srcpath{holland\_wind\_ms}\\
+降雨 & \srcpath{typhoon\_rainfall\_mm\_hr}、\srcpath{rain\_sector\_multiplier}\\
+轨迹生成/分类 & \srcpath{build\_track}、\srcpath{classify\_typhoon\_intensity}\\
+二维非对称风场、地形/边界层 CFD & \implnone\\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\begin{gapnote}
+风雨模型是参数化致灾核，不是业务气象预报。没有地形粗糙度图、台风尺度非对称、降雨雷达
+同化或不确定性后验；固定点公式吻合不能推出区域灾害预测精度。
+\end{gapnote}

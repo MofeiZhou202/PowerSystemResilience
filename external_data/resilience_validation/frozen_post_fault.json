@@ -1,0 +1,27 @@
+{
+  "branches": [
+    {
+      "from_bus": 3,
+      "index": 5,
+      "r_pu": 0.02,
+      "to_bus": 4,
+      "x_pu": 0.1
+    }
+  ],
+  "buses": [
+    {
+      "index": 3,
+      "pd_mw": 1.0,
+      "qd_mvar": 0.2,
+      "type": 1
+    },
+    {
+      "index": 4,
+      "pd_mw": 0.6,
+      "qd_mvar": 0.12,
+      "type": 3
+    }
+  ],
+  "slack_bus": 4,
+  "snapshot": "post_fault"
+}

@@ -1,0 +1,51 @@
+\section{储能与 MESS 时空耦合}\label{sec:res-mess}
+
+\subsection{静止储能}
+严格 MIP 对每个固定储能建立放电功率 $P^{dis}_{e,t}$ 与能量 $E_{e,t}$：
+\begin{align}
+ 0&\le P^{dis}_{e,t}\le \overline P_e u_{i(e),t},\\
+ \underline E_e&\le E_{e,t}\le\overline E_e,\\
+ E_{e,t+1}&=E_{e,t}-\frac{\Delta t}{\eta_e^{dis}}P^{dis}_{e,t}.
+\end{align}
+当前严格恢复 MIP 没有 $P^{ch}$，故不能用于电价套利或灾前充电优化。构网储能可在
+\fld{allow\_grid\_forming\_storage\_roots}=true 时作为孤岛根，但仍须满足能量与位置条件。
+
+\subsection{时空网络}
+令 $x_{m,i,t}\in\{0,1\}$ 表示 MESS $m$ 在时步 $t$ 位于节点 $i$，
+$a_{m,ij,t}\in\{0,1\}$ 表示从 $(i,t)$ 出发、在 $t+\tau_{ij}$ 到达 $j$ 的时空弧。基本约束为
+\begin{align}
+ \sum_i x_{m,i,t}&=1,\\
+ \sum_{a\in\delta^+(i,t)}a_{m,a}&=x_{m,i,t},\\
+ \sum_{a\in\delta^-(i,t)}a_{m,a}&=x_{m,i,t},\\
+ \tau_{ij}&=\left\lceil\frac{d_{ij}/v_m}{\Delta t}\right\rceil.
+\end{align}
+显式 \fld{transport\_edges} 优先；缺省可把电气图当运输代理。代理图只表示可达性，不代表道路
+容量、交通拥堵或灾后道路损伤。
+
+\subsection{能量与行驶消耗}
+MESS 能量递推为
+\begin{equation}
+ E_{m,t+1}=E_{m,t}-\frac{\Delta t}{\eta_m^{dis}}
+ \sum_iP^{dis}_{m,i,t}-\sum_{a:\,depart(a)=t}e^{travel}_{m,a}a_{m,a}.
+\end{equation}
+放电只能发生在当前位置：
+\begin{equation}
+ 0\le P^{dis}_{m,i,t}\le\overline P_m x_{m,i,t}.
+\end{equation}
+总行驶距离还受 \fld{max\_travel\_distance\_km} 限制；
+\fld{mobile\_storage\_available\_from\_hr} 可锁定外部调运资源的最早可用时刻。
+
+\subsection{构网与黑启动}
+若 $m$ 具有 \fld{grid\_forming} 能力且 \fld{allow\_mess\_black\_start}=true，位置二进制、
+能量下界与根节点二进制共同约束其成岛资格。认证层另外检查到达截止时间、可用能量和构网能力；
+优化中的“位于母线”不自动等价于通信授权、并网同期或动态安全。
+
+\subsection{RA 专用 MESS 子问题与回退}
+RA 模型先求阶段拓扑，再以阶段残余切负荷作为右端项求 MESS 时空 MILP。若子问题未在后端、时限、
+gap 限制内得到有效解：
+\begin{itemize}
+ \item \fld{fallback\_to\_stage\_mess\_dispatch}=true 时，使用阶段局部贪心调度，
+       \fld{mess\_dispatch\_model}=\texttt{stage\_dispatch\_fallback}；
+ \item 关闭回退时，结果保留 MESS 未调度及失败状态。
+\end{itemize}
+回退结果不能与严格时空最优解混报。

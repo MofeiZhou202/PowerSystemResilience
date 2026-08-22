@@ -1966,7 +1966,9 @@ std::string export_opendss_text(const HybridPowerSystem& input,
       << " pu=" << format_double(positive_or(slack_vm, 1.0))
       << " angle=" << format_double(slack_va)
       << " phases=3\n";
-  out << "Set baseMVA=" << format_double(base_mva) << "\n\n";
+  // OpenDSS has no `Set baseMVA` command. The system base is already used
+  // above to convert per-unit branch data into physical ohms.
+  out << "\n";
 
   for (const auto& branch : sys.ac.branches) {
     if (!branch.in_service) continue;
@@ -2076,6 +2078,21 @@ std::string export_opendss_text(const HybridPowerSystem& input,
         << " kvar=" << format_double(scale * gen.q_mvar * 1000.0)
         << " model=1\n";
   }
+
+  std::set<double> voltage_bases;
+  for (const auto& bus : sys.ac.buses) {
+    if (bus.in_service) {
+      voltage_bases.insert(bus_base_kv(bus, options.minimum_base_kv));
+    }
+  }
+  out << "\nSet VoltageBases=[";
+  bool first_voltage_base = true;
+  for (const double base_kv : voltage_bases) {
+    if (!first_voltage_base) out << ",";
+    out << format_double(base_kv);
+    first_voltage_base = false;
+  }
+  out << "]\nCalcVoltageBases\n";
 
   if (options.include_solve_command) out << "\nSolve\n";
   return out.str();

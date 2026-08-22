@@ -59,7 +59,11 @@ int first_slack_or_none(const std::vector<ACBus>& ac_buses) {
 std::vector<int> plan_gfm_ac_island_references(
     const SolverData& data,
     const std::vector<ACBus>& ac_buses,
-    const std::vector<VSCConverter>& converters) {
+    const std::vector<VSCConverter>& converters,
+    std::string* diagnostic_stage = nullptr) {
+  if (diagnostic_stage != nullptr) {
+    *diagnostic_stage = "AC grid-forming island adjacency construction";
+  }
   const int n = static_cast<int>(ac_buses.size());
   std::vector<std::vector<int>> adjacency(static_cast<size_t>(n));
   for (int col = 0; col < data.ybus.outerSize(); ++col) {
@@ -73,6 +77,9 @@ std::vector<int> plan_gfm_ac_island_references(
   }
 
   std::vector<int> component(static_cast<size_t>(n), -1);
+  if (diagnostic_stage != nullptr) {
+    *diagnostic_stage = "AC grid-forming connected-component enumeration";
+  }
   int component_count = 0;
   for (int start = 0; start < n; ++start) {
     if (!ac_buses[static_cast<size_t>(start)].in_service ||
@@ -97,6 +104,9 @@ std::vector<int> plan_gfm_ac_island_references(
   }
 
   std::unordered_map<int, int> bus_position;
+  if (diagnostic_stage != nullptr) {
+    *diagnostic_stage = "AC grid-forming source-to-island mapping";
+  }
   bus_position.reserve(static_cast<size_t>(n));
   std::vector<int> slack_count(static_cast<size_t>(component_count), 0);
   std::vector<std::vector<int>> gfm_ids(static_cast<size_t>(component_count));
@@ -130,10 +140,26 @@ std::vector<int> plan_gfm_ac_island_references(
   }
 
   std::vector<int> island_reference_ids;
+  if (diagnostic_stage != nullptr) {
+    *diagnostic_stage = "AC grid-forming island reference coverage check";
+  }
   for (int island = 0; island < component_count; ++island) {
     if (slack_count[static_cast<size_t>(island)] > 0) continue;
     const auto& anchors = gfm_ids[static_cast<size_t>(island)];
     if (anchors.empty()) {
+      if (diagnostic_stage != nullptr) {
+        std::string buses;
+        for (int position = 0; position < n; ++position) {
+          if (component[static_cast<std::size_t>(position)] != island) continue;
+          if (!buses.empty()) buses += ",";
+          buses += std::to_string(
+              ac_buses[static_cast<std::size_t>(position)].index);
+        }
+        *diagnostic_stage =
+            "AC grid-forming island reference coverage check for island " +
+            std::to_string(island) + " buses [" + buses +
+            "] (terminal_slacks=0, gfm_vsc_anchors=0)";
+      }
       throw std::invalid_argument(
           "AC island " + std::to_string(island) +
           " has no terminal SLACK and no GFM Norton internal-voltage "
@@ -1084,6 +1110,8 @@ PowerFlowResult NewtonSolver::solve(const SolverData& input_data,
   using Clock = std::chrono::steady_clock;
   const auto core_start = Clock::now();
   PowerFlowResult out;
+  std::string solve_stage = "input and numerical-policy preprocessing";
+  try {
   const auto finish_core_profiling = [&]() {
     out.profiling.solver_core_ms_total =
         std::chrono::duration<double, std::milli>(Clock::now() - core_start)
@@ -1190,6 +1218,7 @@ PowerFlowResult NewtonSolver::solve(const SolverData& input_data,
     return out;
   }
 
+  solve_stage = "voltage-state initialization";
   workspace.prepare_state(n, ndc);
   Eigen::VectorXd& vm = workspace.vm;
   Eigen::VectorXd& va = workspace.va;
@@ -1226,17 +1255,21 @@ PowerFlowResult NewtonSolver::solve(const SolverData& input_data,
   // every bus P/Q equation and every Vm/Va variable; the GFM local equations
   // break the global rotational nullspace. No artificial terminal angle is
   // fixed, because doing so would remove a physical network equation.
+  solve_stage = "AC/DC island reference planning";
   const int slack = first_slack_or_none(ac_buses);
+  solve_stage = "AC grid-forming island reference planning";
   out.diagnostics.gfm_island_reference_vsc_indices =
-      plan_gfm_ac_island_references(data, ac_buses, converters);
+      plan_gfm_ac_island_references(data, ac_buses, converters, &solve_stage);
   // Translate multi-source DC coordination metadata into the solve (multi-converter
   // model §6.6–6.7): participation factors reshape the group's droop sharing, and
   // a declared master is preferred when forming a reference (handled inside
   // plan_dc_island_references).
+  solve_stage = "DC converter participation-factor planning";
   apply_participation_factor_sharing(converters);
   // Plan DC island voltage references.  This may promote a PQ converter to VDC_Q
   // (mutating the local `converters` copy) so a reference-less island can balance;
   // such converters are locked against the adaptive switch demoting them back.
+  solve_stage = "DC island voltage-reference planning";
   DcSlackPlan dc_plan =
       plan_dc_island_references(data, converters, opt.enable_rigid_vdc_former);
   const std::vector<int>& dc_slacks = dc_plan.dc_slacks;
@@ -1270,6 +1303,7 @@ PowerFlowResult NewtonSolver::solve(const SolverData& input_data,
         "[PF-JAC-SUPERSET-01] Fixed PV/PQ layout was ignored because "
         "semi-smooth NCP owns the same Q-row equations.");
   }
+  solve_stage = "Jacobian context construction";
   JacobianContext jac_ctx = build_jacobian_context(
       ac_buses, ndc, slack, dc_slacks, &data, &converters,
       fixed_pv_pq_layout, &vm);
@@ -1391,6 +1425,7 @@ PowerFlowResult NewtonSolver::solve(const SolverData& input_data,
   };
 
   auto ensure_pattern = [&]() {
+    solve_stage = "Jacobian sparsity analysis";
     const bool same_matrix_storage =
         cache_.ybus_value_ptr == data.ybus.valuePtr() &&
         cache_.ybus_outer_ptr == data.ybus.outerIndexPtr() &&
@@ -1941,6 +1976,7 @@ PowerFlowResult NewtonSolver::solve(const SolverData& input_data,
       }
       out.profiling.linear_solver_backend = sparse_solver->backend_name();
 
+      solve_stage = "residual and Jacobian evaluation";
       auto eval_t0 = Clock::now();
       const double resid = evaluate_residual_and_jacobian(data,
                                                           jac_ctx,
@@ -2147,6 +2183,7 @@ PowerFlowResult NewtonSolver::solve(const SolverData& input_data,
           out.profiling.condition_estimate > ropts.nk_condition_trigger;
 
       // ── Globalization strategy dispatch (Direction 4) ───────────────
+      solve_stage = "Newton linear solve and globalization";
       if (opt.globalization == GS::TrustRegion) {
         // Trust-region Newton with dogleg step.
         // Phase 5: use NK-GMRES to compute the Newton direction when the
@@ -2698,6 +2735,7 @@ PowerFlowResult NewtonSolver::solve(const SolverData& input_data,
     }
   }
 
+  solve_stage = "power-flow result reconstruction";
   // Surface the final converter list (post auto-promotion / stiff Vdc forming /
   // in-iteration mode switching) so result reconstruction reports converter
   // powers consistent with the solved network state.
@@ -2705,6 +2743,14 @@ PowerFlowResult NewtonSolver::solve(const SolverData& input_data,
 
   finish_core_profiling();
   return out;
+  } catch (const std::exception& error) {
+    throw std::runtime_error("NewtonSolver failed during " + solve_stage +
+                             ": " + error.what());
+  } catch (...) {
+    throw std::runtime_error(
+        "NewtonSolver failed during " + solve_stage +
+        " with an unrecognized non-standard or cross-ABI exception");
+  }
 }
 
 }  // namespace hacdcpf::engine

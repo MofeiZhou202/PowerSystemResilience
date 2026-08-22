@@ -83,6 +83,9 @@ struct DistributionResilienceModelStats {
   std::string formulation_notes;
   /// Number of CGLP disjunctive cuts admitted.
   int cglp_cuts_added{0};
+  /// Number of scenario-specific DAE topology/service cuts assembled into the
+  /// current strict restoration MILP.
+  int dynamic_feedback_cuts_added{0};
 
   /// Structured model-capability declaration for the strict restoration MIP.
   /// The hybrid path uses canonical projection for rich AC devices and an
@@ -174,6 +177,37 @@ struct TransportEdge {
   bool available{true};
 };
 
+/// A binary topology literal used by a scenario-specific DAE no-good cut.
+/// component_index is the stable rich-model ID; step is the zero-based MIP
+/// interval. Domain and pair_number disambiguate AC/DC and projected 3-winding
+/// transformer equivalents.
+struct DistributionResilienceTopologyLiteral {
+  int step{0};
+  std::string component_type;
+  std::string domain;
+  int component_index{0};
+  int pair_number{0};
+  bool closed{false};
+};
+
+/// A domain-qualified upper bound on restored active load at one bus and step.
+struct DistributionResilienceBusServiceUpperBound {
+  int step{0};
+  std::string domain{"AC"};
+  int bus_index{0};
+  double served_mw{0.0};
+};
+
+/// Operational cut returned by a proof-valid DAE counterexample. The topology
+/// literals exclude one exact binary transition signature; service bounds hold
+/// unsafe load pickup at or below the previously certified level.
+struct DistributionResilienceMIPFeedbackCut {
+  std::string source_action_id;
+  std::string reason;
+  std::vector<DistributionResilienceTopologyLiteral> topology_literals;
+  std::vector<DistributionResilienceBusServiceUpperBound> service_upper_bounds;
+};
+
 // ── Options ──────────────────────────────────────────────────────────────────
 
 /// @brief Configuration for a multi-hour distribution resilience study.
@@ -225,6 +259,9 @@ struct DistributionResilienceOptions {
   /// resource cannot dispatch, form an island, or depart before this time;
   /// once available it may wait and retains every later service interval.
   std::unordered_map<int, double> mobile_storage_available_from_hr;
+  /// Scenario-specific DAE feedback cuts. Every literal/bus ID is validated
+  /// against the canonical MIP projection; unresolved identities are rejected.
+  std::vector<DistributionResilienceMIPFeedbackCut> dynamic_feedback_cuts;
   std::function<bool(int, double, double)> progress_callback;
 
   /// If true, run full AC power flow at each step to obtain bus voltages
@@ -377,6 +414,12 @@ struct DistributionResilienceStepResult {
   std::vector<double> bus_supply_demand_mw;
   std::vector<double> bus_supply_served_mw;
   std::vector<double> bus_supply_shed_mw;
+  std::vector<bool> bus_supply_energized;
+  std::vector<bool> bus_supply_root;
+  std::vector<double> bus_supply_base_source_mw;
+  std::vector<double> bus_supply_dispatchable_generation_mw;
+  std::vector<double> bus_supply_renewable_mw;
+  std::vector<double> bus_supply_fixed_storage_mw;
   std::vector<int> bus_supply_priority_tier;
   std::vector<double> bus_supply_importance;
 

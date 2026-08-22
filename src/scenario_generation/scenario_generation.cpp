@@ -547,22 +547,73 @@ std::vector<double> synthesize_base_renewable(double base, int steps) {
   return synthesize_base_pv(base, steps);
 }
 
-std::vector<double> smooth_noise_factors(int steps, double sigma, double min_value, double max_value,
-                                         int block_hours, std::mt19937& rng) {
-  std::vector<double> factors(std::max(1, steps), 1.0);
-  if (sigma <= 0.0) return factors;
-  std::normal_distribution<double> normal(0.0, sigma);
+struct CorrelatedNoiseFactors {
+  std::vector<double> load;
+  std::vector<double> renewable;
+};
+
+CorrelatedNoiseFactors correlated_noise_factors(
+    int steps,
+    double load_sigma,
+    double load_min,
+    double load_max,
+    double renewable_sigma,
+    double renewable_min,
+    double renewable_max,
+    int block_hours,
+    double temporal_correlation,
+    double load_renewable_correlation,
+    std::mt19937& rng) {
+  const int count = std::max(1, steps);
   const int block = std::max(1, block_hours);
-  double previous = normal(rng);
-  double current = normal(rng);
-  for (int t = 0; t < static_cast<int>(factors.size()); ++t) {
-    if (t % block == 0) {
-      previous = current;
-      current = normal(rng);
+  const int knot_count = (count + block - 1) / block + 1;
+  const double rho_t = clamp_value(temporal_correlation, -0.999, 0.999);
+  const double rho_lr = clamp_value(load_renewable_correlation, -0.999, 0.999);
+  const double temporal_innovation_scale = std::sqrt(1.0 - rho_t * rho_t);
+  const double cross_innovation_scale = std::sqrt(1.0 - rho_lr * rho_lr);
+  std::normal_distribution<double> standard_normal(0.0, 1.0);
+  std::vector<double> load_knots(static_cast<std::size_t>(knot_count), 0.0);
+  std::vector<double> renewable_knots(static_cast<std::size_t>(knot_count), 0.0);
+
+  // Stationary bivariate AR(1): Box, Jenkins, Reinsel & Ljung (2015),
+  // Sec. 3.1. The contemporaneous innovation transform preserves rho_lr;
+  // the executable derivation is in the scenario-generation manual Sec. 4.
+  double load_state = standard_normal(rng);
+  double renewable_state =
+      rho_lr * load_state + cross_innovation_scale * standard_normal(rng);
+  for (int knot = 0; knot < knot_count; ++knot) {
+    if (knot > 0) {
+      const double load_innovation = standard_normal(rng);
+      const double renewable_innovation =
+          rho_lr * load_innovation +
+          cross_innovation_scale * standard_normal(rng);
+      load_state = rho_t * load_state +
+                   temporal_innovation_scale * load_innovation;
+      renewable_state = rho_t * renewable_state +
+                        temporal_innovation_scale * renewable_innovation;
     }
-    const double alpha = static_cast<double>(t % block) / static_cast<double>(block);
-    const double noise = previous * (1.0 - alpha) + current * alpha;
-    factors[static_cast<std::size_t>(t)] = clamp_value(1.0 + noise, min_value, max_value);
+    load_knots[static_cast<std::size_t>(knot)] = load_state;
+    renewable_knots[static_cast<std::size_t>(knot)] = renewable_state;
+  }
+
+  CorrelatedNoiseFactors factors;
+  factors.load.assign(static_cast<std::size_t>(count), 1.0);
+  factors.renewable.assign(static_cast<std::size_t>(count), 1.0);
+  for (int t = 0; t < count; ++t) {
+    const int left = t / block;
+    const double alpha = static_cast<double>(t % block) /
+                         static_cast<double>(block);
+    const double load_noise =
+        (1.0 - alpha) * load_knots[static_cast<std::size_t>(left)] +
+        alpha * load_knots[static_cast<std::size_t>(left + 1)];
+    const double renewable_noise =
+        (1.0 - alpha) * renewable_knots[static_cast<std::size_t>(left)] +
+        alpha * renewable_knots[static_cast<std::size_t>(left + 1)];
+    factors.load[static_cast<std::size_t>(t)] = clamp_value(
+        1.0 + std::max(0.0, load_sigma) * load_noise, load_min, load_max);
+    factors.renewable[static_cast<std::size_t>(t)] = clamp_value(
+        1.0 + std::max(0.0, renewable_sigma) * renewable_noise,
+        renewable_min, renewable_max);
   }
   return factors;
 }
@@ -1226,15 +1277,11 @@ void apply_factor(std::vector<double>& values, const std::vector<double>& factor
   for (std::size_t i = 0; i < values.size(); ++i) values[i] *= i < factors.size() ? factors[i] : 1.0;
 }
 
-std::vector<std::vector<double>> perturb_load_components(const std::vector<std::vector<double>>& base_load_components,
-                                                         const PerturbationOptions& opt,
-                                                         std::mt19937& rng) {
+std::vector<std::vector<double>> perturb_load_components(
+    const std::vector<std::vector<double>>& base_load_components,
+    const std::vector<double>& factors) {
   auto load_components = base_load_components;
-  if (!opt.enable_load_perturbation) return load_components;
   for (auto& component : load_components) {
-    const auto factors = smooth_noise_factors(static_cast<int>(component.size()), opt.load_sigma,
-                                              opt.load_min_multiplier, opt.load_max_multiplier,
-                                              opt.block_hours, rng);
     apply_factor(component, factors);
   }
   return load_components;
@@ -1287,21 +1334,31 @@ CandidateLoadRealization make_candidate_with_load_components(const std::string& 
                                                              const StorageSocBaseline& storage_baseline,
                                                              const PerturbationOptions& opt,
                                                              std::mt19937& rng) {
-  auto load_components = perturb_load_components(base_load_components, opt, rng);
   const int renewable_steps = static_cast<int>(std::max({base_pv.size(), base_wind.size(), base_other_renewable.size(), std::size_t{1}}));
+  int factor_steps = renewable_steps;
+  for (const auto& component : base_load_components) {
+    factor_steps = std::max(factor_steps, static_cast<int>(component.size()));
+  }
+  const auto factors = correlated_noise_factors(
+      factor_steps,
+      opt.enable_load_perturbation ? opt.load_sigma : 0.0,
+      opt.load_min_multiplier, opt.load_max_multiplier,
+      opt.enable_renewable_perturbation ? opt.renewable_sigma : 0.0,
+      opt.renewable_min_multiplier, opt.renewable_max_multiplier,
+      opt.block_hours, opt.temporal_correlation,
+      opt.load_renewable_correlation, rng);
+  auto load_components =
+      perturb_load_components(base_load_components, factors.load);
   int load_steps = renewable_steps;
   for (const auto& component : load_components) load_steps = std::max(load_steps, static_cast<int>(component.size()));
   auto load = sum_profiles(load_components, load_steps);
-  auto renewable_factor = smooth_noise_factors(renewable_steps, opt.renewable_sigma,
-                                               opt.renewable_min_multiplier, opt.renewable_max_multiplier,
-                                               opt.block_hours, rng);
   std::vector<double> pv = base_pv;
   std::vector<double> wind = base_wind;
   std::vector<double> other = base_other_renewable;
   if (opt.enable_renewable_perturbation) {
-    apply_factor(pv, renewable_factor);
-    apply_factor(wind, renewable_factor);
-    apply_factor(other, renewable_factor);
+    apply_factor(pv, factors.renewable);
+    apply_factor(wind, factors.renewable);
+    apply_factor(other, factors.renewable);
   }
   const auto storage = make_storage_soc_profiles(storage_baseline, static_cast<int>(std::max(load.size(), sum_series(pv, wind, other).size())), opt, rng);
   ScenarioCandidate c;
@@ -1321,22 +1378,26 @@ ScenarioCandidate make_candidate(const std::string& id, ScenarioFamily family,
                                  const StorageSocBaseline& storage_baseline,
                                  const PerturbationOptions& opt,
                                  std::mt19937& rng) {
-  auto load_factor = smooth_noise_factors(static_cast<int>(base_load.size()), opt.load_sigma,
-                                          opt.load_min_multiplier, opt.load_max_multiplier,
-                                          opt.block_hours, rng);
   const int renewable_steps = static_cast<int>(std::max({base_pv.size(), base_wind.size(), base_other_renewable.size()}));
-  auto renewable_factor = smooth_noise_factors(renewable_steps, opt.renewable_sigma,
-                                               opt.renewable_min_multiplier, opt.renewable_max_multiplier,
-                                               opt.block_hours, rng);
+  const int factor_steps = std::max(static_cast<int>(base_load.size()),
+                                    renewable_steps);
+  const auto factors = correlated_noise_factors(
+      factor_steps,
+      opt.enable_load_perturbation ? opt.load_sigma : 0.0,
+      opt.load_min_multiplier, opt.load_max_multiplier,
+      opt.enable_renewable_perturbation ? opt.renewable_sigma : 0.0,
+      opt.renewable_min_multiplier, opt.renewable_max_multiplier,
+      opt.block_hours, opt.temporal_correlation,
+      opt.load_renewable_correlation, rng);
   std::vector<double> load = base_load;
   std::vector<double> pv = base_pv;
   std::vector<double> wind = base_wind;
   std::vector<double> other = base_other_renewable;
-  if (opt.enable_load_perturbation) apply_factor(load, load_factor);
+  if (opt.enable_load_perturbation) apply_factor(load, factors.load);
   if (opt.enable_renewable_perturbation) {
-    apply_factor(pv, renewable_factor);
-    apply_factor(wind, renewable_factor);
-    apply_factor(other, renewable_factor);
+    apply_factor(pv, factors.renewable);
+    apply_factor(wind, factors.renewable);
+    apply_factor(other, factors.renewable);
   }
   const auto storage = make_storage_soc_profiles(storage_baseline, static_cast<int>(std::max(load.size(), sum_series(pv, wind, other).size())), opt, rng);
   ScenarioCandidate c;
@@ -1516,6 +1577,8 @@ void enrich_candidate_risk_metadata(std::vector<ScenarioCandidate>& candidates, 
     risks[i] = candidates[i].risk_score;
   }
   const double global_q = quantile(risks, opt.source_tail_quantile);
+  const double global_iqr =
+      quantile(risks, 0.75) - quantile(risks, 0.25);
   std::map<std::string, double> source_q95, source_q90;
   for (const auto& key : keys) {
     source_q95[key] = quantile(scaled_by_key[key], opt.source_tail_quantile);
@@ -1525,9 +1588,25 @@ void enrich_candidate_risk_metadata(std::vector<ScenarioCandidate>& candidates, 
     int source_tail_count = 0;
     std::string first_tail;
     if (candidates[i].risk_score >= global_q) candidates[i].anchor_reasons.push_back("global_tail_q95");
+    // Boundary anchors preserve candidates close to the declared empirical
+    // tail decision surface. See scenario-generation manual Sec. 6 and
+    // Rockafellar & Uryasev (2000) for the quantile/CVaR boundary semantics.
+    if (opt.boundary_fraction > 0.0 &&
+        std::abs(candidates[i].risk_score - global_q) <=
+            opt.boundary_fraction * std::max(1e-9, global_iqr)) {
+      candidates[i].anchor_reasons.push_back("decision_boundary:global");
+    }
     for (const auto& key : keys) {
       const double v = candidates[i].risk_source_scores[key];
       if (v >= source_q95[key]) { candidates[i].anchor_reasons.push_back("source_tail:" + key); if (first_tail.empty()) first_tail = key; }
+      const double source_iqr =
+          quantile(scaled_by_key[key], 0.75) -
+          quantile(scaled_by_key[key], 0.25);
+      if (opt.boundary_fraction > 0.0 &&
+          std::abs(v - source_q95[key]) <=
+              opt.boundary_fraction * std::max(1e-9, source_iqr)) {
+        candidates[i].anchor_reasons.push_back("decision_boundary:" + key);
+      }
       if (v >= source_q90[key]) ++source_tail_count;
     }
     if (source_tail_count >= 2) candidates[i].anchor_reasons.push_back("coupling_tail:q90");
@@ -2112,6 +2191,11 @@ RegularScenarioResult generate_regular_scenarios(const HybridPowerSystem& sys,
                   {"storage_soc_sigma", perturbation.storage_soc_sigma},
                   {"storage_soc_min_multiplier", perturbation.storage_soc_min_multiplier},
                   {"storage_soc_max_multiplier", perturbation.storage_soc_max_multiplier},
+                  {"temporal_correlation", perturbation.temporal_correlation},
+                  {"load_renewable_correlation",
+                   perturbation.load_renewable_correlation},
+                  {"clustering_boundary_fraction",
+                   clustering.boundary_fraction},
                   {"load_processing_granularity", profile_plan.granularity()},
                   {"load_site_count", load_sites.size()},
                   {"component_profile_fallback", !profile_plan.per_component},
@@ -2293,6 +2377,11 @@ ReliabilityScenarioResult generate_reliability_scenarios(const HybridPowerSystem
                   {"storage_soc_sigma", perturbation.storage_soc_sigma},
                   {"storage_soc_min_multiplier", perturbation.storage_soc_min_multiplier},
                   {"storage_soc_max_multiplier", perturbation.storage_soc_max_multiplier},
+                  {"temporal_correlation", perturbation.temporal_correlation},
+                  {"load_renewable_correlation",
+                   perturbation.load_renewable_correlation},
+                  {"clustering_boundary_fraction",
+                   clustering.boundary_fraction},
                   {"coverage_samples", std::move(coverage_samples)}};
   return result;
 }
@@ -2708,6 +2797,11 @@ ResilienceScenarioResult generate_resilience_scenarios(const HybridPowerSystem& 
                   {"storage_soc_sigma", perturbation.storage_soc_sigma},
                   {"storage_soc_min_multiplier", perturbation.storage_soc_min_multiplier},
                   {"storage_soc_max_multiplier", perturbation.storage_soc_max_multiplier},
+                  {"temporal_correlation", perturbation.temporal_correlation},
+                  {"load_renewable_correlation",
+                   perturbation.load_renewable_correlation},
+                  {"clustering_boundary_fraction",
+                   clustering.boundary_fraction},
                   {"coverage_samples", std::move(coverage_samples)}};
   if (warnings && sys.ac.buses.empty() && sys.dc.buses.empty()) warnings->push_back("No buses found for typhoon load impact location mapping.");
   return result;
@@ -2815,6 +2909,13 @@ ScenarioGenerationOptions scenario_generation_options_from_json(const nlohmann::
     opt.perturbation.climate_ghi_sigma_pct = std::max(0.0, p.value("climate_ghi_sigma_pct", opt.perturbation.climate_ghi_sigma_pct));
     opt.perturbation.climate_load_sigma_pct = std::max(0.0, p.value("climate_load_sigma_pct", opt.perturbation.climate_load_sigma_pct));
     opt.perturbation.block_hours = p.value("block_hours", opt.perturbation.block_hours);
+    opt.perturbation.temporal_correlation = clamp_value(
+        p.value("temporal_correlation", opt.perturbation.temporal_correlation),
+        -0.999, 0.999);
+    opt.perturbation.load_renewable_correlation = clamp_value(
+        p.value("load_renewable_correlation",
+                opt.perturbation.load_renewable_correlation),
+        -0.999, 0.999);
   }
   if (j.contains("typhoon_impact")) {
     const auto& t = j.at("typhoon_impact");

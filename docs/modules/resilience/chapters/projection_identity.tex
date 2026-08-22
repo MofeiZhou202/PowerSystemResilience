@@ -1,0 +1,42 @@
+\section{Canonical 投影、索引空间与结果归因}\label{sec:res-projection}
+
+\subsection{投影契约}
+丰富模型先经 \srcpath{project\_to\_canonical\_models} 生成 canonical AC/DC 网络、
+\fld{BusMergeMap}、\fld{BranchExpandMap} 与组件来源映射。严格 MIP 在 canonical 模型上装配，结果再
+映射回作者空间。该过程必须满足
+\begin{equation}
+ \text{author component ID}\rightarrow
+ \text{canonical position}\rightarrow
+ \text{solver variable}\rightarrow
+ \text{reported stable ID}.
+\end{equation}
+任一箭头缺失都不得输出看似有效的原组件结论。
+
+\subsection{域限定母线}
+AC 母线 2 与 DC 母线 2 是两个不同对象。内部查询必须使用
+\fld{ac\_bus\_id\_to\_node\_idx}/\fld{dc\_bus\_id\_to\_node\_idx}，结果中的
+\fld{bus\_supply\_kind} 与 \fld{bus\_supply\_index} 组成联合键。HTTP 层也必须同时返回
+\fld{domain} 和稳定 ID；仅返回裸整数会造成跨域错误归因。
+
+\subsection{支路展开与动作回放}
+变压器、开关、断路器及复合组件可展开为多个 canonical 边。恢复动作由
+\fld{BranchRef} 或组件映射回原始稳定 ID；动态桥再从逐步
+\fld{component\_states} 生成 ACBranchTrip/Close 等事件。一个作者组件展开为多边时，必须以映射表
+聚合，不得把 canonical edge position 当作外部 branch index。
+
+\subsection{零阻抗合并与不可逆信息}
+零阻抗母线合并使多个作者母线共享一个 canonical 节点。电压可按合并映射广播回去，但聚合注入、
+切负荷或资源出力通常没有唯一逆分配。此时结果只能报告 canonical 总量或依据明确的组件级分配规则；
+不能声称恢复了未在模型中保留的原始分摊。
+
+\subsection{能力标志}
+\fld{canonical\_projection\_used} 表示本次模型确实经过投影；其余
+\fld{ValidityFlags} 声明 DC 网络、VSC/LCC/DC--DC、储能、变压器、开关等是否进入模型。
+“映射存在”与“物理约束完整”不同，例如 VSC 可被映射并有有功传输限值，但
+\fld{converter\_losses\_modelled} 仍为 false。
+
+\subsection{必须保留的回归测试}
+投影修改后至少验证：AC/DC 同号母线、零阻抗合并 round-trip、dead island、复合支路展开、故障稳定
+ID 拒绝和结果域限定归因。当前代表性测试位于
+\srcpath{tests/test\_resilience\_assessment.cpp} 的 \texttt{[projection]}、
+\texttt{[hybrid]} 与 \texttt{[fault-validation]} 标签。

@@ -19,6 +19,12 @@ struct DistributionResilienceDAECertificationOptions {
   bool replay_mip_load_service{true};
   int max_transitions{64};
 
+  /// Re-solve the strict restoration MILP after every proof-valid Unsafe DAE
+  /// certificate. Failed/Unresolved oracle outcomes remain fail-closed and do
+  /// not generate a physical no-good cut.
+  bool enable_feedback_loop{true};
+  int max_feedback_iterations{8};
+
   bool command_path_available{true};
   bool authorization_valid{true};
   bool acknowledgement_available{true};
@@ -52,15 +58,21 @@ struct DistributionResilienceDAEFeedback {
   std::vector<std::string> event_labels;
   std::string recommended_master_action;
   bool applied_to_restoration_mip{false};
+  int applied_iteration{-1};
 };
 
 struct DistributionResilienceDAECertificateResult {
   bool attempted{false};
   bool all_transitions_safe{false};
   bool proof_valid{false};
+  bool feedback_closed_loop_complete{false};
+  bool safe_plan_found{false};
+  int feedback_iterations{0};
+  int restoration_mip_solves{0};
+  int feedback_cuts_applied{0};
   std::string status;
   std::string model_scope{
-      "strict restoration MIP topology and aggregate bus-service replay + scenario-specific full-DAE threshold certificates"};
+      "strict restoration MIP topology, aggregate bus-service and dispatch replay + scenario-specific full-DAE threshold certificates"};
   std::vector<std::string> limitations;
   std::vector<DistributionResilienceDAETransitionResult> transitions;
   std::vector<DistributionResilienceDAEFeedback> feedback;

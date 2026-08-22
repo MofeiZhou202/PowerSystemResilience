@@ -3,7 +3,7 @@
 
 \subsection{功能定位}
 默认模型 \fld{HeuristicSequential}（\srcpath{run\_distribution\_resilience\_assessment}，
-\srcpath{include/hacdcpf/resilience/resilience\_assessment.hpp:run\_distribution\_resilience\_assessment}）在 \fld{horizon\_hours} 个时步上逐步演进：施加/修复
+头文件 \srcpath{resilience\_assessment.hpp}）在 \fld{horizon\_hours} 个时步上逐步演进：施加/修复
 故障、隔离故障区、贪心闭合联络开关以重新带电失电负荷、调度储能与 DER，并统计逐步供电
 与切负荷。它快速但不保证全局最优，适合大规模快速评估与作为 MILP 的对照基线。
 

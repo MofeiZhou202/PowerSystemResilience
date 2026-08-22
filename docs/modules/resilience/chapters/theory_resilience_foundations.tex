@@ -1,0 +1,112 @@
+\section{韧性的理论基础与问题分层}\label{sec:res-theory}
+
+\begin{theorynote}
+本章给出韧性曲线、随机风险、恢复优化与动态资格的通用数学框架，不是源码逐行转写。当前实现的
+精确变量、约束、截断和回退分别在第~\ref{sec:res-source-model}--\ref{sec:res-dynamic}~章说明；
+本章超出实现的理论形式均以未实现扩展框标识。
+\end{theorynote}
+
+\subsection{可靠性与韧性不是同一统计量}
+可靠性通常以平稳或年度暴露下的失效频率、持续时间和期望失供电量刻画；韧性研究的是给定高影响
+事件下系统性能从扰动前、退化、应急稳定到恢复的完整轨迹。令 $Q(t)\in[0,1]$ 为归一化服务
+水平，$t_0$、$t_d$、$t_r$ 分别为扰动开始、最低服务点和研究终点，则面积型指标为
+\begin{equation}
+ R_Q=\frac{1}{t_r-t_0}\int_{t_0}^{t_r}Q(t)\,\mathrm dt,
+ \qquad
+ L_Q=\int_{t_0}^{t_r}[1-Q(t)]\,\mathrm dt .
+\end{equation}
+平台离散实现取 $Q_t=P_t^{srv}/P_t^{dem}$，因此
+\begin{equation}
+ EENS=\sum_t\sum_i s_{it}\Delta t,
+ \qquad
+ R_E=\frac{\sum_t P_t^{srv}\Delta t}
+              {\sum_t P_t^{dem}\Delta t}.
+\end{equation}
+$R_E$ 对应 \fld{resilience\_index}；它是需求加权面积比，不等同于
+$|T|^{-1}\sum_tQ_t$（\fld{avg\_restoration\_ratio}）。两者只有在各时步需求相同才相等。
+
+\subsection{从灾害到可执行恢复的因果链}
+一个可审计研究必须保留下列条件链，而不能从风速直接跳到“恢复成功”：
+\begin{equation}
+ \xi\longrightarrow h_{k,t}(\xi)\longrightarrow
+ p_{k,t}^{fail}\longrightarrow a_{k,t}\longrightarrow
+ (z,u,p,E,x)\longrightarrow Q_t\longrightarrow
+ \mathcal C_{DAE}.
+\end{equation}
+其中 $\xi$ 是情景种子，$h$ 是灾害暴露，$a$ 是元件可用状态，$z/u$ 是支路/母线状态，
+$p$ 是功率，$E$ 是储能，$x$ 是 MESS 位置，$\mathcal C_{DAE}$ 是动作的动态证书。
+本模块只在每一箭头都有结构化数据时给下游结果授信；缺少保护绑定、零负荷拾取模型或动态初始化时，
+返回 \fld{Unresolved}/\fld{Failed}，而不是补造数值。
+
+\subsection{确定性、随机与风险口径}
+给定单一情景 $\omega$ 的运行损失记为
+\begin{equation}
+ L(\omega)=\sum_{t,i}w_i s_{it}(\omega)\Delta t.
+\end{equation}
+对 $N$ 个独立、同分布样本，经验均值、经验分位数及条件尾期望为
+\begin{align}
+ \widehat\mu_N&=N^{-1}\sum_{n=1}^{N}L_n,\\
+ \widehat{VaR}_{\alpha}&=L_{(\lceil\alpha N\rceil)},\\
+ \widehat{CVaR}_{\alpha}&=\frac{1}{|\mathcal T_\alpha|}
+   \sum_{n\in\mathcal T_\alpha}L_n,
+ \quad \mathcal T_\alpha=\{n:L_n\ge\widehat{VaR}_\alpha\}.
+\end{align}
+复核案例采用配对种子比较基线与干预，降低灾害实现差异带来的方差；它是事件条件经验风险，
+没有事件年发生率，因而不得解释为年度 EENS。
+
+\begin{gapnote}
+恢复模块没有概率测度校准、置信区间、重要抽样、相关随机场或分布鲁棒风险优化。经验均值/VaR/CVaR
+由复核工具后处理，不是 \fld{DistributionResilienceResult} 的通用求解目标。
+\end{gapnote}
+
+\subsection{优化层与物理层}
+恢复决策是混合离散问题。严格入口求解
+\begin{equation}
+ \min_{z,u,p,E,x,s}\quad
+ \sum_{t,i}\pi_i s_{it}\Delta t+C_{sw}+C_{travel}+C_{dispatch}
+\end{equation}
+并受拓扑、径向性、有功平衡、电压包络、资源容量和跨时段状态约束。这里的
+``严格''指模型按所列约束构成并交给 MIP 后端，不表示模型等价于非线性三相 AC/DC 物理。
+动态层随后把离散动作映射为 DAE 事件，检查
+\begin{equation}
+ f_{min}\ge\underline f,\qquad
+ |\dot f|_{max}\le\overline r_f,\qquad
+ V_{min}\ge\underline V,
+\end{equation}
+以及换流器电流观测门。优化可行、MIP gap 合格和动态安全是三个独立命题。
+
+\subsection{四类证明义务}
+\begin{enumerate}
+ \item \textbf{数据义务}：稳定 ID、AC/DC 域、单位、时标和情景种子可追溯；
+ \item \textbf{优化义务}：报告可行性、目标、界、gap、规模、后端和时限；
+ \item \textbf{物理义务}：用潮流或 DAE 对选定状态/动作复核，并报告残差与阈值；
+ \item \textbf{统计义务}：风险样本数、配对规则、收敛准则和未收敛状态完整披露。
+\end{enumerate}
+只有四项均满足，案例才可进入“研究结论”；任何一项失败只能进入诊断结果。
+
+\subsection{文献坐标与实现边界}
+恢复曲线采用 Bruneau 等提出的性能轨迹思想；配电系统多时段恢复与微网成岛通常使用
+混合整数网络流或 LinDistFlow；径向性以单商品流/虚拟根约束表达；动态认证使用轨迹残差、
+采样雅可比与情景阈值检查。上述理论是理解框架。平台当前实现的唯一精确契约仍是
+\srcpath{src/resilience/} 中的方程装配，故本手册后续各章都区分“理论可用形式”和“当前已实现形式”。
+
+\subsection{与实现的对应}
+\begin{center}\small
+\begin{tabular}{@{}L{5.0cm}L{9.0cm}@{}}
+\toprule
+理论条目 & 实现状态\\\midrule
+离散服务曲线、EENS 与面积型韧性指数 &
+\implfull{src/resilience/resilience\_assessment.cpp:run\_distribution\_resilience\_assessment}\\
+多时段 hybrid AC/DC 恢复 MIP &
+\implfull{src/resilience/resilience\_restoration\_mip.cpp:build\_mip\_skeleton}\\
+分阶段隔离与灾后重构 &
+\implfull{src/resilience/resilience\_stage\_milp.cpp:run\_distribution\_resilience\_stage\_milp\_assessment}\\
+轨迹残差与情景 DAE 阈值认证 &
+\implpart{L3 为情景/模型/阈值/时域特定认证；L1/L2 常量仅为采样估计}\\
+经验均值、VaR、CVaR 与配对干预 &
+\implpart{仅复核工具 tools/distribution\_resilience\_review\_case.cpp 实现；非公共恢复求解器目标}\\
+相关随机场、置信区间和分布鲁棒恢复 & \implnone\\
+动态反馈自动加入恢复 MIP 并迭代至闭环 & \implnone\\
+\bottomrule
+\end{tabular}
+\end{center}

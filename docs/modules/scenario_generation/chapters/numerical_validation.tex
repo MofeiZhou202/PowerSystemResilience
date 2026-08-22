@@ -1,0 +1,149 @@
+\section{固定数值案例、统计结果与独立交叉验证}
+\label{sec:scenario-numerical-validation}
+
+\subsection{案例系统与复现条件}
+\srcpath{tools/scenario\_generation\_review\_case.cpp} 构造 2 母线 AC 系统：slack bus 1、load bus 2、
+支路 \texttt{ac\_branch:101}、10 MW/2 Mvar 负荷 201、5 MW PV 301、3 MW wind 302 和
+20 MW 上限发电机 401。母线坐标为 $(22.75,113.55)$ 与 $(22.75,113.95)$。
+
+常规短时案例参数：24 步、64 候选、6 代表、seed 20260822、load sigma 0.08、renewable sigma
+0.12、$\rho_t=0.75$、$\rho_{LR}=-0.25$、block=1、无气候/SOC 扰动。未知
+\texttt{ssp999:2090} 有意触发零气候增量 fallback。统计长序列用 4096 步、1 候选，sigma 改为
+0.05/0.08，保持同一相关参数。
+
+缩减案例使用 128 候选、12 代表、hybrid tail-anchor、seed 17、
+\fld{boundary\_fraction}=0.10、\fld{regime\_weight}=0、baseline comparison=true。
+
+\subsection{概率与确定性复现}
+\begin{center}\small
+\begin{tabular}{@{}L{6.4cm}L{4.2cm}L{3.5cm}@{}}
+\toprule
+量 & 数值 & 判据\\
+\midrule
+常规候选数 / 代表数 & 64 / 6 & 等于请求\\
+候选概率和 & 1.000000000000 & 误差 0\\
+代表概率和 & 1.000000000000 & 误差 0\\
+重复生成 coverage/簇数 & 完全相同 & deterministic=true\\
+64 候选 load--PV energy correlation & -0.3663644365 & 目标 -0.25，容差 0.15\\
+\bottomrule
+\end{tabular}
+\end{center}
+能量相关同时含确定性日内 profile、PV 夜间零值、风电容量和有限候选，因此只作为端到端统计
+现象；AR 核的直接验证使用下面的 multiplier 分离实验。
+
+\subsection{4096 步 AR(1) 结果}
+用同一系统和同一确定性生成器分别运行“有扰动”和“无扰动”，逐点相除恢复 multiplier。
+负荷和风电基线始终为正；PV 只保留 1879 个白天点。
+\begin{center}\small
+\begin{tabular}{@{}L{5.7cm}rrrr@{}}
+\toprule
+序列 & count & mean & sample std & min / max\\
+\midrule
+load multiplier & 4096 & 0.99804200 & 0.04915002 & 0.83864293 / 1.17151450\\
+wind multiplier & 4096 & 1.00088103 & 0.08094124 & 0.73517822 / 1.27080447\\
+PV daylight multiplier & 1879 & 1.00471410 & 0.08273485 & 0.73517822 / 1.27080447\\
+\bottomrule
+\end{tabular}
+\end{center}
+
+相关结果：
+\begin{center}\small
+\begin{tabular}{@{}L{6.8cm}rrr@{}}
+\toprule
+统计量 & 目标 & 实测 & 绝对偏差\\
+\midrule
+load lag-1 correlation & 0.750000 & 0.74375318 & 0.00624682\\
+load--wind contemporaneous & -0.250000 & -0.29025168 & 0.04025168\\
+load--PV daylight contemporaneous & -0.250000 & -0.34127948 & 0.09127948\\
+\bottomrule
+\end{tabular}
+\end{center}
+预声明门为 lag-1 0.05、同期 0.08。全天 wind 通过；PV 白天子样本不作为准入门并保留失败数值。
+这避免通过事后放宽容差掩盖周期性筛选偏差。
+
+\subsection{128→12 场景缩减结果}
+\begin{center}\small
+\begin{tabular}{@{}L{5.5cm}rrr@{}}
+\toprule
+指标 & Hybrid & Weighted baseline & Hybrid--baseline\\
+\midrule
+transport mean & 2.14810121 & 1.18838011 & +0.95972110\\
+transport max & 7.16929262 & 3.06119436 & +4.10809826\\
+global tail coverage & 1.000000 & 0.000000 & +1.000000\\
+coupling tail coverage & 0.450000 & 0.150000 & +0.300000\\
+load source coverage & 0.714286 & 0.142857 & +0.571429\\
+net-load source coverage & 0.571429 & 0.285714 & +0.285714\\
+PV deficit coverage & 0.714286 & 0.285714 & +0.428571\\
+renewable deficit coverage & 0.857143 & 0.285714 & +0.571429\\
+wind deficit coverage & 1.000000 & 0.000000 & +1.000000\\
+regime mass L1 & 1.640625 & 0.046875 & +1.593750\\
+\bottomrule
+\end{tabular}
+\end{center}
+Hybrid 的 12 个 anchor 全部冻结。结论是明确的双目标取舍：尾部覆盖大幅提高，但平均/最坏运输
+误差和 regime 质量显著变差，不能写成“hybrid 全面优于 baseline”。
+
+\subsection{聚类独立复算}
+Python oracle 从 C++ 序列化的 128 个候选和 12 个簇重新：
+\begin{enumerate}
+  \item 按字段列构造 median/IQR 尺度；
+  \item 检查每个 representative ID 属于 member IDs；
+  \item 逐成员计算欧氏距离（案例 regime weight=0，无 outage 差异）；
+  \item 复算 cluster probability、weighted average distance、max distance；
+  \item 汇总 transport mean/max 和成员总数。
+\end{enumerate}
+结果：成员总数 128、概率误差 0、最大平均距离误差 0、最大半径误差 0、transport mean/max 误差
+均为 0（断言容差 $10^{-10}$）；tail/frozen medoid count 均为 12。
+
+\subsection{固定 Holland、雨量与易损结果}
+固定风暴参数：中心 $(22.75,113.55)$，$\Delta p=70$ hPa，$B=1.2$，$R_{mw}=40$ km，
+$f_c=5.6398700067\times10^{-5}$ s$^{-1}$，站点 $(22.75,113.95)$。结果：
+\begin{center}\small
+\begin{tabular}{@{}L{6.4cm}L{4.8cm}L{3.0cm}@{}}
+\toprule
+量 & C++ 值 & Python 误差\\
+\midrule
+Holland 10 m wind & 55.24244506292464 m/s & 0\\
+rainfall & 32.58499937279819 mm/h & $7.82\times10^{-14}$\\
+2 km overhead failure probability & 0.7989101008439494 & $6.66\times10^{-16}$\\
+\bottomrule
+\end{tabular}
+\end{center}
+sampling gate 设为 1.0，所以 fault count=0；风险 0.798910 仍在 branch risks，验证门不隐藏风险。
+
+\subsection{交通递推结果}
+固定 link 长 4 km、free-flow time 0.08 h、capacity 1200，runoff=0.85、drainage=25 mm/h、
+$\Delta t=1$ h、闭锁水深 300 mm。逐步结果：
+\begin{center}\small
+\begin{tabular}{@{}rrrrrr@{}}
+\toprule
+step & rain & water & speed factor & wind factor & capacity factor\\
+\midrule
+0 & 32.584999 & 2.697249 & 0.982923 & 0.65 & 0.638900\\
+1 & 32.584999 & 5.394499 & 0.965996 & 0.65 & 0.627898\\
+2 & 32.584999 & 8.091748 & 0.949221 & 0.65 & 0.616993\\
+3 & 32.584999 & 10.788998 & 0.932595 & 0.65 & 0.606187\\
+\bottomrule
+\end{tabular}
+\end{center}
+closed link-step=0；独立水深最大误差 $6.39\times10^{-14}$。
+
+\subsection{可靠性目录结果}
+review system 的目录为 \texttt{ac\_gen:401}、\texttt{ac\_branch:101}、
+\texttt{ac\_ren:302}，count=3，count 与 ID 数组长度一致。PVSystem 当前没有由本案例 include
+组合产生独立目录项；文档按实际输出报告，不用 enum 覆盖列表替代数值结果。
+
+\subsection{证据文件与复现命令}
+证据目录为 \srcpath{external\_data/scenario\_generation\_validation/}。原始 C++ 输出文件为
+\srcpath{scenario\_generation\_review\_case.json}；独立报告文件为
+\srcpath{scenario\_generation\_cross\_validation.json}。
+\begin{verbatim}
+cmake --build build/macos-release --target scenario_generation_review_case -j4
+python3 tests/scenario_generation_cross_validation.py \
+  --cpp-bin build/macos-release/tests/scenario_generation_review_case \
+  --output-dir external_data/scenario_generation_validation
+\end{verbatim}
+
+\subsection{结论边界}
+这些数值证明公开方程、字段消费、概率守恒、聚类序列化和固定 seed 复现一致；它们不证明气候
+或台风预测准确、易损参数经现场校准、下游 PF 可行或代表场景在任意 OPF 目标下最优。

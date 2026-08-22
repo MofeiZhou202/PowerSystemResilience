@@ -1,0 +1,202 @@
+\section{多保真动态证书的逐公式推导}\label{sec:res-dynamic-derivation}
+
+本章展开 \srcpath{src/resilience/certified\_restoration.cpp} 和
+\srcpath{src/resilience/resilience\_dynamic\_certification.inc} 的数值契约。核心原则是区分三件事：
+动作是否可执行、DAE 是否成功求解、求解轨迹是否满足声明阈值。三者不能由一个布尔量替代。
+
+\subsection{动作与可执行性集合}
+
+候选动作 $a\in\mathcal A$ 由动态事件序列、master 目标值、确定性破平优先级、信息物理命令链以及
+可选 MESS 需求组成。信息物理可执行性为
+\begin{equation}
+ \chi_a^{cyber}=c_a^{path}\land c_a^{auth}\land c_a^{ack}.
+\end{equation}
+若动作需要 MESS，则
+\begin{equation}
+ \chi_a^{mess}=
+ \mathbb 1[t_a^{travel}\le t_a^{deadline}]
+ \land\mathbb 1[E_a^{avail}\ge E_a^{req}]
+ \land\left(\neg g_a^{req}\lor g_a^{cap}\right).
+\end{equation}
+最终 $\chi_a=\chi_a^{cyber}\land\chi_a^{mess}$。失败约束逐项写入
+\fld{failed\_constraints}；不可执行动作不会获得“跳过仿真即安全”的信用。
+
+\subsection{MESS 动态物化}
+
+当 $a$ 需要 MESS 时，认证器先检查稳定 storage ID、目标 AC 母线、额定能量、可用能量和构网能力，
+随后在动作系统副本中生成目标母线动态储能设备，并把 $P/Q$ 设定传给 DAE 模型。证书分别报告
+\fld{mess\_materialized\_in\_dae} 与 \fld{mess\_dynamic\_device\_observed}：前者表示设备已写入
+模型，后者表示轨迹输出确实出现对应稳定 ID 的 GridForming/Battery 设备。两者不能混同。
+
+\subsection{半显式 DAE 和轨迹残差}
+
+动态系统写为
+\begin{align}
+ \dot x&=f(t,x,y),\\
+ 0&=g(t,x,y),
+\end{align}
+其中 $x$ 是动态状态，$y$ 是网络代数量。对求解器快照
+$(t_n,x_n,y_n,\widehat{\dot x}_n)$，回放计算
+\begin{align}
+ r_f^{(n)}&=\widehat{\dot x}_n-f(t_n,x_n,y_n),\\
+ r_g^{(n)}&=g(t_n,x_n,y_n).
+\end{align}
+认证器报告
+\begin{align}
+ \fld{r\_f.max\_inf}&=\max_n\|S_x^{-1}r_f^{(n)}\|_\infty,\\
+ \fld{r\_g.max\_inf}&=\max_n\|r_g^{(n)}\|_\infty,
+\end{align}
+以及梯形积分的 \fld{integral\_inf}。状态尺度矩阵
+$S_x=\operatorname{diag}(s_j)$，
+\begin{equation}
+ s_j=\max\left(\max_n|x_{n,j}|,s_{floor}\right)
+\end{equation}
+避免角度、控制器积分状态与机械量直接按原始数值大小竞争。
+
+\subsection{代数消元条件数}
+
+在采样点线性化
+\begin{equation}
+ \begin{bmatrix}\delta\dot x\\0\end{bmatrix}=
+ \begin{bmatrix}f_x&f_y\\g_x&g_y\end{bmatrix}
+ \begin{bmatrix}\delta x\\\delta y\end{bmatrix}.
+\end{equation}
+若 $g_y$ 可解，则约化动态雅可比为
+\begin{equation}
+ A_r=f_x-f_yg_y^{-1}g_x.
+\end{equation}
+代码从采样 $g_y$ 解估计代数增益 $\kappa_g$，从 $A_r$ 的范数/方向探针估计 $L_F$。当状态维度
+不超过 \fld{dense\_jacobian\_dimension\_limit} 时可构造稠密有限差分雅可比；更大系统使用
+\fld{directional\_jacobian\_probes} 个方向探针。所有估计乘
+\fld{jacobian\_tube\_factor}。
+
+\begin{gapnote}
+有限差分采样只覆盖名义轨迹及有限扰动方向。当前
+\fld{constants\_are\_global\_bounds=false}，因此 $\kappa_g$ 和 $L_F$ 不是整个状态管上的区间上界。
+任何把 L1/L2 称为严格全局证明的表述均与实现冲突。
+\end{gapnote}
+
+\subsection{连续重构缺陷与总 forcing}
+
+相邻快照间采用 Hermite 型连续重构估计状态和导数，并回放 DAE 得到缺陷轮廓 $d(t)$。
+证书记录
+\begin{equation}
+ D_{rec}=\int_0^T\|d(t)\|_\infty\,dt.
+\end{equation}
+若重构有效，总 forcing 由初始误差、微分/代数残差和数值误差组合；典型保守形式为
+\begin{equation}
+ \Phi=e_0+\int_0^T\|r_f\|_sdt
+ +\kappa_g\int_0^T\|r_g\|_\infty dt+D_{rec}+e_{num}.
+\end{equation}
+代码使用饱和乘加防止浮点溢出；无穷或非有限常量保持为不可证明状态，而不是截成看似有限的误差。
+
+\subsection{转移增益和输出边界}
+
+对安全输出 $J(x,y)$，在达到极值的快照处计算状态梯度 $c=\partial J/\partial x$，并用采样
+$A_r(t)$ 估计有限时域输出转移增益
+\begin{equation}
+ \Gamma_J(\tau)=\sup_{0\le s\le\tau}
+ \|c^\top\Phi_A(\tau,s)\|_1.
+\end{equation}
+采样时间点数量由 \fld{transition\_time\_probes} 限制。若重构缺陷有效，输出误差采用卷积
+\begin{equation}
+ \Delta J\approx\int_0^{t_J}\Gamma_J(t_J-s)d(s)\,ds
+ +\Gamma_J(t_J)\kappa_g(e_0+\|r_g\|_{L^1})
+ +G_y\|r_g\|_\infty;
+\end{equation}
+否则退回 $\Delta J\approx\Gamma_J\Phi$；再失败时使用全状态 Lipschitz 回退。每个
+\fld{MarginCertificate} 同时给出 estimate、$\Delta J$、lower、upper 与
+\fld{bound\_method}，不得只展示 estimate。
+
+\subsection{三个安全输出}
+
+当前输出为最小频率、最小 AC 电压和最大绝对 RoCoF。为统一“越大越安全”的方向，内部 margin
+可写为
+\begin{align}
+ J_f&=f_{min}-\underline f,\\
+ J_V&=V_{min}-\underline V,\\
+ J_r&=\overline r-|\dot f|_{max}.
+\end{align}
+换流器电流不是连续 margin，而是观测资格和限流活动门。若
+\fld{require\_converter\_current\_observation=true} 且轨迹没有相应输出，则 L3 为 Unresolved。
+
+\subsection{L1/L2 诊断标签}
+
+L1 和 L2 分别把 DAE 步长乘以默认 4 和 2，在同一模型上运行较粗/较细轨迹。对 margin 区间
+$[\underline J_k,\overline J_k]$：
+\begin{align}
+ \text{Safe}_{diag}&\iff \forall k:\underline J_k\ge0,\\
+ \text{Unsafe}_{diag}&\iff \exists k:\overline J_k<0,\\
+ \text{Unresolved}_{diag}&\iff\text{其余情况}.
+\end{align}
+即使标签为 Safe，\fld{proof\_valid=false}，因为当前常量不是全局包络。L1/L2 的作用是筛查与
+诊断，不是替代 L3。
+
+\subsection{L3 资格条件和标签真值表}
+
+L3 使用调用者原始 \fld{DynamicSolverOptions}。资格条件为
+\begin{equation}
+ q= q_{pf}\land(q_{trim}\lor\|\dot x_0\|_\infty\le\epsilon_0)
+ \land q_f\land q_V\land q_{rocof}\land q_I.
+\end{equation}
+这里 $q_I$ 在未要求换流器电流观测时恒真。标签规则为：
+\begin{center}\small
+\begin{tabular}{@{}L{3.0cm}L{3.2cm}L{2.4cm}L{5.0cm}@{}}
+\toprule
+条件 & label & proof\_valid & 解释\\\midrule
+构建/初始化/积分抛异常 & Failed & false & fail-closed，保留诊断\\
+仿真返回失败或无快照 & Failed & false & 没有可审核轨迹\\
+$q=false$ & Unresolved & false & 缺初始化或关键观测资格\\
+$q=true$ 且阈值均满足 & Safe & true & 仅对指定模型/情景/阈值/时域\\
+$q=true$ 且至少一阈值失败 & Unsafe & true & 已观测轨迹违反安全条件\\
+\bottomrule
+\end{tabular}
+\end{center}
+L3 的 \fld{proof\_valid=true} 是情景特定阈值判定有效，不是全局吸引域、任意扰动或参数不确定性证明。
+
+\subsection{有限动作 master 的语义}
+
+\fld{CertifiedRestorationCoordinator} 面对调用者给定的有限目录 $\mathcal A$。它先过滤不可执行动作，
+再按 objective 和 tie-break 选择候选，依次调用 L1、L2、L3。已证 Unsafe 的动作可形成 no-good cut；
+Failed/Unresolved 表示证据不足，不可被误用为“安全排除证明”。只有目录中更优动作均被合法过滤或
+证伪、且存在 Safe incumbent 时，\fld{optimality\_proven\_over\_catalog} 才可能为 true。
+这一结论只对给定有限目录成立，不是连续控制空间的全局最优。
+
+\subsection{恢复时序到 DAE 事件的映射}
+
+DAE 转换入口（\srcpath{resilience\_dynamic\_certification.inc}）比较相邻逐步恢复结果：
+\begin{itemize}
+ \item AC 支路分/合映射为 trip/close 事件；
+ \item 支持的 DC 支路和负荷服务变化按域限定 ID 形成事件；
+ \item bus service 以 $P^{srv}_{it}/D_{it}$ 回放为相对 authored 额定值的绝对负荷缩放；
+ \item 母线级机组、可再生与储能出力跨同类容器按正容量统一分摊，分摊和等于 MIP 目标；
+ \item 从完全相同的服务比例到下一步不产生伪事件；
+ \item 从零服务直接拾取可借助保留的 authored 额定值恢复，不再丢失基值；
+ \item 未支持的换流器/LCC/断路器闭合不能获得 Safe 证明。
+\end{itemize}
+\fld{require\_supported\_transitions=true} 时，存在任一 unsupported 项即阻止安全授信。
+
+\subsection{候选反馈与真正闭环}
+
+每个非安全/不可执行转移可生成 \fld{DistributionResilienceDAEFeedback}，其中包含 feedback type、
+原因、事件标签和建议的 master action。真正闭环至少要求
+\begin{equation}
+ \text{certificate}\to\text{valid cut}\to\text{MIP re-solve}
+ \to\text{new transitions}\to\text{re-certificate}.
+\end{equation}
+当前桥对 proof-valid Unsafe 自动构造精确拓扑 no-good 和适用的服务上界，重求恢复 MIP 并重新
+认证；Failed/Unresolved 仍只返回诊断候选，不生成割。只有新方案全部为 proof-valid Safe 时才令
+\fld{applied\_to\_restoration\_mip=true}（对应被实际施加的历史反馈）和
+\fld{feedback\_closed\_loop\_complete=true}。因此它是有限 master 上的 oracle-feedback 闭环，
+不是把 DAE 方程直接嵌入单层 MIP，也不提供连续动态约束优化的全局最优证书。
+
+\subsection{数值失效的保守传播}
+
+模型构建、潮流初始化、轨迹积分、残差回放和有限差分均可能拒绝病态输入。公开结果必须满足
+\begin{equation}
+ \text{exception}\Rightarrow
+ (\text{label=Failed},\ \text{proof\_valid=false},\
+  \text{simulation\_success=false}).
+\end{equation}
+标准异常的 \texttt{what()} 写入限制；非标准或跨 ABI 异常给出通用诊断。该边界保证批量研究继续，
+但不会把失败转换为物理安全。回归见第~\ref{sec:res-verification-catalog}~章。

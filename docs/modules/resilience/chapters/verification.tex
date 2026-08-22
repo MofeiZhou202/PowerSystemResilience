@@ -8,7 +8,7 @@
 测试/目标 & 注册位置 & 覆盖\\
 \midrule
 \srcpath{test\_resilience\_assessment} & \srcpath{tests/CMakeLists.txt} & 三种恢复模型、MESS、指标、有效性\\
-\srcpath{test\_transient\_dynamics} & tests/ & \srcpath{CertifiedRestorationCoordinator}、可执行性、MESS/信息物理阻断\\
+\srcpath{test\_transient\_dynamics} & tests/ & 认证协调器、可执行性、MESS/信息物理阻断\\
 \srcpath{cyber\_dynamic\_safe\_restoration\_small} & 可执行目标 & 认证恢复小案例复现\\
 \srcpath{cyber\_dynamic\_safe\_restoration\_scale} & 可执行目标 & 认证恢复规模复现\\
 \bottomrule
@@ -23,9 +23,9 @@
 
 \subsection{边界与局限（如实标注）}
 \begin{itemize}
-  \item \textbf{LinDistFlow/有功口径}：恢复 MILP \fld{model\_scope}=\texttt{"hybrid-acdc-restoration-milp"}，
-        默认不强制 DC 支路流限、换流器传输限、换流器损耗与无功
-        （\fld{ValidityFlags}，:ValidityFlags），强制辐射拓扑；
+  \item \textbf{LinDistFlow/有功口径}：严格恢复 MIP
+        \fld{model\_scope}=\texttt{"hybrid-acdc-restoration-milp"}，对已建模 DC 支路和换流器建立
+        有功传输限，但不建模换流器损耗与无功；RA 模型另行声明无 AC 流限和电压包络；
   \item \textbf{近似最优}：\fld{mip\_gap\_within\_tolerance}=true 只表示与已知界的间隙在容差内，
         \textbf{非}全局最优；准确间隙见 \fld{model\_stats.mip\_gap}；
   \item \textbf{认证 L1/L2}：采样雅可比“管”诊断，\fld{constants\_are\_global\_bounds}=false，
@@ -37,10 +37,12 @@
   \item \textbf{MESS}：行程动态不在亚秒 DAE 时间轴积分，到达/行程能量为主问题级前提；
   \item \textbf{桥接器}：仅重放拓扑驱动的带电，不回填完整 MIP 运行点，聚合出力不分配到单个
         动态器件（\fld{DistributionResilienceDAECertificateResult::limitations}）。
+  \item \textbf{异常边界}：DAE 初始化/构建/积分拒绝通过 fail-closed 证书返回，由
+        \texttt{fail\_closed} 标签测试覆盖；失败不等于动态安全。
 \end{itemize}
 
 \subsection{加深与后续}
-行号以 2026-08-17 检出为准，如与后续变更不符以
-\srcpath{include/hacdcpf/resilience/} 与注册测试为准。数学与运行契约对照
+符号锚点与语义以当前 \srcpath{include/hacdcpf/resilience/}、\srcpath{src/resilience/} 和注册测试为准。
+数学与运行契约对照
 \srcpath{docs/theory/certified\_restoration\_runtime.md}；网络重构建模见
 \srcpath{docs/theory/network\_reconfiguration\_models.md}。

@@ -1,8 +1,7 @@
 \section{源码等价数学实现}\label{sec:res-source-model}
 
-本章只覆盖可由当前实现逐行重建的启发式供电计算和严格多时段 MIP。认证恢复的动态证书由
-\srcpath{src/resilience/resilience\_dynamic\_certification.inc} 实现；在未完成逐式审计前，本手册
-不复述其理论误差界。
+本章逐行重建启发式供电计算和严格多时段 MIP；动态证书的 DAE、残差、采样常量与资格条件在
+第~\ref{sec:res-dynamic}~章单列，避免把静态 MIP 可行性与动态安全混在同一证明中。
 
 \subsection{启发式岛内供电分配}
 

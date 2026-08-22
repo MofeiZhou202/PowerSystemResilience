@@ -24,8 +24,8 @@
 | `power_flow` | `modules/power_flow/` | [潮流计算手册](power_flow/power_flow_manual.tex) | AC/DC、三相、配网、CPF、鲁棒求解 |
 | `power_models` | `modules/power_models/` | [AML 建模层手册](power_models/power_models_manual.tex) | ACOPF、ACDCOPF、DCOPF、LinDistFlow、SCUC builder |
 | `reliability` | `modules/reliability/` | [可靠性手册](reliability/reliability_manual.tex) | MC、FMEA、三阶段、F\&D |
-| `resilience` | `modules/resilience/` | [弹性手册](resilience/resilience_manual.tex) | 启发式恢复、严格 MILP、MESS |
-| `scenario_generation` | `modules/scenario_generation/` | [场景生成手册](scenario_generation/scenario_generation_manual.tex) | 常规、可靠性、弹性、台风场景 |
+| `resilience` | `modules/resilience/` | [弹性恢复专著](resilience/resilience_manual.tex) | 理论、灾害/修复、启发式、严格/RA MILP、MESS、投影、DAE 认证、HTTP、数值验证与审计 |
+| `scenario_generation` | `modules/scenario_generation/` | [场景生成手册](scenario_generation/scenario_generation_manual.tex) | 16 专章：概率/随机过程/缩减理论，三族实现，风雨--易损--修复--交通链，全字段契约与独立数值复算 |
 | `server` | `modules/server/` | [服务端手册](server/server_manual.tex) | `RuntimeApiV1` 与版本能力配置 |
 | `short_circuit` | `modules/short_circuit/` | [短路手册](short_circuit/short_circuit_manual.tex) | IEC 60909、序网、换流器、直流故障、投影身份、批量算法、HTTP、数值交叉验证与系统审计 |
 | `sppt` | `modules/sppt/` | [SPPT 手册](sppt/sppt_manual.tex) | MR1–MR8、证书、守卫、代理循环 |

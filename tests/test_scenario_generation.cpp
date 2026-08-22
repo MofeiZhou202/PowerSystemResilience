@@ -4,6 +4,7 @@
 #include <algorithm>
 #include <cmath>
 #include <map>
+#include <numeric>
 #include <string>
 #include <nlohmann/json.hpp>
 #include <vector>
@@ -104,6 +105,29 @@ std::vector<double> representative_feature_values(const RegularScenarioResult& r
   for (const auto& cluster : result.clusters) values.push_back(feature(cluster.representative, key));
   std::sort(values.begin(), values.end());
   return values;
+}
+
+double pearson_correlation(const std::vector<double>& x,
+                           const std::vector<double>& y) {
+  REQUIRE(x.size() == y.size());
+  REQUIRE(x.size() >= 3);
+  const double mx =
+      std::accumulate(x.begin(), x.end(), 0.0) / static_cast<double>(x.size());
+  const double my =
+      std::accumulate(y.begin(), y.end(), 0.0) / static_cast<double>(y.size());
+  double numerator = 0.0;
+  double sx = 0.0;
+  double sy = 0.0;
+  for (std::size_t i = 0; i < x.size(); ++i) {
+    const double dx = x[i] - mx;
+    const double dy = y[i] - my;
+    numerator += dx * dy;
+    sx += dx * dx;
+    sy += dy * dy;
+  }
+  REQUIRE(sx > 0.0);
+  REQUIRE(sy > 0.0);
+  return numerator / std::sqrt(sx * sy);
 }
 
 }  // namespace
@@ -228,6 +252,132 @@ TEST_CASE("Regular climate perturbation creates reproducible candidate variation
   REQUIRE(pvs_again.size() == pvs.size());
   for (std::size_t i = 0; i < loads.size(); ++i) CHECK(loads_again[i] == Approx(loads[i]));
   for (std::size_t i = 0; i < pvs.size(); ++i) CHECK(pvs_again[i] == Approx(pvs[i]));
+}
+
+TEST_CASE("Scenario perturbations realize declared temporal and cross correlations",
+          "[scenario_generation][statistics][correlation]") {
+  const auto sys = make_regular_scenario_test_system();
+  ClusteringOptions clustering;
+  clustering.method = "weighted_k_medoids";
+  clustering.include_tail_anchors = false;
+  clustering.compare_baseline = false;
+
+  RegularScenarioOptions long_run;
+  long_run.ssp = "ssp999";
+  long_run.year = 2090;
+  long_run.num_steps = 4096;
+  long_run.candidate_count = 1;
+  long_run.cluster_count = 1;
+  auto correlated = deterministic_perturbation();
+  correlated.enable_load_perturbation = true;
+  correlated.load_sigma = 0.05;
+  correlated.load_min_multiplier = 0.5;
+  correlated.load_max_multiplier = 1.5;
+  correlated.temporal_correlation = 0.75;
+  correlated.block_hours = 1;
+  const auto perturbed = generate_regular_scenarios(
+      sys, long_run, correlated, clustering, nullptr);
+  const auto baseline = generate_regular_scenarios(
+      sys, long_run, deterministic_perturbation(), clustering, nullptr);
+  REQUIRE(perturbed.clusters.size() == 1);
+  REQUIRE(baseline.clusters.size() == 1);
+  const auto perturbed_load = profile_values(
+      perturbed.clusters.front().representative.time_series, "total_load_mw");
+  const auto baseline_load = profile_values(
+      baseline.clusters.front().representative.time_series, "total_load_mw");
+  REQUIRE(perturbed_load.size() == baseline_load.size());
+  std::vector<double> factors;
+  factors.reserve(perturbed_load.size());
+  for (std::size_t i = 0; i < perturbed_load.size(); ++i) {
+    REQUIRE(baseline_load[i] > 0.0);
+    factors.push_back(perturbed_load[i] / baseline_load[i]);
+  }
+  const std::vector<double> lagged_left(factors.begin(), factors.end() - 1);
+  const std::vector<double> lagged_right(factors.begin() + 1, factors.end());
+  CHECK(pearson_correlation(lagged_left, lagged_right) ==
+        Approx(0.75).margin(0.05));
+
+  RegularScenarioOptions ensemble;
+  ensemble.ssp = "ssp999";
+  ensemble.year = 2090;
+  ensemble.num_steps = 24;
+  ensemble.candidate_count = 512;
+  ensemble.cluster_count = 4;
+  correlated.enable_renewable_perturbation = true;
+  correlated.renewable_sigma = 0.08;
+  correlated.renewable_min_multiplier = 0.5;
+  correlated.renewable_max_multiplier = 1.5;
+  correlated.load_renewable_correlation = -0.25;
+  correlated.temporal_correlation = 0.75;
+  const auto samples = generate_regular_scenarios(
+      sys, ensemble, correlated, clustering, nullptr);
+  const auto& coverage = samples.audit.at("coverage_samples");
+  REQUIRE(coverage.size() == 512);
+  std::vector<double> load_energy;
+  std::vector<double> pv_energy;
+  for (const auto& candidate : coverage) {
+    load_energy.push_back(candidate.at("features").at("load_sum").get<double>());
+    pv_energy.push_back(candidate.at("features").at("pv_sum").get<double>());
+  }
+  CHECK(pearson_correlation(load_energy, pv_energy) ==
+        Approx(-0.25).margin(0.15));
+  CHECK(samples.audit.at("temporal_correlation").get<double>() ==
+        Approx(0.75));
+  CHECK(samples.audit.at("load_renewable_correlation").get<double>() ==
+        Approx(-0.25));
+}
+
+TEST_CASE("Hybrid clustering consumes the declared quantile boundary fraction",
+          "[scenario_generation][clustering][boundary]") {
+  const auto sys = make_regular_scenario_test_system();
+  RegularScenarioOptions regular;
+  regular.ssp = "ssp999";
+  regular.year = 2090;
+  regular.num_steps = 24;
+  regular.candidate_count = 40;
+  regular.cluster_count = 40;
+  auto perturbation = deterministic_perturbation();
+  perturbation.enable_load_perturbation = true;
+  perturbation.enable_renewable_perturbation = true;
+  ClusteringOptions clustering;
+  clustering.method = "hybrid_kmedoids_tail_5pct";
+  clustering.boundary_fraction = 0.50;
+  clustering.compare_baseline = false;
+  const auto result = generate_regular_scenarios(
+      sys, regular, perturbation, clustering, nullptr);
+  REQUIRE(result.clusters.size() == 40);
+  CHECK(std::any_of(result.clusters.begin(), result.clusters.end(),
+                    [](const ScenarioCluster& cluster) {
+    return std::any_of(cluster.anchor_reasons.begin(),
+                       cluster.anchor_reasons.end(),
+                       [](const std::string& reason) {
+      return reason.rfind("decision_boundary:", 0) == 0;
+    });
+  }));
+}
+
+TEST_CASE("Typhoon minimum fault probability gates sampling without hiding risk",
+          "[scenario_generation][typhoon][probability-gate]") {
+  const auto sys = make_regular_scenario_test_system();
+  TyphoonScenarioOptions options;
+  options.horizon_hours = 4;
+  options.time_step_hr = 1.0;
+  options.stochastic = false;
+  options.initial_latitude = 22.75;
+  options.initial_longitude = 113.55;
+  options.max_segments_per_branch = 1;
+  options.staged_post_disaster_repair = false;
+  options.min_fault_probability = 1.0;
+  options.default_overhead_fragility.design_wind_ms = 30.0;
+  options.default_overhead_fragility.design_rain_mm_hr = 1000.0;
+  options.default_overhead_fragility.seg_a_wind = 0.0;
+  options.default_overhead_fragility.seg_b_rain = 0.0;
+  options.default_overhead_fragility.seg_c_bias = -2.0;
+  const auto result = generate_typhoon_fault_sequence(sys, options);
+  REQUIRE(result.branch_risks.size() == 1);
+  CHECK(result.branch_risks.front().peak_failure_probability > 0.0);
+  CHECK(result.branch_risks.front().peak_failure_probability < 1.0);
+  CHECK(result.faults.empty());
 }
 
 TEST_CASE("Regular climate morphing falls back safely for unknown SSP/year", "[scenario_generation]") {

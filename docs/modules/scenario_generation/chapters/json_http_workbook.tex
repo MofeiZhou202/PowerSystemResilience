@@ -1,0 +1,126 @@
+\section{JSON、HTTP 与工作簿契约}
+\label{sec:scenario-io-contract}
+
+\subsection{选项 JSON}
+\srcpath{scenario\_generation\_options\_from\_json} 读取顶层
+\texttt{regular}、\texttt{reliability}、\texttt{resilience}、\texttt{perturbation}、
+\texttt{typhoon\_impact} 和 \texttt{clustering}。缺失字段使用结构默认值；相关系数、分位数、
+边界宽度和非负权重按第~\ref{sec:scenario-options-results} 章钳制。可靠性
+\fld{num\_steps} 最终强制为 1。
+
+最小请求示例：
+\begin{verbatim}
+{
+  "regular": {"enabled": true, "candidate_count": 128,
+              "cluster_count": 12, "ssp": "ssp245", "year": 2050},
+  "reliability": {"enabled": false},
+  "resilience": {"enabled": false},
+  "perturbation": {"seed": 20260822, "temporal_correlation": 0.75,
+                   "load_renewable_correlation": -0.25},
+  "clustering": {"method": "hybrid_kmedoids_tail_5pct",
+                 "boundary_fraction": 0.10, "compare_baseline": true}
+}
+\end{verbatim}
+
+\subsection{结果 JSON}
+\srcpath{scenario\_generation\_result\_to\_json} 返回
+\texttt{success}、\texttt{summary}、\texttt{warnings}、\texttt{regular}、
+\texttt{reliability} 和 \texttt{resilience}。每族保留实际计数、nested groups、clusters 和
+audit。cluster 内嵌完整 representative candidate，因此 time series、条件元数据、风险、锚点、
+成员和距离可以沿一条 JSON 路径闭环，不需依赖 GUI 内存。
+
+\subsection{生产 HTTP：生成场景}
+生产路由位于 \srcpath{tests/run\_gui\_server.cpp}：
+\begin{verbatim}
+POST /api/session/generate_scenarios
+Content-Type: application/json
+\end{verbatim}
+路由先取得不可变 session system snapshot；已有分析运行时返回 HTTP 409。解析选项后，HTTP 层
+有意强制：
+\begin{equation}
+ T_{regular}=8760,\qquad T_{reliability}=1,\qquad T_{resilience}=48.
+\end{equation}
+预算钳制为 regular candidates $[1,500]$、reliability/resilience candidates $[1,200]$，
+各 cluster count 在 1 到对应候选数之间。类别覆盖 cluster count 同样钳制。故而直接 C++ API
+允许的短时域 review case 与 HTTP 生产路由不是相同行为。
+
+响应在公共 JSON 外增加 \texttt{\_performance}：generation ms 和三族 load processing
+granularity；HTTP header 还返回 \texttt{Server-Timing} 与
+\texttt{X-Scenario-Response-Bytes}。这些是性能元数据，不是算法收敛证书。
+
+\subsection{生产 HTTP：台风故障预览}
+\begin{verbatim}
+POST /api/session/generate_typhoon_faults
+\end{verbatim}
+该路由读取 horizon、step、seed、stochastic、month、SST path、segment length、sampling gate、
+staged repair 等公开子集，生成线路风险和故障供前端预览。未在该路由读取的
+\fld{TyphoonScenarioOptions} 字段只能通过 C++ API 或后续接口使用；不能因结构公开就声称 HTTP
+已全量暴露。
+
+\subsection{场景包 v3}
+规范包外壳为
+\begin{verbatim}
+{
+ "format":"generated_scenario_case_bundle_v3",
+ "schema_version":3,
+ "unit_space":"dimensionless_multiplier",
+ "family":"mixed",
+ "case_count":1,
+ "cases":[{
+   "case_id":"regular:ssp245:2050:17",
+   "system":{...},
+   "generated_scenario":{...},
+   "standard_time_series":{"num_steps":8760,"profiles":[...]}
+ }]
+}
+\end{verbatim}
+v3 的 profile 值是 multiplier 或 soc fraction；设备表另存 base MW/MWh 和 capacity field，
+避免把倍率当有名功率。\texttt{system} 中资产仍使用有名值。
+
+\subsection{规范化}
+\srcpath{normalize\_generated\_scenario\_bundle} 支持三种输入：
+\begin{enumerate}
+  \item 已是 v3：原样返回；
+  \item 单个 system，含 \texttt{\_generated\_scenario}/\texttt{\_time\_series}：包装为一个 case；
+  \item v1/v2 cases 数组：规范化 case shape，升级 format/schema/unit space，并产生 warning。
+\end{enumerate}
+不含 system 且不含 cases 的对象抛出异常。升级 warning 是数据迁移证据，调用方不应丢弃。
+
+\subsection{Strict 与 Permissive 验证}
+\srcpath{validate\_scenario\_bundle} 检查：
+\begin{itemize}
+  \item \texttt{unit\_space=dimensionless\_multiplier}；cases 非空；
+  \item profile ID 不重复，values 长度等于 num steps；
+  \item 所有值有限；SOC 在 $[0,1]$；其他 multiplier 非负；
+  \item case ID 和标准时序结构可解析。
+\end{itemize}
+Strict 把问题写入 \fld{errors}，Permissive 写入 \fld{warnings}；两者均返回规范化内容，调用方
+必须检查 report，不能仅凭函数返回判为有效。
+
+验证路由：
+\begin{verbatim}
+POST /api/session/validate_scenario_bundle
+\end{verbatim}
+生产路由当前使用 Permissive，响应显式返回 bundle、warnings、errors 与 case count/unit space。
+
+\subsection{工作簿布局}
+启用 \texttt{HACDCPF\_ENABLE\_ETAP} 时，OpenXLSX 路径写入 Metadata、Cases、Devices、Profiles
+等表。Metadata 保存 workbook schema、JSON format/schema、unit space、family、case count；
+Devices 保存 case ID、kind、稳定 component index、position（仅校验）、bus、name、base MW/MWh、
+capacity field、service 和 profile ID；Profiles 保存逐时 multiplier。
+
+导入优先按 kind+稳定 index 定位设备，找不到才使用 position fallback。position 回退必须形成
+warning，不能成为跨版本稳定身份。
+
+\subsection{工作簿 HTTP 与编译门}
+\begin{verbatim}
+POST /api/session/export_scenario_workbook
+POST /api/session/import_scenario_workbook
+\end{verbatim}
+导出接收 JSON bundle、返回 xlsx binary；导入接收 binary、返回 bundle/report。临时文件在异常
+路径也清理。未编译 \texttt{HACDCPF\_ENABLE\_ETAP} 时，公共 workbook API 明确抛出
+\texttt{Scenario workbook I/O not compiled}，不是返回空文件。
+
+\subsection{合同边界}
+GUI 下载成功只证明 HTTP 和文件 I/O 成功，不证明 scenario probability、气候资源或 PF/OPF
+可行。v3 校验只验证结构、有限数和 multiplier 语义，不重新运行候选生成或聚类。

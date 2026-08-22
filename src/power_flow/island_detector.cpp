@@ -259,7 +259,13 @@ std::vector<IslandInfo> detect_islands(const HybridPowerSystem& sys) {
     if (!has_generators) {
       for (const auto& sg : sys.ac.static_generators) {
         if (!sg.in_service || ac_set.count(sg.bus) == 0) continue;
-        if (sg.p_mw * sg.scaling > 1e-9) { has_generators = true; break; }
+        const double capacity_mw =
+            std::max(sg.p_rated_mw, std::max(0.0, sg.pmax_mw));
+        if (sg.p_mw * sg.scaling > 1e-9 ||
+            (sg.grid_forming && sg.controllable && capacity_mw > 1e-9)) {
+          has_generators = true;
+          break;
+        }
       }
     }
     if (!has_generators) {
@@ -277,7 +283,27 @@ std::vector<IslandInfo> detect_islands(const HybridPowerSystem& sys) {
     if (!has_generators) {
       for (const auto& st : sys.ac.storage) {
         if (!st.in_service || ac_set.count(st.bus) == 0) continue;
-        if (st.p_mw > 1e-9) { has_generators = true; break; }
+        const double discharge_capacity_mw =
+            std::max(st.p_rated_mw, std::max(0.0, st.pmax_mw));
+        const double available_energy_mwh = st.e_mwh > 0.0
+                                                ? std::max(
+                                                      0.0, st.e_mwh -
+                                                               st.e_rated_mwh *
+                                                                   st.soc_min)
+                                                : st.e_rated_mwh * std::max(
+                                                      0.0, st.soc_init -
+                                                               st.soc_min);
+        // A GFM battery is a voltage-forming source at zero scheduled power
+        // only when both its PCS discharge capacity and usable stored energy
+        // are positive. This is the same P/E feasibility boundary used by the
+        // restoration model; the PF merely chooses its bus as the island angle
+        // reference and does not create energy ex nihilo.
+        if (st.p_mw > 1e-9 ||
+            (st.grid_forming && st.controllable &&
+             discharge_capacity_mw > 1e-9 && available_energy_mwh > 1e-9)) {
+          has_generators = true;
+          break;
+        }
       }
     }
     if (!has_generators) {

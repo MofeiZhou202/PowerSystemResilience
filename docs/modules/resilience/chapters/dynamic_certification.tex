@@ -1,0 +1,74 @@
+\section{恢复动作的多保真动态认证}\label{sec:res-dynamic}
+
+\subsection{从 MIP 时步到 DAE 事件}
+\srcpath{build\_distribution\_resilience\_dae\_transitions} 比较相邻恢复时步，将支路状态变化、
+负荷服务比例变化和支持的 MESS 动作转换为 \fld{DynamicEvent}。初始故障、相邻状态变化和最终状态
+可分别认证，最多处理 \fld{max\_transitions} 个动作。MIP 的母线级可调机组、可再生和固定储能
+出力先按 AC/DC 域解析到 canonical bus，再在同类器件间按正可用功率容量分摊；AC 可再生统一跨
+\fld{renewable\_gens}/\fld{pv\_systems} 分配，DC 机组与储能分别统一跨两套兼容容器分配，因而
+每个母线目标只物化一次。负荷从零服务恢复保留 authored 额定值，以绝对服务比例回放。
+不支持的换流器/LCC 转移进入 \fld{unsupported\_transitions}，不得得到 Safe 证书。
+
+\subsection{DAE 与残差}
+动态模型写为半显式 DAE
+\begin{equation}
+ \dot x=f(t,x,y),\qquad 0=g(t,x,y).
+\end{equation}
+对离散轨迹 $(x_n,y_n)$，认证器采样微分残差 $r_f$ 和代数残差 $r_g$，报告最大无穷范数和时间
+积分。状态按
+$s_j=\max(\max_n|x_{n,j}|,\fld{state\_scale\_floor})$ 缩放，避免不同量纲直接比较。
+
+\subsection{采样常量与误差传播}
+认证器沿计算轨迹采样代数雅可比和约化状态场，估计 $\kappa_g$、$L_F$、有限时域转移增益及
+Hermite 连续重构缺陷。典型包络为
+\begin{equation}
+ \eta\le \Gamma(T)\left[kappa_g e_0+int_0^T
+   (\|r_f\|_s+\kappa_g\|r_g\|)\,dt+e_{num}\right].
+\end{equation}
+这些常量是轨迹采样估计，\fld{constants\_are\_global\_bounds}=false；因此 L1/L2 标签只作诊断，
+\fld{proof\_valid}=false。手册不得把它们称为全局 Lipschitz 或区间包络证明。
+
+\subsection{L1、L2 与 L3}
+L1、L2 分别以 $4\Delta t$、$2\Delta t$ 的缺省步长运行同一完整模型，用于快速筛查。L3 使用调用者
+配置的 DAE 求解器和步长，并要求：潮流初始化成功；动态 trim 或初始导数残差合格；频率、电压、
+RoCoF 以及请求的换流器电流均被观测。只有这些资格条件满足时，L3 才依据
+\begin{align}
+ f_{min}-\underline f&\ge0,\\
+ V_{min}-\underline V&\ge0,\\
+ \overline r_f-|\dot f|_{max}&\ge0
+\end{align}
+标记 Safe/Unsafe，并令 \fld{proof\_valid}=true。其证明域仍仅为指定场景、模型、阈值和时域。
+
+\subsection{可执行性门}
+在 DAE 前检查命令路径、授权、确认、MESS 到达截止时间、能量和构网能力。失败动作返回
+\fld{ExecutabilityReport::failed\_constraints}，不会调用动态求解器。有限动作协调器以 master MIP
+选择最高目标动作，对已证实 Unsafe 的动作加入 no-good cut；Unresolved/Failed 不允许形成安全切割，
+并终止“目录最优”证明。
+
+\subsection{异常的 fail-closed 契约}
+潮流初始化、模型构建、积分或回放可能拒绝输入。认证器捕获标准和跨 ABI 异常，统一返回
+\fld{label=Failed}、\fld{proof\_valid=false}、\fld{simulation\_success=false}，诊断写入
+\fld{limitations}。异常不能传播并终止批量韧性研究，更不能被解释为安全。该契约由
+\texttt{fail\_closed} 标签的回归测试保护。
+
+\subsection{恢复—认证闭环与割的严格定义}
+仅有 \fld{proof\_valid=true} 且 label=Unsafe 的 L3 反例可以进入恢复 master；Failed/Unresolved
+严格 fail-closed，但不构成排除任何可行方案的逻辑证明。设某次反例在二进制支路签名 $L$ 中有
+$n_1$ 个闭合变量，则精确 incumbent no-good 为
+\begin{equation}
+ \sum_{j\in L_1}z_j-\sum_{j\in L_0}z_j\le n_1-1.
+\end{equation}
+它只排除被认证为 Unsafe 的完整拓扑签名。若动作把域限定母线 $i$ 的服务从
+$P^{\rm prev}_{it}$ 提高到 $P^{\rm new}_{it}$，同时加入
+\begin{equation}
+ P^{d}_{it}-P^{shed}_{it}\le P^{\rm prev}_{it},
+\end{equation}
+使 master 可通过降低该次拾取量寻找另一方案。每轮流程为“求 MIP---构造 DAE---认证---生成割---
+重求 MIP”，直到所有表示的转换均为 proof-valid Safe、有限 master 被割空或达到显式反馈轮数上限。
+只有第一种情况令 \fld{feedback\_closed\_loop\_complete=true} 与
+\fld{safe\_plan\_found=true}；结果同时回显 MIP 求解次数、反馈轮次和实际施加割数。
+
+微电网 \fld{islanding\_capability} 投影为构网静态电源，并保留电压、频率与 droop 设定；零计划
+出力的构网储能只有同时具有正 PCS 放电容量和高于最低 SOC 的可用能量时才可作为孤岛参考。
+DC 电压健康检查只覆盖从当前在役 DC 电压源经当前闭合 DC 支路可达的母线；断开的无源 DC 岛不
+制造假欠压，合闸后则立即纳入检查。

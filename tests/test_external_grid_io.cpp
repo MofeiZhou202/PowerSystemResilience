@@ -197,6 +197,9 @@ TEST_CASE("OpenDSS text export round-trips through the text importer",
   CHECK_THAT(text, ContainsSubstring("New Line.L12"));
   CHECK_THAT(text, ContainsSubstring("New Load."));
   CHECK_THAT(text, ContainsSubstring("New Generator.PV2"));
+  CHECK_THAT(text, !ContainsSubstring("Set baseMVA="));
+  CHECK_THAT(text, ContainsSubstring("Set VoltageBases=[12.47]"));
+  CHECK_THAT(text, ContainsSubstring("CalcVoltageBases"));
 
   hacdcpf::io::OpenDSSImportOptions options;
   options.default_base_mva = 10.0;

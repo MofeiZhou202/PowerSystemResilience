@@ -1,0 +1,127 @@
+\section{场景缩减、风险保持与量化理论}
+\label{sec:scenario-reduction-theory}
+
+\begin{theorynote}
+场景缩减是带离散概率的代表点选择问题。当前实现追求“典型形态与预声明尾部同时保留”，
+不是单一运输误差最小化器。本章给出目标、尺度、锚点和评价指标，后续实现章逐分支转写。
+\end{theorynote}
+
+\subsection{特征空间}
+候选 $i$ 的表示分为三块：连续特征 $a_i\in\mathbb R^S$、停运签名
+$\sigma_i\in\{0,1\}^B$ 和 regime 标签 $r_i$。连续特征来自负荷、新能源、净负荷、SOC、
+故障概率等摘要，而不是完整 $T$ 维轨迹。该降维降低成本，但可能丢失爬坡、持续时间和
+时序相位信息。
+
+\subsection{稳健尺度}
+对连续特征列 $s$，令中位数 $m_s$、四分位距 $q_s=Q_{0.75}-Q_{0.25}$，缩放为
+\begin{equation}
+ \widetilde a_{is}=\frac{a_{is}-m_s}{\max(10^{-9},q_s)}.
+\end{equation}
+与均值--标准差相比，中位数/IQR 对少量极端值更稳健。当关闭 \fld{robust\_scale} 时使用原始
+特征，量纲差异将直接进入距离。
+
+\subsection{混合距离}
+\begin{equation}
+ d(i,j)=w_c\|\widetilde a_i-\widetilde a_j\|_2
+ +w_o\sum_b\mathbf1(\sigma_{ib}\ne\sigma_{jb})
+ +w_r\mathbf1(r_i\ne r_j).
+\end{equation}
+签名长度不同时缺失位按 0；regime 项只在混合方法且双方标签非空时启用。非负权重由 JSON
+解析时钳制；距离可能是伪度量，因为不同候选可具有相同摘要、签名和标签。
+
+\subsection{加权 k-medoids 目标}
+给定 medoid 集 $M$，基本目标为
+\begin{equation}
+ J(M)=\sum_i\pi_i\min_{m\in M}d(i,m),\qquad |M|=K.
+\end{equation}
+分配步使用最近 medoid；更新步在簇成员中枚举新 medoid：
+\begin{equation}
+ m_k\leftarrow\arg\min_{j\in A_k}\sum_{i\in A_k}\pi_i d(i,j).
+\end{equation}
+这是交替局部改进，不保证全局最优。冻结 medoid 不参与更新。
+
+\subsection{加权 k-means++ 型初始化}
+首个 medoid 和后续候选的选择均受 seed 控制；后续抽样权重为
+\begin{equation}
+ w_i^{init}=\max(10^{-12},\pi_i)D_i^2,qquad
+ D_i=\min_{m\in M}d(i,m).
+\end{equation}
+它借用 k-means++ 的平方距离思想，但中心必须是候选点，因此仍是 medoid 初始化。
+
+\subsection{风险源构造}
+设原始风险源为 $r_{is}$，逐列稳健尺度后得到 $v_{is}$。实现的综合分数为
+\begin{equation}
+ R_i=\max_s v_{is}
+ +0.25\sqrt{\sum_{s:v_{is}>1}(v_{is}-1)^2}
+ +0.15\sqrt{S^{-1}\sum_s(v_{is}-\bar v_i)^2}.
+\end{equation}
+第一项强调单一最坏源，第二项强调多源同时越过一个 IQR，第三项表征源间离散。系数是当前
+算法定义，不是概率校准参数。
+
+\subsection{尾部、耦合与决策边界}
+对源 $s$，尾部集合为
+\begin{equation}
+ T_s=\{i:r_{is}\ge Q_{q_s}(r_{\cdot s})\},
+\end{equation}
+全局尾部对 $R_i$ 同理。若候选至少在两个风险源上超过 coupling quantile，则标记耦合尾部。
+决策边界集合为
+\begin{equation}
+ B_s=\{i:|r_{is}-Q_{q_s}|\le b\max(10^{-9},IQR_s)\},
+\end{equation}
+其中 $b=$\fld{boundary\_fraction}。它保留阈值附近可能因小扰动改变分类的候选。
+
+\subsection{锚点预算与优先级}
+锚点还包括含故障的弹性候选和每个 regime 中风险最高者。若锚点数超过 $K$，实现优先保留
+故障候选，再按 $R_i$ 降序截断。这意味着冻结锚点可能占满全部 medoid 预算，导致典型区域
+表示变差。\fld{tail\_fraction} 与 \fld{boundary\_fraction} 是不同参数：前者属于尾部配置，
+后者是分位点邻域宽度。
+
+\subsection{评价指标}
+当前 audit 的主要指标为
+\begin{align}
+ D_{mean}&=\sum_k\sum_{i\in A_k}\pi_i d(i,m_k),\\
+ D_{max}&=\max_k\max_{i\in A_k}d(i,m_k),\\
+ C_{global}&=\frac{|T_{global}\cap\{m_k\}|}{|T_{global}|},\\
+ C_{source,s}&=\frac{|T_s\cap\{m_k\}|}{|T_s|},\\
+ E_{regime}&=\sum_r|p_r-\widetilde p_r|.
+\end{align}
+$D_{mean}$ 衡量平均运输代理，$D_{max}$ 衡量最坏簇半径，覆盖率衡量尾部代表保留，
+$E_{regime}$ 衡量缩减前后标签质量偏移。没有单一指标能证明缩减“更优”。
+
+\subsection{混合方法的不可避免取舍}
+冻结尾部锚点对覆盖率单调有利，但可能使 $J(M)$ 变大。本项目 128→12 固定算例中，混合方法
+全局尾部覆盖由 0 提高到 1，风电缺额尾部由 0 提高到 1；同时 transport mean 从
+1.188380 增至 2.148101，regime mass L1 从 0.046875 增至 1.640625。该结果不是失败，而是
+目标冲突的定量证据：若下游关心平均拟合，应选 baseline 或增加 $K$；若关心极端风险，才应
+接受更大的平均运输误差。
+
+\subsection{复杂度}
+若预先缓存 $N^2$ 距离，内存为 $O(N^2)$，每轮分配 $O(NK)$、medoid 更新最坏 $O(N^2)$；
+当前实现按候选计算距离，保守时间上界 $O(IKN^2S)$、额外存储约 $O(NS+NK)$。锚点选择的
+分位数排序约 $O(SN\log N)$。
+
+\begin{gapnote}
+当前实现没有 Kantorovich/Wasserstein 线性规划、前向/后向概率距离缩减、PAM swap 全邻域、
+动态时间规整，也没有用下游 PF/OPF 损失做 decision-aware reduction。审计指标不能替代
+下游任务的外样本回测。
+\end{gapnote}
+
+\subsection{理论--实现对应}
+\begin{center}\small
+\begin{tabular}{@{}L{5.1cm}L{8.6cm}@{}}
+\toprule
+理论条目 & 实现锚点\\
+\midrule
+特征摘要与稳健尺度 & \srcpath{scenario\_generation.cpp:feature\_summary}、
+\srcpath{scaled\_features}\\
+混合距离 & \srcpath{scenario\_generation.cpp:candidate\_distance}\\
+风险源与综合风险 & \srcpath{raw\_risk\_source\_scores}、
+\srcpath{enrich\_candidate\_risk\_metadata}\\
+尾部/边界锚点 & \srcpath{select\_tail\_anchors}\\
+初始化和 medoid 更新 & \srcpath{initialize\_medoids\_kmeanspp}、
+\srcpath{cluster\_candidates\_core}\\
+评价指标与基线比较 & \srcpath{compute\_reduction\_metrics}\\
+全局最优缩减与下游误差界 & \implnone\\
+\bottomrule
+\end{tabular}
+\end{center}

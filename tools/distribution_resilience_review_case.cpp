@@ -15,12 +15,18 @@
 
 #include <nlohmann/json.hpp>
 
+#include "hacdcpf/api/hacdcpf.hpp"
 #include "hacdcpf/analysis/counterfactual_planning.hpp"
 #include "hacdcpf/analysis/multidimensional_weak_link.hpp"
 #include "hacdcpf/analysis/typhoon_resilience.hpp"
 #include "hacdcpf/graph/power_system_graph.hpp"
 #include "hacdcpf/graph/topology_analysis.hpp"
 #include "hacdcpf/io/case_builders.hpp"
+#include "hacdcpf/io/external_grid_io.hpp"
+#include "hacdcpf/io/gridlabd_bridge.hpp"
+#ifdef HACDCPF_HAVE_OPENDSS
+#include "hacdcpf/io/opendss_bridge.hpp"
+#endif
 #include "hacdcpf/reliability/reliability_assessment.hpp"
 #include "hacdcpf/resilience/resilience_dynamic_certification.hpp"
 #include "hacdcpf/time_series/time_series_pf.hpp"
@@ -317,6 +323,11 @@ DistributionResilienceOptions restoration_options(
   options.allow_reconfiguration = true;
   options.allow_mess_dispatch = true;
   options.mip.solver = DistributionResilienceMIPSolver::HiGHS;
+  // Repeated review-case solves use one HiGHS worker to keep the seeded
+  // evidence run deterministic and to avoid process-global scheduler state
+  // crossing isolated adapter invocations. This changes execution only, not
+  // the MILP; see docs/modules/resilience/chapters/numerical_validation.tex.
+  options.mip.num_threads = 1;
   options.mip.mip_gap = 0.0;
   options.mip.max_time_s = 30;
   return options;
@@ -484,7 +495,12 @@ json certificate_json(const DistributionResilienceDAECertificateResult& result) 
           {"limitations", result.limitations},
           {"transitions", std::move(transitions)},
           {"feedback", std::move(feedback)},
-          {"feedback_closed_loop_complete", false}};
+          {"feedback_closed_loop_complete",
+           result.feedback_closed_loop_complete},
+          {"safe_plan_found", result.safe_plan_found},
+          {"feedback_iterations", result.feedback_iterations},
+          {"restoration_mip_solves", result.restoration_mip_solves},
+          {"feedback_cuts_applied", result.feedback_cuts_applied}};
 }
 
 std::vector<double> normalized(const std::vector<double>& values) {
@@ -512,14 +528,392 @@ std::string latex_escape(std::string text) {
   return text;
 }
 
+double wrapped_angle_difference_deg(double lhs, double rhs) {
+  double difference = std::remainder(lhs - rhs, 360.0);
+  if (difference <= -180.0) difference += 360.0;
+  if (difference > 180.0) difference -= 360.0;
+  return std::abs(difference);
+}
+
+struct FrozenACSnapshot {
+  std::string name;
+  HybridPowerSystem system;
+  std::vector<int> source_bus_ids;
+};
+
+FrozenACSnapshot freeze_ac_snapshot(
+    const HybridPowerSystem& authored,
+    const std::string& name,
+    const DistributionResilienceStepResult* step) {
+  std::map<int, const ACBus*> authored_buses;
+  for (const auto& bus : authored.ac.buses) authored_buses[bus.index] = &bus;
+
+  std::map<int, bool> energized;
+  std::map<int, bool> root;
+  std::map<int, double> served;
+  std::map<int, double> supply;
+  if (step != nullptr) {
+    const std::size_t count = std::min(
+        step->bus_supply_kind.size(), step->bus_supply_index.size());
+    for (std::size_t i = 0; i < count; ++i) {
+      if (step->bus_supply_kind[i] != "AC") continue;
+      const int bus = step->bus_supply_index[i];
+      energized[bus] = i < step->bus_supply_energized.size() &&
+                        step->bus_supply_energized[i];
+      root[bus] = i < step->bus_supply_root.size() &&
+                   step->bus_supply_root[i];
+      served[bus] = i < step->bus_supply_served_mw.size()
+                        ? std::max(0.0, step->bus_supply_served_mw[i])
+                        : 0.0;
+      const auto value_at = [i](const std::vector<double>& values) {
+        return i < values.size() ? std::max(0.0, values[i]) : 0.0;
+      };
+      supply[bus] = value_at(step->bus_supply_base_source_mw) +
+                    value_at(step->bus_supply_dispatchable_generation_mw) +
+                    value_at(step->bus_supply_renewable_mw) +
+                    value_at(step->bus_supply_fixed_storage_mw);
+    }
+  } else {
+    for (const auto& [bus, unused] : authored_buses) energized[bus] = true;
+  }
+
+  std::set<int> closed_branch_ids;
+  if (step != nullptr) {
+    for (const auto& state : step->component_states) {
+      if (state.component_type == "ac_branch" && state.closed &&
+          state.available) {
+        closed_branch_ids.insert(state.component_index);
+      }
+    }
+  }
+
+  std::map<int, std::vector<int>> adjacency;
+  for (const auto& [bus, is_energized] : energized) {
+    if (is_energized && authored_buses.count(bus) != 0U) adjacency[bus];
+  }
+  for (const auto& branch : authored.ac.branches) {
+    const bool closed = step == nullptr ? branch.in_service
+                                        : closed_branch_ids.count(branch.index) != 0U;
+    if (!closed || adjacency.count(branch.from_bus) == 0U ||
+        adjacency.count(branch.to_bus) == 0U) {
+      continue;
+    }
+    adjacency[branch.from_bus].push_back(branch.to_bus);
+    adjacency[branch.to_bus].push_back(branch.from_bus);
+  }
+
+  std::set<int> selected;
+  std::set<int> visited;
+  for (const auto& [start, unused] : adjacency) {
+    if (visited.count(start) != 0U) continue;
+    std::set<int> component;
+    std::vector<int> stack{start};
+    visited.insert(start);
+    while (!stack.empty()) {
+      const int bus = stack.back();
+      stack.pop_back();
+      component.insert(bus);
+      for (const int next : adjacency[bus]) {
+        if (visited.insert(next).second) stack.push_back(next);
+      }
+    }
+    const auto component_supply = [&](const std::set<int>& buses) {
+      double total = 0.0;
+      for (const int bus : buses) total += supply[bus];
+      return total;
+    };
+    if (component.size() > selected.size() ||
+        (component.size() == selected.size() &&
+         component_supply(component) > component_supply(selected))) {
+      selected = std::move(component);
+    }
+  }
+  if (selected.empty()) {
+    throw std::runtime_error(name + ": no energized AC island is available");
+  }
+
+  int slack_bus = 0;
+  for (const int bus : selected) {
+    if (root[bus]) {
+      slack_bus = bus;
+      break;
+    }
+  }
+  if (slack_bus == 0) {
+    slack_bus = *std::max_element(
+        selected.begin(), selected.end(), [&](int lhs, int rhs) {
+          if (supply[lhs] != supply[rhs]) return supply[lhs] < supply[rhs];
+          return lhs > rhs;
+        });
+  }
+
+  HybridPowerSystem frozen;
+  frozen.name = name;
+  frozen.base_mva = frozen.ac.base_mva = authored.ac.base_mva;
+  frozen.ac.freq_hz = authored.ac.freq_hz;
+  std::map<int, std::pair<double, double>> authored_demand;
+  for (const auto& bus : authored.ac.buses) {
+    authored_demand[bus.index].first += std::max(0.0, bus.pd_mw);
+    authored_demand[bus.index].second += bus.qd_mvar;
+  }
+  for (const auto& load : authored.ac.loads) {
+    if (!load.in_service) continue;
+    authored_demand[load.bus].first +=
+        std::max(0.0, load.p_mw * std::max(0.0, load.scaling));
+    authored_demand[load.bus].second +=
+        load.q_mvar * std::max(0.0, load.scaling);
+  }
+  for (const int bus_id : selected) {
+    ACBus bus = *authored_buses.at(bus_id);
+    bus.name = "xref_" + std::to_string(bus_id);
+    bus.in_service = true;
+    bus.bus_type = bus_id == slack_bus ? BusType::SLACK : BusType::PQ;
+    const double original_p = authored_demand[bus_id].first;
+    bus.pd_mw = step == nullptr ? original_p : served[bus_id];
+    bus.qd_mvar = original_p > 1e-12
+                      ? authored_demand[bus_id].second * bus.pd_mw / original_p
+                      : 0.0;
+    bus.vm_pu = 1.0;
+    bus.va_deg = 0.0;
+    frozen.ac.buses.push_back(std::move(bus));
+  }
+  for (const auto& branch : authored.ac.branches) {
+    const bool closed = step == nullptr ? branch.in_service
+                                        : closed_branch_ids.count(branch.index) != 0U;
+    if (closed && selected.count(branch.from_bus) != 0U &&
+        selected.count(branch.to_bus) != 0U) {
+      ACBranch frozen_branch = branch;
+      frozen_branch.in_service = true;
+      frozen.ac.branches.push_back(std::move(frozen_branch));
+    }
+  }
+  Generator slack;
+  slack.index = 1;
+  slack.name = "xref_slack";
+  slack.bus = slack_bus;
+  slack.in_service = true;
+  slack.is_slack = true;
+  slack.vg_pu = 1.0;
+  frozen.ac.generators.push_back(slack);
+  if (step != nullptr) {
+    int index = 1;
+    for (const int bus : selected) {
+      if (bus == slack_bus || supply[bus] <= 1e-12) continue;
+      StaticGenerator generator;
+      generator.index = index++;
+      generator.name = "xref_supply_" + std::to_string(bus);
+      generator.bus = bus;
+      generator.in_service = true;
+      generator.p_mw = supply[bus];
+      generator.pmax_mw = supply[bus];
+      generator.scaling = 1.0;
+      frozen.ac.static_generators.push_back(generator);
+    }
+  }
+  return {name, std::move(frozen), {slack_bus}};
+}
+
+json run_external_snapshot_matrix(
+    const HybridPowerSystem& authored,
+    const DistributionResilienceResult& restoration,
+    const fs::path& output_dir) {
+  if (restoration.steps.empty()) {
+    throw std::runtime_error("external comparison requires restoration steps");
+  }
+  std::vector<FrozenACSnapshot> snapshots;
+  snapshots.push_back(freeze_ac_snapshot(authored, "pre_event", nullptr));
+  snapshots.push_back(
+      freeze_ac_snapshot(authored, "post_fault", &restoration.steps.front()));
+  snapshots.push_back(freeze_ac_snapshot(
+      authored, "restored_final", &restoration.steps.back()));
+
+  constexpr double kVmTolerance = 5e-3;
+  constexpr double kVaTolerance = 0.5;
+  const fs::path gridlabd_executable =
+      "/Users/tianyangzhao/Codes/gridlab-d/cmake-build/bin/gridlabd";
+  if (!fs::exists(gridlabd_executable)) {
+    throw std::runtime_error("required GridLAB-D executable not found at " +
+                             gridlabd_executable.string());
+  }
+
+  json matrix = json::array();
+  std::ostringstream csv;
+  csv << "snapshot,engine,bus,quantity,native_value,external_value,absolute_error,tolerance,passed\n";
+  bool all_passed = true;
+  for (const auto& snapshot : snapshots) {
+    json frozen_model = {{"snapshot", snapshot.name},
+                         {"slack_bus", snapshot.source_bus_ids.front()},
+                         {"buses", json::array()},
+                         {"branches", json::array()}};
+    for (const auto& bus : snapshot.system.ac.buses) {
+      frozen_model["buses"].push_back(
+          {{"index", bus.index}, {"type", static_cast<int>(bus.bus_type)},
+           {"pd_mw", bus.pd_mw}, {"qd_mvar", bus.qd_mvar}});
+    }
+    for (const auto& branch : snapshot.system.ac.branches) {
+      frozen_model["branches"].push_back(
+          {{"index", branch.index}, {"from_bus", branch.from_bus},
+           {"to_bus", branch.to_bus}, {"r_pu", branch.r_pu},
+           {"x_pu", branch.x_pu}});
+    }
+    write_text(output_dir / ("frozen_" + snapshot.name + ".json"),
+               frozen_model.dump(2) + "\n");
+    json row;
+    row["snapshot"] = snapshot.name;
+    row["ac_bus_ids"] = json::array();
+    for (const auto& bus : snapshot.system.ac.buses)
+      row["ac_bus_ids"].push_back(bus.index);
+    row["slack_bus"] = snapshot.source_bus_ids.front();
+    PowerFlowResult native;
+    try {
+      native = solve_power_flow(snapshot.system);
+    } catch (const std::exception& error) {
+      throw std::runtime_error(snapshot.name + ": native PF exception: " +
+                               error.what());
+    }
+    row["native"] = {{"converged", native.converged},
+                     {"status", native.diagnostics.termination_reason}};
+    if (!native.converged || native.vm.size() != snapshot.system.ac.buses.size() ||
+        native.va.size() != snapshot.system.ac.buses.size()) {
+      throw std::runtime_error(snapshot.name + ": native PF did not converge");
+    }
+
+    io::GridLABDComparisonOptions grid_options;
+    grid_options.run_options.executable = gridlabd_executable;
+    grid_options.run_options.keep_working_files = true;
+    grid_options.require_gridlabd = true;
+    grid_options.vm_tolerance_pu = kVmTolerance;
+    grid_options.va_tolerance_deg = kVaTolerance;
+    grid_options.compare_branch_flows = false;
+    grid_options.export_options.model_name = "resilience_" + snapshot.name;
+    const auto grid = io::compare_gridlabd_snapshot(snapshot.system, grid_options);
+    row["gridlabd"] = {{"attempted", grid.gridlabd_run_attempted},
+                       {"success", grid.gridlabd_run_success},
+                       {"numerical_comparison_passed",
+                        grid.numerical_comparison_passed},
+                       {"executable", grid.gridlabd_result.executable.string()},
+                       {"equivalence_scope", grid.equivalence_scope},
+                       {"items", json::array()}};
+    for (const auto& item : grid.items) {
+      row["gridlabd"]["items"].push_back(
+          {{"kind", item.kind}, {"key", item.key},
+           {"native_value", item.hacdcpf_value},
+           {"external_value", item.gridlabd_value},
+           {"absolute_error", std::abs(item.difference)},
+           {"tolerance", item.tolerance}, {"passed", item.passed}});
+      csv << snapshot.name << ",GridLAB-D," << csv_escape(item.key) << ','
+          << item.kind << ',' << item.hacdcpf_value << ','
+          << item.gridlabd_value << ',' << std::abs(item.difference) << ','
+          << item.tolerance << ',' << (item.passed ? 1 : 0) << '\n';
+    }
+    const bool grid_passed = grid.gridlabd_run_attempted &&
+                             grid.gridlabd_run_success &&
+                             grid.numerical_comparison_passed;
+
+#ifdef HACDCPF_HAVE_OPENDSS
+    const fs::path dss_dir = output_dir / "external_snapshots" / snapshot.name;
+    fs::create_directories(dss_dir);
+    const fs::path master = dss_dir / "Master.dss";
+    io::OpenDSSExportOptions dss_options;
+    dss_options.circuit_name = "resilience_" + snapshot.name;
+    io::save_opendss(snapshot.system, master, dss_options);
+    const auto dss = io::solve_opendss_snapshot(master);
+    json dss_items = json::array();
+    bool dss_numerical_passed = dss.converged;
+    for (std::size_t i = 0; i < snapshot.system.ac.buses.size(); ++i) {
+      const int bus_id = snapshot.system.ac.buses[i].index;
+      const std::string expected_suffix =
+          "_xref_" + std::to_string(bus_id);
+      const auto voltage = std::find_if(
+          dss.node_voltages.begin(), dss.node_voltages.end(),
+          [&](const io::OpenDSSNodeVoltage& value) {
+            return value.node == 1 &&
+                   value.bus_name.size() >= expected_suffix.size() &&
+                   value.bus_name.compare(
+                       value.bus_name.size() - expected_suffix.size(),
+                       expected_suffix.size(), expected_suffix) == 0;
+          });
+      if (voltage == dss.node_voltages.end()) {
+        dss_numerical_passed = false;
+        dss_items.push_back({{"bus", bus_id}, {"missing", true},
+                             {"passed", false}});
+        continue;
+      }
+      const double vm_error = std::abs(native.vm[i] - voltage->vm_pu);
+      const double native_va_deg = native.va[i] * 180.0 / std::acos(-1.0);
+      const double va_error =
+          wrapped_angle_difference_deg(native_va_deg, voltage->va_deg);
+      const bool vm_passed = vm_error < kVmTolerance;
+      const bool va_passed = va_error < kVaTolerance;
+      dss_numerical_passed =
+          dss_numerical_passed && vm_passed && va_passed;
+      dss_items.push_back(
+          {{"bus", bus_id}, {"native_vm_pu", native.vm[i]},
+           {"opendss_vm_pu", voltage->vm_pu}, {"vm_error_pu", vm_error},
+           {"native_va_deg", native_va_deg},
+           {"opendss_va_deg", voltage->va_deg},
+           {"va_error_deg", va_error},
+           {"vm_passed", vm_passed}, {"va_passed", va_passed}});
+      csv << snapshot.name << ",OpenDSS," << bus_id << ",vm_pu,"
+          << native.vm[i] << ',' << voltage->vm_pu << ',' << vm_error << ','
+          << kVmTolerance << ',' << (vm_passed ? 1 : 0) << '\n';
+      csv << snapshot.name << ",OpenDSS," << bus_id << ",va_deg,"
+          << native_va_deg << ',' << voltage->va_deg << ',' << va_error << ','
+          << kVaTolerance << ',' << (va_passed ? 1 : 0) << '\n';
+    }
+    row["opendss"] = {{"attempted", true}, {"converged", dss.converged},
+                      {"engine_version", dss.engine_version},
+                      {"numerical_comparison_passed", dss_numerical_passed},
+                      {"items", std::move(dss_items)}};
+    all_passed = all_passed && grid_passed && dss_numerical_passed;
+#else
+    row["opendss"] = {{"attempted", false},
+                      {"numerical_comparison_passed", false},
+                      {"reason", "binary was built without DSS C-API"}};
+    all_passed = false;
+#endif
+    matrix.push_back(std::move(row));
+  }
+  json report = {
+      {"schema", "hacdcpf.resilience.external_snapshot_comparison.v1"},
+      {"passed", all_passed},
+      {"voltage_magnitude_tolerance_pu", kVmTolerance},
+      {"voltage_angle_tolerance_deg", kVaTolerance},
+      {"scope", "balanced positive-sequence frozen AC steady-state only"},
+      {"excluded", {"DC network", "converter internals", "protection",
+                    "control loops", "switching transients", "DAE stability"}},
+      {"snapshots", std::move(matrix)}};
+  write_text(output_dir / "external_snapshot_comparison.json",
+             report.dump(2) + "\n");
+  write_text(output_dir / "external_snapshot_comparison.csv", csv.str());
+  return report;
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
   try {
-    const fs::path output_dir = argc > 1
-                                    ? fs::path(argv[1])
-                                    : fs::path(HACDCPF_PROJECT_ROOT) /
-                                          "docs/latex/paper/distribution_resilience_transient_microgrids_review/results";
+    bool dynamic_only = false;
+    bool external_only = false;
+    std::optional<fs::path> requested_output_dir;
+    for (int i = 1; i < argc; ++i) {
+      const std::string argument = argv[i];
+      if (argument == "--dynamic-only") {
+        dynamic_only = true;
+      } else if (argument == "--external-only") {
+        external_only = true;
+      } else if (!argument.empty() && argument.front() == '-') {
+        throw std::invalid_argument("unknown argument: " + argument);
+      } else if (requested_output_dir.has_value()) {
+        throw std::invalid_argument("multiple output directories supplied");
+      } else {
+        requested_output_dir = fs::path(argument);
+      }
+    }
+    const fs::path output_dir =
+        requested_output_dir.value_or(
+            fs::path(HACDCPF_PROJECT_ROOT) /
+            "docs/latex/paper/distribution_resilience_transient_microgrids_review/results");
     fs::create_directories(output_dir);
     json report;
     report["schema"] = "hacdcpf.distribution_resilience_review_case.v1";
@@ -569,11 +963,11 @@ int main(int argc, char** argv) {
 
     auto event_options = restoration_options(hazard);
     started = Clock::now();
-    const auto heuristic = run_distribution_resilience_assessment(
+    const auto heuristic = analysis::run_distribution_resilience_assessment(
         system, event_options);
     const double heuristic_runtime = elapsed_seconds(started);
     started = Clock::now();
-    const auto strict_mip = run_distribution_resilience_mip_assessment(
+    auto strict_mip = run_distribution_resilience_mip_assessment(
         system, event_options);
     const double strict_runtime = elapsed_seconds(started);
     report["restoration"] = {
@@ -605,13 +999,90 @@ int main(int argc, char** argv) {
     bridge_options.fidelity_level = 3;
     bridge_options.switching_time_s = 0.05;
     bridge_options.max_transitions = 12;
+    bridge_options.certify_initial_transition = false;
+    bridge_options.enable_feedback_loop = true;
+    bridge_options.max_feedback_iterations = 8;
 
     started = Clock::now();
-    const auto dae = certify_distribution_resilience_dynamics(
-        system, strict_mip, dynamic_options, certificate_options,
+    const auto certified = run_certified_distribution_resilience_mip(
+        system, event_options, dynamic_options, certificate_options,
         bridge_options);
+    strict_mip = certified.restoration;
+    const auto& dae = certified.dynamic_certification;
+    report["restoration"]["strict_mip"] = resilience_json(strict_mip);
+    report["restoration"]["strict_mip"]["critical_unserved_mwh"] =
+        tier_unserved_mwh(strict_mip, event_options.time_step_hr, 0);
+    report["restoration"]["strict_mip"]["critical_ac_unserved_mwh"] =
+        tier_unserved_mwh(strict_mip, event_options.time_step_hr, 0, "AC");
+    report["restoration"]["strict_mip"]["critical_dc_unserved_mwh"] =
+        tier_unserved_mwh(strict_mip, event_options.time_step_hr, 0, "DC");
     report["dynamic_certificate"] = certificate_json(dae);
     report["dynamic_certificate"]["runtime_sec"] = elapsed_seconds(started);
+
+    const auto external_snapshot_comparison =
+        run_external_snapshot_matrix(system, strict_mip, output_dir);
+    report["external_snapshot_comparison"] = external_snapshot_comparison;
+    if (external_only) {
+      std::cout << report["external_snapshot_comparison"].dump(2) << '\n';
+      return report["external_snapshot_comparison"]["passed"].get<bool>()
+                 ? 0
+                 : 3;
+    }
+
+    if (dynamic_only) {
+      report["execution_scope"] = "dynamic-only diagnostic";
+      json debug_steps = json::array();
+      for (const auto& step : strict_mip.steps) {
+        json supplies = json::array();
+        const std::size_t supply_count = std::min(
+            {step.bus_supply_kind.size(), step.bus_supply_index.size(),
+             step.bus_supply_demand_mw.size(),
+             step.bus_supply_served_mw.size()});
+        for (std::size_t i = 0; i < supply_count; ++i) {
+          const auto bool_at = [i](const std::vector<bool>& values) {
+            return i < values.size() && values[i];
+          };
+          const auto double_at = [i](const std::vector<double>& values) {
+            return i < values.size() ? values[i] : 0.0;
+          };
+          supplies.push_back(
+              {{"domain", step.bus_supply_kind[i]},
+               {"bus", step.bus_supply_index[i]},
+               {"demand_mw", step.bus_supply_demand_mw[i]},
+               {"served_mw", step.bus_supply_served_mw[i]},
+               {"energized", bool_at(step.bus_supply_energized)},
+               {"root", bool_at(step.bus_supply_root)},
+               {"base_source_mw",
+                double_at(step.bus_supply_base_source_mw)},
+               {"dispatchable_generation_mw",
+                double_at(step.bus_supply_dispatchable_generation_mw)},
+               {"renewable_mw", double_at(step.bus_supply_renewable_mw)},
+               {"fixed_storage_mw",
+                double_at(step.bus_supply_fixed_storage_mw)}});
+        }
+        json components = json::array();
+        for (const auto& state : step.component_states) {
+          components.push_back(
+              {{"component_type", state.component_type},
+               {"domain", state.domain},
+               {"component_index", state.component_index},
+               {"canonical_component_index",
+                state.canonical_component_index},
+               {"available", state.available},
+               {"closed", state.closed},
+               {"flow_mw", state.active_power_mw}});
+        }
+        debug_steps.push_back({{"step", step.step_index},
+                               {"hour", step.hour},
+                               {"bus_supply", std::move(supplies)},
+                               {"component_states", std::move(components)}});
+      }
+      report["debug_restoration_steps"] = std::move(debug_steps);
+      write_text(output_dir / "dynamic_review_case_results.json",
+                 report.dump(2) + "\n");
+      std::cout << report.dump(2) << '\n';
+      return dae.feedback_closed_loop_complete ? 0 : 2;
+    }
 
     auto cyber_options = bridge_options;
     cyber_options.command_path_available = false;
@@ -836,7 +1307,11 @@ int main(int argc, char** argv) {
     std::vector<double> improved_samples;
     json sample_rows = json::array();
     json convergence_rows = json::array();
-    const std::vector<unsigned> convergence_checkpoints = {16, 32, 64, 128, 256};
+    // Rockafellar & Uryasev (2000): a 95% empirical CVaR uses only the upper
+    // 5% tail. Geometric checkpoints reach about 205 tail observations at the
+    // immutable 4096-pair hard limit while preserving the predeclared rule.
+    const std::vector<unsigned> convergence_checkpoints = {
+        16, 32, 64, 128, 256, 512, 1024, 2048, 4096};
     constexpr unsigned minimum_convergence_samples = 64;
     constexpr double mean_relative_tolerance = 0.05;
     constexpr double cvar_relative_tolerance = 0.10;
@@ -966,7 +1441,7 @@ int main(int argc, char** argv) {
         {"mean_relative_tolerance", mean_relative_tolerance},
         {"cvar_relative_tolerance", cvar_relative_tolerance},
         {"required_consecutive_checkpoints", required_consecutive_checkpoints},
-        {"solver", "HiGHS (paired runs; priority penalties scaled 1000:100:10:1)"},
+        {"solver", "HiGHS (one thread; paired runs; priority penalties scaled 1000:100:10:1)"},
         {"selected_measure", selected_measure},
         {"baseline_mean_unserved_mwh", baseline_mean},
         {"improved_mean_unserved_mwh", improved_mean},
@@ -1260,7 +1735,11 @@ Metric & Baseline & Intervention \\
 
     write_text(output_dir / "review_case_results.json", report.dump(2) + "\n");
     std::cout << report.dump(2) << '\n';
-    return strict_mip.feasible && pre_event.uc_schedule.feasible ? 0 : 2;
+    return strict_mip.feasible && pre_event.uc_schedule.feasible &&
+                   dae.feedback_closed_loop_complete && risk_converged &&
+                   external_snapshot_comparison["passed"].get<bool>()
+               ? 0
+               : 2;
   } catch (const std::exception& error) {
     std::cerr << "distribution resilience review case failed: " << error.what()
               << '\n';

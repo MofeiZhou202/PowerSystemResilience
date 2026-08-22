@@ -312,6 +312,25 @@ hacdcpf_add_test(test_scenario_generation test_scenario_generation.cpp)
 hacdcpf_add_test(test_typhoon_traffic_impact test_typhoon_traffic_impact.cpp)
 hacdcpf_add_test(test_scenario_bundle_schema test_scenario_bundle_schema.cpp)
 
+if(EXISTS "${CMAKE_SOURCE_DIR}/tools/scenario_generation_review_case.cpp")
+  add_executable(scenario_generation_review_case
+    "${CMAKE_SOURCE_DIR}/tools/scenario_generation_review_case.cpp")
+  target_link_libraries(scenario_generation_review_case PRIVATE hacdcpf::hacdcpf)
+  find_package(Python3 COMPONENTS Interpreter QUIET)
+  if(Python3_Interpreter_FOUND AND
+     EXISTS "${CMAKE_SOURCE_DIR}/tests/scenario_generation_cross_validation.py")
+    add_test(NAME scenario_generation_cross_validation
+      COMMAND "${Python3_EXECUTABLE}"
+              "${CMAKE_SOURCE_DIR}/tests/scenario_generation_cross_validation.py"
+              --cpp-bin "$<TARGET_FILE:scenario_generation_review_case>"
+              --output-dir
+              "${CMAKE_CURRENT_BINARY_DIR}/scenario_generation_validation")
+    set_tests_properties(scenario_generation_cross_validation PROPERTIES
+      LABELS "scenario_generation;cross_validation;python_oracle"
+      TIMEOUT 120 ENVIRONMENT "PYTHONPYCACHEPREFIX=/tmp/hacdcpf_pycache")
+  endif()
+endif()
+
 # ── Graph analysis & reduction ──────────────────────────────────────────────
 
 # Graph topology analysis, switch contraction, series/pendant reduction,

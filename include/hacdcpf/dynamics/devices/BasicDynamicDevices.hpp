@@ -84,6 +84,9 @@ struct ACLoadDynamicParams {
   double p_weight_q{1.0};
   double base_mva{100.0};
   double scale{1.0};
+  /// Authored scale before resilience service replay. ACLoadScale events with
+  /// service_ratio set scale = service_base_scale * service_ratio.
+  double service_base_scale{1.0};
   DynamicLoadModelKind model_kind{DynamicLoadModelKind::ConstantImpedance};
   bool in_service{true};
 };
@@ -203,6 +206,7 @@ struct ThreePhaseLoadDynamicParams {
   std::array<bool, 3> phase_active{true, true, true};
   double base_mva{100.0};
   double scale{1.0};
+  double service_base_scale{1.0};
   bool in_service{true};
 };
 
@@ -254,6 +258,7 @@ struct DCLoadDynamicParams {
   double p_mw{0.0};
   double base_mva{100.0};
   double scale{1.0};
+  double service_base_scale{1.0};
   bool in_service{true};
 };
 

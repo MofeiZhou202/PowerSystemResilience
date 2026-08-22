@@ -523,7 +523,14 @@ double overhead_segment_probability(const TyphoonLineSegment& seg,
     // The lognormal curve gives a fragility severity, not an independent full-line
     // outage probability for every synthetic segment. Scale it by segment exposure
     // length so auto-segmentation does not make long feeders fail deterministically.
-    const double severity = lognormal_cdf(eq_wind, f.lognormal_median_wind_ms, f.lognormal_sigma);
+    // Collapse-wind saturation closes the authored fragility contract; below
+    // collapse, use the lognormal CDF. Holland (1980) supplies the hazard and
+    // the executable derivation is in the scenario-generation manual Sec. 8.
+    const double severity =
+        f.collapse_wind_ms > 0.0 && eq_wind >= f.collapse_wind_ms
+            ? 1.0
+            : lognormal_cdf(eq_wind, f.lognormal_median_wind_ms,
+                            f.lognormal_sigma);
     const double exposure_km = clamp_value(seg.length_km, 0.0, 5.0);
     p_wind = clamp_value(1.0 - std::exp(-0.015 * severity * exposure_km * std::max(0.0, dt_hr)), 0.0, 1.0);
   }
@@ -1538,7 +1545,13 @@ TyphoonFaultSequenceResult generate_typhoon_fault_sequence(
       risk.peak_rain_mm_hr = std::max(risk.peak_rain_mm_hr, hour_peak_rain);
       risk.peak_probability = std::max(risk.peak_probability, p_branch);
       max_system_wind[t] = std::max(max_system_wind[t], hour_peak_wind);
-      if (!risk.faulted && unit_draw(fault_rng) < p_branch) {
+      // The public minimum-probability option is a declared sampling support
+      // truncation, not a post-hoc reporting filter. Probabilities below the
+      // gate remain visible in branch_risks but cannot create a sampled fault.
+      const double sampling_gate =
+          clamp_value(opts.min_fault_probability, 0.0, 1.0);
+      if (!risk.faulted && p_branch >= sampling_gate &&
+          unit_draw(fault_rng) < p_branch) {
         risk.faulted = true;
         risk.first_fault_hr = result.track[t].hour;
       }

@@ -17,6 +17,7 @@
 #include "hacdcpf/model/enums.hpp"
 #include "hacdcpf/model/gfm_norton_contract.hpp"
 #include "hacdcpf/power_flow/newton_solver.hpp"
+#include "hacdcpf/power_flow/island_detector.hpp"
 #include "hacdcpf/projection/result_attribution.hpp"
 
 namespace hacdcpf::dynamics {
@@ -1525,6 +1526,8 @@ DynamicDCBranch make_dc_branch(const DCBranch& branch,
 
 PowerFlowResult nominal_power_flow(const HybridPowerSystem& sys,
                                    const DynamicSolverOptions& options) {
+  std::string pf_stage = "power-flow dispatch";
+  try {
   if (options.run_power_flow_initialization) {
     // The PF facade owns rich-to-canonical projection and authored-space result
     // recovery. DynamicSolverOptions::project_to_canonical controls only the
@@ -1533,14 +1536,41 @@ PowerFlowResult nominal_power_flow(const HybridPowerSystem& sys,
     // bypassing the facade would reinterpret stable bus IDs as vector positions.
     PowerFlowResult pf;
     if (sys.projection_certificate.has_value()) {
-      auto data = powerflow::make_solver_data_projected(
-          HybridPowerSystem(sys), options.power_flow_options.loss_model);
-      powerflow::NewtonSolver solver;
-      const InitialState* initial = options.power_flow_options.initial_state
-                                        ? &*options.power_flow_options.initial_state
-                                        : nullptr;
-      pf = solver.solve(data, options.power_flow_options, initial);
+      const bool has_isolated_bus =
+          std::any_of(sys.ac.buses.begin(), sys.ac.buses.end(),
+                      [](const ACBus& bus) {
+                        return bus.bus_type == BusType::ISOLATED;
+                      }) ||
+          std::any_of(sys.dc.buses.begin(), sys.dc.buses.end(),
+                      [](const DCBus& bus) {
+                        return bus.bus_type == DCBusType::DC_ISOLATED;
+                      });
+      if (has_isolated_bus) {
+        pf_stage = "adaptive projected-island power-flow solve";
+        const auto adaptive =
+            solve_power_flow_adaptive(sys, options.power_flow_options);
+        pf.converged = adaptive.converged;
+        pf.iterations = adaptive.iterations;
+        pf.residual = adaptive.residual;
+        pf.vm = adaptive.vm;
+        pf.va = adaptive.va;
+        pf.vdc = adaptive.vdc;
+        pf.diagnostics = adaptive.diagnostics;
+        pf.profiling = adaptive.profiling;
+        pf.reactive_limits = adaptive.reactive_limits;
+      } else {
+        pf_stage = "projected SolverData assembly";
+        auto data = powerflow::make_solver_data_projected(
+            HybridPowerSystem(sys), options.power_flow_options.loss_model);
+        pf_stage = "projected Newton solve";
+        powerflow::NewtonSolver solver;
+        const InitialState* initial = options.power_flow_options.initial_state
+                                          ? &*options.power_flow_options.initial_state
+                                          : nullptr;
+        pf = solver.solve(data, options.power_flow_options, initial);
+      }
     } else {
+      pf_stage = "rich-model power-flow facade";
       pf = solve_power_flow(sys, options.power_flow_options);
     }
     if (pf.converged) return pf;
@@ -1562,6 +1592,14 @@ PowerFlowResult nominal_power_flow(const HybridPowerSystem& sys,
     pf.vdc.push_back(bus.vm_pu > 0.0 ? bus.vm_pu : 1.0);
   }
   return pf;
+  } catch (const std::exception& error) {
+    throw std::runtime_error("nominal power flow failed during " + pf_stage +
+                             ": " + error.what());
+  } catch (...) {
+    throw std::runtime_error(
+        "nominal power flow failed during " + pf_stage +
+        " with an unrecognized non-standard or cross-ABI exception");
+  }
 }
 
 void initialize_network_voltages(const HybridPowerSystem& sys,
@@ -1622,7 +1660,7 @@ std::unordered_map<int, Complex> explicit_ac_load_power_by_bus(
   std::unordered_map<int, Complex> load_power;
   for (const auto& load : sys.ac.loads) {
     if (!load.in_service) continue;
-    const double scale = scale_or_one(load.scaling);
+    const double scale = std::max(0.0, load.scaling);
     load_power[load.bus] += Complex(load.p_mw * scale, load.q_mvar * scale);
   }
   return load_power;
@@ -1678,14 +1716,18 @@ bool use_pf_bus_injection_machine_init(const HybridPowerSystem& sys) {
 DynamicSystem DynamicModelBuilder::build(const HybridPowerSystem& sys,
                                          const DynamicSolverOptions& options) const {
   DynamicSystem dyn;
+  std::string build_stage = "canonical projection";
+  try {
   dyn.options = options;
   dyn.canonical_system =
       options.project_to_canonical
           ? projection::RichToCanonicalOperator::apply(sys).canonical
           : sys;
+  build_stage = "nominal power-flow initialization";
   dyn.initial_power_flow = nominal_power_flow(
       options.project_to_canonical ? sys : dyn.canonical_system, options);
   dyn.initialization = make_initialization_summary(options, dyn.initial_power_flow);
+  build_stage = "dynamic network topology assembly";
 
   // Multi-machine rule (PSD semantics): with >= 2 in-service synchronous
   // machines a slack machine is one of several real machines and swings with
@@ -1813,6 +1855,7 @@ DynamicSystem DynamicModelBuilder::build(const HybridPowerSystem& sys,
   for (const auto& branch : dyn.canonical_system.dc.branches) {
     network.dc_branches.push_back(make_dc_branch(branch, network, options.min_branch_impedance_pu));
   }
+  build_stage = "dynamic network matrix assembly";
   network.rebuildBaseMatrices(options.singular_regularization_pu);
   initialize_network_voltages(dyn.canonical_system, dyn.initial_power_flow, dyn);
   auto pf_ac_bus_device_injection_mva =
@@ -1861,6 +1904,7 @@ DynamicSystem DynamicModelBuilder::build(const HybridPowerSystem& sys,
   }
 
   std::unordered_set<int> voltage_source_buses;
+  build_stage = "AC dynamic device assembly";
   const bool using_explicit_three_phase =
       dyn.canonical_system.three_phase_ac &&
       !dyn.canonical_system.three_phase_ac->buses.empty();
@@ -2107,8 +2151,16 @@ DynamicSystem DynamicModelBuilder::build(const HybridPowerSystem& sys,
     p.label = label_or(load.name, "AC load " + std::to_string(load.index));
     p.canvas_type = "load";
     p.source_type = "ac_load";
-    p.p_mw = load.p_mw * load.scaling;
-    p.q_mvar = load.q_mvar * load.scaling;
+    p.p_mw = load.p_mw;
+    p.q_mvar = load.q_mvar;
+    p.scale = std::max(0.0, load.scaling);
+    if (const auto it = load.dynamic_model.parameters.find(
+            "resilience_service_base_scale");
+        it != load.dynamic_model.parameters.end()) {
+      p.service_base_scale = std::max(0.0, it->second);
+    } else {
+      p.service_base_scale = p.scale;
+    }
     p.base_mva = base_mva;
     p.phase_power_scale = ac_phase_power_scale;
     if (bus_pos >= 0 && bus_pos < static_cast<int>(dyn.initial_power_flow.vm.size())) {
@@ -2134,7 +2186,14 @@ DynamicSystem DynamicModelBuilder::build(const HybridPowerSystem& sys,
     p.source_type = "asymmetric_load";
     p.p_mw = {load.pa_mw, load.pb_mw, load.pc_mw};
     p.q_mvar = {load.qa_mvar, load.qb_mvar, load.qc_mvar};
-    p.scale = scale_or_one(load.scaling);
+    p.scale = std::max(0.0, load.scaling);
+    if (const auto it = load.dynamic_model.parameters.find(
+            "resilience_service_base_scale");
+        it != load.dynamic_model.parameters.end()) {
+      p.service_base_scale = std::max(0.0, it->second);
+    } else {
+      p.service_base_scale = p.scale;
+    }
     p.base_mva = base_mva;
     p.model_profiles = to_dynamic_profiles(load.dynamic_model);
     dyn.devices.push_back(std::make_unique<ThreePhaseDynamicLoad>(p));
@@ -2179,7 +2238,7 @@ DynamicSystem DynamicModelBuilder::build(const HybridPowerSystem& sys,
           make_regca_params(gen, bus_pos, base_mva)));
       continue;
     }
-    if (profile_model_is(gen.dynamic_model,
+    if (gen.grid_forming || profile_model_is(gen.dynamic_model,
                          {"GridFormingNortonDroop",
                           "GFMDroopOuterControl",
                           "VirtualInertia",
@@ -2359,6 +2418,7 @@ DynamicSystem DynamicModelBuilder::build(const HybridPowerSystem& sys,
   }
 
   for (const auto& load : dyn.canonical_system.dc.loads) {
+    build_stage = "DC load device assembly";
     if (!load.in_service) continue;
     const int bus_pos = network.dcBusPosition(load.bus);
     if (bus_pos < 0) continue;
@@ -2369,13 +2429,22 @@ DynamicSystem DynamicModelBuilder::build(const HybridPowerSystem& sys,
     p.label = label_or(load.name, "DC load " + std::to_string(load.index));
     p.canvas_type = "dcLoad";
     p.source_type = "dc_load";
-    p.p_mw = load.p_mw * load.scaling;
+    p.p_mw = load.p_mw;
+    p.scale = std::max(0.0, load.scaling);
+    if (const auto it = load.dynamic_model.parameters.find(
+            "resilience_service_base_scale");
+        it != load.dynamic_model.parameters.end()) {
+      p.service_base_scale = std::max(0.0, it->second);
+    } else {
+      p.service_base_scale = p.scale;
+    }
     p.base_mva = base_mva;
     p.model_profiles = to_dynamic_profiles(load.dynamic_model);
     dyn.devices.push_back(std::make_unique<DCDynamicLoad>(p));
   }
 
   for (const auto& gen : dyn.canonical_system.dc.dc_static_generators) {
+    build_stage = "DC static-generator device assembly";
     if (!gen.in_service) continue;
     const int bus_pos = network.dcBusPosition(gen.bus);
     if (bus_pos < 0) continue;
@@ -2397,6 +2466,7 @@ DynamicSystem DynamicModelBuilder::build(const HybridPowerSystem& sys,
   }
 
   for (const auto& pv : dyn.canonical_system.dc.pv_arrays) {
+    build_stage = "DC PV device assembly";
     if (!pv.in_service) continue;
     const int bus_pos = network.dcBusPosition(pv.bus);
     if (bus_pos < 0) continue;
@@ -2418,6 +2488,7 @@ DynamicSystem DynamicModelBuilder::build(const HybridPowerSystem& sys,
   }
 
   for (const auto& st : dyn.canonical_system.dc.storage) {
+    build_stage = "DC storage device assembly";
     if (!st.in_service) continue;
     const int bus_pos = network.dcBusPosition(st.bus);
     if (bus_pos < 0) continue;
@@ -2444,6 +2515,7 @@ DynamicSystem DynamicModelBuilder::build(const HybridPowerSystem& sys,
   }
 
   for (const auto& conv : dyn.canonical_system.vsc_converters) {
+    build_stage = "VSC dynamic device assembly";
     if (!conv.in_service) continue;
     const int ac_pos = network.acBusPosition(conv.bus_ac);
     const int dc_pos = network.dcBusPosition(conv.bus_dc);
@@ -2552,6 +2624,7 @@ DynamicSystem DynamicModelBuilder::build(const HybridPowerSystem& sys,
   }
 
   for (const auto& conv : dyn.canonical_system.dc.dcdc_converters) {
+    build_stage = "DC/DC dynamic device assembly";
     if (!conv.in_service) continue;
     const int in_pos = network.dcBusPosition(conv.bus_in);
     const int out_pos = network.dcBusPosition(conv.bus_out);
@@ -2572,6 +2645,7 @@ DynamicSystem DynamicModelBuilder::build(const HybridPowerSystem& sys,
     dyn.devices.push_back(std::make_unique<DCDCConverterDynamic>(p));
   }
 
+  build_stage = "dynamic state indexing and initialization";
   dyn.assignStateIndices();
   initialize_network_voltages(dyn.canonical_system, dyn.initial_power_flow, dyn);
   dyn.initializeStatesFromPowerFlow();
@@ -2585,6 +2659,22 @@ DynamicSystem DynamicModelBuilder::build(const HybridPowerSystem& sys,
     dyn.warnings.push_back(warning);
   }
   return dyn;
+  } catch (const std::exception& error) {
+    throw std::runtime_error("DynamicModelBuilder failed during " + build_stage +
+                             ": " + error.what());
+  } catch (const std::string& error) {
+    throw std::runtime_error("DynamicModelBuilder failed during " + build_stage +
+                             ": " + error);
+  } catch (const char* error) {
+    throw std::runtime_error(
+        "DynamicModelBuilder failed during " + build_stage + ": " +
+        (error == nullptr ? std::string("null C-string exception")
+                          : std::string(error)));
+  } catch (...) {
+    throw std::runtime_error(
+        "DynamicModelBuilder failed during " + build_stage +
+        " with an unrecognized non-standard or cross-ABI exception");
+  }
 }
 
 }  // namespace hacdcpf::dynamics

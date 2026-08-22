@@ -1,0 +1,53 @@
+\section{灾害、故障与修复过程}\label{sec:res-hazard}
+
+\subsection{输入事件的最小充分描述}
+\fld{DistributionResilienceFault} 用
+$(d,k,t_k^{out},\tau_k^{rep})$ 描述故障，其中 $d\in\{AC,DC\}$，$k$ 是作者空间支路稳定
+ID。时步 $t$ 的可用性为
+\begin{equation}
+ a_{k,t}=\begin{cases}
+ 0,&t_k^{out}\le t<t_k^{out}+\tau_k^{rep},\\
+ 1,&\text{其他}.
+ \end{cases}
+\end{equation}
+显式故障若不能映射到 canonical AC/DC 支路，严格 MIP 直接返回不可行状态；不会把未知 ID
+静默解释为 vector position。旧字段 \fld{ac\_branch\_index} 只在新
+\fld{branch\_index} 未设置时按 AC 故障兼容。
+
+\subsection{自动故障与时间离散}
+未给定 \fld{faults} 时，可按 \fld{default\_fault\_count}、
+\fld{auto\_fault\_start\_hr}、\fld{auto\_fault\_stagger\_hr} 和
+\fld{default\_repair\_time\_hr} 构造确定性测试序列。该入口用于功能测试，不代表天气灾害统计。
+真实灾害序列应由 \srcpath{src/scenario\_generation/typhoon\_resilience.cpp} 生成并显式传入。
+
+复核工具的台风链采用 Holland 风场抽象。中心压差、最大风速半径、平移速度与轨迹给出线路段
+峰值风雨暴露，再经脆弱性曲线得到 $p_k^{fail}$，按固定种子采样故障。手册不把该单次合成轨迹
+称为实测台风，也不把 $p_k^{fail}$ 当作年故障率。
+
+\subsection{相关失效的边界}
+当前 \fld{DistributionResilienceOptions} 接收已经生成的故障序列；恢复 MIP 本身不重建 copula、
+空间相关场或天气共同原因。相关性必须由上游情景生成器体现在同一 $\omega$ 的联合故障集合中。
+若逐支路独立采样，则研究结论只对该独立假设成立。
+
+\subsection{分阶段修复语义}
+RA 入口把时间划分为：
+\begin{equation}
+ \text{Normal}\rightarrow\text{DisasterIsolation}\rightarrow
+ \text{DisasterPostFaultReconfig}\rightarrow\text{PostDisasterRepair}.
+\end{equation}
+灾害隔离阶段将已经发生的故障视为不可闭合；灾后重构窗口由
+\fld{post\_fault\_reconfig\_window\_hr} 控制；修复阶段按故障修复时刻恢复候选边，并尝试保持上一
+阶段可行拓扑。若某阶段 MIP 失败，结果必须在 \fld{status} 中保留具体小时和后端状态。
+
+\subsection{保护与开关动作的区别}
+“支路故障”不是“开关动作”。支路只能在存在相应可操作开关/断路器或显式允许虚拟分支开关时被
+隔离。选项 \fld{require\_switch\_for\_nonfault\_branch\_operation}、
+\fld{allow\_branch\_operation\_without\_switch}、\fld{use\_remote\_switch\_only}
+控制操作资格。当前恢复 MIP 不求解继电保护定值、选择性和短路波形，因此
+\fld{protection\_logic\_modelled}=false；保护研究必须调用可靠性/短路/动态模块另行验证。
+
+\subsection{修复时间与恢复时间}
+元件修复时刻 $t_k^{rep}=t_k^{out}+\tau_k^{rep}$ 只是拓扑重新可用的时刻，不等于负荷恢复时刻。
+负荷恢复还取决于开关、根节点、容量、储能和动态可执行性。当前兼容字段
+\fld{restoration\_time\_hr} 在启发式入口中保存最后一个模拟时步，而非首次完全恢复时刻；研究者
+应由逐步 \fld{restoration\_ratio} 序列计算首次 $Q_t=1$ 的时刻。
