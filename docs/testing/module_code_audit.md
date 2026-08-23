@@ -1,6 +1,6 @@
 # Module Code Audit
 
-Updated: 2026-08-22
+Updated: 2026-08-23
 
 This is the living code-audit ledger for repository modules. It records
 source-backed defects and audit coverage; it is not a dated snapshot and does
@@ -53,18 +53,18 @@ New open findings from the deep `network_reconfiguration/` audit:
 | AUD-022 | Medium | The legacy `solve_optimal_reconfiguration` wrapper converts a failed core solve into `feasible=true` when the unchanged connected AC topology passes PF, with objective 0 and no fallback/status/scope marker. | Preserve the core failure and expose `fallback_used`/scope, or keep optimization feasibility false; add a regression that forces this branch. |
 | AUD-023 | Low | Roughly 600 lines of the historical AC LinDistFlow B&C implementation remain unreachable after the compatibility wrapper's unconditional return, while comments and test prose still describe it as active. | Delete/move the historical implementation or restore it as a separate explicit, tested entry; keep one reachable model per function. |
 
-New open findings from the deep `graph/` audit:
+Findings closed by the `graph/` implementation pass:
 
-| ID | Severity | Finding | Required closure |
+| ID | Status | Closure | Focused evidence |
 |---|---|---|---|
-| AUD-024 | High | Reduction candidates carry `NodeDomain`, but `make_reduction_plan()` keys candidate lookup, eliminated sets, neighbour conflicts, and the batch Kron list by bare integer bus IDs. Same-number AC/DC candidates can suppress each other, and one Kron action has only its default AC `bus_domain`. | Use domain-qualified keys throughout planning/actions and add same-ID AC/DC multi-action regressions. |
-| AUD-025 | Low | The public reduction surface drifts from reachable behavior: `mode`, `preserve_all_voltage_constrained_buses`, and `ReductionMethod` are unused; switch contraction and `max_fill_ratio` are not wired through the plan; switch/retain actions and `RadialFeederSegment` have no generation path. | Remove unsupported surface or implement every option/action with effect tests and explicit diagnostics. |
-| AUD-026 | Medium | `ReductionMapping` is not a complete bidirectional or multi-stage certificate: reverse bus maps remain identity after series/pendant, pendant branch maps are empty, mapping-level switch/Kron records are never populated, and no composition API exists. | Populate domain-qualified forward/reverse maps for every operation and add composition plus round-trip tests. |
-| AUD-027 | High | Pendant reduction records the graph `edge_id` as `PendantReductionRecord::branch_id`, while voltage recovery looks it up as a source branch component `.index`. With non-sequential component IDs, impedance lookup can fail and silently recover with `Z=0`. | Use one declared ID space, reject lookup failure, and add a non-sequential-ID numerical recovery regression. |
-| AUD-028 | Medium | Dense Kron with injection computes `I_reduced`, but recovery only evaluates `V_beta=-K V_alpha`; it cannot add `Ybb^-1 I_beta` because the recovery API accepts no interior injection. | Store/accept the injection correction and verify the full partitioned equation. |
-| AUD-029 | Medium | `IslandStatus::IsolatedLoad` is never assigned: topology emits only `GraphIsolatedLoad`, while `validate_system.cpp` checks the unreachable status branch. | Unify status/diagnostic semantics and register topology-to-validation isolated-load tests. |
-| AUD-030 | Medium | A series-created edge receives an `edge_id` beyond existing graph/component IDs while adjacency, bridge, and cycle APIs continue to use vector positions. The initial convenience relation `edge_id == edges[] position` no longer holds after reduction. | Separate these types or renumber graph-internal IDs consistently, then add post-series topology/index regressions. |
-| AUD-031 | High | Graph construction omits Transformer3W, LCC, EnergyRouter, and three-phase topology and under-flags several rich injections. Contraction does not remap multiple rich asset terminals; HTTP compact export then filters dangling objects, potentially deleting assets instead of preserving them. | Complete rich-component graph/remap coverage or reject unsupported reductions, with per-component HTTP reload and semantic round-trip tests. |
+| AUD-024 | Closed | Planning and actions use `BusRef {domain,bus_id}` throughout candidate lookup, conflict tracking and Kron batching; AC/DC same-number buses cannot suppress each other. | `test_graph` same-number AC/DC independent Kron planning |
+| AUD-025 | Closed | `mode`, voltage-constrained preservation, switch/retain actions, `ReductionMethod`, and per-action `max_fill_ratio` now have reachable behavior; the unused `RadialFeederSegment` surface was removed. | `test_graph` mode/option/action effect cases; `test_graph_kron` plan fill guard |
+| AUD-026 | Closed | `ReductionMapping` has authoritative domain-qualified bus/branch forward and reverse maps, explicit invalid branch targets, operation records, AC-preferred legacy views, and `compose_reduction_mappings()`. | `test_graph` reverse-map and two-stage composition cases |
+| AUD-027 | Closed | Pendant records store stable AC/DC branch component `.index` in `source_branch_index`; recovery rejects missing lookup instead of substituting `Z=0`. | `test_graph` non-sequential pendant ID, numerical voltage recovery, and missing-source exception |
+| AUD-028 | Closed | Injection Kron stores `Ybb^-1 I_beta` in `KronData` and back-substitution adds it to `-Ybb^-1 Yba V_alpha`. | `test_graph_kron` full partition equation and interior residual `<=1e-12` |
+| AUD-029 | Closed | A singleton in-service load with no in-service neighbor is assigned `IslandStatus::IsolatedLoad`, emits the matching diagnostic, and reaches validation. | `test_graph` isolated-load status; `test_validation` topology propagation |
+| AUD-030 | Closed | `GraphEdge::edge_id` is graph storage position for initial, contracted, and series graphs; stable component identity remains `comp_index`/`BranchRef`. | `test_graph` post-series identity, bridge, and fundamental-cycle regressions |
+| AUD-031 | Closed for declared topology/reduction scope | Graph construction covers Transformer3W, LCC, EnergyRouter connectivity and a separate three-phase graph; contraction remaps rich terminals and fails closed for unsupported phase/transformer/DCDC collapses; HTTP rejects dangling rich terminals rather than silently deleting assets. Virtual edges remain connectivity-only. | `test_graph` construction/remap/fail-closed cases; `gui_api_e2e` reduction-export-reload preservation for Transformer3W, LCC, EnergyRouter and three-phase data |
 
 New open findings from the deep `time_series/` annual/lifecycle audit:
 
@@ -345,7 +345,7 @@ the review record. The table above is the current status.
 | `power_flow/` | Focused | Baseline | Active manual and regression baseline retained; the point-in-time math audit is archived. |
 | `optimal_power_flow/` | Focused | Baseline | Active OPF manual retained; point-in-time diagnostics and validation are archived. |
 | `power_models/` | Focused | Baseline | Ownership and AML builder documentation confirmed. |
-| `graph/` | Focused | Deep | AUD-009 closed; AUD-024--AUD-031 open across domain-safe planning, option drift, mapping/recovery, edge identity, island status, and rich-component coverage. Focused Release rebuild: three direct targets pass 56 cases / 467 assertions; numerical chapter records Kron/current/recovery and PF/OPF round-trip errors. |
+| `graph/` | Focused | Deep | AUD-009 and AUD-024--AUD-031 closed for the declared topology/reduction scope. Focused Release: four graph targets pass 76 cases / 629 assertions; validation adds 38/180, GUI E2E passes 80 checks, and the selected ASan/UBSan run passes 42 with one conditional skip. Connectivity-only rich virtual edges, HTTP Kron identify-only, and pendant approximation remain explicit model boundaries. |
 | `network_reconfiguration/` | Focused | Deep | AUD-018--AUD-023 open: HTTP loss units, validity timing, solver-comment drift, unpopulated result fields, hidden ONR fallback, and unreachable legacy model. Focused Release rebuild: five focused targets pass 30 cases / 401 assertions; numerical chapter records exhaustive, BFS, PF and pipeline cross-validation with proxy limitations. |
 | `reliability/` | Focused | Deep | AUD-015 closed: tail-risk LOLE-vs-EENS length guard and ASAI `[0,1]` clamp; result-scope invariants checked. |
 | `resilience/` | Distributed | Deep | AUD-011/AUD-074--078 closed; DAE feedback, 2048-pair convergence and three-snapshot external AC comparison are admitted only within their declared scopes. |
@@ -376,8 +376,8 @@ disabled and the local dependency dirty-check override:
 | SPPT executable layer | 7 targets: 33 cases, 213 assertions |
 | Harmonics | `test_harmonics_power_flow`: 63 cases, 412 assertions; cross-engine 14/14, GridLAB-D 24 slices, IEEE13/OpenDSS 164 points |
 | EV Formulation D | `test_ev_power_traffic_joint_opt_d`: 15 cases, 196 assertions |
-| Graph/reduction | Focused Release rebuild `test_graph`, `test_graph_kron`, `test_graph_roundtrip`: 56 cases, 467 assertions; numeric logs in `/private/tmp/hysim_graph_nr_evidence_20260821/` |
-| Graph cross-module | Existing `macos-release` `test_distribution_pipeline`, `test_three_phase_hybrid_opf`: 13 cases, 330 assertions |
+| Graph/reduction | Focused Release rebuild of four graph targets: 76 cases, 629 assertions; serial runtime about 0.51 s |
+| Graph validation/runtime | `test_validation`: 38 cases, 180 assertions; GUI E2E: 80 checks; selected ASan/UBSan: 42 passed, 1 conditional skip |
 | Scenario generation/schema | 2 targets: 12 cases, 105 assertions |
 | Carbon snapshot/annual/GEC | 3 targets: 41 cases, 574 assertions |
 | Resilience/reliability shared suite | `test_resilience_assessment`: 39 cases, 360 assertions, including five Native-to-StrictHiGHS cycles |

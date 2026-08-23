@@ -19,7 +19,7 @@
 ///   Init: V_j^(0) = V_i
 ///
 /// Kron reduction:
-///   V_β = -Y_ββ⁻¹ · Y_βα · V_α   (via stored KronData)
+///   V_β = Y_ββ⁻¹ I_β - Y_ββ⁻¹ · Y_βα · V_α   (via stored KronData)
 
 #include <complex>
 #include <unordered_map>
@@ -93,12 +93,20 @@ void recover_series_reduced_buses(
     const HybridPowerSystem&      original_system);
 
 /// Recover voltage at Kron-eliminated passive nodes.
-/// V_β = -Y_ββ⁻¹ · Y_βα · V_α   (uses pre-computed KronData)
+/// V_β = Y_ββ⁻¹ I_β - Y_ββ⁻¹ · Y_βα · V_α (uses pre-computed KronData)
+/// Legacy single-domain overload. Bus IDs are resolved through bus_voltage.
 void recover_kron_eliminated_buses(
     FullNetworkVoltages&     voltages,
     const KronData&          kron_data,
     const std::vector<int>&  bus_ids_alpha,
     const std::vector<int>&  bus_ids_beta);
+
+/// Domain-qualified overload for hybrid AC/DC systems.
+void recover_kron_eliminated_buses(
+    FullNetworkVoltages&     voltages,
+    const KronData&          kron_data,
+    const std::vector<BusRef>& bus_refs_alpha,
+    const std::vector<BusRef>& bus_refs_beta);
 
 /// Recover voltage at pendant (leaf) eliminated nodes iteratively.
 /// V_j^(t+1) = V_i - Z_ij · (S_j^* / V_j^(t)^*)

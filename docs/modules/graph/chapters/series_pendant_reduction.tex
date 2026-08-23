@@ -6,7 +6,8 @@
 
 两个 reducer 都从 graph/system 副本开始，仅消费匹配类型的 plan actions。被消去 bus/branch 不从
 内部结果中立即删除，而是标 \fld{in\_service=false}；HTTP 导出层另行 compact。动作大小不符、
-母线/边找不到或边已停运时静默跳过，\fld{diagnostics} 当前始终为空。
+母线/边找不到或边已停运时跳过。plan 中的边引用明确为生成该 plan 时的
+\texttt{graph.edges[]} position；调用方不能把稳定组件 \fld{index} 填入该字段。
 
 \subsection{串联适用条件}
 
@@ -26,24 +27,26 @@ rate_{ik}&=0.
 
 \subsection{新增边与 ID}
 
-新 branch ID 从
+新 branch component index 从
 \begin{equation}
-\max\{\,|E|,\ 1+\max ACBranch.index,\ 1+\max DCBranch.index\,\}
+\max\{\,1+\max ACBranch.index,\ 1+\max DCBranch.index\,\}
 \end{equation}
-开始，并同时赋给 new edge 的 \fld{edge\_id} 与 \fld{comp\_index}、新 AC/DCBranch.index。
-这样不会与现有普通 line component index 冲突，但可能与其他类别组件 index 数值重复；稳定 ID 仍需
-结合类别。由于该值通常大于 \texttt{reduced\_graph.edges.size()}，新边的 edge\_id 不再是 vector
-position，邻接表保存的仍是实际 push-back position。
+开始，并赋给 new edge 的 \fld{comp\_index} 与新 AC/DCBranch.index。\fld{edge\_id} 则始终取
+push-back 前的 \texttt{reduced\_graph.edges.size()}，所以初始、收缩及 series 后都保持
+\begin{equation}
+\fld{edge\_id}=\texttt{graph.edges[]}\text{ position}.
+\end{equation}
+稳定组件 ID 与图存储位置是两个独立空间；对外支路证书使用带域 \texttt{BranchRef}。
 
 \subsection{串联模型更新}
 
 记录 \texttt{SeriesReductionRecord}：eliminated/from/to bus 为稳定 ID，domain 域限定，
-original\_branch\_ids 存两条\textbf{源组件 comp\_index}，new\_branch\_id 存新 edge ID。
+original\_branch\_ids 存两条\textbf{源组件 comp\_index}，new\_branch\_id 存新 branch component index。
 旧 AC/DCBranch 按 comp\_index 停运，被消去 bus 停运，新等值 branch 加入对应域。
 
-branch mapping 的 identity keys 和 action 输入使用 graph edge\_id；record 的 original branch IDs
-则改用 component index。二者属于不同空间，不能交叉查询。当前 reverse bus maps 未把 eliminated
-bus 追加到代表 bus 的 original list，因此 \fld{reduced\_to\_original\_buses} 仍是初始身份视图。
+action 输入使用 graph edge position；mapping 与 record 始终使用稳定 branch component index。
+\srcpath{set\_bus\_reduction/set\_branch\_reduction} 每次同步重建域限定反向表，因此 eliminated bus
+会进入代表 bus 的 original members，两条源支路也会反向归因到新等值支路。
 
 \subsection{多动作边界}
 
@@ -62,17 +65,16 @@ p_{abs}^{pu}&=p_j^{pu}+r_{ij}\ell_j,\\
 q_{abs}^{pu}&=q_j^{pu}+x_{ij}\ell_j \quad(AC),
 \end{align}
 DC 固定 $q=0$。吸收量乘 $S_B$ 后写入 parent 的 bus-level demand；原详细 load 行仍留在已停运
-leaf bus 下，HTTP compact 会因端点不存在而删除。
+leaf bus 下并标为停运，HTTP compact 会删除该停运行；其有功/无功已计入 parent 的 bus-level demand。
 
 \subsection{悬垂记录与分支空间}
 
-\texttt{PendantReductionRecord::p\_load\_absorbed/q\_load\_absorbed} 实际存 MW/MVAr，尽管字段注释
-写 pu；手册以实现单位为准。\fld{branch\_id} 当前存 action 的 graph edge\_id，而恢复函数按源
-AC/DCBranch.index 查它。当 component index 不等于 edge ID 时，恢复会找不到阻抗并退化为
-$Z=0$，这是开放审计问题。
+\texttt{PendantReductionRecord::p\_load\_absorbed/q\_load\_absorbed} 存 MW/MVAr。
+\fld{source\_branch\_index} 明确存源 ACBranch/DCBranch 的稳定 \fld{index}；恢复按同一域和同一
+组件空间查阻抗，找不到时抛 \texttt{invalid\_argument}，不再用 $Z=0$ 伪造结果。
 
-Pendant result 不初始化 branch maps，也不更新 reverse bus maps；只有 domain-qualified
-original-to-reduced bus map 和 pendant records 可用于当前恢复。
+Pendant result 从身份 mapping 开始，把 eliminated bus 正向映射到 parent，并把源 branch 映射到
+invalid \texttt{BranchRef} 表示“已消去且无替代支路”；域限定正反向表随之重建。
 
 \subsection{悬垂近似误差}
 
@@ -91,4 +93,5 @@ original-to-reduced bus map 和 pendant records 可用于当前恢复。
   \item 求解 reduced system；
   \item 按应用的逆序调用 pendant/series/switch recovery，并自行维护每阶段 mapping。
 \end{enumerate}
-当前没有把多阶段 mapping 自动 compose 成一份 \texttt{ReductionMapping} 的函数。
+各阶段 mapping 可用 \srcpath{compose\_reduction\_mappings} 按执行顺序合成一份证书；operation
+records 同样按正向执行顺序串接，恢复仍应按阶段逆序调用相应恢复函数。

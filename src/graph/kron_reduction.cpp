@@ -7,6 +7,7 @@
 #include <algorithm>
 #include <complex>
 #include <stdexcept>
+#include <unordered_map>
 
 #include <Eigen/Dense>
 
@@ -87,15 +88,40 @@ static int count_nnz(const Eigen::MatrixXcd& M,
 // apply_kron_reduction
 // ─────────────────────────────────────────────────────────────────────
 
-KronReductionResult apply_kron_reduction(
+static KronReductionResult apply_kron_reduction_impl(
     const Eigen::SparseMatrix<std::complex<double>>& Y_full,
     const std::vector<int>&                          retained,
     const std::vector<int>&                          eliminated,
-    double max_fill_ratio)
+    double max_fill_ratio,
+    const Eigen::VectorXcd*                          I_full)
 {
   KronReductionResult res;
   res.kron_data.retained_bus_indices  = retained;
   res.kron_data.eliminated_bus_indices = eliminated;
+
+  const int n = static_cast<int>(Y_full.rows());
+  std::vector<int> membership(static_cast<std::size_t>(std::max(0, n)), 0);
+  const auto valid_partition = [&]() {
+    if (Y_full.rows() != Y_full.cols() || max_fill_ratio < 0.0) return false;
+    if (I_full != nullptr && I_full->size() != n) return false;
+    for (int index : retained) {
+      if (index < 0 || index >= n || membership[index] != 0) return false;
+      membership[index] = 1;
+    }
+    for (int index : eliminated) {
+      if (index < 0 || index >= n || membership[index] != 0) return false;
+      membership[index] = 2;
+    }
+    return retained.size() + eliminated.size() == static_cast<std::size_t>(n);
+  };
+  if (!valid_partition()) {
+    res.diagnostics.push_back(
+        {DiagCode::Error,
+         "Kron reduction requires a square matrix, a complete disjoint "
+         "in-range partition, a matching injection vector, and a "
+         "non-negative fill limit."});
+    return res;
+  }
 
   if (eliminated.empty()) {
     // Nothing to do: Y_red = Y_aa (retained submatrix)
@@ -114,6 +140,11 @@ KronReductionResult apply_kron_reduction(
       }
     }
     res.Y_reduced.setFromTriplets(trips.begin(), trips.end());
+    if (I_full != nullptr) {
+      res.I_reduced.resize(na);
+      for (int i = 0; i < na; ++i) res.I_reduced[i] = (*I_full)[retained[i]];
+      res.kron_data.has_current_injection = true;
+    }
     return res;
   }
 
@@ -130,8 +161,8 @@ KronReductionResult apply_kron_reduction(
     return res;
   }
 
-  // Schur complement: Y_red = Y_aa - Y_ab * Y_bb^{-1} * Y_ba
-  // Store Y_bb^{-1} * Y_ba for voltage recovery
+  // Kron (1939), partitioned-network elimination; derivation in
+  // docs/modules/graph/chapters/source_equivalent_algorithms.tex.
   Eigen::MatrixXcd Ybb_inv_Yba = lu.solve(blk.Y_ba); // nb × na
   Eigen::MatrixXcd Yab_Ybb_inv = blk.Y_ab * lu.inverse(); // na × nb
 
@@ -167,9 +198,30 @@ KronReductionResult apply_kron_reduction(
   // Store KronData
   res.kron_data.Ybb_inv_Yba = Ybb_inv_Yba;
   res.kron_data.Yab_Ybb_inv = Yab_Ybb_inv;
+  res.kron_data.Ybb_inv_Ibeta = Eigen::VectorXcd::Zero(
+      static_cast<int>(eliminated.size()));
+  if (I_full != nullptr) {
+    const int na = static_cast<int>(retained.size());
+    const int nb = static_cast<int>(eliminated.size());
+    Eigen::VectorXcd I_alpha(na), I_beta(nb);
+    for (int i = 0; i < na; ++i) I_alpha[i] = (*I_full)[retained[i]];
+    for (int i = 0; i < nb; ++i) I_beta[i] = (*I_full)[eliminated[i]];
+    res.kron_data.Ybb_inv_Ibeta = lu.solve(I_beta);
+    res.kron_data.has_current_injection = true;
+    res.I_reduced = I_alpha - blk.Y_ab * res.kron_data.Ybb_inv_Ibeta;
+  }
   res.kron_data.valid = true;
 
   return res;
+}
+
+KronReductionResult apply_kron_reduction(
+    const Eigen::SparseMatrix<std::complex<double>>& Y_full,
+    const std::vector<int>&                          retained,
+    const std::vector<int>&                          eliminated,
+    double max_fill_ratio) {
+  return apply_kron_reduction_impl(Y_full, retained, eliminated,
+                                   max_fill_ratio, nullptr);
 }
 
 // ─────────────────────────────────────────────────────────────────────
@@ -183,21 +235,123 @@ KronReductionResult apply_kron_reduction_with_injection(
     const std::vector<int>&                          eliminated,
     double max_fill_ratio)
 {
-  auto res = apply_kron_reduction(Y_full, retained, eliminated, max_fill_ratio);
-  if (!res.kron_data.valid) return res;
+  return apply_kron_reduction_impl(Y_full, retained, eliminated,
+                                   max_fill_ratio, &I_full);
+}
 
-  // I_red = I_alpha - Y_ab * Y_bb^{-1} * I_beta
-  const int na = static_cast<int>(retained.size());
-  const int nb = static_cast<int>(eliminated.size());
+namespace {
 
-  Eigen::VectorXcd I_alpha(na), I_beta(nb);
-  for (int i = 0; i < na; ++i) I_alpha(i) = I_full(retained[i]);
-  for (int i = 0; i < nb; ++i) I_beta(i)  = I_full(eliminated[i]);
+void attach_kron_mapping(KronReductionResult& result,
+                         const std::vector<BusRef>& bus_order,
+                         const std::vector<int>& retained,
+                         const std::vector<int>& eliminated) {
+  if (!result.kron_data.valid) return;
+  for (const auto& bus : bus_order) {
+    result.mapping.original_to_reduced_buses[bus] = bus;
+  }
+  KronReductionRecord record;
+  for (int position : retained) {
+    record.retained_buses.push_back(bus_order[position]);
+  }
+  for (int position : eliminated) {
+    const BusRef bus = bus_order[position];
+    record.eliminated_buses.push_back(bus);
+    result.mapping.original_to_reduced_buses[bus] = {bus.domain, -1};
+  }
+  result.mapping.kron_records.push_back(std::move(record));
+  rebuild_reduction_reverse_maps(result.mapping);
+}
 
-  // Y_ab * Y_bb_inv already stored as Yab_Ybb_inv (na × nb)
-  res.I_reduced = I_alpha - res.kron_data.Yab_Ybb_inv * I_beta;
+bool valid_bus_order(const std::vector<BusRef>& bus_order,
+                     int matrix_size) {
+  if (bus_order.size() != static_cast<std::size_t>(matrix_size)) return false;
+  std::unordered_map<BusRef, int, BusRefHash> seen;
+  for (int position = 0; position < matrix_size; ++position) {
+    if (!bus_order[position].valid() ||
+        !seen.emplace(bus_order[position], position).second) {
+      return false;
+    }
+  }
+  return true;
+}
 
-  return res;
+}  // namespace
+
+KronReductionResult apply_kron_reduction(
+    const Eigen::SparseMatrix<std::complex<double>>& Y_full,
+    const std::vector<BusRef>&                        bus_order,
+    const std::vector<int>&                           retained,
+    const std::vector<int>&                           eliminated,
+    double max_fill_ratio) {
+  if (!valid_bus_order(bus_order, static_cast<int>(Y_full.rows()))) {
+    KronReductionResult result;
+    result.diagnostics.push_back(
+        {DiagCode::Error,
+         "Kron bus ordering must contain one unique valid BusRef per row."});
+    return result;
+  }
+  auto result = apply_kron_reduction_impl(
+      Y_full, retained, eliminated, max_fill_ratio, nullptr);
+  attach_kron_mapping(result, bus_order, retained, eliminated);
+  return result;
+}
+
+KronReductionResult apply_kron_reduction_with_injection(
+    const Eigen::SparseMatrix<std::complex<double>>& Y_full,
+    const Eigen::VectorXcd&                          I_full,
+    const std::vector<BusRef>&                        bus_order,
+    const std::vector<int>&                           retained,
+    const std::vector<int>&                           eliminated,
+    double max_fill_ratio) {
+  if (!valid_bus_order(bus_order, static_cast<int>(Y_full.rows()))) {
+    KronReductionResult result;
+    result.diagnostics.push_back(
+        {DiagCode::Error,
+         "Kron bus ordering must contain one unique valid BusRef per row."});
+    return result;
+  }
+  auto result = apply_kron_reduction_impl(
+      Y_full, retained, eliminated, max_fill_ratio, &I_full);
+  attach_kron_mapping(result, bus_order, retained, eliminated);
+  return result;
+}
+
+KronReductionResult apply_kron_reduction(
+    const Eigen::SparseMatrix<std::complex<double>>& Y_full,
+    const std::vector<BusRef>&                        bus_order,
+    const ReductionAction&                            action) {
+  KronReductionResult error;
+  if (action.type != ReductionActionType::KronEliminate) {
+    error.diagnostics.push_back(
+        {DiagCode::Error, "Kron executor requires a KronEliminate action."});
+    return error;
+  }
+  std::unordered_map<BusRef, int, BusRefHash> position;
+  for (int index = 0; index < static_cast<int>(bus_order.size()); ++index) {
+    position.emplace(bus_order[index], index);
+  }
+  std::vector<int> retained;
+  std::vector<int> eliminated;
+  for (const auto& bus : action.retained_buses) {
+    const auto it = position.find(bus);
+    if (it == position.end()) {
+      error.diagnostics.push_back(
+          {DiagCode::Error, "Kron retained BusRef is absent from bus_order."});
+      return error;
+    }
+    retained.push_back(it->second);
+  }
+  for (const auto& bus : action.eliminated_buses) {
+    const auto it = position.find(bus);
+    if (it == position.end()) {
+      error.diagnostics.push_back(
+          {DiagCode::Error, "Kron eliminated BusRef is absent from bus_order."});
+      return error;
+    }
+    eliminated.push_back(it->second);
+  }
+  return apply_kron_reduction(Y_full, bus_order, retained, eliminated,
+                              action.max_fill_ratio);
 }
 
 // ─────────────────────────────────────────────────────────────────────
@@ -211,8 +365,21 @@ Eigen::VectorXcd recover_eliminated_voltages(
   if (!kron_data.valid || kron_data.Ybb_inv_Yba.rows() == 0)
     return Eigen::VectorXcd();
 
-  // V_beta = -Y_bb^{-1} * Y_ba * V_alpha
-  return -(kron_data.Ybb_inv_Yba * V_alpha);
+  if (V_alpha.size() != kron_data.Ybb_inv_Yba.cols()) {
+    throw std::invalid_argument(
+        "Kron retained-voltage dimension does not match recovery operator");
+  }
+
+  // Kron (1939), back-substitution of the eliminated block; derivation in
+  // docs/modules/graph/chapters/source_equivalent_algorithms.tex.
+  Eigen::VectorXcd recovered = -(kron_data.Ybb_inv_Yba * V_alpha);
+  if (kron_data.has_current_injection) {
+    if (kron_data.Ybb_inv_Ibeta.size() != recovered.size()) {
+      throw std::invalid_argument("Kron injection-correction dimension mismatch");
+    }
+    recovered += kron_data.Ybb_inv_Ibeta;
+  }
+  return recovered;
 }
 
 }  // namespace hacdcpf::graph

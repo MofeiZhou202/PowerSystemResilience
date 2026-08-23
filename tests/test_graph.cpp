@@ -13,7 +13,10 @@
 #include <catch2/catch_test_macros.hpp>
 #include <catch2/matchers/catch_matchers_floating_point.hpp>
 
+#include <algorithm>
 #include <cmath>
+#include <stdexcept>
+#include <tuple>
 // MinGW GCC in strict -std=c++20 mode does not define M_PI via <cmath>.
 #ifndef M_PI
 #define M_PI 3.14159265358979323846
@@ -289,6 +292,9 @@ TEST_CASE("Graph topology: isolated load node diagnostic", "[graph][topology]") 
   for (const auto& d : rep.diagnostics)
     if (d.code == DiagCode::GraphIsolatedLoad) { found_isolated = true; break; }
   REQUIRE(found_isolated);
+  REQUIRE(std::count_if(rep.islands.begin(), rep.islands.end(), [](const auto& island) {
+            return island.status == IslandStatus::IsolatedLoad;
+          }) == 1);
 }
 
 TEST_CASE("Graph topology: cycle detection in mesh network", "[graph][topology]") {
@@ -452,7 +458,7 @@ TEST_CASE("Series reduction: passive degree-2 node eliminated", "[graph][series]
   // Check Bus 2 is classified as ZeroInjectionDegree2
   bool found_d2 = false;
   for (const auto& c : candidates.candidates)
-    if (c.bus_id == 2 && c.type == CandidateType::ZeroInjectionDegree2)
+    if (c.bus.bus_id == 2 && c.type == CandidateType::ZeroInjectionDegree2)
       found_d2 = true;
   REQUIRE(found_d2);
 
@@ -507,7 +513,7 @@ TEST_CASE("Series reduction: bus with load not eliminated", "[graph][series]") {
   // Bus 2 should be MustRetain because it has load
   bool bus2_must_retain = false;
   for (const auto& c : candidates.candidates)
-    if (c.bus_id == 2 && c.type == CandidateType::MustRetain)
+    if (c.bus.bus_id == 2 && c.type == CandidateType::MustRetain)
       bus2_must_retain = true;
   REQUIRE(bus2_must_retain);
 
@@ -547,7 +553,7 @@ TEST_CASE("Pendant reduction: leaf load folded to parent", "[graph][pendant]") {
   // Bus 2 should be PendantLoad
   bool found_pendant = false;
   for (const auto& c : candidates.candidates)
-    if (c.bus_id == 2 && c.type == CandidateType::PendantLoad)
+    if (c.bus.bus_id == 2 && c.type == CandidateType::PendantLoad)
       found_pendant = true;
   REQUIRE(found_pendant);
 
@@ -1149,4 +1155,351 @@ TEST_CASE("Typed-ID graph lookups map StableBusId to NodeIdx", "[graph][typed_id
   CHECK(dc7.value() == g.dc_node_idx(7));
   CHECK(ac7.value() != dc7.value());          // AC bus 7 and DC bus 7 differ
   CHECK_FALSE(g.ac_node_idx(StableBusId{999}).valid());  // absent -> invalid
+}
+
+TEST_CASE("Reduction planning keeps same-number AC and DC Kron actions separate",
+          "[graph][audit][planning][collision]") {
+  HybridPowerSystem sys;
+  sys.ac.buses = {
+      make_ac_bus(1, BusType::SLACK), make_ac_bus(2, BusType::PQ),
+      make_ac_bus(3, BusType::PQ, 110.0, 1.0),
+      make_ac_bus(4, BusType::PQ, 110.0, 1.0)};
+  sys.ac.branches = {
+      make_ac_branch(101, 1, 2), make_ac_branch(102, 2, 3),
+      make_ac_branch(103, 2, 4)};
+
+  for (int id = 1; id <= 4; ++id) {
+    DCBus bus;
+    bus.index = id;
+    bus.bus_type = id == 1 ? DCBusType::DC_V : DCBusType::DC_P;
+    bus.pd_mw = id >= 3 ? 1.0 : 0.0;
+    sys.dc.buses.push_back(bus);
+  }
+  for (const auto [index, from, to] :
+       {std::tuple{201, 1, 2}, std::tuple{202, 2, 3},
+        std::tuple{203, 2, 4}}) {
+    DCBranch branch;
+    branch.index = index;
+    branch.from_bus = from;
+    branch.to_bus = to;
+    branch.r_pu = 0.02;
+    sys.dc.branches.push_back(branch);
+  }
+
+  const auto graph = build_power_system_graph(sys);
+  GraphReductionOptions options;
+  options.mode = ReductionMode::Moderate;
+  options.enable_series_reduction = false;
+  options.max_fill_ratio = 1.25;
+  const auto candidates = classify_reduction_candidates(graph, sys, options);
+  const auto plan = make_reduction_plan(graph, candidates, options);
+
+  std::vector<const ReductionAction*> kron_actions;
+  for (const auto& action : plan.actions) {
+    if (action.type == ReductionActionType::KronEliminate) {
+      kron_actions.push_back(&action);
+    }
+  }
+  REQUIRE(kron_actions.size() == 2);
+  for (const auto* action : kron_actions) {
+    REQUIRE(action->method == ReductionMethod::KronPassiveOnly);
+    REQUIRE(action->eliminated_buses ==
+            std::vector<BusRef>{{action->eliminated_buses.front().domain, 2}});
+    REQUIRE_THAT(action->max_fill_ratio, WithinAbs(1.25, 0.0));
+    for (const auto& retained : action->retained_buses) {
+      CHECK(retained.domain == action->eliminated_buses.front().domain);
+    }
+  }
+  CHECK(kron_actions[0]->eliminated_buses.front().domain !=
+        kron_actions[1]->eliminated_buses.front().domain);
+}
+
+TEST_CASE("Reduction planning options generate switch and retain actions",
+          "[graph][audit][planning][options]") {
+  HybridPowerSystem sys = make_simple_system(
+      {make_ac_bus(1, BusType::SLACK), make_ac_bus(2, BusType::PV),
+       make_ac_bus(3, BusType::PQ)},
+      {make_ac_branch(10, 1, 2), make_ac_branch(11, 2, 3)});
+  sys.ac.switches = {make_switch(40, 1, 3, true)};
+  const auto graph = build_power_system_graph(sys);
+
+  GraphReductionOptions preserve;
+  preserve.preserve_all_voltage_constrained_buses = true;
+  const auto retained = classify_reduction_candidates(graph, sys, preserve);
+  const auto retained_plan = make_reduction_plan(graph, retained, preserve);
+  CHECK(std::any_of(retained_plan.actions.begin(), retained_plan.actions.end(),
+                    [](const ReductionAction& action) {
+                      return action.type == ReductionActionType::SwitchContraction &&
+                             action.method == ReductionMethod::SwitchContraction &&
+                             action.eliminated_edge_positions.size() == 1;
+                    }));
+  CHECK(std::any_of(retained_plan.actions.begin(), retained_plan.actions.end(),
+                    [](const ReductionAction& action) {
+                      return action.type == ReductionActionType::Retain &&
+                             action.retained_buses ==
+                                 std::vector<BusRef>{{NodeDomain::AC, 2}};
+                    }));
+
+  GraphReductionOptions allow = preserve;
+  allow.preserve_all_voltage_constrained_buses = false;
+  const auto reducible = classify_reduction_candidates(graph, sys, allow);
+  const auto bus2 = std::find_if(reducible.candidates.begin(),
+                                 reducible.candidates.end(),
+                                 [](const BusCandidate& candidate) {
+                                   return candidate.bus == BusRef{NodeDomain::AC, 2};
+                                 });
+  REQUIRE(bus2 != reducible.candidates.end());
+  CHECK(bus2->type == CandidateType::ZeroInjectionDegree2);
+}
+
+TEST_CASE("Reduction mappings rebuild reverse maps and compose stages",
+          "[graph][audit][mapping]") {
+  ReductionMapping first;
+  first.original_to_reduced_buses = {
+      {{NodeDomain::AC, 1}, {NodeDomain::AC, 1}},
+      {{NodeDomain::AC, 2}, {NodeDomain::AC, 1}},
+      {{NodeDomain::DC, 1}, {NodeDomain::DC, 1}}};
+  first.original_to_reduced_branches = {
+      {{NodeDomain::AC, 10}, {NodeDomain::AC, 20}},
+      {{NodeDomain::AC, 11}, {NodeDomain::AC, 20}}};
+  rebuild_reduction_reverse_maps(first);
+  REQUIRE(first.reduced_to_original_bus_refs.at({NodeDomain::AC, 1}).size() == 2);
+  REQUIRE(first.reduced_to_original_branch_refs.at({NodeDomain::AC, 20}).size() == 2);
+
+  ReductionMapping second;
+  second.original_to_reduced_buses = {
+      {{NodeDomain::AC, 1}, {NodeDomain::AC, 3}},
+      {{NodeDomain::AC, 3}, {NodeDomain::AC, 3}},
+      {{NodeDomain::DC, 1}, {NodeDomain::DC, 1}}};
+  second.original_to_reduced_branches = {
+      {{NodeDomain::AC, 20}, {NodeDomain::AC, 30}}};
+  rebuild_reduction_reverse_maps(second);
+
+  const auto composed = compose_reduction_mappings(first, second);
+  CHECK(composed.original_to_reduced_buses.at({NodeDomain::AC, 2}) ==
+        BusRef{NodeDomain::AC, 3});
+  CHECK(composed.original_to_reduced_buses.at({NodeDomain::DC, 1}) ==
+        BusRef{NodeDomain::DC, 1});
+  CHECK(composed.original_to_reduced_branches.at({NodeDomain::AC, 10}) ==
+        BranchRef{NodeDomain::AC, 30});
+  REQUIRE(composed.reduced_to_original_bus_refs.at({NodeDomain::AC, 3}).size() == 2);
+  REQUIRE(composed.reduced_to_original_branch_refs.at({NodeDomain::AC, 30}).size() == 2);
+}
+
+TEST_CASE("Pendant recovery uses stable non-sequential branch component index",
+          "[graph][audit][pendant][recovery]") {
+  HybridPowerSystem sys = make_simple_system(
+      {make_ac_bus(1, BusType::SLACK),
+       make_ac_bus(2, BusType::PQ, 110.0, 10.0, 5.0)},
+      {make_ac_branch(77, 1, 2, 0.1, 0.2)});
+  const auto graph = build_power_system_graph(sys);
+  GraphReductionOptions options;
+  options.enable_pendant_reduction = true;
+  options.preserve_all_load_buses = false;
+  const auto candidates = classify_reduction_candidates(graph, sys, options);
+  const auto plan = make_reduction_plan(graph, candidates, options);
+  const auto reduced = apply_pendant_reduction(graph, sys, plan, options);
+  REQUIRE(reduced.mapping.pendant_records.size() == 1);
+  CHECK(reduced.mapping.pendant_records.front().source_branch_index == 77);
+  CHECK(reduced.mapping.original_to_reduced_branches.at(
+            {NodeDomain::AC, 77}) == BranchRef{NodeDomain::AC, -1});
+
+  FullNetworkVoltages voltages;
+  voltages.ac_bus_voltage[1] = {1.0, 0.0};
+  RecoveryOptions recovery;
+  recovery.max_pendant_iterations = 1;
+  recover_pendant_buses(voltages, reduced.mapping, sys, recovery);
+  REQUIRE(voltages.ac_bus_voltage.contains(2));
+  CHECK_THAT(voltages.ac_bus_voltage.at(2).real(), WithinAbs(0.98, 1e-12));
+  CHECK_THAT(voltages.ac_bus_voltage.at(2).imag(), WithinAbs(-0.015, 1e-12));
+
+  auto missing_branch = sys;
+  missing_branch.ac.branches.clear();
+  FullNetworkVoltages invalid;
+  invalid.ac_bus_voltage[1] = {1.0, 0.0};
+  CHECK_THROWS_AS(
+      recover_pendant_buses(invalid, reduced.mapping, missing_branch, recovery),
+      std::invalid_argument);
+}
+
+TEST_CASE("Series reduction preserves graph edge-position topology invariant",
+          "[graph][audit][series][topology]") {
+  const auto sys = make_simple_system(
+      {make_ac_bus(1, BusType::SLACK), make_ac_bus(2, BusType::PQ),
+       make_ac_bus(3, BusType::PQ)},
+      {make_ac_branch(100, 1, 2), make_ac_branch(500, 2, 3),
+       make_ac_branch(900, 1, 3)});
+  const auto graph = build_power_system_graph(sys);
+  GraphReductionOptions options;
+  options.preserve_branch_flow_limited_edges = false;
+  const auto plan = make_reduction_plan(
+      graph, classify_reduction_candidates(graph, sys, options), options);
+  const auto reduced = apply_series_reduction(graph, sys, plan, options);
+
+  for (std::size_t position = 0; position < reduced.reduced_graph.edges.size();
+       ++position) {
+    CHECK(reduced.reduced_graph.edges[position].edge_id ==
+          static_cast<int>(position));
+  }
+  const auto report = analyze_topology(reduced.reduced_graph);
+  CHECK(report.cycle_count == 1);
+  CHECK(report.bridge_edge_ids.empty());
+  REQUIRE(report.fundamental_cycles.size() == 1);
+  for (int position : report.fundamental_cycles.front()) {
+    REQUIRE(position >= 0);
+    REQUIRE(position < reduced.reduced_graph.edge_count());
+  }
+}
+
+TEST_CASE("Rich graph represents transformer LCC router and three-phase topology",
+          "[graph][audit][build][rich]") {
+  HybridPowerSystem sys;
+  for (int id = 1; id <= 4; ++id) {
+    sys.ac.buses.push_back(make_ac_bus(
+        id, id == 1 ? BusType::SLACK : BusType::PQ, 20.0));
+  }
+  DCBus dc10;
+  dc10.index = 10;
+  dc10.bus_type = DCBusType::DC_V;
+  DCBus dc11 = dc10;
+  dc11.index = 11;
+  dc11.bus_type = DCBusType::DC_P;
+  sys.dc.buses = {dc10, dc11};
+
+  Transformer3W transformer;
+  transformer.index = 301;
+  transformer.hv_bus = 1;
+  transformer.mv_bus = 2;
+  transformer.lv_bus = 3;
+  sys.ac.transformers_3w = {transformer};
+  LCCConverter lcc;
+  lcc.index = 401;
+  lcc.ac_bus = 1;
+  lcc.dc_bus = 10;
+  sys.lcc_converters = {lcc};
+  EnergyRouter router;
+  router.index = 501;
+  EnergyRouterPort ac_port;
+  ac_port.index = 1;
+  ac_port.bus = 2;
+  ac_port.port_type = ERPortType::AC;
+  EnergyRouterPort dc_port = ac_port;
+  dc_port.index = 2;
+  dc_port.bus = 11;
+  dc_port.port_type = ERPortType::DC;
+  EnergyRouterPort ac_port_2 = ac_port;
+  ac_port_2.index = 3;
+  ac_port_2.bus = 4;
+  router.ports = {ac_port, dc_port, ac_port_2};
+  sys.energy_routers = {router};
+
+  ThreePhaseACSystem phase;
+  for (int id = 1; id <= 3; ++id) {
+    ThreePhaseACBus bus;
+    bus.index = id;
+    bus.bus_type = id == 1 ? BusType::SLACK : BusType::PQ;
+    bus.base_kv = 20.0;
+    phase.buses.push_back(bus);
+  }
+  ThreePhaseACLine line;
+  line.index = 601;
+  line.from_bus = 1;
+  line.to_bus = 2;
+  line.r1_pu = 0.01;
+  line.x1_pu = 0.03;
+  phase.lines = {line};
+  ThreePhaseTransformer phase_transformer;
+  phase_transformer.index = 602;
+  phase_transformer.hv_bus = 2;
+  phase_transformer.lv_bus = 3;
+  phase.transformers = {phase_transformer};
+  sys.three_phase_ac = phase;
+
+  const auto graph = build_power_system_graph(sys);
+  CHECK(std::count_if(graph.edges.begin(), graph.edges.end(), [](const auto& edge) {
+          return edge.category == EdgeCategory::AC_Transformer;
+        }) == 2);
+  CHECK(std::count_if(graph.edges.begin(), graph.edges.end(), [](const auto& edge) {
+          return edge.category == EdgeCategory::LCC_Coupling;
+        }) == 1);
+  CHECK(std::count_if(graph.edges.begin(), graph.edges.end(), [](const auto& edge) {
+          return edge.category == EdgeCategory::EnergyRouter_Coupling;
+        }) == 2);
+  CHECK(graph.nodes[graph.ac_node_idx(2)].has_energy_router);
+  CHECK(graph.nodes[graph.ac_node_idx(2)].has_three_phase_model);
+  CHECK(graph.nodes[graph.dc_node_idx(10)].has_lcc);
+
+  const auto phase_graph = build_three_phase_power_system_graph(phase);
+  REQUIRE(phase_graph.node_count() == 3);
+  REQUIRE(phase_graph.edge_count() == 2);
+  CHECK(phase_graph.edges[0].category == EdgeCategory::ThreePhase_Line);
+  CHECK(phase_graph.edges[1].category == EdgeCategory::ThreePhase_Transformer);
+}
+
+TEST_CASE("Contraction remaps rich terminals and rejects unresolved phase collapse",
+          "[graph][audit][contraction][rich]") {
+  HybridPowerSystem sys;
+  sys.ac.buses = {make_ac_bus(1, BusType::SLACK, 20.0),
+                  make_ac_bus(2, BusType::PQ, 20.0),
+                  make_ac_bus(3, BusType::PQ, 20.0)};
+  sys.ac.switches = {make_switch(10, 1, 2, true)};
+  DCBus dc;
+  dc.index = 10;
+  dc.bus_type = DCBusType::DC_V;
+  sys.dc.buses = {dc};
+  MobileStorage mobile;
+  mobile.index = 20;
+  mobile.bus = 2;
+  mobile.target_bus = 2;
+  sys.mobile_storage = {mobile};
+  VirtualPowerPlant vpp;
+  vpp.index = 21;
+  vpp.pcc_bus = 2;
+  sys.vpps = {vpp};
+  Microgrid microgrid;
+  microgrid.index = 22;
+  microgrid.pcc_bus = 2;
+  microgrid.internal_buses = {2, 3};
+  sys.microgrids = {microgrid};
+  LCCConverter lcc;
+  lcc.index = 23;
+  lcc.ac_bus = 2;
+  lcc.dc_bus = 10;
+  sys.lcc_converters = {lcc};
+  EnergyRouter router;
+  router.index = 24;
+  EnergyRouterPort port;
+  port.index = 1;
+  port.bus = 2;
+  port.port_type = ERPortType::AC;
+  router.ports = {port};
+  sys.energy_routers = {router};
+
+  const auto graph = build_power_system_graph(sys);
+  const auto contracted = contract_zero_impedance_edges(graph, sys, {});
+  const int representative = contracted.ac_bus_to_super.at(2);
+  CHECK(contracted.contracted_system.mobile_storage.front().bus == representative);
+  CHECK(contracted.contracted_system.mobile_storage.front().target_bus == representative);
+  CHECK(contracted.contracted_system.vpps.front().pcc_bus == representative);
+  CHECK(contracted.contracted_system.microgrids.front().pcc_bus == representative);
+  CHECK(contracted.contracted_system.microgrids.front().internal_buses.front() ==
+        representative);
+  CHECK(contracted.contracted_system.lcc_converters.front().ac_bus == representative);
+  CHECK(contracted.contracted_system.energy_routers.front().ports.front().bus ==
+        representative);
+  CHECK(contracted.mapping.original_to_reduced_buses.at({NodeDomain::AC, 2}) ==
+        BusRef{NodeDomain::AC, representative});
+
+  ThreePhaseACSystem phase;
+  ThreePhaseACBus phase_bus;
+  phase_bus.index = 2;
+  phase.buses = {phase_bus};
+  sys.three_phase_ac = phase;
+  const auto rejected = contract_zero_impedance_edges(
+      build_power_system_graph(sys), sys, {});
+  CHECK(rejected.ac_bus_to_super.at(2) == 2);
+  CHECK(std::any_of(rejected.diagnostics.begin(), rejected.diagnostics.end(),
+                    [](const Diagnostic& diagnostic) {
+                      return diagnostic.code == DiagCode::Error;
+                    }));
 }

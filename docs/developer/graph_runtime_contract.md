@@ -23,7 +23,7 @@ The umbrella header is `hacdcpf/graph/graph.hpp`. The main stages are:
 |---|---|
 | `GraphNode::bus_id` | Stable source-model bus `.index`; qualify it with `NodeDomain`. |
 | `GraphEdge::comp_index` | Stable source component `.index`. |
-| `GraphEdge::edge_id` | Graph-internal edge position, normally `0..edges.size()-1`. |
+| `GraphEdge::edge_id` | Graph-internal edge position, always `0..edges.size()-1`. |
 | `from_node`, `to_node` | Positions in `PowerSystemGraph::nodes`. |
 | adjacency `edge_idx` | Position in `PowerSystemGraph::edges`. |
 | `TopologyReport::bridge_edge_ids` | Positions in `graph.edges[]`. |
@@ -40,15 +40,18 @@ ID and must not drive hybrid calculations.
 ## Graph semantics
 
 Nodes represent in-service AC and DC buses. Edges represent AC/DC branches,
-transformers, switches, breakers, VSC virtual couplings, and DC/DC virtual
-couplings. Electrical quantities stored on graph edges use per-unit impedance,
-degrees for phase shift, kV for voltage bases, and MVA for ratings.
+two/three-winding transformer connectivity, switches, breakers, and VSC,
+LCC, DC/DC, or EnergyRouter virtual couplings. Electrical quantities stored on
+ordinary line edges use per-unit impedance, degrees for phase shift, kV for
+voltage bases, and MVA for ratings. Transformer3W uses an HV--MV/HV--LV
+connectivity tree; LCC and EnergyRouter edges are connectivity-only and do not
+invent electrical equivalents. `build_three_phase_power_system_graph()` owns a
+separate phase-resolved graph so it is not overlaid on the balanced graph.
 
-The projection is intentionally incomplete: Transformer3W, LCC,
-EnergyRouter, and the three-phase model do not create graph edges, and several
-detailed load/generation/storage families do not set node-retention flags.
-Transformer2W edges currently omit electrical parameters. Consumers must not
-infer full rich-model coverage from graph connectivity alone.
+Rich load/generation/storage/converter terminals set retention flags.
+Transformer2W edges still omit electrical parameters, and newly introduced
+component families must add flags/edges or fail closed before reduction.
+Consumers must not infer full electrical-model coverage from graph connectivity.
 
 Open switches and breakers may remain as out-of-service edges so latent
 topology is inspectable. Connectivity, cycles, bridges, and radiality use only
@@ -66,9 +69,11 @@ isolated loads, invalid merges, and reduction failures.
 | Dense Kron reduction | Linear Schur complement; optional known current injection. | The zero-injection form requires `I_beta=0`; fill and singular-pivot guards can reject it. Constant-power interiors are an approximation. |
 | Sparse Kron reduction | Reduced sparse matrix plus reverse recovery tape. | Candidates violating pivot, front, or fill caps remain retained. `valid()` and `error` carry status. |
 
-`ReductionMapping` records authored-to-reduced buses and branches and the
-operation-specific recovery tape. Hybrid callers must use the AC/DC qualified
-bus maps. `FullNetworkVoltages::ac_bus_voltage` and `dc_bus_voltage` are the
+`ReductionMapping` records authoritative `BusRef`/`BranchRef` forward and
+reverse maps plus operation-specific recovery records.
+`compose_reduction_mappings()` composes multi-stage identity certificates;
+hybrid callers must use these domain-qualified maps. Legacy integer maps are
+AC-preferred compatibility views. `FullNetworkVoltages::ac_bus_voltage` and `dc_bus_voltage` are the
 authoritative outputs; its flat `bus_voltage` map is AC-preferred compatibility
 output when IDs collide. Complex voltage is per unit; angle accessors return
 degrees.
@@ -77,16 +82,12 @@ No graph reduction by itself proves that a nonlinear solver result is
 equivalent. Use the registered round-trip tests and projection certificate for
 that claim, and retain approximation/fill diagnostics in user-facing results.
 
-The current mapping is not a complete multi-stage certificate. Reverse bus
-maps remain identity after series/pendant operations, pendant branch maps are
-empty, and `ReductionMapping::switch_records`/`kron_records` are not populated.
-There is no public mapping-composition or unified reduction-pipeline API.
-
-`make_reduction_plan()` is not fully domain safe: candidates carry a domain,
-but its conflict sets and batch Kron list use bare integer bus IDs. Do not use
-one plan as an AC/DC same-ID correctness certificate. Series-created edges also
-break the initial convenience relation `GraphEdge::edge_id == edges[] position`;
-adjacency, bridge, and cycle values remain vector positions.
+`make_reduction_plan()` uses `BusRef` for candidates, conflicts, and Kron
+batches, so same-number AC/DC buses remain independent. Action edge references
+are declared `graph.edges[]` positions. Series-created edges preserve
+`GraphEdge::edge_id == edges[] position`; stable source identity is always
+`comp_index`/`BranchRef`. There is still no unified public C++ API that executes
+all reductions, solves, and recovers in one call.
 
 ## Production HTTP composition
 
@@ -101,9 +102,11 @@ adjacency, bridge, and cycle values remain vector positions.
 - The endpoint only identifies Kron candidates; it does not apply Kron to the
   exported system. Sparse Kron is separately integrated into graph-reduced
   three-phase hybrid OPF.
-- `reduced_system` is compacted by filtering dangling objects. This makes the
-  JSON reloadable but can delete unsupported rich assets instead of preserving
-  their semantics. Treat it as a topology-reduction view until AUD-031 closes.
+- `reduced_system` removes inactive audit ghosts, but rich endpoints are first
+  remapped and then validated. Dangling LCC/EnergyRouter/MobileStorage data is
+  rejected rather than silently deleted. Transformer3W, LCC, EnergyRouter, and
+  three-phase preservation is covered by export/reload E2E; their virtual graph
+  edges remain connectivity-only.
 
 The complete source-equivalent contract, HTTP fields, formulas, and audit are
 in the [graph module manual](../modules/graph/graph_manual.tex).
@@ -116,10 +119,12 @@ in the [graph module manual](../modules/graph/graph_manual.tex).
   the constant-power approximation boundary.
 - `test_graph_roundtrip`: PF/OPF round trips, stable component IDs, switches,
   breakers, AC/DC collisions, and real feeder cases.
-- `test_distribution_pipeline`: graph information through projection and
-  downstream analyses.
+- `test_topology_crossval`: bridge, cycle, and cut-vertex checks against
+  independent graph oracles.
+- `test_validation`: isolated-load topology status reaches validation.
+- `gui_api_e2e`: rich reduction, compact export, and reload preservation.
 
-Existing `macos-release` binaries passed 56 direct graph cases / 467
-assertions. Including `test_distribution_pipeline` and
-`test_three_phase_hybrid_opf`, the focused total is 69 cases / 797 assertions.
-This is not a clean rebuild or full CTest run.
+The rebuilt `macos-release` graph binaries pass 76 cases / 629 assertions;
+`test_validation` adds 38/180 and GUI E2E passes 80 checks. A selected rebuilt
+ASan/UBSan run passes 42 tests with one conditional skip and no report. This is
+a focused validation set, not a full CTest run or a full-network scale study.

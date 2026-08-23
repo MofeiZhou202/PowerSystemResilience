@@ -15,10 +15,10 @@
 - `chapters/source_equivalent_algorithms.tex`：稠密/稀疏 Kron 源码等价算法。
 - `chapters/recovery_mapping.tex`：映射索引空间与四类电压恢复。
 - `chapters/runtime_http_contract.tex`：生产拓扑/网络化简 HTTP 与 GUI 契约。
-- `chapters/verification_audit.tex`：测试矩阵、系统审计、开放问题和使用判据。
+- `chapters/verification_audit.tex`：测试矩阵、审计关闭证据和使用判据。
 - `chapters/numerical_cross_validation.tex`：Kron、收缩、串联及 PF/OPF round-trip 的数值结果、误差门槛与复现条件。
 
-公共头位于 `include/hacdcpf/graph/`，八个实现文件位于 `src/graph/`；生产路由位于
+公共头位于 `include/hacdcpf/graph/`，九个实现文件位于 `src/graph/`；生产路由位于
 `tests/run_gui_server.cpp`。较短的 Markdown 契约为
 [graph_runtime_contract.md](../../developer/graph_runtime_contract.md)，本手册是完整实现参考。
 
@@ -32,5 +32,5 @@ xelatex -interaction=nonstopmode graph_manual.tex
 ```
 
 PDF、`.aux`、`.log`、`.toc`、`.xdv` 与 SyncTeX 文件是构建产物，不作为规范源提交。修改图语义、
-映射、默认值或近似边界后，必须同步核对公共头、八个实现文件、生产路由及三个直接测试目标。
+映射、默认值或近似边界后，必须同步核对公共头、九个实现文件、生产路由及四个直接 graph 测试目标。
 数值结果章节还必须注明构建提交、依赖提交、测试命令、单位、误差门槛和未覆盖范围。

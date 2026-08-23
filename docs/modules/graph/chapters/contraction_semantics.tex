@@ -17,7 +17,7 @@
 \begin{equation}
  |V_{B,i}-V_{B,j}|>\epsilon_V\max(V_{B,i},V_{B,j}),
 \end{equation}
-即相对容差；任一端 base\_kv 不正时跳过该检查。选项没有输入验证。
+即相对容差；任一端 base\_kv 不正时跳过该检查。负阈值在入口显式拒绝并返回身份结果。
 
 \subsection{可收缩边}
 
@@ -52,7 +52,7 @@ VSC 不是可收缩边，因此 DSU 分量正常情况下不会跨 AC/DC 域。
   \item 权威 \fld{ac\_bus\_to\_super}/\fld{dc\_bus\_to\_super}；
   \item 权威反向 \fld{ac\_super\_to\_buses}/\fld{dc\_super\_to\_buses}；
   \item 兼容 \fld{bus\_to\_super}/\fld{super\_to\_buses}，同号 AC/DC 会覆盖；
-  \item 非平凡组写入 \fld{switch\_records}，记录本身没有 domain 字段。
+  \item 非平凡组写入带 \fld{domain} 的 \fld{switch\_records}，并同步进入 ReductionMapping。
 \end{itemize}
 
 \subsection{contracted graph 的构造}
@@ -71,14 +71,15 @@ $P_d$、客户数求和，is\_load 做 OR，选择最高 DCBusType。详细 Load
   \item AC：generator/load/shunt/storage/external grid/static/renewable/PV/flexible/asymmetric load、
         charging station、motor、branch、2W/3W transformer、switch、breaker；
   \item DC：branch/load/storage/static generator/DC static generator/PV array/DCDC/DC breaker；
-  \item hybrid：VSC 的 AC/DC 两端分别走域映射。
+  \item hybrid：VSC/LCC、EnergyRouter ports、MobileStorage 当前/目标母线、VPP PCC、
+        Microgrid PCC/internal buses 分别走域映射；
+  \item 控制/滤波：regulator monitored bus、AC/DC harmonic filter、DC capacitor/reactor。
 \end{itemize}
 随后删除非代表母线及收缩后形成的 AC/DC branch、switch、breaker、DCDC 自环。
 
-当前未重映射 \texttt{dc\_storage}、LCC、EnergyRouter ports、MobileStorage、VPP PCC、Microgrid
-PCC/internal buses 和 RegulatorControl.monitored\_bus。HTTP 导出层会过滤悬空对象，但过滤不是
-语义保持：某资产可能被删除而非迁移到代表母线。因此含这些资产的系统不能把收缩结果宣称为完整
-rich-model 等价。
+若收缩会把 phase-resolved bus、Transformer2W/3W 的不同绕组端、或 DCDC 的两端压成同一母线，
+当前没有相应物理聚合规则，入口返回身份系统并给 Error diagnostic。该 fail-closed 规则防止“删除
+自环资产”伪装成语义保持。
 
 \subsection{精确性边界}
 

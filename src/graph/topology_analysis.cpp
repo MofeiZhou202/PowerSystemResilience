@@ -336,6 +336,30 @@ TopologyReport analyze_topology(const PowerSystemGraph& g) {
     else                              ++rep.n_dc_islands;
   }
 
+  // A load with no in-service neighbour forms a singleton island. Record this
+  // before reference checks so the status and diagnostic use one precedence:
+  // IsolatedLoad is more specific than NoSlack/NoDCVoltageRef.
+  std::vector<bool> isolated_load_island(
+      static_cast<std::size_t>(n_components), false);
+  for (int ni = 0; ni < g.node_count(); ++ni) {
+    if (!g.nodes[ni].in_service || !g.nodes[ni].has_load) continue;
+    bool has_neighbour = false;
+    for (auto [edge_pos, neighbor] : g.adj[ni]) {
+      if (g.edges[edge_pos].in_service && g.nodes[neighbor].in_service) {
+        has_neighbour = true;
+        break;
+      }
+    }
+    if (has_neighbour || comp[ni] < 0) continue;
+    isolated_load_island[static_cast<std::size_t>(comp[ni])] = true;
+    Diagnostic diagnostic;
+    diagnostic.code = DiagCode::GraphIsolatedLoad;
+    diagnostic.message = "Bus " + std::to_string(g.nodes[ni].bus_id) +
+                         " has load but no in-service connection.";
+    diagnostic.related_buses = {g.nodes[ni].bus_id};
+    rep.diagnostics.push_back(std::move(diagnostic));
+  }
+
   // ── Island validity ───────────────────────────────────────────────
   rep.all_islands_valid = true;
   for (auto& isl : rep.islands) {
@@ -343,7 +367,10 @@ TopologyReport analyze_topology(const PowerSystemGraph& g) {
       isl.status = IslandStatus::Empty;
       continue;
     }
-    if (isl.domain == NodeDomain::AC && !isl.has_ac_slack) {
+    if (isolated_load_island[static_cast<std::size_t>(isl.island_id)]) {
+      isl.status = IslandStatus::IsolatedLoad;
+      rep.all_islands_valid = false;
+    } else if (isl.domain == NodeDomain::AC && !isl.has_ac_slack) {
       isl.status = IslandStatus::NoSlack;
       rep.all_islands_valid = false;
       Diagnostic d;
@@ -360,28 +387,6 @@ TopologyReport analyze_topology(const PowerSystemGraph& g) {
       d.message = "DC island " + std::to_string(isl.island_id) +
                   " has no voltage-reference (DC_V) bus.";
       d.related_buses = isl.bus_ids;
-      rep.diagnostics.push_back(d);
-    }
-  }
-
-  // ── Isolated load nodes ───────────────────────────────────────────
-  // A bus with load but no neighbour through in-service edges
-  for (int ni = 0; ni < g.node_count(); ++ni) {
-    if (!g.nodes[ni].in_service) continue;
-    if (!g.nodes[ni].has_load) continue;
-    bool has_neighbour = false;
-    for (auto [eid, v] : g.adj[ni]) {
-      if (g.edges[eid].in_service && g.nodes[v].in_service) {
-        has_neighbour = true; break;
-      }
-    }
-    if (!has_neighbour) {
-      rep.all_islands_valid = false;
-      Diagnostic d;
-      d.code    = DiagCode::GraphIsolatedLoad;
-      d.message = "Bus " + std::to_string(g.nodes[ni].bus_id) +
-                  " has load but no in-service connection.";
-      d.related_buses = {g.nodes[ni].bus_id};
       rep.diagnostics.push_back(d);
     }
   }

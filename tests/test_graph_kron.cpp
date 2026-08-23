@@ -24,6 +24,7 @@
 #include <Eigen/Sparse>
 
 #include "hacdcpf/graph/kron_reduction.hpp"
+#include "hacdcpf/graph/result_recovery.hpp"
 #include "hacdcpf/graph/sparse_kron_reduction.hpp"
 
 using namespace hacdcpf::graph;
@@ -332,6 +333,65 @@ TEST_CASE("Kron reduction: extended with non-zero injection", "[graph][kron]") {
   // Retained voltages must match full solution
   REQUIRE_THAT(std::abs(V_alpha(0) - V_full(0)), WithinAbs(0.0, 1e-10));
   REQUIRE_THAT(std::abs(V_alpha(1) - V_full(2)), WithinAbs(0.0, 1e-10));
+
+  const Eigen::VectorXcd V_beta =
+      recover_eliminated_voltages(res.kron_data, V_alpha);
+  REQUIRE(V_beta.size() == 1);
+  REQUIRE_THAT(std::abs(V_beta(0) - V_full(1)), WithinAbs(0.0, 1e-12));
+
+  FullNetworkVoltages legacy_voltages;
+  legacy_voltages.bus_voltage[10] = V_alpha(0);
+  legacy_voltages.bus_voltage[30] = V_alpha(1);
+  recover_kron_eliminated_buses(
+      legacy_voltages, res.kron_data, {10, 30}, {20});
+  REQUIRE_THAT(std::abs(legacy_voltages.bus_voltage.at(20) - V_full(1)),
+               WithinAbs(0.0, 1e-12));
+  REQUIRE_THROWS_AS(
+      recover_kron_eliminated_buses(
+          legacy_voltages, res.kron_data, std::vector<int>{10},
+          std::vector<int>{20}),
+      std::invalid_argument);
+
+  Eigen::VectorXcd V_reassembled(3);
+  V_reassembled << V_alpha(0), V_beta(0), V_alpha(1);
+  const double partition_residual =
+      std::abs((Y * V_reassembled - I_full)(1));
+  REQUIRE(partition_residual <= 1e-12);
+}
+
+TEST_CASE("Kron plan executor carries domain-qualified certificate and fill guard",
+          "[graph][kron][audit][mapping]") {
+  Eigen::MatrixXcd Y(3, 3);
+  Y << cplx{2.0, 0.0}, cplx{-1.0, 0.0}, cplx{0.0, 0.0},
+       cplx{-1.0, 0.0}, cplx{2.0, 0.0}, cplx{-1.0, 0.0},
+       cplx{0.0, 0.0}, cplx{-1.0, 0.0}, cplx{2.0, 0.0};
+  const auto sparse = dense_to_sparse(Y);
+  const std::vector<BusRef> order = {
+      {NodeDomain::DC, 1}, {NodeDomain::DC, 2}, {NodeDomain::DC, 3}};
+  ReductionAction action;
+  action.type = ReductionActionType::KronEliminate;
+  action.method = ReductionMethod::KronPassiveOnly;
+  action.retained_buses = {order[0], order[2]};
+  action.eliminated_buses = {order[1]};
+  action.max_fill_ratio = 10.0;
+
+  const auto result = apply_kron_reduction(sparse, order, action);
+  REQUIRE(result.kron_data.valid);
+  REQUIRE(result.mapping.kron_records.size() == 1);
+  CHECK(result.mapping.kron_records.front().eliminated_buses ==
+        std::vector<BusRef>{{NodeDomain::DC, 2}});
+  CHECK(result.mapping.original_to_reduced_buses.at({NodeDomain::DC, 2}) ==
+        BusRef{NodeDomain::DC, -1});
+  CHECK_FALSE(result.mapping.reduced_to_original_bus_refs.contains(
+      {NodeDomain::DC, -1}));
+
+  action.max_fill_ratio = 0.0;
+  const auto rejected = apply_kron_reduction(sparse, order, action);
+  CHECK_FALSE(rejected.kron_data.valid);
+  CHECK(std::any_of(rejected.diagnostics.begin(), rejected.diagnostics.end(),
+                    [](const Diagnostic& diagnostic) {
+                      return diagnostic.code == DiagCode::KronFillInTooLarge;
+                    }));
 }
 
 // ─────────────────────────────────────────────────────────────────────

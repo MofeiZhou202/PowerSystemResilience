@@ -45,6 +45,8 @@ struct ContractionResult {
   PowerSystemGraph contracted_graph;
   /// System model after contraction (loads/gens/shunts aggregated)
   HybridPowerSystem contracted_system;
+  /// Domain-qualified, composable bus certificate for this stage.
+  ReductionMapping mapping;
 
   // ── Domain-qualified maps (correct in all hybrid systems) ──────────
   /// AC bus_id → AC super-bus_id.  Use this for AC component remapping.

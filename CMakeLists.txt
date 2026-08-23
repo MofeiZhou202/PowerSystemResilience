@@ -497,6 +497,7 @@ set(HACDCPF_SOURCES
   src/graph/topology_analysis.cpp
   src/graph/switch_contraction.cpp
   src/graph/reduction_plan.cpp
+  src/graph/reduction_mapping.cpp
   src/graph/series_reduction.cpp
   src/graph/kron_reduction.cpp
   src/graph/sparse_kron_reduction.cpp

@@ -282,6 +282,76 @@ def maybe_run_opendss_ieee13_smoke(c: Client, chk: Checker) -> None:
     )
 
 
+def run_rich_reduction_roundtrip(c: Client, chk: Checker) -> None:
+    print("3b. rich graph reduction export + reload")
+    fixture = REPO_ROOT / "tests" / "fixtures" / "td_coordination_all_components.json"
+    model = json.loads(fixture.read_text(encoding="utf-8"))
+    model["energy_routers"][0]["in_service"] = True
+    model["lcc_converters"] = [{
+        "index": 901,
+        "name": "audit_lcc",
+        "ac_bus": 5,
+        "dc_bus": 1,
+        "in_service": True,
+    }]
+    st, loaded = c.post_json(
+        "/api/session/load_json_string",
+        {"json_string": json.dumps(model)},
+    )
+    chk.check(
+        st == 200 and (loaded.get("_has_three_phase_ac") is True or
+                       len(loaded.get("tp_buses", [])) > 0),
+        "rich graph fixture loads with its phase-resolved model",
+    )
+
+    st, reduction = c.post_json(
+        "/api/session/network_reduction",
+        {
+            "enable_switch_contraction": True,
+            "enable_series_reduction": True,
+            "enable_pendant_reduction": False,
+            "enable_kron_reduction": True,
+            "contract_zero_impedance_lines": False,
+        },
+    )
+    reduced = reduction.get("reduced_system") or {}
+    before_counts = {
+        "transformers_3w": len(model.get("ac", {}).get("transformers_3w", [])),
+        "lcc_converters": len(model.get("lcc_converters", [])),
+        "energy_routers": len(model.get("energy_routers", [])),
+        "phase_buses": len(model.get("three_phase_ac", {}).get("buses", [])),
+    }
+    after_counts = {
+        "transformers_3w": len(reduced.get("ac", {}).get("transformers_3w", [])),
+        "lcc_converters": len(reduced.get("lcc_converters", [])),
+        "energy_routers": len(reduced.get("energy_routers", [])),
+        "phase_buses": len(reduced.get("three_phase_ac", {}).get("buses", [])),
+    }
+    chk.check(
+        st == 200 and reduction.get("reduced_system_schema") == "hacdcpf_system_json_v1" and
+        after_counts == before_counts,
+        f"reduction preserves rich asset counts={after_counts}",
+    )
+
+    st, reloaded = c.post_json(
+        "/api/session/load_json_string",
+        {"json_string": json.dumps(reduced)},
+    )
+    export_status, exported = c.post_json("/api/session/export_json")
+    exported_model = json.loads(exported.get("json_string", "{}"))
+    reload_counts = {
+        "transformers_3w": len(exported_model.get("ac", {}).get("transformers_3w", [])),
+        "lcc_converters": len(exported_model.get("lcc_converters", [])),
+        "energy_routers": len(exported_model.get("energy_routers", [])),
+        "phase_buses": len(exported_model.get("three_phase_ac", {}).get("buses", [])),
+    }
+    chk.check(
+        st == 200 and export_status == 200 and not reloaded.get("error") and
+        reload_counts == before_counts,
+        f"reduced rich system reload/export preserves asset counts={reload_counts}",
+    )
+
+
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--server")
@@ -1514,6 +1584,7 @@ def main() -> int:
                 f"(status={invalid_status}, error={invalid_sc.get('error', '')!r})",
             )
 
+        run_rich_reduction_roundtrip(c, chk)
         maybe_run_opendss_ieee13_smoke(c, chk)
 
     finally:

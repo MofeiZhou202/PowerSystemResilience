@@ -293,6 +293,23 @@ TEST_CASE("validate: dangling branch endpoint produces Error", "[validation][fau
     CHECK(r.has_errors());
 }
 
+TEST_CASE("validation reports graph-classified isolated load islands",
+          "[validation][graph][isolated-load]") {
+    auto sys = make_valid_2bus();
+    sys.ac.branches.clear();
+    const auto report = val::validate(sys);
+    const auto issue = std::find_if(
+        report.issues.begin(), report.issues.end(), [](const auto& candidate) {
+            return candidate.component_type == "ACBus" &&
+                   candidate.component_id == "2" &&
+                   candidate.field == "connectivity" &&
+                   candidate.message.find("isolated load island") !=
+                       std::string::npos;
+        });
+    REQUIRE(issue != report.issues.end());
+    CHECK(issue->severity == Severity::Warning);
+}
+
 TEST_CASE("validate: inverted voltage limits produce Error or Warning", "[validation][fault][limits]") {
     auto sys = make_inverted_vlimits();
     auto r = val::validate(sys);

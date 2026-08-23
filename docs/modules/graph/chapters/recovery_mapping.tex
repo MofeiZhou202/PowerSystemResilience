@@ -13,21 +13,24 @@
 字段 & 设计含义 & 当前赋值覆盖\\
 \midrule
 \endhead
-\fld{original\_to\_reduced\_bus} & 裸 bus ID 正向 & series/pendant；同号不安全\\
-\fld{ac/dc\_original\_to\_reduced\_bus} & 域限定正向 & series/pendant 正确更新\\
-\fld{reduced\_to\_original\_buses} & 裸反向成员 & 只初始化身份，消去后不合并\\
-\fld{ac/dc\_reduced\_to\_original\_buses} & 域限定反向成员 & 只初始化身份，消去后不合并\\
-\fld{original\_to\_reduced\_branch} & graph edge ID 正向 & series 初始化/更新；pendant 为空\\
-\fld{reduced\_to\_original\_branches} & graph edge ID 反向 & series 更新；pendant 为空\\
-\fld{switch\_records} & 收缩记录 & ReductionMapping 中不填；记录在 ContractionResult\\
+\fld{original\_to\_reduced\_buses} & \texttt{BusRef} 正向 & 权威；所有阶段、同号安全\\
+\fld{reduced\_to\_original\_bus\_refs} & \texttt{BusRef} 反向成员 & 由权威正向表重建\\
+\fld{ac/dc\_original\_to\_reduced\_bus} & 分域整数兼容视图 & 由权威表派生\\
+裸 bus 正/反向表 & 裸 bus ID 兼容视图 & AC-preferred，同号不安全\\
+\fld{original\_to\_reduced\_branches} & \texttt{BranchRef} 正向 & 权威；invalid target 表示无替代删除\\
+\fld{reduced\_to\_original\_branch\_refs} & \texttt{BranchRef} 反向 & 由权威正向表重建\\
+裸 branch 正/反向表 & 裸稳定 component ID 兼容视图 & AC-preferred，同号不安全\\
+\fld{switch\_records} & 收缩记录 & contraction mapping 填\\
 \fld{series\_records} & 串联恢复带 & series 填\\
 \fld{pendant\_records} & 悬垂恢复带 & pendant 填\\
-\fld{kron\_records} & Kron bus 集 & 当前无赋值路径\\
+\fld{kron\_records} & 域限定 Kron bus 集 & bus-order overload 填\\
 \bottomrule
 \end{longtable}
 
-因此该结构当前不是“所有策略统一且双向完整”的映射。可靠恢复依赖 operation-specific records；
-多阶段调用方必须保存每阶段 result，不能只保留最后一份 flat maps。
+\srcpath{make\_identity\_reduction\_mapping} 建立身份表，set/rebuild API 维护正反向一致性；
+\srcpath{compose\_reduction\_mappings} 把 original$\to$intermediate 与
+intermediate$\to$final 复合，并串接 operation records。可靠恢复仍依赖 records 和原系统，裸整数
+兼容表不构成混合系统权威证书。
 
 \subsection{FullNetworkVoltages}
 
@@ -51,15 +54,16 @@ ac+flat；DC 从 dc map、再从 flat 找，并写 dc，只有同 ID 未被 AC �
 I_{ik}&=\begin{cases}(V_i-V_k)/Z_{ik},&|Z_{ik}|>10^{-15},\\0,&\text{否则},\end{cases}\\
 V_j&=V_i-Z_{ij}I_{ik}.
 \end{align}
-缺任一端点电压则静默跳过。找不到原 branch 时 $Z_{ij}=0$，不返回 diagnostic。DC 结果写 dc map，
+缺任一端点电压则跳过。找不到 record 指定的源 branch component index 时抛
+\texttt{invalid\_argument}。DC 结果写 dc map，
 但当前 series DC 分支不写 flat compatibility map；AC 写 ac+flat。
 
 \subsection{稠密 Kron bus-ID 包装恢复}
 
-\srcpath{recover\_kron\_eliminated\_buses} 接收 bus ID vectors，却只从 flat bus\_voltage 构造
-$V_\alpha$；缺键静默使用 $1+0j$。结果也只写 flat map，没有 domain 参数。因此此包装只适合纯
-AC 或数值不重叠的单域系统；混合调用应直接使用 index-space
-\srcpath{recover\_eliminated\_voltages} 后自行按域散射。invalid KronData 静默返回。
+legacy overload 接收裸 bus ID vectors，只适合纯 AC 或数值不重叠的单域系统。推荐 overload 接收
+\texttt{BusRef} vectors，从相应 AC/DC map 读取保留电压并按域散射恢复值；缺保留电压或尺寸不匹配
+抛 \texttt{invalid\_argument}。两者都通过 \texttt{KronData} 中保存的
+$Y_{\beta\beta}^{-1}I_\beta$ 支持含常电流注入恢复；invalid KronData 不写结果。
 
 \subsection{悬垂恢复}
 
@@ -74,17 +78,19 @@ AC 或数值不重叠的单域系统；混合调用应直接使用 index-space
 V_j^{(t+1)}=V_i-Z_{ij}\frac{S_j^*}{(V_j^{(t)})^*}.
 \end{equation}
 $|V_j|<10^{-12}$ 时提前停止；达到 tolerance 或迭代上限都写最终值，没有 converged/iterations/residual
-输出。负迭代数导致循环不执行并写 $V_j=V_i$，选项不校验。
+输出。负迭代数或负 tolerance 在入口抛 \texttt{invalid\_argument}。
 
-恢复按 record.branch\_id 去原 branch component index 表查 $Z$，但 reducer 当前记录 graph edge ID；
-非顺序 component index 时可能查找失败。该问题不会影响 folded demand，却会使恢复电压错误。
+恢复按 \fld{source\_branch\_index} 去同域原 branch component index 表查 $Z$；reducer 在动作执行时
+从 graph edge 的 \fld{comp\_index} 写入这一稳定身份。非顺序 component index 已由数值回归覆盖，
+查找失败显式拒绝。
 
 \subsection{恢复顺序与复合}
 
 若执行顺序为 contraction $\to$ series $\to$ pendant $\to$ Kron，理论恢复顺序必须反向：Kron、
-pendant、series、contraction。当前库没有统一 tape，也没有 dependency ordering；records 保持 action
-执行顺序，而 series 多节点恢复不显式逆序。现有 plan 避免相邻 chain 同批消去，降低依赖，但调用方
-自行构造/多轮降阶时必须逐阶段逆序保存和恢复。
+pendant、series、contraction。当前库没有自动 recovery pipeline 或 dependency ordering；records
+保持 action 执行顺序，而 series 多节点恢复不显式逆序。现有 plan 避免相邻 chain 同批消去，降低
+依赖。调用方可复合 mapping 形成统一身份归因，但仍必须保存每阶段所需的 KronData/原系统并按阶段
+逆序恢复。
 
 \subsection{没有支路潮流恢复 API}
 

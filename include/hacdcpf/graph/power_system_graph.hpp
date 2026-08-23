@@ -9,6 +9,8 @@
 /// This is the entry point for the graph analysis & reduction pipeline:
 ///   HybridPowerSystem → PowerSystemGraph → topology/reduction modules.
 
+#include <cstddef>
+#include <functional>
 #include <string>
 #include <unordered_map>
 #include <vector>
@@ -24,6 +26,43 @@ namespace hacdcpf::graph {
 
 enum class NodeDomain { AC, DC };
 
+struct BusRef {
+  NodeDomain domain{NodeDomain::AC};
+  int bus_id{-1};
+
+  [[nodiscard]] bool valid() const noexcept { return bus_id >= 0; }
+  friend bool operator==(const BusRef&, const BusRef&) = default;
+  friend bool operator<(const BusRef& lhs, const BusRef& rhs) noexcept {
+    if (lhs.domain != rhs.domain) return lhs.domain < rhs.domain;
+    return lhs.bus_id < rhs.bus_id;
+  }
+};
+
+struct BusRefHash {
+  std::size_t operator()(const BusRef& ref) const noexcept {
+    const auto domain = static_cast<std::size_t>(ref.domain);
+    const auto id = std::hash<int>{}(ref.bus_id);
+    return id ^ (domain + 0x9e3779b9U + (id << 6U) + (id >> 2U));
+  }
+};
+
+/// Stable source-branch identity, never a graph.edges[] position.
+struct BranchRef {
+  NodeDomain domain{NodeDomain::AC};
+  int component_index{-1};
+
+  [[nodiscard]] bool valid() const noexcept { return component_index >= 0; }
+  friend bool operator==(const BranchRef&, const BranchRef&) = default;
+};
+
+struct BranchRefHash {
+  std::size_t operator()(const BranchRef& ref) const noexcept {
+    const auto domain = static_cast<std::size_t>(ref.domain);
+    const auto id = std::hash<int>{}(ref.component_index);
+    return id ^ (domain + 0x9e3779b9U + (id << 6U) + (id >> 2U));
+  }
+};
+
 // ═══════════════════════════════════════════════════════════════════════
 // Edge category
 // ═══════════════════════════════════════════════════════════════════════
@@ -36,7 +75,11 @@ enum class EdgeCategory {
   DC_Line,         ///< DC branch
   DC_Switch,       ///< DC circuit breaker
   VSC_Coupling,    ///< VSC converter AC↔DC link (virtual edge)
+  LCC_Coupling,    ///< LCC converter AC↔DC link (virtual edge)
   DCDC_Coupling,   ///< DCDC converter DC↔DC link (virtual edge)
+  EnergyRouter_Coupling, ///< Multi-port energy-router connectivity edge
+  ThreePhase_Line,       ///< Line in an independent phase graph
+  ThreePhase_Transformer,///< Transformer in an independent phase graph
 };
 
 // ═══════════════════════════════════════════════════════════════════════
@@ -62,6 +105,9 @@ struct GraphNode {
   bool has_vsc_ac{false};      ///< AC side of a VSC
   bool has_vsc_dc{false};      ///< DC side of a VSC
   bool has_dcdc{false};        ///< Terminal of a DCDC converter
+  bool has_lcc{false};         ///< Terminal of an LCC converter
+  bool has_energy_router{false}; ///< Terminal of a multi-port energy router
+  bool has_three_phase_model{false}; ///< Bus participates in the phase model
   bool has_controllable{false};///< Any tap/voltage-control device
 
   /// Convenience: true if slack / external grid
@@ -79,10 +125,9 @@ struct GraphNode {
 // ═══════════════════════════════════════════════════════════════════════
 
 struct GraphEdge {
-  int edge_id{0};         ///< Unique positional ID within the graph (0 … E-1).
-                          ///  Used for graph-internal lookups and as the branch
-                          ///  key in ReductionMapping.  NOT the source model's
-                          ///  component index — use comp_index for that.
+  int edge_id{0};         ///< Graph position invariant: equals edges[] index.
+                          ///  It is never persisted and never used as a source
+                          ///  component identity; use comp_index for that.
   int comp_index{0};      ///< Original component .index in the source model
                           ///  (ACBranch/DCBranch/Switch/CircuitBreaker/…).
                           ///  Reducers disable the right model component by
@@ -174,6 +219,13 @@ struct PowerSystemGraph {
 ///                          flagged is_zero_impedance (default 1e-8 pu).
 PowerSystemGraph build_power_system_graph(
     const HybridPowerSystem& system,
+    double zero_impedance_threshold = 1e-8);
+
+/// Build an independent topology graph for a ThreePhaseACSystem. Keeping the
+/// phase graph separate avoids treating a phase-resolved mirror and its
+/// balanced aggregate as parallel electrical networks.
+PowerSystemGraph build_three_phase_power_system_graph(
+    const ThreePhaseACSystem& system,
     double zero_impedance_threshold = 1e-8);
 
 }  // namespace hacdcpf::graph

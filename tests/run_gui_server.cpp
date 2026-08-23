@@ -17141,7 +17141,11 @@ int main(int argc, char** argv) {
           case gr::EdgeCategory::DC_Line:        return "DC_Line";
           case gr::EdgeCategory::DC_Switch:      return "DC_Switch";
           case gr::EdgeCategory::VSC_Coupling:   return "VSC_Coupling";
+          case gr::EdgeCategory::LCC_Coupling:   return "LCC_Coupling";
           case gr::EdgeCategory::DCDC_Coupling:  return "DCDC_Coupling";
+          case gr::EdgeCategory::EnergyRouter_Coupling: return "EnergyRouter_Coupling";
+          case gr::EdgeCategory::ThreePhase_Line: return "ThreePhase_Line";
+          case gr::EdgeCategory::ThreePhase_Transformer: return "ThreePhase_Transformer";
         }
         return "Unknown";
       };
@@ -17328,7 +17332,11 @@ int main(int argc, char** argv) {
           case gr::EdgeCategory::DC_Line:        return "DC_Line";
           case gr::EdgeCategory::DC_Switch:      return "DC_Switch";
           case gr::EdgeCategory::VSC_Coupling:   return "VSC_Coupling";
+          case gr::EdgeCategory::LCC_Coupling:   return "LCC_Coupling";
           case gr::EdgeCategory::DCDC_Coupling:  return "DCDC_Coupling";
+          case gr::EdgeCategory::EnergyRouter_Coupling: return "EnergyRouter_Coupling";
+          case gr::EdgeCategory::ThreePhase_Line: return "ThreePhase_Line";
+          case gr::EdgeCategory::ThreePhase_Transformer: return "ThreePhase_Transformer";
         }
         return "Unknown";
       };
@@ -18081,6 +18089,8 @@ int main(int argc, char** argv) {
 
       gr::PowerSystemGraph  work_graph = graph0;
       hacdcpf::HybridPowerSystem work_sys = sys;
+      gr::ReductionMapping composed_mapping =
+          gr::make_identity_reduction_mapping(graph0);
 
       std::vector<gr::Diagnostic> all_diags;
       json switch_groups = json::array();
@@ -18112,6 +18122,8 @@ int main(int argc, char** argv) {
         record_groups(cr.ac_super_to_buses, gr::NodeDomain::AC, ac_rep, ac_status);
         record_groups(cr.dc_super_to_buses, gr::NodeDomain::DC, dc_rep, dc_status);
         for (const auto& d : cr.diagnostics) all_diags.push_back(d);
+        composed_mapping = gr::compose_reduction_mappings(
+            composed_mapping, cr.mapping);
         work_graph = cr.contracted_graph;
         work_sys   = cr.contracted_system;
       }
@@ -18134,6 +18146,8 @@ int main(int argc, char** argv) {
             if (r == rec.eliminated_bus_id) { status[b] = 2; r = rec.from_bus_id; }
         }
         for (const auto& d : sr.diagnostics) all_diags.push_back(d);
+        composed_mapping = gr::compose_reduction_mappings(
+            composed_mapping, sr.mapping);
         work_graph = sr.reduced_graph;
         work_sys   = sr.reduced_system;
       }
@@ -18155,6 +18169,8 @@ int main(int argc, char** argv) {
             if (r == rec.eliminated_bus_id) { status[b] = 3; r = rec.parent_bus_id; }
         }
         for (const auto& d : pr.diagnostics) all_diags.push_back(d);
+        composed_mapping = gr::compose_reduction_mappings(
+            composed_mapping, pr.mapping);
         work_graph = pr.reduced_graph;
         work_sys   = pr.reduced_system;
       }
@@ -18203,7 +18219,14 @@ int main(int argc, char** argv) {
         for (size_t i = 0; i < n; ++i) {
           int bid = dc_domain ? sys.dc.buses[i].index : sys.ac.buses[i].index;
           int st  = status.count(bid) ? status[bid] : 0;
-          int rp  = rep.count(bid) ? rep[bid] : bid;
+          const gr::BusRef original{
+              dc_domain ? gr::NodeDomain::DC : gr::NodeDomain::AC, bid};
+          const auto mapped =
+              composed_mapping.original_to_reduced_buses.find(original);
+          int rp = mapped != composed_mapping.original_to_reduced_buses.end() &&
+                           mapped->second.valid()
+                       ? mapped->second.bus_id
+                       : (rep.count(bid) ? rep[bid] : bid);
           auto pit = id_to_pos.find(rp);
           arr.push_back(json{
             {"bus_id", bid}, {"pos", static_cast<int>(i)},
@@ -18288,12 +18311,27 @@ int main(int argc, char** argv) {
         filter(simplified.ac.asymmetric_loads,  [&](const auto& x) { return has_ac(x.bus); });
         filter(simplified.ac.motors,            [&](const auto& x) { return has_ac(x.bus); });
         filter(simplified.ac.charging_stations, [&](const auto& x) { return has_ac(x.bus); });
-        filter(simplified.mobile_storage,       [&](const auto& x) { return has_ac(x.bus); });
-        filter(simplified.vpps,                 [&](const auto& x) { return has_ac(x.pcc_bus); });
-        filter(simplified.microgrids,            [&](const auto& x) { return has_ac(x.pcc_bus); });
+        for (const auto& x : simplified.mobile_storage) {
+          if (!has_ac(x.bus)) throw std::runtime_error(
+              "network reduction left a dangling MobileStorage terminal");
+          if (x.target_bus != 0 && !has_ac(x.target_bus)) {
+            throw std::runtime_error(
+                "network reduction left a dangling MobileStorage target bus");
+          }
+        }
+        for (const auto& x : simplified.vpps) {
+          if (!has_ac(x.pcc_bus)) throw std::runtime_error(
+              "network reduction left a dangling VPP PCC terminal");
+        }
+        for (const auto& x : simplified.microgrids) {
+          if (!has_ac(x.pcc_bus)) throw std::runtime_error(
+              "network reduction left a dangling Microgrid PCC terminal");
+        }
         for (auto& microgrid : simplified.microgrids) {
-          filter(microgrid.internal_buses,
-                 [&](int bus) { return has_ac(bus); });
+          for (int bus : microgrid.internal_buses) {
+            if (!has_ac(bus)) throw std::runtime_error(
+                "network reduction left a dangling Microgrid internal bus");
+          }
         }
 
         std::unordered_set<int> station_ids;
@@ -18315,26 +18353,47 @@ int main(int argc, char** argv) {
         filter(simplified.dc.static_generators,    [&](const auto& x) { return has_dc(x.bus); });
         filter(simplified.dc.dc_static_generators, [&](const auto& x) { return has_dc(x.bus); });
         filter(simplified.dc.pv_arrays,             [&](const auto& x) { return has_dc(x.bus); });
-        filter(simplified.dc.dcdc_converters, [&](const auto& x) { return x.in_service && has_dc(x.bus_in) && has_dc(x.bus_out); });
-        filter(simplified.vsc_converters, [&](const auto& x) { return x.in_service && has_ac(x.bus_ac) && has_dc(x.bus_dc); });
-
-        for (auto& router : simplified.energy_routers) {
-          filter(router.ports, [&](const auto& port) {
-            return port.in_service && (port.port_type == hacdcpf::ERPortType::DC ? has_dc(port.bus) : has_ac(port.bus));
-          });
-          router.num_ports = static_cast<int>(router.ports.size());
+        for (const auto& converter : simplified.dc.dcdc_converters) {
+          if (converter.in_service &&
+              (!has_dc(converter.bus_in) || !has_dc(converter.bus_out))) {
+            throw std::runtime_error(
+                "network reduction left a dangling DC/DC converter terminal");
+          }
         }
-        filter(simplified.energy_routers, [](const auto& x) {
-          return x.in_service && x.ports.size() >= 2;
-        });
+        for (const auto& converter : simplified.vsc_converters) {
+          if (converter.in_service &&
+              (!has_ac(converter.bus_ac) || !has_dc(converter.bus_dc))) {
+            throw std::runtime_error(
+                "network reduction left a dangling VSC terminal");
+          }
+        }
+        filter(simplified.dc.dcdc_converters,
+               [](const auto& x) { return x.in_service; });
+        filter(simplified.vsc_converters,
+               [](const auto& x) { return x.in_service; });
+
+        for (const auto& lcc : simplified.lcc_converters) {
+          if (lcc.in_service && (!has_ac(lcc.ac_bus) || !has_dc(lcc.dc_bus))) {
+            throw std::runtime_error(
+                "network reduction left a dangling LCC terminal");
+          }
+        }
+
+        for (const auto& router : simplified.energy_routers) {
+          for (const auto& port : router.ports) {
+            const bool exists = port.port_type == hacdcpf::ERPortType::DC
+                                    ? has_dc(port.bus)
+                                    : has_ac(port.bus);
+            if (port.in_service && !exists) throw std::runtime_error(
+                "network reduction left a dangling EnergyRouter port");
+          }
+        }
 
         simplified.name = sys.name + " (simplified)";
-        simplified.three_phase_ac.reset();
         simplified.bus_merge_map.reset();
         simplified.branch_expand_map.reset();
         simplified.projection_certificate.reset();
         simplified.projection_report.reset();
-        simplified.telemetry.reset();
         out["reduced_system"] = json::parse(hacdcpf::io::to_json(simplified, 0));
         out["reduced_system_schema"] = "hacdcpf_system_json_v1";
       }

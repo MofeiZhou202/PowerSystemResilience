@@ -3,30 +3,32 @@
 
 \subsection{实验边界与复现条件}
 
-本节补上实现审计不能由断言数量替代的数值证据。所有数值来自同一轮 clean
-Release 重编译后的注册测试，不修改运行时算法。实验机为 Apple Silicon
+本节补上实现审计不能由断言数量替代的数值证据。所有数值来自同一轮当前工作树
+Release 重编译后的注册测试。实验机为 Apple Silicon
 macOS/arm64，CMake preset 为 \srcpath{macos-release}（Release、\texttt{-O3}、
-\texttt{-DNDEBUG}）。主仓库提交为 \texttt{b1bf15736c96}，
-本地 \texttt{../MIPSolvers} 为 \texttt{7721936245d5}；
-后者与仓库记录的 pin \texttt{3bf1e66749e3} 不同，因此这里的结果是“当前工作树依赖”
-证据，不是 pinned-dependency 认证。
+\texttt{-DNDEBUG}）。主仓库基准 HEAD 为 \texttt{114f3225f4c3} 加本轮未提交变更，
+本地 \texttt{../MIPSolvers} 为且等于仓库 pin
+\texttt{4a0b16a00daefcbe18d2c5648fe30f840ed77052}，依赖工作树 clean。
 
-重建和运行命令如下（输出日志保存在
-\srcpath{/private/tmp/hysim\_graph\_nr\_evidence\_20260821/}）：
+重建和运行命令如下：
 \begin{verbatim}
 cmake --build --preset macos-release --target \
   test_graph test_graph_kron test_graph_roundtrip \
-  test_topology_crossval test_reconfig_options test_device_flows \
-  test_distribution_pipeline test_crossmodule_integration -j4
-build/macos-release/tests/test_graph -s
-build/macos-release/tests/test_graph_kron -s
-build/macos-release/tests/test_graph_roundtrip -s
+  test_topology_crossval test_validation run_gui_server -j4
+build/macos-release/tests/test_graph
+build/macos-release/tests/test_graph_kron
+build/macos-release/tests/test_graph_roundtrip
+build/macos-release/tests/test_topology_crossval
+build/macos-release/tests/test_validation
+ctest --test-dir build/macos-release -R gui_api_e2e
 \end{verbatim}
 
-本节只声称这八个目标的 focused Release rebuild 结果：\texttt{test\_graph} 30 cases/129
-assertions，\texttt{test\_graph\_kron} 9/44，\texttt{test\_graph\_roundtrip}
-17/294；其余五个目标属于重构及跨模块证据，列在网络重构章节。没有运行完整
-CTest、sanitizer 或图模块级全网络基准，故不得将本节表格解释为全套认证。
+focused Release 结果为：\texttt{test\_graph} 37 cases/193 assertions，
+\texttt{test\_graph\_kron} 10/56，\texttt{test\_graph\_roundtrip} 17/294，
+\texttt{test\_topology\_crossval} 12/86，\texttt{test\_validation} 38/180；合计
+114/809。前四个 graph 二进制串行约 0.51 s，低于 5 s 门槛。GUI E2E 的 80 项检查全部通过。
+定向 ASan/UBSan CTest 通过 42 项，1 项按既有条件 skip，无 sanitizer 报告。没有运行完整 CTest 或
+图模块级全网络规模基准，故不得将本节表格解释为全套认证。
 
 \subsection{验收门槛}
 
@@ -58,9 +60,10 @@ recovery operator 回放。三组边界电流最大误差分别为
 恢复算子最大误差为 0。该结果满足比 \(10^{-10}\) 更严格的门槛，且同时检查了
 边界方程、内部零注入和状态恢复三种量。
 
-恒功率内部注入被单独标成近似路径：with-injection 与 zero-injection reduced
-current norm 的差为 \(0.64513950905954009\)。因此该路径不能被描述为精确
-Ward 等值；调用方必须保留工作点、注入假设和后验 PF 结果。
+新增常电流注入回归同时检查 reduced boundary equation 与完整分块回代，内部节点残差
+不超过 \(10^{-12}\)。这证明保存的 $Y_{\beta\beta}^{-1}I_\beta$ correction 对线性常电流模型
+闭环；恒功率负荷若只在工作点转换为电流仍不能被描述为全局精确 Ward 等值，调用方必须保留
+工作点、注入假设和后验 PF 结果。
 
 \subsection{开关收缩与串联化简的 PF round-trip}
 
@@ -100,8 +103,8 @@ IEEE case33bw 的 split-series round-trip 进一步把多个串联记录组合�
 
 \subsection{证据解读与未覆盖范围}
 
-上述结果形成三层交叉验证：解析三母线标量、完整矩阵与 recovery operator、以及
-完整/化简网络的 PF/OPF round-trip。它们没有覆盖任意富组件的全网络图基准；
-AUD-024--AUD-031 所列的同号 AC/DC 计划冲突、非连续 pendant branch ID、内部注入
-恢复、multi-stage mapping compose 和富组件 compact 丢失仍是开放审计项。因而当前
-graph reduction 只准用于组件覆盖已知、域限定 ID 已保存并有原网后验 PF/OPF 的场景。
+上述结果形成四层交叉验证：解析三母线标量、完整矩阵与 recovery operator、完整/化简网络的
+PF/OPF round-trip，以及富组件 HTTP export/reload。AUD-024--AUD-031 的缺陷路径均已有定向动态
+回归并按声明范围关闭。仍未覆盖任意富组件的全网络电气等值基准；Transformer3W/LCC/
+EnergyRouter 图边只表示连接性，HTTP Kron identify-only，pendant 为工作点近似。因此生产使用仍须
+保存域限定 ID、原系统及后验 PF/OPF 证据。

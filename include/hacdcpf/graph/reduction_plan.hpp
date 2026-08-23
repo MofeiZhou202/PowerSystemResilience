@@ -38,8 +38,6 @@ enum class ReductionMethod {
   PendantReduction,
   KronPassiveOnly,
   KronWithCurrentInjection,
-  WardEquivalent,
-  HybridSafeReduction,
 };
 
 // ═══════════════════════════════════════════════════════════════════════
@@ -77,14 +75,12 @@ enum class CandidateType {
   ZeroInjectionDegree2,      ///< Passive, degree-2 → series reduction
   ZeroInjectionPassiveInterior, ///< Passive, interior → Kron candidate
   PendantLoad,               ///< Leaf node with load only
-  RadialFeederSegment,       ///< Segment of a radial feeder
   KronPassiveNode,           ///< Pure passive node for Kron elimination
 };
 
 struct BusCandidate {
-  int           bus_id{0};
+  BusRef        bus;
   CandidateType type{CandidateType::MustRetain};
-  NodeDomain    domain{NodeDomain::AC};  ///< AC or DC — determines which node-lookup map to use
   std::string   reason;
 };
 
@@ -106,12 +102,13 @@ enum class ReductionActionType {
 
 struct ReductionAction {
   ReductionActionType    type{ReductionActionType::Retain};
-  std::vector<int>       eliminated_buses;
-  std::vector<int>       eliminated_branches;
-  std::vector<int>       retained_buses;
-  NodeDomain             bus_domain{NodeDomain::AC};  ///< Domain of eliminated_buses[0]; used by
-                                                       ///  series/pendant reducers for domain-correct
-                                                       ///  node lookup (ac_node_idx vs dc_node_idx).
+  ReductionMethod        method{ReductionMethod::None};
+  std::vector<BusRef>    affected_buses;
+  std::vector<BusRef>    eliminated_buses;
+  /// Positions into graph.edges[] for the graph used to create this plan.
+  std::vector<int>       eliminated_edge_positions;
+  std::vector<BusRef>    retained_buses;
+  double                 max_fill_ratio{2.0};
   std::string            reason;
 };
 

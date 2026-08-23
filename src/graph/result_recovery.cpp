@@ -8,6 +8,7 @@
 
 #include <cmath>
 #include <complex>
+#include <stdexcept>
 
 #include "hacdcpf/graph/switch_contraction.hpp"
 
@@ -195,20 +196,34 @@ void recover_series_reduced_buses(
     // ── Look up segment impedance from domain-correct branch table ───────
     double r_eq = rec.r_eq, x_eq = rec.x_eq;
     double r_ij = 0.0, x_ij = 0.0;
+    bool source_branch_found = false;
     if (!rec.original_branch_ids.empty()) {
       int eid_ij = rec.original_branch_ids[0];
       if (is_dc) {
         // DC branches have only r_pu (no reactance).
         for (const auto& br : original_system.dc.branches) {
-          if (br.index == eid_ij) { r_ij = br.r_pu; break; }
+          if (br.index == eid_ij) {
+            r_ij = br.r_pu;
+            source_branch_found = true;
+            break;
+          }
         }
         x_ij = 0.0;
         x_eq = 0.0;  // DC: no reactive component in the equivalent either
       } else {
         for (const auto& br : original_system.ac.branches) {
-          if (br.index == eid_ij) { r_ij = br.r_pu; x_ij = br.x_pu; break; }
+          if (br.index == eid_ij) {
+            r_ij = br.r_pu;
+            x_ij = br.x_pu;
+            source_branch_found = true;
+            break;
+          }
         }
       }
+    }
+    if (!source_branch_found) {
+      throw std::invalid_argument(
+          "series recovery cannot resolve source branch component index");
     }
 
     // V_j = V_i - Z_ij * I_ik,  I_ik = (V_i - V_k) / Z_ik_eq
@@ -239,22 +254,75 @@ void recover_kron_eliminated_buses(
     const std::vector<int>&  bus_ids_beta)
 {
   if (!kron_data.valid) return;
-  const int na = static_cast<int>(bus_ids_alpha.size());
-  const int nb = static_cast<int>(bus_ids_beta.size());
+  if (bus_ids_alpha.size() !=
+          static_cast<std::size_t>(kron_data.Ybb_inv_Yba.cols()) ||
+      bus_ids_beta.size() !=
+          static_cast<std::size_t>(kron_data.Ybb_inv_Yba.rows())) {
+    throw std::invalid_argument("Kron bus-ID recovery size mismatch");
+  }
+
+  Eigen::VectorXcd V_alpha(static_cast<int>(bus_ids_alpha.size()));
+  for (int i = 0; i < V_alpha.size(); ++i) {
+    const auto it = voltages.bus_voltage.find(bus_ids_alpha[i]);
+    if (it == voltages.bus_voltage.end()) {
+      throw std::invalid_argument(
+          "Kron recovery is missing a retained legacy voltage");
+    }
+    V_alpha(i) = it->second;
+  }
+
+  const Eigen::VectorXcd V_beta =
+      recover_eliminated_voltages(kron_data, V_alpha);
+  for (int i = 0; i < V_beta.size(); ++i) {
+    voltages.bus_voltage[bus_ids_beta[i]] = V_beta(i);
+  }
+}
+
+void recover_kron_eliminated_buses(
+    FullNetworkVoltages&     voltages,
+    const KronData&          kron_data,
+    const std::vector<BusRef>& bus_refs_alpha,
+    const std::vector<BusRef>& bus_refs_beta)
+{
+  if (!kron_data.valid) return;
+  if (bus_refs_alpha.size() !=
+          static_cast<std::size_t>(kron_data.Ybb_inv_Yba.cols()) ||
+      bus_refs_beta.size() !=
+          static_cast<std::size_t>(kron_data.Ybb_inv_Yba.rows())) {
+    throw std::invalid_argument("Kron BusRef recovery size mismatch");
+  }
+  const int na = static_cast<int>(bus_refs_alpha.size());
+  const int nb = static_cast<int>(bus_refs_beta.size());
 
   // Build V_alpha vector
   Eigen::VectorXcd V_alpha(na);
   for (int i = 0; i < na; ++i) {
-    auto it = voltages.bus_voltage.find(bus_ids_alpha[i]);
-    V_alpha(i) = (it != voltages.bus_voltage.end()) ?
-        it->second : std::complex<double>{1.0, 0.0};
+    const auto& ref = bus_refs_alpha[i];
+    const auto& domain_voltages = ref.domain == NodeDomain::AC
+                                      ? voltages.ac_bus_voltage
+                                      : voltages.dc_bus_voltage;
+    auto it = domain_voltages.find(ref.bus_id);
+    if (it == domain_voltages.end()) {
+      throw std::invalid_argument(
+          "Kron recovery is missing a retained domain-qualified voltage");
+    }
+    V_alpha(i) = it->second;
   }
 
-  // Recover: V_beta = -Y_bb^{-1} * Y_ba * V_alpha
+  // Recover: V_beta = Y_bb^{-1} I_beta - Y_bb^{-1} Y_ba V_alpha.
   Eigen::VectorXcd V_beta = recover_eliminated_voltages(kron_data, V_alpha);
 
   for (int i = 0; i < nb && i < static_cast<int>(V_beta.size()); ++i) {
-    voltages.bus_voltage[bus_ids_beta[i]] = V_beta(i);
+    const auto& ref = bus_refs_beta[i];
+    if (ref.domain == NodeDomain::AC) {
+      voltages.ac_bus_voltage[ref.bus_id] = V_beta(i);
+      voltages.bus_voltage[ref.bus_id] = V_beta(i);
+    } else {
+      voltages.dc_bus_voltage[ref.bus_id] = V_beta(i);
+      if (!voltages.ac_bus_voltage.contains(ref.bus_id)) {
+        voltages.bus_voltage[ref.bus_id] = V_beta(i);
+      }
+    }
   }
 }
 
@@ -268,6 +336,10 @@ void recover_pendant_buses(
     const HybridPowerSystem&  original_system,
     const RecoveryOptions&    opts)
 {
+  if (opts.max_pendant_iterations < 0 ||
+      opts.pendant_convergence_tol < 0.0) {
+    throw std::invalid_argument("invalid pendant recovery options");
+  }
   double base_mva = original_system.base_mva > 0 ? original_system.base_mva : 100.0;
 
   for (const auto& rec : mapping.pendant_records) {
@@ -302,15 +374,30 @@ void recover_pendant_buses(
 
     // ── Get connecting branch impedance from domain-correct table ─────────
     double r_ij = 0.0, x_ij = 0.0;
+    bool source_branch_found = false;
     if (is_dc) {
       for (const auto& br : original_system.dc.branches) {
-        if (br.index == rec.branch_id) { r_ij = br.r_pu; break; }
+        if (br.index == rec.source_branch_index) {
+          r_ij = br.r_pu;
+          source_branch_found = true;
+          break;
+        }
       }
       x_ij = 0.0;  // DC branches have no reactance
     } else {
       for (const auto& br : original_system.ac.branches) {
-        if (br.index == rec.branch_id) { r_ij = br.r_pu; x_ij = br.x_pu; break; }
+        if (br.index == rec.source_branch_index) {
+          r_ij = br.r_pu;
+          x_ij = br.x_pu;
+          source_branch_found = true;
+          break;
+        }
       }
+    }
+    if (!source_branch_found) {
+      throw std::invalid_argument(
+          "pendant recovery cannot resolve source branch component index " +
+          std::to_string(rec.source_branch_index));
     }
     std::complex<double> Z_ij{r_ij, x_ij};
 
@@ -341,7 +428,8 @@ void recover_pendant_buses(
     }
     std::complex<double> S_j{p_j_mw / base_mva, q_j_mvar / base_mva};
 
-    // ── Iterative recovery: V_j^(t+1) = V_i - Z_ij * (S_j^* / V_j^(t)*) ─
+    // Baran & Wu, IEEE TPD 1989, radial branch current relation; derivation in
+    // docs/modules/graph/chapters/series_pendant_reduction.tex.
     std::complex<double> V_j = V_i; // flat-start: V_j ≈ V_i
     for (int iter = 0; iter < opts.max_pendant_iterations; ++iter) {
       if (std::abs(V_j) < 1e-12) break;

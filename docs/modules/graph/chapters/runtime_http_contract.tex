@@ -39,9 +39,10 @@ HTTP 400。返回 200 只表示路由完成，不是 PF/OPF 或语义等价证�
 \bottomrule
 \end{longtable}
 
-岛状态字符串为 \texttt{Valid/NoSlack/NoDCVoltageRef/IsolatedLoad/Empty}，但当前核心分析不会赋值
-\texttt{IsolatedLoad} 或 \texttt{Empty}；孤立负荷通过 diagnostic 和
-\fld{all\_islands\_valid=false} 表达。桥列表不暴露 graph edge position 或源组件 index，而是为 GUI
+岛状态字符串为 \texttt{Valid/NoSlack/NoDCVoltageRef/IsolatedLoad/Empty}。带负荷且无在运邻边的
+单点岛赋 \texttt{IsolatedLoad}，优先于缺参考状态，并同步产生 GraphIsolatedLoad diagnostic 与
+\fld{all\_islands\_valid=false}；\texttt{Empty} 仅是防御性分支。桥列表不暴露 graph edge position
+或源组件 index，而是为 GUI
 重建端点和类别；VSC 桥可有不同的 \fld{from\_domain/to\_domain}，legacy \fld{domain} 仅当两端均
 为 DC 时写 DC。
 
@@ -81,9 +82,9 @@ G_1\xrightarrow{\text{one series plan}}G_2
 $G_3$ 上统计 passive candidates，因为矩阵 Kron 不生成 rich system，故不会改变 after count 或
 \fld{reduced\_system}。该路由不调用 PF/OPF，也不执行电压/支路结果恢复。
 
-路由另外维护 AC/DC 分开的 authored bus $\to$ 当前代表映射，并把代表链压缩。这个临时映射用于
-HTTP 展示，弥补了单阶段 \texttt{ReductionMapping} 不会自动复合的限制；它不是公共 C++ API，也没有
-支路映射。
+路由用 \srcpath{compose\_reduction\_mappings} 逐阶段复合公共 C++ mapping，并从合成后的
+domain-qualified bus certificate 生成 authored bus $\to$ 当前代表展示；支路映射保留在 C++ 证书中，
+当前 HTTP 响应不单独序列化该表。
 
 \subsection{网络化简响应}
 
@@ -117,15 +118,15 @@ HTTP 展示，弥补了单阶段 \texttt{ReductionMapping} 不会自动复合的
 
 \subsection{紧凑 reduced\_system 的边界}
 
-reducer 内部保留停运 audit ghosts；HTTP 在序列化前删除停运母线/支路，并过滤端点不再存在的普通
-AC/DC 设备、VSC/DCDC、移动储能、VPP、微网和 EnergyRouter ports。端口少于两个的 EnergyRouter
-被删除，regulator 仅在 transformer 与 monitored bus 都仍有效时保留。随后清空 three-phase model、
-投影 mapping/certificate/report 和 telemetry。
+reducer 内部保留停运 audit ghosts；HTTP 在序列化前删除停运母线/支路与停运详细负荷，并验证所有
+保留设备端点仍存在。收缩层会重映射 Transformer3W、LCC、EnergyRouter ports、MobileStorage 的
+current/target bus 及其他已列 rich terminals；three-phase 子系统保留原结构，因为涉及相域母线的
+收缩会在 C++ 入口 fail closed。若 compact 检出 LCC、EnergyRouter 或移动储能悬空端点，路由抛错，
+不再静默过滤资产。投影 mapping/certificate/report 与 telemetry 仍不随 reduced system 导出。
 
-该过滤保证 JSON 不含悬空 terminal，且 E2E 已验证一个混合系统可重载并通过 topology/PF；它不证明
-设备语义保持。收缩层未重映射的富组件可能在 compact 时被删除，Transformer3W/LCC/EnergyRouter/
-three-phase 又不完整参与初始图模型。因此在 AUD-031 关闭前，含这些资产的导出只能解释为
-\textbf{拓扑化简视图}，不能作为全 rich-model 等价替代。
+E2E 固定检查 Transformer3W、LCC、EnergyRouter 与 three-phase 数据经化简、compact、reload 后数量
+和稳定身份保留。虚拟耦合边只证明连接性，未构造这些设备的电气等值；HTTP Kron 仍是 identify-only，
+pendant 仍是 flat-voltage loss approximation，不能把可重载性解释为任意分析的方程等价证书。
 
 \subsection{GUI 与 topology\_window 的关系}
 

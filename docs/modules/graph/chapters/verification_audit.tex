@@ -4,12 +4,13 @@
 
 \subsection{审计范围}
 
-本轮逐个核对了 \srcpath{include/hacdcpf/graph/} 的十个公共头、\srcpath{src/graph/} 的八个实现、
+本轮逐个核对了 \srcpath{include/hacdcpf/graph/} 的十个公共头、\srcpath{src/graph/} 的九个实现、
 CMake 注册、三个直接测试目标，以及 validation、PF/OPF、可靠性/弹性、时序和生产 HTTP/GUI 的主要
 消费者。审计判断以可达实现为准；未因头文件存在枚举、字段或注释就推断能力已实现。
 
-本轮没有修改运行时代码。三个直接 graph 目标已由当前源码重新构建后运行；这仍不能替代完整
-CTest、sanitizer 或外部求解器交叉验证。逐项原始数值与依赖提交见
+本轮已修改 graph 运行时代码、HTTP 组合路径与测试。四个直接 graph 目标、validation 和 GUI E2E
+均由当前源码重新构建后运行，并执行定向 ASan/UBSan；这仍不能替代完整 CTest 或外部求解器
+全模型交叉验证。逐项数值与依赖提交见
 第~\ref{sec:gr-numerical-crossval} 节。
 
 \subsection{集中验证结果}
@@ -19,15 +20,16 @@ CTest、sanitizer 或外部求解器交叉验证。逐项原始数值与依赖�
 \toprule
 目标 & cases & assertions & 主要覆盖\\
 \midrule
-\texttt{test\_graph} & 30 & 129 & 构图、拓扑、收缩、series/pendant\\
-\texttt{test\_graph\_kron} & 9 & 44 & 稠密/稀疏 Kron、fill、恢复\\
+\texttt{test\_graph} & 37 & 193 & 构图、拓扑、收缩、计划、mapping、series/pendant\\
+\texttt{test\_graph\_kron} & 10 & 56 & 稠密/稀疏 Kron、fill、注入恢复、legacy overload\\
 \texttt{test\_graph\_roundtrip} & 17 & 294 & PF/OPF round-trip、稳定 ID、同号 AC/DC\\
+\texttt{test\_topology\_crossval} & 12 & 86 & 桥/圈/割点与独立 oracle 对照\\
 \midrule
-直接 graph 合计 & 56 & 467 & 三个注册目标\\
-\texttt{test\_distribution\_pipeline} & 1 & 178 & graph 到 projection/下游分析\\
-\texttt{test\_three\_phase\_hybrid\_opf} & 12 & 152 & 历史基线：GraphReduced sparse Kron 集成，本轮未重跑\\
+直接 graph 合计 & 76 & 629 & 四个注册目标，串行约 0.51 s\\
+\texttt{test\_validation} & 38 & 180 & isolated-load 到 validation 传播及既有验证契约\\
+\texttt{gui\_api\_e2e} & 80 & -- & HTTP reduction、compact、reload 全链路\\
 \midrule
-含历史交叉模块基线 & 69 & 797 & 不应与本轮 focused rebuild 合并声称\\
+本轮定向 C++ 合计 & 114 & 809 & 五个 C++ 二进制；GUI E2E 另计\\
 \bottomrule
 \end{tabular}
 \end{center}
@@ -36,35 +38,35 @@ CTest、sanitizer 或外部求解器交叉验证。逐项原始数值与依赖�
 电压基与多 slack 守卫、series/pendant records、稠密 Schur 补、稀疏 fill/front/pivot 与电压恢复。
 round-trip 还覆盖 MATPOWER/配电样例、非连续稳定组件 ID 和 PF/OPF 结果一致性边界。
 
-\subsection{仍缺动态回归的关键契约}
+\subsection{新增动态回归}
 
-当前测试没有把以下高风险组合逐项锁死：同号 AC/DC 候选在同一个 reduction plan 中互不干扰；
-非连续 branch component index 的 pendant 电压恢复；含内部常电流注入的稠密 Kron 完整电压恢复；
-Transformer3W/LCC/EnergyRouter/MobileStorage 等富组件经过 contraction 和 HTTP compact 后的语义保持；
-多轮 series/pendant 的 mapping composition；所有声明但未生效的 option；HTTP Kron identify-only 与
-各类 400/409 结果契约。E2E 的 reduced-system reload 是完整性 smoke test，不是上述语义回归。
+本轮逐项锁定同号 AC/DC plan 隔离、非连续 pendant branch component ID、含内部常电流注入的
+稠密 Kron 完整恢复、domain-qualified mapping 双向与多阶段 compose、post-series edge position、
+IsolatedLoad validation 传播、选项/动作效果，以及 Transformer3W/LCC/EnergyRouter/MobileStorage/
+three-phase 的构图、收缩拒绝或 HTTP compact/reload 保留。E2E 证明结构与稳定身份不被静默删除；
+它不把虚拟连接边提升为电气等值，也不改变 HTTP Kron identify-only 口径。
 
-\subsection{开放审计问题}
+\subsection{审计问题关闭矩阵}
 
 全局台账见 \srcpath{docs/testing/module\_code\_audit.md}；本节给出 graph 侧使用边界。
 
 \begin{longtable}{@{}L{1.8cm}L{2.0cm}L{7.0cm}L{4.0cm}@{}}
 \toprule
-ID & 严重度 & 源码事实与影响 & 关闭条件\\
+ID & 原严重度 & 关闭实现 & 回归证据\\
 \midrule
 \endfirsthead
 \toprule
-ID & 严重度 & 源码事实与影响 & 关闭条件\\
+ID & 原严重度 & 关闭实现 & 回归证据\\
 \midrule
 \endhead
-AUD-024 & High & plan 候选带 domain，但 candidate map、已消去集合、邻居冲突与 Kron 列表按裸 bus ID；同号 AC/DC 会互相抑制，Kron action 只有一个默认 AC domain。 & 全部 key 改为 domain-qualified，并加同号多动作回归。\\
-AUD-025 & Low & \fld{mode}、\fld{preserve\_all\_voltage\_constrained\_buses}、\fld{max\_fill\_ratio} 等选项未生效，switch action、Retain action、若干 enum/segment 无生成路径。 & 删除/实现字段并以 option-effect 测试锁定。\\
-AUD-026 & Medium & series/pendant 后 reverse bus map 仍是 identity；pendant branch maps 为空；mapping 内 switch/Kron records 未填，也没有多阶段 compose。 & 建立完整双向、分域、可复合映射与 round-trip。\\
-AUD-027 & High & pendant reducer 把 graph edge ID 写入 \fld{branch\_id}，recovery 却按源 component index 查阻抗；非连续 ID 时可退化为 $Z=0$ 并给出错误电压。 & 统一 ID 空间，查找失败显式报错，并加非连续 ID 数值回归。\\
-AUD-028 & Medium & injection Kron 返回 $I_{red}$，但恢复只算 $V_\beta=-KV_\alpha$，API 无法加入 $Y_{\beta\beta}^{-1}I_\beta$。 & recovery 接收/保存内部注入并验证完整方程。\\
-AUD-029 & Medium & \texttt{IslandStatus::IsolatedLoad} 从未赋值；validation 检查该状态的分支不可达，核心只发 diagnostic。 & 统一 status/diagnostic 语义并加 validation 回归。\\
-AUD-030 & Medium & series 新边的 \fld{edge\_id} 可大于 graph storage size，而 adjacency、bridge/cycle 使用 vector position；旧“edge ID 等于位置”假设失效。 & 明确分离/重编号内部位置，增加 post-series topology 回归。\\
-AUD-031 & High & 构图与 contraction 未覆盖多类 rich/three-phase 组件，HTTP compact 会过滤悬空对象；导出的 reduced system 可能丢资产而非迁移资产。 & 补齐组件投影/重映射或拒绝不支持输入，并做逐组件 round-trip。\\
+AUD-024 & High & 全流程使用 \texttt{BusRef}，同号 AC/DC 分开计划。 & 同号双域 Kron action。\\
+AUD-025 & Low & mode/options/method/switch/retain/fill 均可达；删除死 enum。 & option/action effect 与 fill guard。\\
+AUD-026 & Medium & 权威域限定双向 bus/branch 证书及 compose API。 & reverse map、两阶段 compose。\\
+AUD-027 & High & pendant 保存稳定 source component index；缺失显式抛错。 & 非连续 ID 数值恢复与异常。\\
+AUD-028 & Medium & 保存并回加 $Y_{\beta\beta}^{-1}I_\beta$。 & partition residual $\le10^{-12}$。\\
+AUD-029 & Medium & singleton load 赋 IsolatedLoad 并传播 validation。 & topology + validation。\\
+AUD-030 & Medium & edge\_id 恒等于 storage position；comp\_index 独立。 & post-series bridge/cycle。\\
+AUD-031 & High & 富组件连通性/端点重映射补齐；无规则 contraction fail closed。 & C++ 组件回归与 80 项 GUI E2E。\\
 \bottomrule
 \end{longtable}
 
@@ -86,7 +88,8 @@ AUD-031 & High & 构图与 contraction 未覆盖多类 rich/three-phase 组件�
 
 \subsection{工业使用边界}
 
-在 AUD-024、AUD-027 与 AUD-031 关闭前，不应把当前 graph reduction 作为任意富模型的无条件生产
-预处理器。较安全的可用范围是：ID 受控、组件覆盖明确的单域或无同号冲突网络；被动普通线路的
-series；带显式误差回放的 pendant；以及三相混合 OPF 已注册路径中的 sparse Kron。任何导出的
-reduced system 都应与原系统并存，保留完整 option、diagnostic、mapping 和原网后验 PF/OPF 证据。
+AUD-024--AUD-031 已按声明范围关闭，但 graph reduction 仍不是任意富模型的无条件电气等值
+预处理器。可认证范围是：理想连接收缩、无注入普通线路 series、带明确 flat-voltage 近似的 pendant、
+线性无源或常电流 Kron，以及三相混合 OPF 已注册路径中的 sparse Kron。Transformer3W/LCC/
+EnergyRouter 虚拟边只编码连接性；无物理聚合规则的 phase/transformer/DCDC contraction 显式拒绝。
+任何 reduced system 仍应与原系统并存，保留 option、diagnostic、mapping 和后验 PF/OPF 证据。

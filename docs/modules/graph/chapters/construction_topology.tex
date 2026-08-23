@@ -19,20 +19,20 @@ positions 在后”，但这是当前实现顺序，不应替代域映射。AC �
 节点标志 & 当前来源 & 未覆盖/注意\\
 \midrule
 \endhead
-\fld{has\_generator} & AC Generator、ExternalGrid、StaticGenerator、RenewableGen、PVSystem；DC StaticGeneratorDC & DC \texttt{static\_generators}、PVArrayDC 不设置\\
-\fld{has\_load} & bus-level demand、AC Load/FlexibleLoad、DCLoad & AsymmetricLoad、motor、charging station 不设置\\
-\fld{has\_shunt} & bus gs/bs 与 AC Shunt & 不按 shunt.in\_service 过滤\\
-\fld{has\_storage} & AC Storage & DC storage/DCStorage、MobileStorage 不设置\\
-\fld{has\_vsc\_ac/dc} & 在运 VSC 两端 & LCC 不设置\\
-\fld{has\_dcdc} & 在运 DCDC 两端 & EnergyRouter 端口不设置\\
+\fld{has\_generator} & AC/DC generator、PV、VPP、Microgrid & 仅在运组件设置\\
+\fld{has\_load} & bus demand、各类 AC/DC load、motor、charging station、VPP/Microgrid & 作为降阶保留条件\\
+\fld{has\_shunt} & bus gs/bs、在运 AC Shunt、DC capacitor & harmonic filter 不等同稳态 shunt\\
+\fld{has\_storage} & AC/DC Storage、DCStorage、MobileStorage & MobileStorage 当前位置母线\\
+\fld{has\_vsc\_ac/dc}/\fld{has\_lcc} & 在运 VSC/LCC 两端 & 两类换流器分别标记\\
+\fld{has\_dcdc}/\fld{has\_energy\_router} & DCDC 两端、EnergyRouter 在运端口 & 虚拟边只表达连接性\\
+\fld{has\_three\_phase\_model} & 与 three-phase bus 同号的平衡 AC 母线 & 阻止无证书相模型收缩\\
 \fld{has\_controllable} & 非固定档 Transformer2W 两端 & regulator、可控 shunt 等不直接设置\\
 \fld{is\_slack} & AC：SLACK、generator slack、ExternalGrid；DC：DC\_V & 混合岛仍按 AC-primary 判参考\\
 \bottomrule
 \end{longtable}
 
-这些标志直接控制降阶候选。若某富组件没有进入上表，它所在母线可能被误判为无注入/无控制节点；
-在严格工程使用前必须先做 canonical projection 或显式把该母线设为保留，而当前 API 没有按 ID
-传入保留集合的字段。
+这些标志直接控制降阶候选。富组件端点、聚合资源和三相镜像母线均进入保留规则；新增组件仍须
+补节点标志或在 reducer 入口 fail closed，不能依赖 compact 阶段删除悬空资产。
 
 \subsection{边类别和电气字段覆盖}
 
@@ -49,22 +49,27 @@ ACBranch & AC\_Line & 复制 $r,x,b,tap,shift,rate$ & $|Z|<$ threshold 标 zero-
 Transformer2W & AC\_Transformer & 只复制端点/状态 & source branch index $>0$ 时跳过；不复制阻抗/变比\\
 Switch & Switch & in\_service $\land$ closed & 开路边保留为 out-of-service\\
 CircuitBreaker & Breaker & in\_service $\land$ closed & 同上\\
-DCBranch & DC\_Line & 复制 $r$ & 代码用 $r<$ threshold，不取绝对值\\
+DCBranch & DC\_Line & 复制 $r$ & $|r|<$ threshold 标 zero-Z\\
 DCCircuitBreaker & DC\_Switch & in\_service $\land$ closed & 开路边保留\\
 VSC & VSC\_Coupling & 在运虚拟边 & 无阻抗；只表连接性\\
 DCDC & DCDC\_Coupling & 在运虚拟边 & 无效率/方向；只表连接性\\
+Transformer3W & AC\_Transformer & HV--MV、HV--LV 连接树 & 不虚构两两阻抗，不形成假环\\
+LCC & LCC\_Coupling & 在运 AC--DC 虚拟边 & 无阻抗；只表连接性\\
+EnergyRouter & \shortstack{EnergyRouter\_\\Coupling} & 首端口到其余端口的连接树 & 无效率/方向；只表连接性\\
 \bottomrule
 \end{longtable}
 
-Transformer3W、LCC、EnergyRouter 和 three-phase 子系统不生成图边。缺失端点的组件被静默跳过；
-建图不返回 diagnostic，也不校验重复 bus ID、负阈值或邻接一致性。
+three-phase 子系统由 \srcpath{build\_three\_phase\_power\_system\_graph} 单独生成
+ThreePhase\_Line/ThreePhase\_Transformer 图，避免与平衡镜像叠成并联网络。缺失端点仍在建图时
+跳过；输入结构完整性应先由 validation 保证。
 
 \subsection{邻接表与开路边}
 
 每个加入的边都写入 \fld{edges}，并在两端 \fld{adj} 中保存
 \texttt{(edges[] position, neighbour node position)}，所以图是无向多重图。邻接表包含开路边，
-所有拓扑算法再检查 edge/node.in\_service。\fld{edge\_id} 在初始建图时按 0,1,... 赋值，恰好
-等于 \texttt{edges[]} 位置；这不是源组件 ID。
+所有拓扑算法再检查 edge/node.in\_service。统一 add-edge 路径强制
+\fld{edge\_id=edges[] position}，初始图、收缩图和 series 新边均满足；源组件稳定 ID 始终由
+\fld{comp\_index} 表示。
 
 \subsection{连通分量与快速查询}
 
@@ -86,14 +91,15 @@ component id，停运节点为 $-1$。于是
 节点的岛数”。有效性规则为：
 \begin{equation}
 status(C)=\begin{cases}
+\text{IsolatedLoad},&C\text{ 是带负荷且无在运邻边的单点岛},\\
 \text{NoSlack},&C\text{ 含 AC 且无 AC slack},\\
 \text{NoDCVoltageRef},&C\text{ 为纯 DC 且无 DC\_V},\\
 \text{Valid},&\text{其他。}
 \end{cases}
 \end{equation}
 混合岛即使含 DC\_V，只要没有 AC slack 仍为 NoSlack；反之含 AC slack 时不再单独要求 DC\_V。
-\texttt{IsolatedLoad} 枚举当前没有赋值路径：孤立负荷只产生
-\texttt{GraphIsolatedLoad} diagnostic 并令 \fld{all\_islands\_valid=false}。
+IsolatedLoad 优先于 NoSlack/NoDCVoltageRef，并只生成匹配的 GraphIsolatedLoad diagnostic；
+validation 消费同一 status 产生 connectivity warning。
 
 \subsection{圈复杂度与径向性}
 

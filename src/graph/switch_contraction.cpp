@@ -79,6 +79,43 @@ ContractionResult contract_zero_impedance_edges(
   ContractionResult result;
   result.contracted_system = system; // start from a copy
 
+  const auto reset_to_identity = [&]() {
+    result.contracted_graph = graph;
+    result.contracted_system = system;
+    result.ac_bus_to_super.clear();
+    result.dc_bus_to_super.clear();
+    result.ac_super_to_buses.clear();
+    result.dc_super_to_buses.clear();
+    result.bus_to_super.clear();
+    result.super_to_buses.clear();
+    result.switch_records.clear();
+    for (const auto& node : graph.nodes) {
+      auto& forward = node.domain == NodeDomain::AC
+                          ? result.ac_bus_to_super
+                          : result.dc_bus_to_super;
+      auto& reverse = node.domain == NodeDomain::AC
+                          ? result.ac_super_to_buses
+                          : result.dc_super_to_buses;
+      forward[node.bus_id] = node.bus_id;
+      reverse[node.bus_id] = {node.bus_id};
+      if (node.domain == NodeDomain::AC) {
+        result.bus_to_super[node.bus_id] = node.bus_id;
+        result.super_to_buses[node.bus_id] = {node.bus_id};
+      }
+    }
+    result.mapping = make_identity_reduction_mapping(graph);
+  };
+
+  if (options.zero_impedance_threshold < 0.0 ||
+      options.voltage_base_tolerance < 0.0) {
+    reset_to_identity();
+    result.diagnostics.push_back(
+        {DiagCode::Error,
+         "Contraction thresholds must be non-negative; no contraction was "
+         "applied."});
+    return result;
+  }
+
   const int n = graph.node_count();
   DSU dsu(n);
 
@@ -259,19 +296,80 @@ ContractionResult contract_zero_impedance_edges(
     }
   }
 
+  const auto ac_rep = [&](int bus) {
+    const auto it = result.ac_bus_to_super.find(bus);
+    return it == result.ac_bus_to_super.end() ? bus : it->second;
+  };
+  const auto dc_rep = [&](int bus) {
+    const auto it = result.dc_bus_to_super.find(bus);
+    return it == result.dc_bus_to_super.end() ? bus : it->second;
+  };
+  std::string unsupported_collapse;
+  if (system.three_phase_ac.has_value()) {
+    for (const auto& bus : system.three_phase_ac->buses) {
+      if (ac_rep(bus.index) != bus.index) {
+        unsupported_collapse =
+            "phase-resolved bus aggregation has no certified contraction rule";
+        break;
+      }
+    }
+  }
+  if (unsupported_collapse.empty()) {
+    for (const auto& transformer : system.ac.transformers_2w) {
+      if (transformer.in_service &&
+          ac_rep(transformer.hv_bus) == ac_rep(transformer.lv_bus)) {
+        unsupported_collapse =
+            "contraction would collapse both terminals of a two-winding transformer";
+        break;
+      }
+    }
+  }
+  if (unsupported_collapse.empty()) {
+    for (const auto& transformer : system.ac.transformers_3w) {
+      if (!transformer.in_service) continue;
+      const int hv = ac_rep(transformer.hv_bus);
+      const int mv = ac_rep(transformer.mv_bus);
+      const int lv = ac_rep(transformer.lv_bus);
+      if (hv == mv || hv == lv || mv == lv) {
+        unsupported_collapse =
+            "contraction would collapse winding terminals of a three-winding transformer";
+        break;
+      }
+    }
+  }
+  if (unsupported_collapse.empty()) {
+    for (const auto& converter : system.dc.dcdc_converters) {
+      if (converter.in_service &&
+          dc_rep(converter.bus_in) == dc_rep(converter.bus_out)) {
+        unsupported_collapse =
+            "contraction would collapse both terminals of a DC/DC converter";
+        break;
+      }
+    }
+  }
+  if (!unsupported_collapse.empty()) {
+    reset_to_identity();
+    result.diagnostics.push_back(
+        {DiagCode::Error,
+         unsupported_collapse + "; no contraction was applied."});
+    return result;
+  }
+
   // ── Step 6: Build contraction records (from domain maps) ─────────────
-  auto make_records = [&](const std::unordered_map<int, std::vector<int>>& s2b) {
+  auto make_records = [&](const std::unordered_map<int, std::vector<int>>& s2b,
+                          NodeDomain domain) {
     for (auto& [rep, orig_buses] : s2b) {
       if (orig_buses.size() == 1 && orig_buses[0] == rep) continue; // trivial
       SwitchContractionRecord rec;
+      rec.domain           = domain;
       rec.original_bus_ids = orig_buses;
       rec.super_bus_id     = rep;
       rec.reason           = "zero-impedance / closed-switch merge";
       result.switch_records.push_back(rec);
     }
   };
-  make_records(result.ac_super_to_buses);
-  make_records(result.dc_super_to_buses);
+  make_records(result.ac_super_to_buses, NodeDomain::AC);
+  make_records(result.dc_super_to_buses, NodeDomain::DC);
 
   // ── Step 7: Build contracted PowerSystemGraph ─────────────────────────
   PowerSystemGraph& cg = result.contracted_graph;
@@ -300,6 +398,9 @@ ContractionResult contract_zero_impedance_edges(
       if (nd.has_vsc_ac)       new_node.has_vsc_ac       = true;
       if (nd.has_vsc_dc)       new_node.has_vsc_dc       = true;
       if (nd.has_dcdc)         new_node.has_dcdc         = true;
+      if (nd.has_lcc)          new_node.has_lcc          = true;
+      if (nd.has_energy_router) new_node.has_energy_router = true;
+      if (nd.has_three_phase_model) new_node.has_three_phase_model = true;
       if (nd.has_controllable) new_node.has_controllable = true;
       if (nd.is_slack)         new_node.is_slack         = true;
       if (nd.is_monitored)     new_node.is_monitored     = true;
@@ -476,6 +577,21 @@ ContractionResult contract_zero_impedance_edges(
     rg.bus = remap(rg.bus);
   for (auto& pv  : result.contracted_system.ac.pv_systems)
     pv.bus = remap(pv.bus);
+  for (auto& mobile : result.contracted_system.mobile_storage) {
+    mobile.bus = remap(mobile.bus);
+    if (mobile.target_bus != 0) mobile.target_bus = remap(mobile.target_bus);
+  }
+  for (auto& vpp : result.contracted_system.vpps)
+    vpp.pcc_bus = remap(vpp.pcc_bus);
+  for (auto& microgrid : result.contracted_system.microgrids) {
+    microgrid.pcc_bus = remap(microgrid.pcc_bus);
+    for (auto& bus : microgrid.internal_buses) bus = remap(bus);
+    std::sort(microgrid.internal_buses.begin(), microgrid.internal_buses.end());
+    microgrid.internal_buses.erase(
+        std::unique(microgrid.internal_buses.begin(),
+                    microgrid.internal_buses.end()),
+        microgrid.internal_buses.end());
+  }
   // Remaining AC bus-referencing components
   for (auto& fl  : result.contracted_system.ac.flexible_loads)
     fl.bus = remap(fl.bus);
@@ -492,6 +608,15 @@ ContractionResult contract_zero_impedance_edges(
   for (auto& cb  : result.contracted_system.ac.circuit_breakers) {
     cb.bus_from = remap(cb.bus_from);
     cb.bus_to   = remap(cb.bus_to);
+  }
+  for (auto& filter : result.contracted_system.ac.harmonic_filters) {
+    filter.from_bus = remap(filter.from_bus);
+    if (filter.to_bus != 0) filter.to_bus = remap(filter.to_bus);
+  }
+  for (auto& regulator : result.contracted_system.ac.regulator_controls) {
+    if (regulator.monitored_bus != 0) {
+      regulator.monitored_bus = remap(regulator.monitored_bus);
+    }
   }
 
   for (auto& br  : result.contracted_system.ac.branches) {
@@ -511,6 +636,17 @@ ContractionResult contract_zero_impedance_edges(
     vsc.bus_ac = remap_ac(vsc.bus_ac);
     vsc.bus_dc = remap_dc(vsc.bus_dc);
   }
+  for (auto& lcc : result.contracted_system.lcc_converters) {
+    lcc.ac_bus = remap_ac(lcc.ac_bus);
+    lcc.dc_bus = remap_dc(lcc.dc_bus);
+  }
+  for (auto& router : result.contracted_system.energy_routers) {
+    for (auto& port : router.ports) {
+      port.bus = port.port_type == ERPortType::DC
+                     ? remap_dc(port.bus)
+                     : remap_ac(port.bus);
+    }
+  }
 
   // Remap DC component bus references using dc_bus_to_super
   for (auto& br : result.contracted_system.dc.branches) {
@@ -523,12 +659,24 @@ ContractionResult contract_zero_impedance_edges(
     ld.bus = remap_dc(ld.bus);
   for (auto& st  : result.contracted_system.dc.storage)
     st.bus = remap_dc(st.bus);
+  for (auto& st  : result.contracted_system.dc.dc_storage)
+    st.bus = remap_dc(st.bus);
   for (auto& sg  : result.contracted_system.dc.static_generators)
     sg.bus = remap_dc(sg.bus);
   for (auto& dsg : result.contracted_system.dc.dc_static_generators)
     dsg.bus = remap_dc(dsg.bus);
   for (auto& pv  : result.contracted_system.dc.pv_arrays)
     pv.bus = remap_dc(pv.bus);
+  for (auto& capacitor : result.contracted_system.dc.capacitors)
+    capacitor.bus = remap_dc(capacitor.bus);
+  for (auto& reactor : result.contracted_system.dc.reactors) {
+    reactor.from_bus = remap_dc(reactor.from_bus);
+    reactor.to_bus = remap_dc(reactor.to_bus);
+  }
+  for (auto& filter : result.contracted_system.dc.harmonic_filters) {
+    filter.from_bus = remap_dc(filter.from_bus);
+    if (filter.to_bus != 0) filter.to_bus = remap_dc(filter.to_bus);
+  }
 
   // Two-terminal DC components
   for (auto& dd  : result.contracted_system.dc.dcdc_converters) {
@@ -596,6 +744,17 @@ ContractionResult contract_zero_impedance_edges(
       cbs.end());
   }
 
+  result.mapping = make_identity_reduction_mapping(graph);
+  for (const auto& [bus, super] : result.ac_bus_to_super) {
+    result.mapping.original_to_reduced_buses[{NodeDomain::AC, bus}] =
+        {NodeDomain::AC, super};
+  }
+  for (const auto& [bus, super] : result.dc_bus_to_super) {
+    result.mapping.original_to_reduced_buses[{NodeDomain::DC, bus}] =
+        {NodeDomain::DC, super};
+  }
+  result.mapping.switch_records = result.switch_records;
+  rebuild_reduction_reverse_maps(result.mapping);
   return result;
 }
 

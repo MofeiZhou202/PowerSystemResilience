@@ -30,6 +30,8 @@
 #include <Eigen/Core>
 #include <Eigen/Sparse>
 
+#include "hacdcpf/graph/reduction_mapping.hpp"
+#include "hacdcpf/graph/reduction_plan.hpp"
 #include "hacdcpf/graph/topology_analysis.hpp"
 
 namespace hacdcpf::graph {
@@ -46,10 +48,15 @@ struct KronData {
   /// Y_αβ · Y_ββ⁻¹  (dense, shape: |α| × |β|)
   Eigen::MatrixXcd  Yab_Ybb_inv;
 
+  /// Y_ββ⁻¹ I_β. Zero for the passive variant; populated by the
+  /// constant-current-injection variant.
+  Eigen::VectorXcd  Ybb_inv_Ibeta;
+
   std::vector<int> retained_bus_indices;   ///< Indices in original Y-bus
   std::vector<int> eliminated_bus_indices; ///< Indices in original Y-bus
 
   bool valid{false};
+  bool has_current_injection{false};
 };
 
 // ═══════════════════════════════════════════════════════════════════════
@@ -64,6 +71,7 @@ struct KronReductionResult {
   Eigen::VectorXcd I_reduced;
 
   KronData kron_data;
+  ReductionMapping mapping;
 
   double fill_ratio{1.0};
   std::vector<Diagnostic> diagnostics;
@@ -92,6 +100,31 @@ KronReductionResult apply_kron_reduction_with_injection(
     const std::vector<int>&                          retained_indices,
     const std::vector<int>&                          eliminated_indices,
     double max_fill_ratio = 2.0);
+
+/// Domain-qualified overloads. bus_order maps original matrix positions to
+/// stable identities and therefore allow the result to carry a complete Kron
+/// reduction certificate.
+KronReductionResult apply_kron_reduction(
+    const Eigen::SparseMatrix<std::complex<double>>& Y_full,
+    const std::vector<BusRef>&                        bus_order,
+    const std::vector<int>&                           retained_indices,
+    const std::vector<int>&                           eliminated_indices,
+    double max_fill_ratio = 2.0);
+
+KronReductionResult apply_kron_reduction_with_injection(
+    const Eigen::SparseMatrix<std::complex<double>>& Y_full,
+    const Eigen::VectorXcd&                          I_full,
+    const std::vector<BusRef>&                        bus_order,
+    const std::vector<int>&                           retained_indices,
+    const std::vector<int>&                           eliminated_indices,
+    double max_fill_ratio = 2.0);
+
+/// Execute a domain-qualified Kron plan action against a matrix whose row
+/// ordering is declared by bus_order. The action's max_fill_ratio is used.
+KronReductionResult apply_kron_reduction(
+    const Eigen::SparseMatrix<std::complex<double>>& Y_full,
+    const std::vector<BusRef>&                        bus_order,
+    const ReductionAction&                            action);
 
 /// Recover eliminated node voltages from retained node voltages.
 /// Uses: V_β = -Y_ββ⁻¹ · Y_βα · V_α  (or with I_β correction).

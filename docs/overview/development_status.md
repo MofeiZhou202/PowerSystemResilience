@@ -540,7 +540,7 @@ The evidence uses project HEAD
 repository pin `3bf1e66749e3b3e0bbd57696a7d4f43ecf09218c`. It is a focused
 Release result, not a full CTest, sanitizer, or pinned-dependency baseline.
 
-## Graph documentation and deep audit (2026-08-21)
+## Graph audit closure (2026-08-23)
 
 `docs/modules/graph/` now has an eleven-chapter source-equivalent manual at the
 granularity of the PF/OPF manuals. The existing 664-line graph-theory chapter
@@ -551,23 +551,29 @@ mapping/recovery, production HTTP/GUI composition, and verification/audit.
 The manual explicitly separates general graph/Ward theory from reachable code
 and states that no unified public C++ reduction pipeline exists.
 
-The deep source audit covered all ten public graph headers, eight
-implementations, CMake registration, direct tests, major cross-module
-consumers, and production topology/network-reduction routes. AUD-024--AUD-031
-record eight open issues: same-ID AC/DC plan conflicts, unused option/enumeration
-surface, incomplete/non-composable mappings, pendant branch-ID recovery
-mismatch, incomplete injection-Kron recovery, unreachable `IsolatedLoad`
-status, post-series edge-ID/position divergence, and rich-component loss during
-contraction/HTTP compact export. Runtime code was not changed in this pass.
+The deep source audit now covers all ten public graph headers, nine
+implementations, CMake registration, direct tests, validation, major
+cross-module consumers, and production topology/network-reduction routes.
+AUD-024--AUD-031 are closed for the declared topology/reduction scope:
+planning is domain-qualified; every public option/action has reachable behavior;
+mapping is bidirectional and composable; pendant recovery uses stable component
+IDs and fails on missing lookup; Kron stores the interior injection correction;
+`IsolatedLoad` reaches validation; `edge_id` remains graph storage position; and
+Transformer3W/LCC/EnergyRouter/three-phase connectivity plus rich-terminal
+contraction/export behavior is covered. Unsupported phase/transformer/DCDC
+collapses fail closed. Rich virtual edges remain connectivity-only, HTTP Kron
+remains identify-only, and pendant folding remains approximate.
 
-The current Release targets were rebuilt before execution. `test_graph` passed
-30 cases/129 assertions, `test_graph_kron` 9/44, and `test_graph_roundtrip` 17/294,
-for 56 direct cases/467 assertions. Numeric cross-validation records an analytic
-3-bus Kron error below `1e-10`, sparse boundary-current errors at or below
-`3.55e-15`, series/PF loss differences below `1e-6 MW`, and a DC-OPF objective
-difference of `1.14e-13`. No full-network graph benchmark is claimed; the dependency
-HEAD differs from the repository pin. These are focused Release rebuild results, not
-full CTest or sanitizer results.
+The affected Release targets rebuilt successfully. `test_graph` passed 37
+cases/193 assertions, `test_graph_kron` 10/56, `test_graph_roundtrip` 17/294,
+`test_topology_crossval` 12/86, and `test_validation` 38/180, for 114/809. The
+four graph binaries ran serially in about 0.51 s. `gui_api_e2e` passed all 80
+checks, including rich reduction/export/reload preservation. A rebuilt
+ASan/UBSan selection passed 42 tests with one conditional skip and no sanitizer
+report. The constant-current Kron partition residual is at most `1e-12`.
+MIPSolvers is clean at the repository pin
+`4a0b16a00daefcbe18d2c5648fe30f840ed77052`. Full CTest and a full-network graph
+scale benchmark were not run.
 
 ## Network reconfiguration documentation and deep audit (2026-08-21)
 

@@ -16,8 +16,8 @@ eligible 集并保存 reverse tape。二者不消费 \texttt{ReductionPlan}，�
 Y=\begin{bmatrix}Y_{\alpha\alpha}&Y_{\alpha\beta}\\
 Y_{\beta\alpha}&Y_{\beta\beta}\end{bmatrix}.
 \end{equation}
-它不检查 $Y$ 方阵、索引范围、$\alpha/\beta$ 互斥或是否覆盖全部行；无效索引可能越界，公共调用方
-必须预验证。
+入口检查 $Y$ 为方阵、$\alpha/\beta$ 索引在范围内且互斥并完整覆盖全部行、fill limit 非负；
+注入版本还检查 $I$ 维数。失败返回 Error diagnostic，不进入分块访问。
 
 当 $\beta=\varnothing$ 时只抽取 retained 子矩阵，标 valid，不计算 dense recovery blocks。
 否则使用 \texttt{FullPivLU::isInvertible()}；不可逆时返回
@@ -49,17 +49,23 @@ nnz(Y_{red})/nnz(Y),&nnz(Y)>0,\\
 \begin{equation}
 I_{red}=I_\alpha-LI_\beta.
 \end{equation}
-它要求 I\_full 覆盖所有给定索引，但没有维数检查。$Y_{red}$ 与零注入版本相同。
+同时保存
+\begin{equation}
+c_\beta=Y_{\beta\beta}^{-1}I_\beta
+\end{equation}
+到 \texttt{KronData::Ybb\_inv\_Ibeta}。$Y_{red}$ 与零注入版本相同。
 
 \subsection{稠密恢复的实际边界}
 
-\srcpath{recover\_eliminated\_voltages} 当前只计算
+\srcpath{recover\_eliminated\_voltages} 根据 \fld{has\_current\_injection} 计算
 \begin{equation}
-V_\beta=-K V_\alpha.
+V_\beta=c_\beta-K V_\alpha.
 \end{equation}
-完整含注入关系应为 $V_\beta=Y_{\beta\beta}^{-1}I_\beta-KV_\alpha$，但 recovery API 不接收
-$I_\beta$，所以注入版本的 \fld{I\_reduced} 可用于边界方程，不能用现有函数完整恢复内部电压。
-invalid、空 $K$ 都返回空向量，不抛错；$V_\alpha$ 维数不匹配由 Eigen 运行时行为决定。
+因此注入版本无需调用方再次传入 $I_\beta$。invalid 或空 $K$ 返回空向量；$V_\alpha$ 或 correction
+维数不匹配抛 \texttt{invalid\_argument}。
+
+带 \texttt{bus\_order} 的 overload 要求每行对应唯一有效 \texttt{BusRef}，并在有效结果中填充
+domain-qualified Kron mapping/record；plan-action overload 还执行 action 的 \fld{max\_fill\_ratio}。
 
 \subsection{SparseKronOptions}
 
@@ -124,6 +130,7 @@ retained 集。OPF 显式构造 recovery operator，把 full phase voltage 表�
 
 \subsection{数值与物理边界}
 
-两条实现都描述线性 $I=YV$。被消去节点若有恒功率/电压相关注入，eligible 判定或 operating-point
-线性化必须由调用方处理；graph Kron API 本身不读 HybridPowerSystem。drop tolerance 改变矩阵与
+两条实现都描述线性 $I=YV$。常电流内部注入由保存的 correction 精确恢复；被消去节点若有
+恒功率/电压相关注入，eligible 判定或 operating-point 线性化必须由调用方处理；graph Kron API
+本身不读 HybridPowerSystem。drop tolerance 改变矩阵与
 恢复算子，是受控数值近似；FullPivLU 的 isInvertible 也不是用户可配置条件数阈值。
