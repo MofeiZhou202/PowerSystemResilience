@@ -1,10 +1,139 @@
 # Development Status
 
-Updated: 2026-08-22
+Updated: 2026-08-23
 
 This is the living handoff for verified build state and active engineering work.
 Update it in place; do not create dated copies. Source, registered tests, and
 the current Git worktrees remain authoritative.
+
+## Complete Release, sanitizer and external-engine verification (2026-08-23)
+
+The full macOS Release baseline for the current solver source contents was
+rebuilt with
+`cmake --build --preset macos-release -j4`, then the complete registered suite
+was executed with `ctest --preset macos-release --output-on-failure`. After the
+four sanitizer repairs, all 1666 tests completed in 206.45 s with no failures:
+1663 passed and three were conditionally skipped (one unavailable formal-SOC
+JSON input and two declared GridLAB-D conditional comparisons). This is the
+normal-build baseline for repository HEAD
+`c3cd6315bcbf66ebe13d5719c55a4f30991dd204`. The dependency source files used
+by that run are now exactly represented by the clean MIPSolvers commit and pin
+`4a0b16a00daefcbe18d2c5648fe30f840ed77052`.
+
+The dependency declaration in `cmake/Dependencies.cmake` was advanced from
+`3bf1e66749e3b3e0bbd57696a7d4f43ecf09218c` to that committed MIPSolvers HEAD.
+During the transition, Release configuration correctly refused the then-dirty
+four-file sanitizer overlay; after those files became commit `4a0b16a`, the
+clean sibling worktree passed normal `cmake --preset macos-release`
+configuration without a pin or dirty-tree warning. A subsequent
+`cmake --build --preset macos-release --target run_gui_server --clean-first -j4`
+rebuilt MIPSolvers, `hacdcpf` and the server from source. The resulting 41 MiB
+arm64 binary is `build/macos-release/run_gui_server`, with SHA-256
+`68f99ad3169eb91edbdccadc88c612893b2e03f9ce515e969627dbfac951001a`.
+The Release `gui_api_e2e` and `runtime_api_v1_e2e` tests passed 2/2 in 3.41 s.
+A live smoke check returned HTTP 200 for `/xjtu/`, reported full edition at
+`/api/edition`, and returned `hysim_api_v1` version 1.0 at `/api/v1`. The
+complete 1666-test suite was not rerun after the pin metadata update; the
+earlier full result above used byte-equivalent dependency source changes.
+
+The OpenDSS/GridLAB-D label selections covered five distinct registered tests
+and all five passed in 5.51 s (OpenDSS 5/5 and GridLAB-D 3/3, with overlapping
+cross-engine tests counted once). The machine checks reported:
+
+- 50 OpenDSS short-circuit cases with maximum `Ikss` relative error
+  `1.805581638e-7`, plus 35 GridLAB-D balanced shunt short-circuit cases with
+  maximum relative error `2.329225394e-8`;
+- IEEE 13/34/123 Thevenin comparisons over 111 buses and 2220 quantities with
+  maximum relative error `8.558706274e-16`;
+- six time-series PF steps with maximum voltage error `6.587109747e-10 pu`
+  against OpenDSS and `5.847480753e-7 pu` against GridLAB-D;
+- 164 IEEE13/OpenDSS harmonic points with maximum complex-voltage error
+  `0.001651738435 pu`, below the declared `0.002 pu` gate;
+- 14/14 harmonic-matrix cases, including nine numerical OpenDSS cases and six
+  GridLAB-D cases/24 slices, with maximum error approximately `5.35e-10 pu`.
+
+These external comparisons certify only their common implemented electrical
+subsets; they do not certify UC, lifecycle, control, switching transient or
+unmodelled AC/DC physics. The ETAP adapter binary passed 21 cases/733 assertions,
+covering OpenXLSX/XML adaptation, round trips and PF/short-circuit fields. The
+real `data/etap_test.xml` PDE fixture is absent, so its conditional fixture path
+only emitted a warning and returned. No ETAP commercial executable was invoked,
+and this result must not be described as commercial-ETAP numerical parity.
+`gui_api_e2e` also passed 1/1 in 2.12 s.
+
+A separate Debug tree at `build/macos-asan-ubsan` was configured with AppleClang
+21, `-fsanitize=address,undefined -fno-omit-frame-pointer`, and ETAP, OpenDSS,
+Ipopt and SuiteSparse disabled. The full command was:
+
+```bash
+ASAN_OPTIONS=detect_leaks=0:halt_on_error=1:abort_on_error=1 \
+UBSAN_OPTIONS=halt_on_error=1:print_stacktrace=1 \
+ctest --test-dir build/macos-asan-ubsan --output-on-failure
+```
+
+After repairing the four sanitizer defect classes described below, the entire
+tree was rebuilt and the same strict command completed all 1628 tests in
+4573.27 s: 1597 passed, 10 were skipped and 21 failed. There was no ASan or
+UBSan report from any repaired path. LeakSanitizer was not enabled on this
+macOS runtime. The ten skips are one Ipopt-only case, one unavailable
+formal-SOC fixture, two GridLAB-D conditional cases and six phase-hybrid
+OPF/relaxation cases excluded by the configured optional-feature set.
+
+The four sanitizer defects are closed as follows:
+
+- MIPSolvers' two mirrored `HighsHash.h` implementations now classify NaN and
+  signed infinities into distinct stable IEEE-754 tags before the finite-value
+  mantissa/exponent hash performs any integer conversion. Finite hashes and
+  equality-based collision resolution are unchanged; the storage-market test
+  therefore keeps its original optimization semantics without `-Inf` to
+  `short` undefined behaviour.
+- `tests/test_nighttime_opf.cpp` now supplies all 24 entries of `solar24` and
+  asserts the 24-sample contract before constructing a repeating profile. The
+  modulo-24 access is consequently total over the declared profile period.
+- Dense parity-IPM explicitly recognizes the unique empty solution of a
+  `0 x 0` KKT operator before factorization and returns empty primal/dual
+  increments only when the right-hand side matches that zero dimension; all
+  dense solves now reject a mismatched KKT/RHS dimension. In addition, vendored
+  Eigen `PartialPivLU` skips the mathematically empty trailing Schur update when
+  its recursive rectangular panel has rows but zero columns. This preserves
+  the original partial-pivot sequence and avoids constructing a writable
+  zero-width `Ref`.
+- The same Eigen guard closes the small-signal path in which the complex
+  eigenvector matrix is empty. The modal formulation and
+  `src/dynamics/SmallSignal.cpp` remain unchanged: inversion on the zero-space
+  now terminates through Eigen's valid empty-operation path instead of UBSan.
+
+Strict focused replay of the original five failing tests passed 5/5 in
+104.26 s. An expanded selection covering dense KKT and every registered
+small-signal case passed 6/6 in 103.86 s. The corresponding Release regression
+selection passed 10/10 in 0.82 s. After adding the explicit dense-KKT/RHS
+dimension guard, the combined ten-test ASan/UBSan selection passed 10/10 under
+strict halt/abort settings in 111.22 s. A trial replacement of `PartialPivLU` by
+rank-revealing `FullPivLU` was rejected: although it removed the immediate UB,
+it changed the Newton trajectory and reduced two existing convergence counts
+from 24/24 to 12/24 and from 4/4 to 3/4. The accepted guard instead retains the
+existing numerical method and results.
+
+Ten further failures are reproducible Debug/configuration contract differences,
+not sanitizer-clean evidence: the multiscale and GUI hybrid OPF cases hit the
+no-Ipopt parity-IPM iteration limit (constraint residuals about `4.05665e-4`
+and `7.12345e-2`); the unanchored-island case fails closed with a different
+exception type; the zero-sequence short-circuit values pass but report status
+`solved` instead of `solved_zero_sequence_open`; four three-stage reliability
+cases hit the HiGHS Debug assertion `col < origColIndex.size()` at
+`HighsPostsolveStack.h:287`; the invalid reliability polygon is captured into
+`result.error` instead of throwing; and `harmonics_ieee13_opendss` cannot resolve
+source bus `675` because the OpenDSS bridge is disabled in this tree.
+
+The remaining 11 failures are browser/HTTP E2E timeouts, connection refusals or
+insufficient LCC result state in the instrumented tree. The exact same 11-test
+selection passed 11/11 in the Release tree in 100.41 s, including NCP/Schur,
+layout/scale, LCC BPA round trip, overview, parameter contract, three reliability
+workflows, market and RPO. They are therefore retained as sanitizer-tree
+integration failures rather than promoted to Release regressions. Thus the four
+memory/undefined-behaviour defects are closed, while the 21 separate
+Debug/configuration and integration failures keep the full sanitizer tree from
+being a green all-contract baseline.
 
 ## Integrated-energy, model and SPPT monographs (2026-08-22)
 

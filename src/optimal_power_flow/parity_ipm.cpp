@@ -794,6 +794,13 @@ bool factor_kkt_dense(DenseKKTCache& cache,
   }
 
   cache.buf_orig = cache.buf;  // save for iterative refinement
+  // The KKT operator on R^0 has the unique empty solution. Eigen's dynamic
+  // dense LU must not be asked to factor a 0-by-0 buffer (Nocedal & Wright,
+  // Numerical Optimization, 2nd ed., Section 16.1, empty-block specialization).
+  if (dim == 0) {
+    cache.factored = true;
+    return true;
+  }
   cache.lu.compute(cache.buf);
   cache.factored = true;
   return true;
@@ -805,6 +812,15 @@ bool kkt_solve_dense(DenseKKTCache& cache,
                      Eigen::VectorXd& dlambda) {
   if (!cache.factored) {
     return false;
+  }
+  const Eigen::Index dim = static_cast<Eigen::Index>(cache.nn + cache.meq);
+  if (rhs.size() != dim) {
+    return false;
+  }
+  if (dim == 0) {
+    dx.resize(cache.nn);
+    dlambda.resize(cache.meq);
+    return true;
   }
   Eigen::VectorXd sol = cache.lu.solve(rhs);
   if (!sol.allFinite()) {

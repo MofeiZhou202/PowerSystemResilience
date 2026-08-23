@@ -389,7 +389,8 @@ $10^{-6}\lVert b\rVert_\infty$ 时置 \fld{solve\_degraded}，下次分解沿候
 （注释 :kkt\_solve\_scaled）。每个后端按 $(\dim,\mathrm{nnz})$ 缓存各自的符号分析，
 模式不变即复用（:SparseKKTCache、:factor\_assembled\_kkt）。$n+m_{eq}\le512$ 的小系统改走
 稠密 \fld{Eigen::PartialPivLU}（阈值 \fld{kDenseAutoKktDim}，:solve\_primal\_dual\_ipm；
-稠密装配/分解 :factor\_kkt\_dense，同样带 2 步精化 :kkt\_solve\_dense），环境变量
+稠密装配/分解 :factor\_kkt\_dense，同样带 2 步精化 :kkt\_solve\_dense）；$0\times0$
+KKT 按 $\mathbb R^0$ 上唯一空解直接闭合，不调用 Eigen 分解。环境变量
 \srcpath{HACDCPF\_OPF\_LINEAR\_SOLVER}（旧拼写
 \srcpath{HACDCPF\_OPF\_SPARSE\_SOLVER} 兼容）可强制
 \fld{dense}/\fld{mumps}/\fld{umfpack}/\fld{klu}/\fld{eigen}/\fld{auto}

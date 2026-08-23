@@ -104,11 +104,12 @@ static hacdcpf::TimeSeriesData canvas_daily_profiles(int steps) {
       0.30,0.40,0.55,0.60,0.50,0.35,0.25,0.30,0.45,0.55,0.60,0.65};
   static const std::vector<double> solar24 = {
       0.00,0.00,0.00,0.00,0.00,0.02,0.10,0.30,0.55,0.80,0.92,1.00,
-      0.98,0.90,0.75,0.55,0.30,0.10,0.02,0.00,0.00,0.00,0.00};
+      0.98,0.90,0.75,0.55,0.30,0.10,0.02,0.00,0.00,0.00,0.00,0.00};
   hacdcpf::TimeSeriesData ts;
   ts.num_steps = steps;
   ts.step_duration_hr = 1.0;
   auto add = [&](int id, const char* name, const std::vector<double>& values) {
+    REQUIRE(values.size() == 24);
     hacdcpf::TimeSeriesProfile profile;
     profile.id = id;
     profile.name = name;

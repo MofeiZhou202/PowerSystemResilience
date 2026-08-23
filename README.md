@@ -5,7 +5,7 @@
 
 本文档面向工程使用者和开发者，说明 HySim-XJTU-HRPES 从“工程场景建模”到“规范模型求解”、再到“结果回投”的完整链路。当前合同与实现参考统一从 `docs/README.md` 进入；历史审计、理论提案和旧技术总笔记隔离在 `docs/archive/`，不代表当前行为。
 
-## 文档同步状态（2026-08-22）
+## 文档同步状态（2026-08-23）
 
 - `docs/README.md` 是当前文档的唯一导航入口，明确区分运行契约与理论参考。
 - `main` 提供统一 Trial 能力清单、后端 fail-closed 403 防绕过、五阶段
@@ -21,14 +21,15 @@
   DC 种子 NCP -> 同伦”的数值升级梯级；五个困难平启动 MATPOWER 算例均已
   收敛并通过 Q 证书。重复求解可使用 `PreparedPowerFlowSession` 复用 projection、
   assembly、固定 pattern 与 symbolic analysis。依赖侧 KLU adapter 已提交至
-  `../MIPSolvers` 的 `3bf1e66`，主仓库依赖 pin 已同步推进。
+  `../MIPSolvers` 的 `3bf1e66`；当前依赖 pin 已推进至包含后续线性代数更新的
+  `4a0b16a`。
 - 2026-08-08 将 MIPSolvers 固定到 `60f8bc4`：纳入系统更新后的 native
   dual simplex（分区 PRICE、驻留 pivot workspace、warm re-optimization）、
   LP IPM Gondzio multiple centrality correctors、MILP B&C 拆分与跨平台构建修复。
   `full-dev` 同时构建两仓库完整测试树；该历史升级回归 1429/1429 个已注册
   测试通过，3 个缺少外部运行时或条件不满足的用例明确跳过。当前 Trial
   Trial 集成先将依赖 pin 更新到 MIPSolvers `7b4cba8`；当前 pin 为
-  `3bf1e66`，加入 Native IPM 的原坐标可行起点审计、方向性变量界契约、
+  `4a0b16a`，加入 Native IPM 的原坐标可行起点审计、方向性变量界契约、
   central warm-start 审计与 NativeLCQP 协作式墙钟截止。有限预算
   的稀疏 Phase I 已覆盖纯 AC、平衡 Hybrid AC/DC 与三相混合 OPF，在
   `mu0 = 0.1` 下以 `1e-1` 为 admission 门槛、`1e-2` 为 primal handoff
