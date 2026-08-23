@@ -735,6 +735,13 @@ struct HighsHashHelpers {
   }
 
   static u32 double_hash_code(double val) {
+    // IEEE 754-2019, Sections 3.4 and 6.2: infinities and NaNs are valid
+    // floating-point encodings, but converting their frexp/ldexp result to a
+    // 16-bit integer is undefined. Give each infinity and all NaNs stable tags;
+    // hash collisions remain permitted and equality still resolves them.
+    if (std::isnan(val)) return 0x7fc00000U;
+    if (std::isinf(val)) return std::signbit(val) ? 0xff800000U : 0x7f800000U;
+
     // we multiply by some irrational number, so that the buckets in which we
     // put the real numbers do not break on a power of two pattern. E.g.
     // consider the use case for detecting parallel rows when we have two
