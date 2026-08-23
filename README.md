@@ -8,6 +8,10 @@
 ## 文档同步状态（2026-08-23）
 
 - `docs/README.md` 是当前文档的唯一导航入口，明确区分运行契约与理论参考。
+- `liuyanhui` 的 BPA/DSP 增量已同步到 `main`：新增 BA/BB/BM/LM/LY 受限导入、
+  L/T 小电抗策略、BQ 来源限定 active-set、DC/LCC 来源字段和 JSON 往返。
+  BM/LM 三端 DSP fixture 未入库，故该外部数值对拍仍明确标为未闭环；当前
+  macOS Release 完整重链后为 1675 passed、4 conditional skips、0 failed。
 - `main` 提供统一 Trial 能力清单、后端 fail-closed 403 防绕过、五阶段
   GUI、后端指标分析计划、Trial 专属验收测试和白名单 Windows 打包；
   维护边界见 `docs/trial_edition_design.md`。
@@ -114,7 +118,7 @@ ctest --preset windows-trial-release -L trial --output-on-failure
 powershell -ExecutionPolicy Bypass -File tools/package_trial_windows.ps1
 ```
 
-## 当前建模与仿真包状态快照（2026-08-09）
+## 当前建模与仿真包状态快照（2026-08-23）
 
 本节用于快速回答“现在这个包到底做到哪一步了”。结论基于当前仓库源码组织、CMake 选项与已注册测试目标，而不是历史规划文档。
 

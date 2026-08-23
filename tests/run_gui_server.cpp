@@ -13588,6 +13588,29 @@ int main(int argc, char** argv) {
           bus_p_out[v.bus_ac] -= v.p_ac_mw;
           bus_q_out[v.bus_ac] -= v.q_ac_mvar;
         }
+        for (const auto& lcc : pf.lcc_transfers) {
+          bus_p_out[lcc.bus_ac] -= lcc.p_ac_mw;
+          bus_q_out[lcc.bus_ac] -= lcc.q_ac_mvar;
+        }
+        std::unordered_map<int, double> solved_vm_by_bus;
+        for (size_t i = 0; i < sys.ac.buses.size(); ++i) {
+          const auto& bus = sys.ac.buses[i];
+          const double vm = i < pf.vm.size() ? pf.vm[i] : bus.vm_pu;
+          solved_vm_by_bus[bus.index] = vm;
+          bus_p_out[bus.index] += bus.gs_mw * vm * vm;
+          bus_q_out[bus.index] -= bus.bs_mvar * vm * vm;
+        }
+        for (const auto& shunt : sys.ac.shunts) {
+          if (!shunt.in_service) continue;
+          const double vm = solved_vm_by_bus.count(shunt.bus)
+                                ? solved_vm_by_bus[shunt.bus]
+                                : 1.0;
+          const double bs = shunt.switchable && shunt.n_steps > 0
+                                ? shunt.bs_per_step * shunt.current_step
+                                : shunt.bs_mvar;
+          bus_p_out[shunt.bus] += shunt.gs_mw * vm * vm;
+          bus_q_out[shunt.bus] -= bs * vm * vm;
+        }
 
         struct TwoWindingTerminalFlow {
           double p_hv_mw{0.0};

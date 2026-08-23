@@ -148,6 +148,8 @@ TNTP 交通网 & \srcpath{parse\_tntp\_network} & tntp\_parser.hpp\\
 \fld{base\_mva} & $S_B$ & MVA & 正数 & $1.0$ & 标幺基准容量\\
 \fld{min\_segment\_length\_m} & — & m & 正数 & — & 线段最小长度阈值（短段合并）\\
 \fld{auto\_add\_external\_grid} & — & — & true/false & — & 无源网时自动补充外部电网\\
+\fld{lcc\_model} & — & — & 原生 LCC / VSC 近似 & 原生 LCC & 精确枚举：LccQuasiSteady / VscApprox\\
+\fld{reactance\_mode} & — & — & DSP 兼容 / 保留源值 & DSP 兼容 & 精确枚举：DspCompatible / PreserveSource\\
 \end{paramtable}
 配电与 SVG 导入结果另含可见诊断字段：\fld{source\_load\_objects}、\fld{inferred\_load\_objects}、
 \fld{has\_explicit\_phase\_data}、\fld{is\_unbalanced}（\texttt{CimDistImportResult}）与

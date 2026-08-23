@@ -52,7 +52,13 @@ $\kappa=(\max/\min$ 行$\ell_1$范数$)\times(\max/\min$ 列$\ell_1$范数$)$
 case9/14/30/57/118 默认缩放开全部收敛且 \fld{scaled\_residual\_norm}/
 \fld{raw\_residual\_norm} 有限（:load\_case）；条件监控开启时
 \fld{condition\_estimate} 为正有限（:TEST\_CASE）；三开关全关的 case14 回退仍收敛
-（:TEST\_CASE）。
+（:TEST\_CASE）。\srcpath{equilibrate\_nonlinear\_scaling} 另提供四遍 Jacobian
+行/列最大范数均衡实验 API；$\hat J=D_FJD_x^{-1}$ 的回代步与原物理 Newton 步在
+构造的三阶病态矩阵上误差小于 $10^{-9}$。该实验均衡\textbf{未接入生产 Newton 主循环}：
+合并试验虽保持单步代数等价，却改变浮点分解与全局化轨迹，完整回归曾引发
+VSC/GFM/NCP/MATPOWER 收敛退化，故生产路径仍只消费
+\srcpath{build\_nonlinear\_scaling} 的名义 $D_F,D_x$。这一区分防止把单步恒等式
+误写成端到端收敛认证。
 
 \subsection{非单调线搜索（GLL）}\label{sec:robust:gll}
 

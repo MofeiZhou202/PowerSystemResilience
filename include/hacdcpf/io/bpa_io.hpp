@@ -9,6 +9,8 @@
 ///   * AC bus cards        B / BS / BE / BQ
 ///   * AC branch cards     L (line), T (two-winding transformer)
 ///   * Two-terminal HVDC   BD (converter node), LD (DC line)
+///   * Layered LCC-HVDC    BA / BA1 / BA2, DC, BB, LY
+///   * Multi-terminal LCC  BM (converter node), LM (DC line)
 ///   * VSC-HVDC            BZ / BZ+ (converter station), LZ (DC line)
 /// Control cards ((...), /..., >...<, comments) are consumed for MVA base and
 /// case id; unsupported cards are skipped with a report record.
@@ -48,6 +50,13 @@ enum class BpaLccModel {
   LccQuasiSteady = 1,
 };
 
+/// How fixed-column BPA/DSP branch reactances below DSP's numerical floor are
+/// represented during import. PreserveSource is intended for audits only.
+enum class BpaSmallReactanceMode {
+  DspCompatible = 0,
+  PreserveSource = 1,
+};
+
 /// Options controlling BPA/DSP import.
 struct BpaImportOptions {
   /// Strict rejects the import when any record is coerced / skipped;
@@ -80,6 +89,18 @@ BpaImportResult parse_bpa_dat(const std::string& filepath,
 /// Parse BPA/DSP card text held in memory (used by the REST import path).
 BpaImportResult parse_bpa_dat_string(const std::string& content,
                                      const BpaImportOptions& options = {});
+
+/// Parse with an explicit L/T small-reactance policy without changing the
+/// layout of BpaImportOptions. The two-argument overload above always uses
+/// DSP-compatible preprocessing.
+BpaImportResult parse_bpa_dat_string(const std::string& content,
+                                     const BpaImportOptions& options,
+                                     BpaSmallReactanceMode reactance_mode);
+
+/// File-path counterpart of the explicit small-reactance policy overload.
+BpaImportResult parse_bpa_dat(const std::string& filepath,
+                              const BpaImportOptions& options,
+                              BpaSmallReactanceMode reactance_mode);
 
 /// Export the BPA-representable steady-state subset as fixed-column card text.
 ///

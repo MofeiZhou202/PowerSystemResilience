@@ -10,7 +10,7 @@
 \srcpath{test\_io\_json} & 43（42 pass, 1 skip） & 429 & 字段与错误契约\\
 \srcpath{test\_io\_matpower} & 2 & 15 & 单位纪律\\
 \srcpath{test\_io\_cim} & 12 & 156 & CGMES 子集、结构损失、XXE\\
-\srcpath{test\_bpa\_io} & 25 & 885 & 卡片结构和往返\\
+\srcpath{test\_bpa\_io} & 32（31 pass, 1 skip） & 1680 & 卡片结构、来源字段和往返\\
 \srcpath{test\_bpa\_dsp\_compare} & 5 & 251 & DSP 外部参考工况\\
 \bottomrule
 \end{tabular}
@@ -30,6 +30,12 @@ DSP 参考通道覆盖 39-bus、IEEE90、2DC LCC、CIGRE LCC 和 vsc2 VSC-HVDC�
 整流侧 $P_{ac}=-1500$ MW、逆变侧 $+1410$ MW、$I_d=3.0$ kA、直流电压 500/470 kV，
 直流线路损耗 90 MW；测试门槛分别为功率/电压 1 MW 或 1 kV、电流 0.01 kA。
 VSC 工况对拍 $P/Q/P_{dc}$、站损和约 300 kV 直流电压。5 cases/251 assertions 全部通过。
+
+新增内部矩阵覆盖 L/T 小电抗的 \fld{DspCompatible}/\fld{PreserveSource} 分歧、BQ
+来源字段、BA/BA1/BA2/BB/BM/LM/LY 卡结构、L/C 工程量保留及 BridgeIn 电流限值。
+三端 BM/LM 外部 DSP 数值用例依赖未随仓库提供的 \texttt{data/dsp/mtdc\_bm.dat}，
+本轮明确 skip；因此 1680 条已执行断言只证明解析/结构/内部方程契约，\textbf{不构成}
+BM/LM 外部数值对拍通过。
 
 该 oracle 来自 DSP 文件和报告，独立于 HySim 求解器，但只覆盖对应 BPA 卡片和稳态 AC/DC
 公共物理。它不能认证 JSON、CIM、ETAP、保护、动态或市场语义。

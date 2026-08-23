@@ -978,6 +978,8 @@ struct GeneratorLimitData {
   std::vector<double> vm_set_pu;
   std::vector<bool> has_generator;
   std::vector<bool> has_finite_q_limits;
+  std::vector<bool> has_bpa_bq;
+  std::vector<int> bpa_source_order;
 };
 
 GeneratorLimitData build_generator_limit_data(const SolverData& data,
@@ -989,6 +991,8 @@ GeneratorLimitData build_generator_limit_data(const SolverData& data,
   out.vm_set_pu.assign(static_cast<size_t>(n), 1.0);
   out.has_generator.assign(static_cast<size_t>(n), false);
   out.has_finite_q_limits.assign(static_cast<size_t>(n), true);
+  out.has_bpa_bq.assign(static_cast<size_t>(n), false);
+  out.bpa_source_order.assign(static_cast<size_t>(n), -1);
 
   std::vector<bool> vm_set_init(static_cast<size_t>(n), false);
   for (int i = 0; i < n; ++i) {
@@ -1004,6 +1008,14 @@ GeneratorLimitData build_generator_limit_data(const SolverData& data,
       continue;
     }
     out.has_generator[static_cast<size_t>(bus)] = true;
+    if (gen.bpa_is_bq) {
+      out.has_bpa_bq[static_cast<size_t>(bus)] = true;
+      int& source_order = out.bpa_source_order[static_cast<size_t>(bus)];
+      if (source_order < 0 ||
+          (gen.bpa_source_order >= 0 && gen.bpa_source_order < source_order)) {
+        source_order = gen.bpa_source_order;
+      }
+    }
     if (!vm_set_init[static_cast<size_t>(bus)]) {
       out.vm_set_pu[static_cast<size_t>(bus)] = gen.vg_pu;
       vm_set_init[static_cast<size_t>(bus)] = true;
@@ -1823,6 +1835,12 @@ PowerFlowResult NewtonSolver::solve(const SolverData& input_data,
     bool any_switched = false;
     const double q_hys = std::max(0.0, opt.pv_q_hysteresis_pu);
     const double vm_tol = std::max(0.0, opt.pv_recover_vm_tol_pu);
+    constexpr double kDegenerateQRangeTolPu = 1e-12;
+    constexpr double kSeverityTieTol = 1e-12;
+    int selected_bq_bus = -1;
+    int selected_bq_source_order = std::numeric_limits<int>::max();
+    double selected_bq_q = 0.0;
+    double selected_bq_severity = -1.0;
     for (int i = 0; i < n; ++i) {
       if (i == slack) continue;
       // Additional SLACK buses are excluded from the Jacobian and must not be switched.
@@ -1838,6 +1856,48 @@ PowerFlowResult NewtonSolver::solve(const SolverData& input_data,
 
       BusControlState& mode = bus_control[static_cast<size_t>(i)];
       if (mode == BusControlState::PVActive) {
+        double violation = 0.0;
+        double limited_q = 0.0;
+        if (qg_implied > qmax + entry_margin_pu) {
+          violation = qg_implied - qmax;
+          limited_q = qmax;
+        } else if (qg_implied < qmin - entry_margin_pu) {
+          violation = qmin - qg_implied;
+          limited_q = qmin;
+        }
+        if (violation <= 0.0) {
+          continue;
+        }
+
+        if (gen_limits.has_bpa_bq[static_cast<size_t>(i)] &&
+            qmax - qmin > kDegenerateQRangeTolPu) {
+          // Hintermuller, Ito & Kunisch (2002), Sec. 3 motivates the generic
+          // batch active-set update. BPA BQ allocation is the source-format
+          // exception documented in docs/modules/power_flow/chapters/newton.tex:
+          // re-solve after the most severe controller enters its bound.
+          const double severity = violation / (qmax - qmin);
+          const int source_order =
+              gen_limits.bpa_source_order[static_cast<size_t>(i)] >= 0
+                  ? gen_limits.bpa_source_order[static_cast<size_t>(i)]
+                  : std::numeric_limits<int>::max();
+          const bool more_severe =
+              severity > selected_bq_severity + kSeverityTieTol;
+          const bool earlier_source_tie =
+              std::abs(severity - selected_bq_severity) <= kSeverityTieTol &&
+              (source_order < selected_bq_source_order ||
+               (source_order == selected_bq_source_order &&
+                (selected_bq_bus < 0 || i < selected_bq_bus)));
+          if (more_severe || earlier_source_tie) {
+            selected_bq_bus = i;
+            selected_bq_source_order = source_order;
+            selected_bq_q = limited_q;
+            selected_bq_severity = severity;
+          }
+          continue;
+        }
+
+        // Generic PV controls, plus zero-width BPA BQ fixed-Q controls, enter
+        // every bound violated at this converged fixed-active-set point.
         if (qg_implied > qmax + entry_margin_pu) {
           ac_buses[static_cast<size_t>(i)].bus_type = BusType::PQ;
           qg_state[i] = qmax;
@@ -1880,6 +1940,16 @@ PowerFlowResult NewtonSolver::solve(const SolverData& input_data,
           last_control_change_iteration[static_cast<size_t>(i)] = total_iters;
         }
       }
+    }
+    if (!allow_restore && selected_bq_bus >= 0) {
+      ac_buses[static_cast<size_t>(selected_bq_bus)].bus_type = BusType::PQ;
+      qg_state[selected_bq_bus] = selected_bq_q;
+      bus_control[static_cast<size_t>(selected_bq_bus)] =
+          BusControlState::PQLimited;
+      any_switched = true;
+      out.profiling.pv_to_pq_switches += 1;
+      last_control_change_iteration[static_cast<size_t>(selected_bq_bus)] =
+          total_iters;
     }
     out.profiling.active_set_scan_ms_total +=
         std::chrono::duration<double, std::milli>(Clock::now() - scan_start)

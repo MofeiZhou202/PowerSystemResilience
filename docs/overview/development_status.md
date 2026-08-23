@@ -6,6 +6,53 @@ This is the living handoff for verified build state and active engineering work.
 Update it in place; do not create dated copies. Source, registered tests, and
 the current Git worktrees remain authoritative.
 
+## `liuyanhui` branch integration and BPA/DSP closure (2026-08-23)
+
+The two commits ending at `origin/liuyanhui`
+`2c122751e503a5a7a0c9b568eda923a6d95b2fda` were integrated into local `main`
+from pre-merge HEAD `6c6103804d8a880c2b7567531ea0ce0d8b2016d3` after resolving the JSON,
+reliability-basis and Newton conflicts against the newer mainline. The
+dependency declaration was deliberately kept at MIPSolvers pin
+`4a0b16a00daefcbe18d2c5648fe30f840ed77052`; the sibling dependency worktree
+was clean at exactly that commit. The incoming legacy dependency policy and
+two conditional CMake targets whose source files were absent were not kept.
+
+The accepted BPA/DSP scope adds explicit `DspCompatible` versus
+`PreserveSource` L/T small-reactance handling, BQ source provenance, JSON
+round trips for the new fields, native engineering provenance on LCC/DC
+components, and bounded BA/BA1/BA2/BB/BM/LM/LY parsing. BA layered conversion
+is a declared quasi-steady projection: the present one-terminal LCC equations
+do not certify physical high/low valve-group series sharing. BM/LM uses the
+general DC nodal network, but its external three-terminal DSP fixture
+`data/dsp/mtdc_bm.dat` is absent and the corresponding test is explicitly
+skipped; this path is not externally numerically certified.
+
+Newton retained mainline globalization, VSC/GFM/NCP behavior, LCC current-limit
+semantics and generic batch PV/PQ active sets. Only imported BPA BQ controls use
+the format-specific sequential exception: at a converged fixed active set, one
+nonzero-range BQ controller with maximum normalized Q violation enters its
+bound before re-solving, while violated zero-width BQ controls become fixed-Q
+PQ buses as a batch. A proposed automatic four-pass Jacobian max-norm
+equilibration was rejected from production after it changed floating-point
+factorization/globalization trajectories and regressed VSC/GFM/NCP/MATPOWER
+cases. Its standalone API remains experimental, with a `1e-9` physical-step
+equivalence unit gate. The proposed generic low-voltage trial guard was removed
+entirely rather than exposed as an ineffective option.
+
+After a complete `cmake --build --preset macos-release -j4`, the fully relinked
+suite completed with
+`ctest --preset macos-release --output-on-failure`: 1679 registered tests in
+202.78 s, 1675 passed, four conditionally skipped and zero failed. The skips
+were the unavailable formal-SOC JSON fixture, the unavailable BM/LM DSP
+fixture, and two declared GridLAB-D conditional comparisons. OpenDSS covered
+5 registered tests, GridLAB-D 3, and GUI/E2E 17; all tests that actually ran
+passed. Focused evidence also includes 24 assertions in four BPA BQ cases,
+five assertions for generic strongly coupled batch switching, 1680 executed
+BPA I/O assertions (31 pass/1 skip), 18 scaling assertions, 313 power-flow math
+audit assertions, and the ACTIVSg2000 GFM benchmark. The I/O and power-flow
+manuals compiled successfully with XeLaTeX to 12 and 152 pages; pre-existing
+long-path box/font warnings remain, with no compile failure.
+
 ## Complete Release, sanitizer and external-engine verification (2026-08-23)
 
 The full macOS Release baseline for the current solver source contents was

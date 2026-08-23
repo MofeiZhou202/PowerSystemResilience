@@ -11,8 +11,12 @@
 
 #include <cmath>  // std::isfinite (GCC 15 no longer provides it transitively)
 
+#include <Eigen/LU>
+#include <Eigen/Sparse>
+
 #include "hacdcpf/power_flow/power_flow_options.hpp"
 #include "hacdcpf/power_flow/hybrid.hpp"
+#include "hacdcpf/power_flow/nonlinear_scaling.hpp"
 #include "hacdcpf/io/matpower_parser.hpp"
 
 #ifndef HACDCPF_MATPOWER_DATA_DIR
@@ -108,4 +112,31 @@ TEST_CASE("Phase1 scaling: case14 converges with scaling disabled", "[scaling][r
   auto sys = load_case("case14.m");
   const auto result = hacdcpf::powerflow::solve_hybrid(sys, opt);
   REQUIRE(result.converged);
+}
+
+TEST_CASE("Jacobian equilibration preserves the physical Newton step",
+          "[scaling][equilibration][unit]") {
+  Eigen::Matrix3d dense;
+  dense << 1.0e8, 2.0, 0.0,
+           3.0, 4.0e-6, 5.0,
+           0.0, 6.0, 7.0e3;
+  const Eigen::SparseMatrix<double> jacobian = dense.sparseView();
+  const Eigen::Vector3d rhs(2.0, -1.0, 3.0);
+
+  const hacdcpf::powerflow::NonlinearScaling nominal(
+      Eigen::Vector3d(0.5, 2.0, 0.25),
+      Eigen::Vector3d(3.0, 0.2, 5.0));
+  hacdcpf::powerflow::RobustNonlinearOptions options;
+  const auto scaling = hacdcpf::powerflow::equilibrate_nonlinear_scaling(
+      nominal, jacobian, options);
+
+  const Eigen::Vector3d direct = dense.fullPivLu().solve(rhs);
+  const Eigen::Matrix3d balanced =
+      Eigen::Matrix3d(scaling.apply_jacobian_scaling(jacobian));
+  const Eigen::Vector3d balanced_rhs = scaling.apply_residual_scaling(rhs);
+  const Eigen::Vector3d recovered =
+      scaling.unscale_step(balanced.fullPivLu().solve(balanced_rhs));
+
+  REQUIRE((dense * recovered - rhs).lpNorm<Eigen::Infinity>() < 1e-9);
+  REQUIRE((recovered - direct).lpNorm<Eigen::Infinity>() < 1e-9);
 }

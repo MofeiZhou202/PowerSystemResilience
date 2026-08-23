@@ -51,7 +51,14 @@ Skipped/Warning 本身不会使 Strict 失败；若业务要求“任何结构�
 \srcpath{src/io/cim\_io.cpp:from\_cim} 只承诺 CGMES EQ+SSH 有界子集并拒绝实体声明；配电 RDF
 归 \srcpath{src/io/cim\_dist\_io.cpp:from\_cim\_dist}，缺失工程参数可产生 Canonical/BestEffort
 记录。BPA/DSP 卡片由 \srcpath{src/io/bpa\_io.cpp:parse\_bpa\_dat} 解析，LCC/VSC 卡的控制与
-单位口径由独立 reason/warning 记录。GridLAB-D/OpenDSS 文本导入的 legacy warnings/skipped
+单位口径由独立 reason/warning 记录。默认 \fld{DspCompatible} 对非理想 L/T 卡的
+$|x|<10^{-4}$~pu 施加保号的 $10^{-4}$~pu 数值下限并记录 RangeCoerced；精确全零的
+理想连接 L 卡不伪装成物理线路，而以 \fld{ideal\_connectivity} 进入规范投影收缩。
+显式 \fld{PreserveSource} 重载保留源反应值，供格式审计使用，不代表 DSP 数值兼容。
+BQ 卡把 \fld{bpa\_is\_bq}/\fld{bpa\_source\_order} 写入发电机并随 JSON 往返；
+BA/BM/BB 与 LD/LY/LM 的来源卡、层号、角色和 L/C 工程量写入 LCC、DCBus、DCBranch
+来源字段，稳态方程仍只消费其已声明的电阻与准稳态 LCC 子集。
+GridLAB-D/OpenDSS 文本导入的 legacy warnings/skipped
 经 \srcpath{src/io/import\_report.cpp:uniform\_report\_from\_messages} 分别转为 Coerced 与 Skipped，
 不会丢失为控制台文字。
 

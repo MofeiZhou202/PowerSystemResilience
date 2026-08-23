@@ -104,4 +104,12 @@ NonlinearScaling build_nonlinear_scaling(
     const Eigen::VectorXd& vdc,
     const RobustNonlinearOptions& options);
 
+/// Refine the nominal scale factors using the numerical Jacobian. The
+/// transformed linear system is algebraically equivalent to the original one;
+/// the recovered physical Newton step and nonlinear equations are unchanged.
+NonlinearScaling equilibrate_nonlinear_scaling(
+    const NonlinearScaling& nominal,
+    const Eigen::SparseMatrix<double>& jacobian,
+    const RobustNonlinearOptions& options);
+
 }  // namespace hacdcpf::powerflow

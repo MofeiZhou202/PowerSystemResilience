@@ -4265,6 +4265,17 @@ struct FMEASimplexCache {
   std::string component_name;
 };
 
+template <typename Basis>
+void copy_optional_dse_cache(Basis& destination, const Basis& source) {
+  if constexpr (requires {
+                  destination.cached_dse_weights = source.cached_dse_weights;
+                  destination.cached_dse_basis = source.cached_dse_basis;
+                }) {
+    destination.cached_dse_weights = source.cached_dse_weights;
+    destination.cached_dse_basis = source.cached_dse_basis;
+  }
+}
+
 double positive_or_zero(double value) {
   return std::isfinite(value) ? std::max(0.0, value) : 0.0;
 }

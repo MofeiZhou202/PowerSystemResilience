@@ -16,6 +16,9 @@
 
 #include <algorithm>
 #include <cmath>
+#include <filesystem>
+#include <fstream>
+#include <sstream>
 #include <string>
 #include <unordered_map>
 
@@ -24,6 +27,7 @@
 #include "hacdcpf/api/hacdcpf.hpp"
 #include "hacdcpf/io/bpa_io.hpp"
 #include "hacdcpf/io/json_io.hpp"
+#include "hacdcpf/power_flow/lcc_model.hpp"
 #include "hacdcpf/validation/validate_system.hpp"
 
 using Catch::Matchers::WithinAbs;
@@ -54,6 +58,28 @@ const hacdcpf::Generator* find_gen(const hacdcpf::HybridPowerSystem& sys,
   for (const auto& g : sys.ac.generators)
     if (g.name == name) return &g;
   return nullptr;
+}
+
+std::string fixed_card(const std::string& type) {
+  std::string card(90, ' ');
+  REQUIRE(type.size() <= 3);
+  card.replace(0, type.size(), type);
+  return card;
+}
+
+void put_field(std::string& card, size_t first, size_t last,
+               const std::string& value) {
+  REQUIRE(first >= 1);
+  REQUIRE(first <= last);
+  REQUIRE(value.size() <= last - first + 1);
+  card.replace(first - 1, value.size(), value);
+}
+
+std::string read_text_file(const std::string& path) {
+  std::ifstream input(path, std::ios::binary);
+  REQUIRE(input.good());
+  return {std::istreambuf_iterator<char>(input),
+          std::istreambuf_iterator<char>()};
 }
 
 }  // namespace
@@ -232,6 +258,12 @@ TEST_CASE("BPA import: BS has an open active-power range while BE/BQ do not",
   REQUIRE_THAT(be->pmax_mw, WithinAbs(250.0, 1e-9));
   REQUIRE_THAT(bq->pmin_mw, WithinAbs(0.0, 1e-9));
   REQUIRE_THAT(bq->pmax_mw, WithinAbs(300.0, 1e-9));
+  CHECK_FALSE(slack->bpa_is_bq);
+  CHECK_FALSE(be->bpa_is_bq);
+  CHECK(bq->bpa_is_bq);
+  CHECK(slack->bpa_source_order == -1);
+  CHECK(be->bpa_source_order == -1);
+  CHECK(bq->bpa_source_order == 3);
 }
 
 TEST_CASE("BPA import: ordinary B-card generation remains a fixed PQ injection",
@@ -401,6 +433,39 @@ TEST_CASE("BPA import: line continuations and order-independent bus binding",
         }));
   }
 
+  SECTION("zero L-card reactance with other parameters uses the DSP floor") {
+    std::string line = card("L ", "BUS500A", "525.", "BUS500B", "525.");
+    line.replace(38, 6, ".0002");
+    line.replace(44, 6, "0.");
+    line.replace(56, 6, ".001");
+    const std::string content =
+        card("BS", "BUS500A", "525.") + "\n" +
+        card("B ", "BUS500B", "525.") + "\n" + line + "\n(END)\n";
+
+    const auto imported = hacdcpf::io::parse_bpa_dat_string(content);
+    REQUIRE_FALSE(imported.report.has_errors());
+    REQUIRE(imported.system.ac.branches.size() == 1);
+    REQUIRE_THAT(imported.system.ac.branches.front().x_pu,
+                 WithinAbs(0.0001, 1e-12));
+    CHECK_FALSE(imported.system.ac.branches.front().ideal_connectivity);
+    REQUIRE(std::any_of(
+        imported.report.records.begin(), imported.report.records.end(),
+        [](const auto& record) {
+          return record.disposition ==
+                     hacdcpf::io::ImportDisposition::Coerced &&
+                 record.reason_code ==
+                     hacdcpf::io::ImportReasonCode::RangeCoerced;
+        }));
+
+    hacdcpf::io::BpaImportOptions preserve_options;
+    const auto preserved = hacdcpf::io::parse_bpa_dat_string(
+        content, preserve_options,
+        hacdcpf::io::BpaSmallReactanceMode::PreserveSource);
+    REQUIRE_FALSE(preserved.report.has_errors());
+    REQUIRE_THAT(preserved.system.ac.branches.front().x_pu,
+                 WithinAbs(0.0, 1e-12));
+  }
+
   SECTION("T-card impedance is referred to the second winding bus base") {
     std::string transformer =
         card("T ", "BUS230A", "230.", "BUS035B", "35.");
@@ -423,6 +488,39 @@ TEST_CASE("BPA import: line continuations and order-independent bus binding",
                  WithinAbs(0.06621 * ratio2 * ratio2, 1e-12));
     REQUIRE_THAT(imported.system.ac.branches.front().tap,
                  WithinAbs(1.0 / ratio2, 1e-12));
+  }
+
+  SECTION("T-card reactance below the DSP floor is coerced") {
+    std::string transformer =
+        card("T ", "BUS525A", "525.", "BUS525B", "525.");
+    transformer.replace(44, 6, ".00001");
+    const std::string content =
+        card("BS", "BUS525A", "525.") + "\n" +
+        card("B ", "BUS525B", "525.") + "\n" + transformer +
+        "\n(END)\n";
+
+    const auto imported = hacdcpf::io::parse_bpa_dat_string(content);
+    REQUIRE_FALSE(imported.report.has_errors());
+    REQUIRE(imported.system.ac.branches.size() == 1);
+    REQUIRE_THAT(imported.system.ac.branches.front().x_pu,
+                 WithinAbs(0.0001, 1e-12));
+    REQUIRE(std::any_of(
+        imported.report.records.begin(), imported.report.records.end(),
+        [](const auto& record) {
+          return record.disposition ==
+                     hacdcpf::io::ImportDisposition::Coerced &&
+                 record.reason_code ==
+                     hacdcpf::io::ImportReasonCode::RangeCoerced &&
+                 record.message.find("T-card reactance") != std::string::npos;
+        }));
+
+    hacdcpf::io::BpaImportOptions preserve_options;
+    const auto preserved = hacdcpf::io::parse_bpa_dat_string(
+        content, preserve_options,
+        hacdcpf::io::BpaSmallReactanceMode::PreserveSource);
+    REQUIRE_FALSE(preserved.report.has_errors());
+    REQUIRE_THAT(preserved.system.ac.branches.front().x_pu,
+                 WithinAbs(0.00001, 1e-12));
   }
 }
 
@@ -598,6 +696,50 @@ TEST_CASE("BPA import: cigre LCC quasi-steady structure", "[bpa][lcc]") {
   REQUIRE(vrep.ok());
 }
 
+TEST_CASE("BPA DSP LCC R-card source count keeps continuous tap control",
+          "[bpa][lcc][dsp-parity][tap-control]") {
+  const auto baseline = hacdcpf::io::parse_bpa_dat(dat_path("cigre.dat"));
+  REQUIRE_FALSE(baseline.report.has_errors());
+
+  std::istringstream input(read_text_file(dat_path("cigre.dat")));
+  std::ostringstream modified;
+  std::string line;
+  int changed = 0;
+  while (std::getline(input, line)) {
+    if (line.rfind("R ", 0) == 0) {
+      line.resize(std::max<size_t>(line.size(), 57), ' ');
+      line.replace(55, 2, "25");
+      ++changed;
+    }
+    modified << line << '\n';
+  }
+  REQUIRE(changed == 2);
+
+  const auto imported = hacdcpf::io::parse_bpa_dat_string(modified.str());
+  REQUIRE_FALSE(imported.report.has_errors());
+  REQUIRE(imported.system.lcc_converters.size() == 2);
+  for (const auto& converter : imported.system.lcc_converters) {
+    REQUIRE(converter.tap_control_modelled);
+    CHECK(converter.transformer_tap_steps == 0);
+  }
+
+  const auto baseline_pf = hacdcpf::solve_power_flow(baseline.system);
+  const auto modified_pf = hacdcpf::solve_power_flow(imported.system);
+  REQUIRE(baseline_pf.converged);
+  REQUIRE(modified_pf.converged);
+  REQUIRE(modified_pf.lcc_transfers.size() == baseline_pf.lcc_transfers.size());
+  for (size_t i = 0; i < baseline_pf.lcc_transfers.size(); ++i) {
+    const auto& expected = baseline_pf.lcc_transfers[i];
+    const auto& actual = modified_pf.lcc_transfers[i];
+    CHECK_THAT(actual.transformer_tap,
+               WithinAbs(expected.transformer_tap, 1e-12));
+    CHECK_THAT(actual.ud_kv, WithinAbs(expected.ud_kv, 1e-10));
+    CHECK_THAT(actual.id_ka, WithinAbs(expected.id_ka, 1e-12));
+    CHECK_THAT(actual.p_ac_mw, WithinAbs(expected.p_ac_mw, 1e-10));
+    CHECK_THAT(actual.q_ac_mvar, WithinAbs(expected.q_ac_mvar, 1e-10));
+  }
+}
+
 TEST_CASE("BPA import: LCC JSON round-trip", "[bpa][lcc][roundtrip]") {
   hacdcpf::io::BpaImportOptions options;
   options.lcc_model = hacdcpf::io::BpaLccModel::LccQuasiSteady;
@@ -660,6 +802,471 @@ TEST_CASE("BPA import: LCC JSON round-trip", "[bpa][lcc][roundtrip]") {
     REQUIRE_THAT(restored->vn_lv_kv, WithinAbs(original.vn_lv_kv, 1e-12));
   }
   REQUIRE(transformer_branch_count == 2);
+}
+
+TEST_CASE("BPA import: layered LCC and passive BB network are materialized",
+          "[bpa][lcc][layered]") {
+  std::string ba = fixed_card("BA");
+  put_field(ba, 7, 14, "RECTBA");
+  put_field(ba, 15, 18, "525.");
+  put_field(ba, 22, 22, "R");
+  put_field(ba, 24, 24, "H");
+  put_field(ba, 26, 26, "2");
+  put_field(ba, 41, 45, "300.");
+  put_field(ba, 46, 50, "100.");
+  put_field(ba, 51, 55, "50.");
+
+  std::string ba1 = fixed_card("BA1");
+  put_field(ba1, 7, 14, "RECTBA");
+  put_field(ba1, 20, 23, "345.");
+  put_field(ba1, 25, 28, "4872");
+  put_field(ba1, 37, 40, ".004");
+  put_field(ba1, 44, 49, "643.12");
+  put_field(ba1, 51, 56, "485.62");
+
+  std::string ba2 = fixed_card("BA2");
+  put_field(ba2, 7, 14, "RECTBA");
+  put_field(ba2, 20, 23, "100.");
+  put_field(ba2, 26, 30, "5000.");
+  put_field(ba2, 31, 35, "5.");
+  put_field(ba2, 36, 41, "120.");
+  put_field(ba2, 43, 47, "15.2");
+  put_field(ba2, 68, 71, "800.");
+
+  std::string control = fixed_card("DC");
+  put_field(control, 4, 11, "RECTBA");
+  put_field(control, 12, 15, "525.");
+  put_field(control, 28, 35, "GRIDPT");
+  put_field(control, 36, 39, "800.");
+  put_field(control, 53, 53, "1");
+  put_field(control, 55, 55, "1");
+  put_field(control, 57, 57, "1");
+  put_field(control, 61, 65, "3000.");
+  put_field(control, 67, 71, "800.");
+  put_field(control, 87, 87, "2");
+
+  std::string bb = fixed_card("BB");
+  put_field(bb, 7, 14, "GRIDPT");
+  put_field(bb, 15, 18, "800.");
+  put_field(bb, 22, 22, "I");
+  put_field(bb, 24, 24, "H");
+
+  std::string ly = fixed_card("LY");
+  put_field(ly, 7, 14, "RECTBA");
+  put_field(ly, 15, 18, "525.");
+  put_field(ly, 20, 27, "GRIDPT");
+  put_field(ly, 28, 31, "800.");
+  put_field(ly, 34, 37, "5000");
+  put_field(ly, 38, 42, "4.255");
+  put_field(ly, 43, 49, "663.87");
+
+  const auto imported = hacdcpf::io::parse_bpa_dat_string(
+      ba + "\n" + ba1 + "\n" + ba2 + "\n" + control + "\n" + bb +
+      "\n" + ly + "\n(END)\n");
+  REQUIRE_FALSE(imported.report.has_errors());
+  const auto& sys = imported.system;
+  REQUIRE(sys.lcc_converters.size() == 1);
+  REQUIRE(sys.vsc_converters.empty());
+  REQUIRE(sys.dc.buses.size() == 2);
+  REQUIRE(sys.dc.branches.size() == 1);
+  REQUIRE(sys.ac.branches.size() == 1);
+  REQUIRE(sys.ac.shunts.size() == 1);
+
+  const auto& converter = sys.lcc_converters.front();
+  CHECK(converter.source_card == "BA");
+  CHECK(converter.layer_code == "H");
+  CHECK(converter.station_role == hacdcpf::LCCStationRole::Rectifier);
+  CHECK(converter.control_mode == hacdcpf::LCCControlMode::ConstantPower);
+  CHECK_THAT(converter.p_set_mw, WithinAbs(3000.0, 1e-12));
+  CHECK_THAT(converter.power_percent, WithinAbs(100.0, 1e-12));
+  CHECK_THAT(converter.q_compensation_mvar, WithinAbs(50.0, 1e-12));
+  CHECK_THAT(converter.x_comm_pu, WithinAbs(0.008, 1e-12));
+  CHECK(converter.converter_transformer_branch == 0);
+  CHECK(converter.tap_control_modelled);
+  CHECK_THAT(converter.transformer_tap_min_pu,
+             WithinAbs(485.62 / 525.0, 1e-12));
+  CHECK_THAT(converter.transformer_tap_max_pu,
+             WithinAbs(643.12 / 525.0, 1e-12));
+
+  const auto passive = std::find_if(
+      sys.dc.buses.begin(), sys.dc.buses.end(),
+      [](const auto& bus) { return bus.name == "GRIDPT"; });
+  REQUIRE(passive != sys.dc.buses.end());
+  CHECK(passive->source_card == "BB");
+  CHECK(passive->bus_type == hacdcpf::DCBusType::DC_P);
+  CHECK_THAT(passive->pd_mw, WithinAbs(0.0, 1e-12));
+
+  const auto& line = sys.dc.branches.front();
+  CHECK(line.source_card == "LY");
+  CHECK_THAT(line.r_pu, WithinAbs(4.255 * 100.0 / (800.0 * 800.0),
+                                 1e-12));
+  CHECK_THAT(line.inductance_mh, WithinAbs(663.87, 1e-12));
+  CHECK_THAT(line.rate_a_mva, WithinAbs(4000.0, 1e-12));
+  CHECK_THAT(sys.ac.shunts.front().bs_mvar, WithinAbs(50.0, 1e-12));
+
+  const auto restored = hacdcpf::io::from_json(hacdcpf::io::to_json(sys, 2));
+  REQUIRE(restored.lcc_converters.size() == 1);
+  REQUIRE(restored.dc.buses.size() == 2);
+  REQUIRE(restored.dc.branches.size() == 1);
+  CHECK(restored.lcc_converters.front().source_card == "BA");
+  CHECK(restored.lcc_converters.front().layer_code == "H");
+  CHECK_THAT(restored.lcc_converters.front().q_compensation_mvar,
+             WithinAbs(50.0, 1e-12));
+  CHECK(restored.dc.buses[1].source_card == "BB");
+  CHECK(restored.dc.branches.front().source_card == "LY");
+  CHECK_THAT(restored.dc.branches.front().inductance_mh,
+             WithinAbs(663.87, 1e-12));
+}
+
+TEST_CASE("BPA import: BM and LM form a native multi-terminal LCC network",
+          "[bpa][lcc][mtdc]") {
+  const auto bm_card = [](const std::string& name,
+                          const std::string& primary,
+                          const std::string& role,
+                          const std::string& angle,
+                          const std::string& p,
+                          const std::string& v) {
+    std::string card = fixed_card("BM");
+    put_field(card, 7, 14, name);
+    put_field(card, 15, 18, "210.");
+    put_field(card, 21, 25, "2");
+    put_field(card, 26, 30, "300.");
+    put_field(card, 31, 35, "5.");
+    put_field(card, 36, 40, "140.");
+    put_field(card, 41, 45, "100.");
+    put_field(card, 46, 50, "3000.");
+    put_field(card, 51, 58, primary);
+    put_field(card, 59, 62, "525.");
+    put_field(card, 63, 63, role);
+    put_field(card, 64, 66, angle);
+    put_field(card, 67, 69, "17.");
+    if (!p.empty()) put_field(card, 70, 74, p);
+    if (!v.empty()) put_field(card, 75, 79, v);
+    put_field(card, 80, 85, "500.");
+    return card;
+  };
+  const auto lm_card = [](const std::string& from, const std::string& to,
+                          const std::string& resistance,
+                          const std::string& inductance) {
+    std::string card = fixed_card("LM");
+    put_field(card, 7, 14, from);
+    put_field(card, 15, 18, "210.");
+    put_field(card, 20, 27, to);
+    put_field(card, 28, 31, "210.");
+    put_field(card, 34, 37, "3000");
+    put_field(card, 38, 42, resistance);
+    put_field(card, 43, 49, inductance);
+    return card;
+  };
+
+  const std::string content =
+      bm_card("RECT1", "PRI1", "R", "142", "500.", "") + "\n" +
+      bm_card("RECT2", "PRI2", "R", "172", "1000.", "") + "\n" +
+      bm_card("INVERT", "PRI3", "I", "193", "", "470.") + "\n" +
+      lm_card("RECT1", "RECT2", "4.64", "316.56") + "\n" +
+      lm_card("RECT2", "INVERT", "9.5", "755.71") + "\n(END)\n";
+  const auto imported = hacdcpf::io::parse_bpa_dat_string(content);
+  REQUIRE_FALSE(imported.report.has_errors());
+  const auto& sys = imported.system;
+  REQUIRE(sys.lcc_converters.size() == 3);
+  REQUIRE(sys.dc.buses.size() == 3);
+  REQUIRE(sys.dc.branches.size() == 2);
+
+  CHECK(sys.lcc_converters[0].source_card == "BM");
+  CHECK(sys.lcc_converters[0].station_role ==
+        hacdcpf::LCCStationRole::Rectifier);
+  CHECK(sys.lcc_converters[0].control_mode ==
+        hacdcpf::LCCControlMode::ConstantPower);
+  CHECK_THAT(sys.lcc_converters[0].p_set_mw, WithinAbs(500.0, 1e-12));
+  CHECK_THAT(sys.lcc_converters[0].alpha_set_deg, WithinAbs(14.2, 1e-12));
+  CHECK_THAT(sys.lcc_converters[1].p_set_mw, WithinAbs(1000.0, 1e-12));
+  CHECK(sys.lcc_converters[2].station_role ==
+        hacdcpf::LCCStationRole::Inverter);
+  CHECK(sys.lcc_converters[2].control_mode ==
+        hacdcpf::LCCControlMode::ConstantGamma);
+  CHECK_THAT(sys.lcc_converters[2].gamma_set_deg, WithinAbs(19.3, 1e-12));
+  CHECK_THAT(sys.lcc_converters[2].gamma_min_deg, WithinAbs(17.0, 1e-12));
+  CHECK_THAT(sys.lcc_converters[2].v_dc_set_kv, WithinAbs(470.0, 1e-12));
+
+  CHECK(sys.dc.branches[0].source_card == "LM");
+  CHECK_THAT(sys.dc.branches[0].r_pu,
+             WithinAbs(4.64 * 100.0 / (500.0 * 500.0), 1e-12));
+  CHECK_THAT(sys.dc.branches[0].inductance_mh,
+             WithinAbs(316.56, 1e-12));
+  CHECK_THAT(sys.dc.branches[1].r_pu,
+             WithinAbs(9.5 * 100.0 / (500.0 * 500.0), 1e-12));
+}
+
+TEST_CASE("LCC BridgeIn consistently bounds BM and BD station current",
+          "[bpa][lcc][mtdc][regression]") {
+  hacdcpf::LCCConverter bm;
+  bm.source_card = "BM";
+  bm.station_role = hacdcpf::LCCStationRole::Inverter;
+  bm.control_mode = hacdcpf::LCCControlMode::ConstantGamma;
+  bm.n_bridges = 2;
+  bm.x_comm_ohm = 5.0;
+  bm.v_drop_v = 100.0;
+  bm.gamma_set_deg = 19.3;
+  bm.rated_current_a = 2500.0;
+
+  constexpr double kDesiredCurrentKa = 3.0;
+  constexpr double kDcVoltageKv = 470.0;
+  const double commutation_voltage =
+      hacdcpf::powerflow::lcc_required_valve_voltage_kv(
+          bm, kDcVoltageKv, kDesiredCurrentKa, bm.gamma_set_deg);
+  REQUIRE(commutation_voltage > 0.0);
+
+  const auto bm_point = hacdcpf::powerflow::lcc_operating_point(
+      bm, commutation_voltage, commutation_voltage, kDcVoltageKv);
+  REQUIRE(bm_point.valid);
+  CHECK_THAT(bm_point.id_ka, WithinAbs(2.5, 1e-10));
+  CHECK(bm_point.id_at_limit);
+
+  auto bd = bm;
+  bd.source_card = "BD";
+  const auto bd_point = hacdcpf::powerflow::lcc_operating_point(
+      bd, commutation_voltage, commutation_voltage, kDcVoltageKv);
+  REQUIRE(bd_point.valid);
+  CHECK_THAT(bd_point.id_ka, WithinAbs(2.5, 1e-10));
+  CHECK(bd_point.id_at_limit);
+}
+
+TEST_CASE("BM and LM three-terminal system matches the DSP operating mode",
+          "[bpa][lcc][mtdc][power-flow][regression]") {
+  const std::string fixture = dat_path("mtdc_bm.dat");
+  if (!std::filesystem::exists(fixture)) {
+    SKIP("BPA multi-terminal DSP fixture mtdc_bm.dat is not present");
+  }
+  const auto imported = hacdcpf::io::parse_bpa_dat(fixture);
+  REQUIRE_FALSE(imported.report.has_errors());
+  REQUIRE(imported.system.lcc_converters.size() == 3);
+  REQUIRE(imported.system.dc.branches.size() == 2);
+
+  hacdcpf::PowerFlowOptions opt;
+  opt.max_iter = 300;
+  opt.tol = 1e-8;
+  opt.enable_pv_pq_conversion = false;
+  REQUIRE_FALSE(opt.initial_state.has_value());
+
+  const auto result = hacdcpf::solve_power_flow(imported.system, opt);
+  REQUIRE(result.converged);
+  CHECK(result.iterations <= 3);
+  CHECK(result.residual < 5e-8);
+  REQUIRE(result.lcc_transfers.size() == 3);
+
+  const auto& rectifier1 = result.lcc_transfers[0];
+  const auto& rectifier2 = result.lcc_transfers[1];
+  const auto& inverter = result.lcc_transfers[2];
+  CHECK_THAT(rectifier1.p_dc_mw, WithinAbs(500.0, 1e-4));
+  CHECK_THAT(rectifier2.p_dc_mw, WithinAbs(1000.0, 1e-4));
+  CHECK_THAT(inverter.ud_kv, WithinAbs(470.0, 0.1));
+  CHECK_THAT(inverter.gamma_deg, WithinAbs(19.3, 1e-6));
+  CHECK_THAT(inverter.id_ka, WithinAbs(2.99865, 0.002));
+  CHECK_FALSE(inverter.id_at_limit);
+
+  // DSP reports 4.58 MW and 86.05 MW for the two LM sections. The current
+  // quasi-steady implementation is calibrated to within 1 MW on this case.
+  const auto line_loss_mw = [&](size_t line) {
+    const auto& branch = imported.system.dc.branches.at(line);
+    const double vf_kv =
+        result.vdc.at(static_cast<size_t>(branch.from_bus - 1)) * branch.base_kv;
+    const double vt_kv =
+        result.vdc.at(static_cast<size_t>(branch.to_bus - 1)) * branch.base_kv;
+    const double r_ohm =
+        branch.r_pu * branch.base_kv * branch.base_kv /
+        imported.system.ac.base_mva;
+    const double current_ka = (vf_kv - vt_kv) / r_ohm;
+    return current_ka * current_ka * r_ohm;
+  };
+  CHECK_THAT(line_loss_mw(0), WithinAbs(4.58, 0.1));
+  CHECK_THAT(line_loss_mw(1), WithinAbs(86.05, 1.0));
+}
+
+TEST_CASE("BPA import: DC mode 1 calibrates the hybrid-grid BZ target from "
+          "the BA P-U boundary",
+          "[bpa][lcc][layered][hybrid-dc]") {
+  std::string ba = fixed_card("BA");
+  put_field(ba, 7, 14, "RECTBA");
+  put_field(ba, 15, 18, "525.");
+  put_field(ba, 22, 22, "R");
+  put_field(ba, 24, 24, "H");
+  put_field(ba, 26, 26, "2");
+
+  std::string ba1 = fixed_card("BA1");
+  put_field(ba1, 7, 14, "RECTBA");
+  put_field(ba1, 20, 23, "345.");
+  put_field(ba1, 25, 28, "4872");
+  put_field(ba1, 37, 40, ".004");
+  put_field(ba1, 44, 49, "643.12");
+  put_field(ba1, 51, 56, "485.62");
+
+  std::string ba2 = fixed_card("BA2");
+  put_field(ba2, 7, 14, "RECTBA");
+  put_field(ba2, 20, 23, "100.");
+  put_field(ba2, 26, 30, "5000.");
+  put_field(ba2, 31, 35, "5.");
+  put_field(ba2, 36, 41, "120.");
+  put_field(ba2, 43, 47, "15.2");
+  put_field(ba2, 68, 71, "800.");
+
+  std::string control = fixed_card("DC");
+  put_field(control, 4, 11, "RECTBA");
+  put_field(control, 12, 15, "525.");
+  put_field(control, 28, 35, "GRIDPT");
+  put_field(control, 36, 39, "800.");
+  put_field(control, 53, 53, "1");
+  put_field(control, 55, 55, "1");
+  put_field(control, 61, 65, "3000.");
+  put_field(control, 67, 71, "800.");
+
+  std::string bb = fixed_card("BB");
+  put_field(bb, 7, 14, "GRIDPT");
+  put_field(bb, 15, 18, "800.");
+  put_field(bb, 22, 22, "I");
+  put_field(bb, 24, 24, "H");
+
+  std::string ly = fixed_card("LY");
+  put_field(ly, 7, 14, "RECTBA");
+  put_field(ly, 15, 18, "525.");
+  put_field(ly, 20, 27, "GRIDPT");
+  put_field(ly, 28, 31, "800.");
+  put_field(ly, 34, 37, "5000");
+  put_field(ly, 38, 42, "4.255");
+
+  std::string bz = fixed_card("BZ");
+  put_field(bz, 7, 14, "VSCB");
+  put_field(bz, 15, 18, "525.");
+  put_field(bz, 21, 25, "2500.");
+  put_field(bz, 51, 55, ".0062");
+  put_field(bz, 64, 64, "1");
+  put_field(bz, 67, 70, "800.");
+
+  std::string bz_plus = fixed_card("BZ+");
+  put_field(bz_plus, 7, 14, "VSCB");
+  put_field(bz_plus, 20, 24, "-2850");
+  put_field(bz_plus, 26, 29, "-5.5");
+  put_field(bz_plus, 34, 34, "1");
+  put_field(bz_plus, 36, 39, "800.");
+  put_field(bz_plus, 41, 44, "800.");
+
+  std::string lz = fixed_card("LZ");
+  put_field(lz, 7, 14, "GRIDPT");
+  put_field(lz, 15, 18, "800.");
+  put_field(lz, 20, 27, "VSCB");
+  put_field(lz, 28, 31, "525.");
+  put_field(lz, 34, 37, "3125");
+  put_field(lz, 38, 43, "3.6284");
+
+  std::string bz_pq = fixed_card("BZ");
+  put_field(bz_pq, 7, 14, "VSCAUX");
+  put_field(bz_pq, 15, 18, "525.");
+  put_field(bz_pq, 21, 25, "1500.");
+  put_field(bz_pq, 51, 55, ".02");
+  put_field(bz_pq, 64, 64, "1");
+  put_field(bz_pq, 67, 70, "800.");
+
+  std::string bz_pq_plus = fixed_card("BZ+");
+  put_field(bz_pq_plus, 7, 14, "VSCAUX");
+  put_field(bz_pq_plus, 20, 24, "-150.");
+  put_field(bz_pq_plus, 26, 29, "-2.");
+  put_field(bz_pq_plus, 36, 39, "800.");
+  put_field(bz_pq_plus, 41, 44, "800.");
+
+  std::string lz_aux = fixed_card("LZ");
+  put_field(lz_aux, 7, 14, "GRIDPT");
+  put_field(lz_aux, 15, 18, "800.");
+  put_field(lz_aux, 20, 27, "VSCAUX");
+  put_field(lz_aux, 28, 31, "525.");
+  put_field(lz_aux, 34, 37, "3000");
+  put_field(lz_aux, 38, 43, ".0001");
+
+  const auto imported = hacdcpf::io::parse_bpa_dat_string(
+      ba + "\n" + ba1 + "\n" + ba2 + "\n" + control + "\n" + bb +
+      "\n" + ly + "\n" + bz + "\n" + bz_plus + "\n" + lz + "\n" +
+      bz_pq + "\n" + bz_pq_plus + "\n" + lz_aux + "\n(END)\n");
+  REQUIRE_FALSE(imported.report.has_errors());
+  REQUIRE(imported.system.lcc_converters.size() == 1);
+  REQUIRE(imported.system.vsc_converters.size() == 2);
+  REQUIRE(imported.system.dc.buses.size() == 4);
+  REQUIRE(imported.system.dc.branches.size() == 3);
+
+  const double r_ly_pu = 4.255 * 100.0 / (800.0 * 800.0);
+  const double r_lz_pu = 3.6284 * 100.0 / (800.0 * 800.0);
+  const double r_aux_pu = 0.0001 * 100.0 / (800.0 * 800.0);
+  const double v_bb = 1.0 - 30.0 * r_ly_pu;
+  const double p_aux_pu = -(1.5 + 0.02 * 1.5);
+  const double v_aux =
+      0.5 * (v_bb +
+             std::sqrt(v_bb * v_bb + 4.0 * p_aux_pu * r_aux_pu));
+  const double balance_current_pu = 30.0 + p_aux_pu / v_aux;
+  const double v_bz = v_bb - balance_current_pu * r_lz_pu;
+  const double p_bz_pu = -balance_current_pu * v_bz;
+  const double expected_target =
+      std::sqrt(v_bz * v_bz + p_bz_pu / 1e5);
+
+  const auto dc_bus = [&](const std::string& name) -> const auto& {
+    const auto it = std::find_if(imported.system.dc.buses.begin(),
+                                 imported.system.dc.buses.end(),
+                                 [&](const auto& bus) {
+                                   return bus.name == name;
+                                 });
+    REQUIRE(it != imported.system.dc.buses.end());
+    return *it;
+  };
+  const auto former = std::find_if(
+      imported.system.vsc_converters.begin(),
+      imported.system.vsc_converters.end(), [](const auto& converter) {
+        return converter.control_mode == hacdcpf::ConverterMode::VDC_Q;
+      });
+  REQUIRE(former != imported.system.vsc_converters.end());
+  CHECK_THAT(dc_bus("RECTBA").vm_pu, WithinAbs(1.0, 1e-8));
+  CHECK_THAT(dc_bus("GRIDPT").vm_pu, WithinAbs(v_bb, 1e-8));
+  CHECK_THAT(dc_bus("VSCAUX").vm_pu, WithinAbs(v_aux, 1e-8));
+  CHECK_THAT(dc_bus("VSCB").vm_pu, WithinAbs(v_bz, 1e-8));
+  CHECK_THAT(former->v_dc_set_pu, WithinAbs(expected_target, 1e-8));
+}
+
+TEST_CASE("BPA import: LZ can terminate at a passive BB junction",
+          "[bpa][vsc][hybrid-dc]") {
+  std::string bb = fixed_card("BB");
+  put_field(bb, 7, 14, "GRIDPT");
+  put_field(bb, 15, 18, "300.");
+
+  std::string bz = fixed_card("BZ");
+  put_field(bz, 7, 14, "VSCB");
+  put_field(bz, 15, 18, "525.");
+  put_field(bz, 21, 25, "1500.");
+  put_field(bz, 51, 55, ".007");
+  put_field(bz, 64, 64, "2");
+  put_field(bz, 67, 70, "300.");
+
+  std::string bz_plus = fixed_card("BZ+");
+  put_field(bz_plus, 7, 14, "VSCB");
+  put_field(bz_plus, 20, 24, "1470.");
+  put_field(bz_plus, 34, 34, "1");
+  put_field(bz_plus, 36, 39, "300.");
+  put_field(bz_plus, 41, 44, "300.");
+
+  std::string lz = fixed_card("LZ");
+  put_field(lz, 7, 14, "GRIDPT");
+  put_field(lz, 15, 18, "300.");
+  put_field(lz, 20, 27, "VSCB");
+  put_field(lz, 28, 31, "300.");
+  put_field(lz, 34, 37, "3000");
+  put_field(lz, 38, 43, "3.628");
+  put_field(lz, 44, 50, "453.5");
+
+  const auto imported = hacdcpf::io::parse_bpa_dat_string(
+      bb + "\n" + bz + "\n" + bz_plus + "\n" + lz + "\n(END)\n");
+  REQUIRE_FALSE(imported.report.has_errors());
+  REQUIRE(imported.system.dc.buses.size() == 2);
+  REQUIRE(imported.system.dc.branches.size() == 1);
+  REQUIRE(imported.system.vsc_converters.size() == 1);
+  CHECK(imported.system.dc.branches.front().source_card == "LZ");
+  CHECK_THAT(imported.system.dc.branches.front().r_pu,
+             WithinAbs((3.628 / 2.0) * 100.0 / (300.0 * 300.0), 1e-12));
+  CHECK_THAT(imported.system.dc.branches.front().inductance_mh,
+             WithinAbs(453.5, 1e-12));
 }
 
 TEST_CASE("LCC tap-control metadata requires a valid transformer range",

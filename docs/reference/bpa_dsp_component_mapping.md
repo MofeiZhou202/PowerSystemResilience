@@ -62,8 +62,9 @@ T 卡固定 tap 并报告限制。
 |---|---|---|---|
 | **BD**（LCC 换流节点） | **`LCCConverter`** | ✅ | 桥数、αmin/αstop、阀压降、桥额定电流、直流额定电压全字段解析 |
 | **LD**（直流线路+运行方式） | `DCBranch` + 两台 `LCCConverter` 的 setpoint | ✅ | R、额定电流、Psch、Vdc 整定、αN、γN、功率控制点标志均解析；L/C 仅动态用，跳过 |
-| BA/LY/DC/BB（分层接入） | — | ❌ | 导入器显式跳过；Pwrflow.exe 不支持分层（仅 pfnt 需狗，§6.1）；结构上需 LCCConverter 串联端口小改（§6.4 判定 b） |
-| BM/LM（LCC-MTDC） | `DCBus`+`DCBranch`+`LCCConverter` | 🔶 | 网络层可组（§6.4 判定 a）；DSP 接受（MULTI TERMINAL DC loader），列位部分实证（§6.3）；导入器跳过，角色分配未实现 |
+| BA/BA1/BA2、DC、LY（分层接入） | `LCCConverter` + 内嵌 `ACBranch` + `Shunt` + `DCBus`/`DCBranch` | 🔶 | 已解析为受限准稳态投影；保留层号、功率比例、补偿与来源卡。当前单端 LCC 方程不能精确表达高低层直流串联端口，层间分配明确标为未校准（§6.4） |
+| BB（无源直流节点） | `DCBus(DC_P)` | ✅ | 零注入 KCL 节点，保留来源卡、角色和层号 |
+| BM/LM（LCC-MTDC） | `DCBus` + `DCBranch` + `LCCConverter` | 🔶 | 已解析站角色、控制与原生多端电阻网络；L/C 仅保留为工程量。仓库缺少 `mtdc_bm.dat`，三端 DSP 数值复验仍未闭环 |
 | **BZ/BZ+**（VSC 站） | `VSCConverter` + `DCBus` | ✅ | 已解析（列位实证确定，见 §5）：定功率站 → `PQ_MODE`，定直流电压站（BZ+ 标志 1）→ `VDC_Q` 硬下垂 |
 | **LZ**（柔直线路） | `DCBranch` | ✅ | 已解析：稳态取每极电阻 R（38-43 列）/极数；In 进 `rate_a_mva`；L/C/平波电抗仅动态用，跳过 |
 
@@ -77,12 +78,14 @@ T 卡固定 tap 并报告限制。
 
 ## 3. bpa_io 卡片支持矩阵与已知近似
 
-已支持：`B/BS/BE/BQ`（含 zone、Vsch、Q 限值）、`L`、`T`、`BD`、`LD`、
-与 LCC 换流变匹配的 `R`、`BZ`/`BZ+`/`LZ`（柔直，见 §5），以及控制卡中的
-`MVA_BASE=/CASEID=/PROJECT=`。普通交流 LTC 的完整 R 系列控制不在本次范围内。
+已支持：`B/BS/BE/BQ`（含 zone、Vsch、Q 限值和 BQ 来源卡序）、`L`、`T`、
+`BD`、`LD`、`BA/BA1/BA2`、`DC`、`BB`、`LY`、`BM`、`LM`、与 LCC
+换流变匹配的 `R`、`BZ`/`BZ+`/`LZ`（柔直，见 §5），以及控制卡中的
+`MVA_BASE=/CASEID=/PROJECT=`。普通交流 LTC 的完整 R 系列控制不在本次范围内；
+BA 分层是带 `model_limitations` 的准稳态投影，不等于完整串联阀组模型。
 
-显式跳过（进 ImportReport）：`BA/LY/DC/BB/BM/LM`（实证结论见 §6），
-其余未识别两字母码按 UnknownField 跳过；`(...)` 控制段在 `(END)` 终止。
+其余未识别两字母码按 UnknownField 跳过并进入 ImportReport；`(...)` 控制段在
+`(END)` 终止。
 
 已知近似/偏差（对比 DSP 解时的系统性来源）：
 
@@ -111,6 +114,12 @@ T 卡固定 tap 并报告限制。
    `bpa_source_order` 指纹，并且 L 支路满足同电压等级、零 R/B/tap/shift/长度/
    额定值/导线参数、无既有参数来源且 `|X|=1e-4 pu` 的全部条件时，才迁移为
    `parameter_source="legacy_bpa_dsp_numerical_tie"`。普通 JSON 不执行该迁移。
+7. **小电抗策略是显式导入契约**：默认 `DspCompatible` 对非理想 L/T 卡的
+   `|X|<1e-4 pu` 施加保号下限并记录 `RangeCoerced`；显式
+   `PreserveSource` 重载保留源值用于审计。两种策略不得混称为同一个物理模型。
+8. **BQ active-set 是来源限定的例外**：普通 PV 在同一收敛点批量进入 Q 限值；
+   BPA BQ 非零范围只选择归一化越限最严重的一台并重求解，零宽范围作为固定 Q
+   批量转 PQ。该行为只由 `bpa_is_bq` 激活，来源字段随 JSON 往返。
 
 ## 4. 与 DSP 潮流的集成对比（四案例）
 
@@ -229,9 +238,11 @@ VSCB 定直压 300 kV 整流），DSP 参考解 `vsc2NEW.SOL` / `vsc2.pf`。
 ## 6. BA/LY/DC/BB（分层接入 LCCDC）与 BM/LM（多端 LCC-MTDC）：实证结论与架构判定
 
 调查方法同 §5（单字段扰动 + 报错信息迭代，DSP 2.1.47 `Pwrflow.exe`，约 30 组对照运行），
-外加二进制字符串/加载器清单取证。核心结论先行：**可运行的 Pwrflow.exe 不支持分层接入
-（BA/LY/DC），该功能只存在于需加密狗的 bin2/pfnt.exe；多端直流（BM/LM）则被
-Pwrflow.exe 完整接受**。未实证字段一律明确标注。
+外加二进制字符串/加载器清单取证。外部工具证据仍表明：**可运行的 Pwrflow.exe 不支持
+分层接入（BA/LY/DC），该功能只存在于需加密狗的 bin2/pfnt.exe；多端直流（BM/LM）
+被 Pwrflow.exe 接受**。当前 HySim 已实现两类卡的受限导入：BM/LM 映射到一般直流
+节点网；BA 系列映射到单端 LCC 准稳态近似并显式声明层间串联未校准。未实证字段和
+未完成的外部数值闭环一律明确标注。
 
 ### 6.1 BA/LY/DC（分层接入）：Pwrflow.exe 实证为不可用
 
@@ -255,7 +266,8 @@ Pwrflow.exe 完整接受**。未实证字段一律明确标注。
 
 因此手册 BA/LY/DC 字段表的**语义**（Ud = Ud,H + Ud,L、Id 各层相同、kp,H+kp,L=100%、
 DC 卡四端节点+系统类型+控制方式+定比例层控+Psch/Vsch）有手册与 pfnt 字符串双重依据，
-但**列位未实证**（无法用可运行程序做数值确认），本库不据此实现解析。
+但**列位未由可运行外部程序实证**。当前解析依据卡片手册与内部结构测试实现，
+输出 `model_limitations`，不得据此宣称 pfnt 数值一致性。
 
 ### 6.2 BB（混合直流无源节点）：被 VSC/混合直流读取器认领
 
@@ -292,17 +304,20 @@ Ppercent 列位）未实证。
 
 ### 6.4 架构判定：(a) 多端可表达 / (b) 分层需小改 / 不需要新顶层类别
 
-**(a) 多端直流（BM/LM）——现有 `LCCConverter + DCBus + DCBranch` 原样可表达。**
+**(a) 多端直流（BM/LM）——现有 `LCCConverter + DCBus + DCBranch` 原样可表达并已导入。**
 证据：`DCBranch` 是任意两直流节点间的纯电阻（`from_bus`/`to_bus`），DC 网络是一般
 节点式网络（手册 BM 卡的 Y_dc 节点法同构）；DSP 的一致性检查要求"一个定电压/平衡站
 + 其余定功率站"。现有两端 BD/LD+R 导入已经把 `ConstantPower`/`ConstantGamma`
 内层特性与 PAAL/VDGA 的分接头外环组合起来；逆变端还使用伴随的直流电压目标闭合
-VDGA。这里尚未覆盖的是 BM/LM 的卡片解析、站角色分配、R 记录绑定和多端复合控制，
-而不是两端 PF 缺少 tap 状态。即使补齐这些导入语义，OPF 仍需另行把 tap 作为联合决策
-变量；多端网络拓扑本身无需新顶层类别。
+VDGA。导入器现已解析 BM 站角色、定功率/定电压控制与 LM 线路，并把来源卡及 L/C
+工程量保留到模型；`BB` 作为零注入 `DC_P` 节点进入 KCL。仍未闭环的是仓库外
+`mtdc_bm.dat` 的 DSP 三端数值对拍和多端复合控制全矩阵，而不是网络拓扑表达能力。
+OPF 仍需另行把 tap 作为联合决策变量；多端网络拓扑本身无需新顶层类别。
 
-**(b) 分层接入（BA/LY/DC）——原样不能表达，需给 `LCCConverter` 加直流串联端口
-（小改，非新元件类别）。** 证据：
+**(b) 分层接入（BA/LY/DC）——当前只实现受限投影；精确表达仍需直流串联端口
+（小改，非新元件类别）。** 当前导入器建立 BA1 换流变、BA 补偿、LY 直流支路与
+带层号/比例的 LCC，并把限制写入 `model_scope/model_limitations`；以下证据解释为何
+该投影不能被宣称为完整分层物理：
 - 物理结构（手册 + pfnt 字符串）：高/低两层换流器直流侧串联，Ud = Ud,H + Ud,L，
   Id 相同，存在中点节点 KCL；两层分别接不同交流母线。
 - HySim 现状（代码证据）：`LCCConverter` 只有单 `dc_bus`

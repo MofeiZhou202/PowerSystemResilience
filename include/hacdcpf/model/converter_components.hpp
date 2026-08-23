@@ -201,6 +201,15 @@ struct LCCConverter {
   bool in_service{true};
   LCCStationRole station_role{LCCStationRole::Rectifier};
 
+  // BPA/DSP provenance for the native LCC variants.  source_card is BD, BA,
+  // or BM; layer_code is H/L for a layered BA station; power_percent is the
+  // BA2 allocation factor.  They preserve interface semantics but do not
+  // change the generic LCC equations by themselves.
+  std::string source_card{"BD"};
+  std::string layer_code;
+  double power_percent{100.0};
+  double q_compensation_mvar{0.0};
+
   // ── Physical parameters (BD card) ──────────────────────────────────────
   int n_bridges{1};          // series 6-pulse bridges per pole
   double alpha_min_deg{5.0};   // minimum firing angle, rectifier limit (deg)
