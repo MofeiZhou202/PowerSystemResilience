@@ -482,6 +482,8 @@ DERAADynamicParams make_deraa_params(const StaticGenerator& gen,
   p.pf_angle_ref_rad = param_or(pmap, {"Pfa_ref", "pf_angle_ref_rad"}, p.pf_angle_ref_rad);
   p.pf_flag = static_cast<int>(param_or(pmap, {"Pf_Flag"}, static_cast<double>(p.pf_flag)));
   p.freq_flag = static_cast<int>(param_or(pmap, {"Freq_Flag"}, static_cast<double>(p.freq_flag)));
+  p.pq_flag = static_cast<int>(param_or(pmap, {"PQ_Flag"}, static_cast<double>(p.pq_flag)));
+  p.gen_flag = static_cast<int>(param_or(pmap, {"Gen_Flag"}, static_cast<double>(p.gen_flag)));
   p.T_rv = param_or(pmap, {"T_rv", "Trv"}, p.T_rv);
   p.Trf = param_or(pmap, {"Trf"}, p.Trf);
   p.dbd1 = param_or(pmap, {"dbd1", "dbd_low"}, p.dbd1);
@@ -494,11 +496,19 @@ DERAADynamicParams make_deraa_params(const StaticGenerator& gen,
   p.Tpord = param_or(pmap, {"Tpord"}, p.Tpord);
   p.Kpg = param_or(pmap, {"Kpg"}, p.Kpg);
   p.Kig = param_or(pmap, {"Kig"}, p.Kig);
+  p.D_dn = param_or(pmap, {"D_dn", "Ddn"}, p.D_dn);
+  p.D_up = param_or(pmap, {"D_up", "Dup"}, p.D_up);
+  p.fdbd1 = param_or(pmap, {"fdbd1", "fdbd_low"}, p.fdbd1);
+  p.fdbd2 = param_or(pmap, {"fdbd2", "fdbd_high"}, p.fdbd2);
+  p.fe_min = param_or(pmap, {"fe_min", "femin"}, p.fe_min);
+  p.fe_max = param_or(pmap, {"fe_max", "femax"}, p.fe_max);
+  p.p_min = param_or(pmap, {"P_min", "p_min"}, p.p_min);
+  p.p_max = param_or(pmap, {"P_max", "p_max"}, p.p_max);
+  p.dp_min = param_or(pmap, {"dP_min", "dp_min"}, p.dp_min);
+  p.dp_max = param_or(pmap, {"dP_max", "dp_max"}, p.dp_max);
   p.I_max = param_or(pmap, {"I_max", "Imax"}, p.I_max);
   p.Iq_min = param_or(pmap, {"Iq_min"}, p.Iq_min);
   p.Iq_max = param_or(pmap, {"Iq_max"}, p.Iq_max);
-  p.Ip_min = param_or(pmap, {"Ip_min", "P_min"}, p.Ip_min);
-  p.Ip_max = param_or(pmap, {"Ip_max", "P_max"}, p.Ip_max);
   p.rr_pwr = param_or(pmap, {"rrpwr", "Rrpwr"}, p.rr_pwr);
   p.v_trip_low_pu = param_or(pmap, {"Vtrip_L", "v_trip_low_pu", "Vltrip"}, p.v_trip_low_pu);
   p.v_trip_high_pu = param_or(pmap, {"Vtrip_H", "v_trip_high_pu", "Vhtrip"}, p.v_trip_high_pu);
@@ -1957,6 +1967,7 @@ DynamicSystem DynamicModelBuilder::build(const HybridPowerSystem& sys,
         p.xdpp_pu = gen.xdpp_pu;
         p.inertia_h = gen.is_slack ? 5.0 : 1.0;
         p.dynamic_angle = dynamic_angle_for(gen);
+        p.network_balance_reference = gen.is_slack;
         apply_voltage_source_profile(gen.dynamic_model, p);
         auto machine = std::make_unique<SynchronousMachine>(p);
         SynchronousMachine* machine_ptr = machine.get();
@@ -2102,6 +2113,7 @@ DynamicSystem DynamicModelBuilder::build(const HybridPowerSystem& sys,
     p.inertia_h = positive_or(gen.inertia_h, gen.is_slack ? 5.0 : 1.0);
     p.droop_r = positive_or(gen.droop_r, 0.05);
     p.dynamic_angle = dynamic_angle_for(gen);
+    p.network_balance_reference = gen.is_slack;
     apply_voltage_source_profile(gen.dynamic_model, p);
     auto machine = std::make_unique<SynchronousMachine>(p);
     SynchronousMachine* machine_ptr = machine.get();
@@ -2639,8 +2651,15 @@ DynamicSystem DynamicModelBuilder::build(const HybridPowerSystem& sys,
     p.canvas_type = "dcdcConverter";
     p.source_type = "dcdc_converter";
     p.base_mva = base_mva;
+    p.control_mode = conv.control_mode;
     p.p_ref_mw = conv.p_ref_mw;
+    p.v_ref_pu = positive_or(conv.v_ref_pu, 1.0);
+    p.sn_mva = conv.sn_mva;
     p.eta = positive_or(conv.eta, 0.98);
+    p.r_eq_pu = std::max(0.0, conv.r_eq_pu);
+    p.pmax_mw = conv.pmax_mw;
+    p.pmin_mw = conv.pmin_mw;
+    p.k_droop = conv.k_droop;
     apply_dcdc_profile(conv.dynamic_model, p);
     dyn.devices.push_back(std::make_unique<DCDCConverterDynamic>(p));
   }

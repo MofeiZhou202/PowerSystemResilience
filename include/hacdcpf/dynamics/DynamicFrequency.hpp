@@ -7,6 +7,8 @@
 namespace hacdcpf::dynamics {
 
 struct DynamicSystem;  // forward declaration (defined in DynamicSystem.hpp)
+struct DynamicState;
+struct NetworkState;
 
 // Aggregate frequency observability for one instant of a transient run
 // (design doc §7 "Frequency in a phasor simulator", §6.2 island detection).
@@ -33,5 +35,12 @@ struct DynamicFrequencyReport {
 // over the in-service branches; each generation-capable device is bucketed into
 // the component of its terminal bus via DynamicDevice::frequencyParticipation().
 [[nodiscard]] DynamicFrequencyReport computeFrequencyReport(const DynamicSystem& sys);
+
+// State-explicit form used by implicit DAE residual evaluations. It prevents a
+// trial Newton state from reading the accepted state's frequency.
+[[nodiscard]] DynamicFrequencyReport computeFrequencyReport(
+    const DynamicSystem& sys,
+    const DynamicState& state,
+    const NetworkState& algebraic);
 
 }  // namespace hacdcpf::dynamics

@@ -186,6 +186,23 @@ series PF round-trip、case33bw split-series 以及 DC-OPF objective round-trip 
 | `POST /api/session/run_reliability*` | Non-sequential, sequential, FMEA, feeder, and three-stage reliability. |
 | `POST /api/session/run_reconfig` | Topology reconfiguration. |
 
+`POST /api/session/run_transient` accepts the MassMatrixDae IEEE 1547 event
+controls `enable_der_protection`, `localize_der_protection_events`,
+`protection_event_time_tol_s`, `protection_event_max_localization_iters`, and
+`protection_event_cluster_window_s`, and `post_event_algebraic_residual_tol`.
+The cluster window is anchored at the earliest physical action and does not
+roll forward. Its result reports localization use/trials, event-cluster count,
+maximum bracket width and cluster span in seconds, and maximum post-event
+algebraic current-balance infinity norm in pu. Protection event records include
+zero-based `protection_cluster_id`; non-protection events use `-1`. The exact numerical scope and
+unsupported relay/within-step pulse cases are defined in the
+[transient runtime contract](../theory/transient_runtime.md).
+The route also accepts and echoes `algebraic_network_max_iters` (default 10)
+and `algebraic_network_tol` (default `1e-6`) in `options`. During
+consistent initialization only, the implementation may temporarily use a
+tighter internal algebraic tolerance as defined by the transient contract; the
+echo remains the requested time-stepping value.
+
 The three short-circuit routes have deliberately different result scopes:
 
 | Route | Effective contract |

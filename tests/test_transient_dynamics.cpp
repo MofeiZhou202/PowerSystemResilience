@@ -10,6 +10,7 @@
 #include <iterator>
 #include <limits>
 #include <map>
+#include <memory>
 #include <sstream>
 #include <string>
 #include <utility>
@@ -22,7 +23,9 @@
 #include "hacdcpf/api/hacdcpf.hpp"
 #include "hacdcpf/dynamics/dynamics.hpp"
 #include "hacdcpf/io/case_builders.hpp"
+#include "hacdcpf/io/json_io.hpp"
 #include "hacdcpf/io/matpower_parser.hpp"
+#include "hacdcpf/power_flow/converter_model.hpp"
 #include "hacdcpf/resilience/certified_restoration.hpp"
 using namespace hacdcpf;
 using namespace hacdcpf::dynamics;
@@ -31,6 +34,51 @@ namespace {
 
 using Complex = std::complex<double>;
 using Json = nlohmann::json;
+
+class ScheduledProtectionProbe final : public DynamicDevice {
+ public:
+  ScheduledProtectionProbe(int component_index, double event_time_s)
+      : component_index_(component_index), event_time_s_(event_time_s) {}
+
+  void assignStateIndices(int&) override {}
+  void initializeFromPowerFlow(const PowerFlowResult&, DynamicState&, NetworkState&) override {}
+  void computeDerivatives(double, const DynamicState&, const NetworkState&,
+                          Eigen::Ref<Eigen::VectorXd>) const override {}
+  void stamp(double, const DynamicState&, const NetworkState&, DynamicStamp&) const override {}
+
+  bool updateProtection(double t, double dt, DynamicState&, NetworkState&,
+                        std::vector<DynamicEvent>& events) override {
+    const auto preview = previewProtection(t, dt, NetworkState{});
+    if (!preview.has_event) return false;
+    tripped_ = true;
+    DynamicEvent event;
+    event.time_s = event_time_s_;
+    event.type = DynamicEventType::Custom;
+    event.component_index = component_index_;
+    event.component_type = "TestProtection";
+    event.label = "scheduled protection probe " + std::to_string(component_index_);
+    event.applied = true;
+    events.push_back(event);
+    return true;
+  }
+
+  [[nodiscard]] DynamicProtectionEventPreview previewProtection(
+      double t, double dt, const NetworkState&) const override {
+    if (tripped_) return {};
+    const double begin = t - std::max(0.0, dt);
+    if (event_time_s_ + 1e-12 < begin || event_time_s_ > t + 1e-12) return {};
+    return {true, event_time_s_};
+  }
+
+  [[nodiscard]] std::string name() const override { return "ScheduledProtectionProbe"; }
+  [[nodiscard]] std::string type() const override { return "TestProtection"; }
+  [[nodiscard]] int componentIndex() const override { return component_index_; }
+
+ private:
+  int component_index_{0};
+  double event_time_s_{0.0};
+  bool tripped_{false};
+};
 
 HybridPowerSystem make_transient_2bus() {
   HybridPowerSystem sys;
@@ -3855,6 +3903,7 @@ TEST_CASE("Transient solver runs partitioned phasor dynamics", "[dynamics][trans
 
   const DynamicResults result = hacdcpf::run_transient_simulation(sys, opt);
 
+  INFO(result.message);
   REQUIRE(result.success);
   CHECK(result.steps == 5);
   REQUIRE(result.final_snapshot() != nullptr);
@@ -4249,11 +4298,129 @@ TEST_CASE("Hybrid AC/DC transient includes VSC and DC/DC coupling", "[dynamics][
 
   const DynamicResults result = hacdcpf::run_transient_simulation(sys, opt);
 
+  INFO(result.message);
   REQUIRE(result.success);
   REQUIRE(result.final_snapshot() != nullptr);
   CHECK(result.final_snapshot()->vdc.size() == 2);
   CHECK(result.final_snapshot()->max_dc_voltage_pu > 0.1);
   CHECK(result.final_snapshot()->vdc[0] == Catch::Approx(1.0).margin(5e-3));
+}
+
+TEST_CASE("Dynamic DC/DC control modes share the steady-state port-power equation",
+          "[dynamics][hybrid_acdc][dcdc][equation_identity]") {
+  const std::array<DCDCControlMode, 3> modes{
+      DCDCControlMode::Power,
+      DCDCControlMode::Voltage,
+      DCDCControlMode::Droop,
+  };
+  for (const DCDCControlMode mode : modes) {
+    DCDCConverterDynamicParams params;
+    params.component_index = 17;
+    params.bus_in = 41;
+    params.bus_out = 73;
+    params.bus_in_pos = 0;
+    params.bus_out_pos = 1;
+    params.base_mva = 100.0;
+    params.control_mode = mode;
+    params.p_ref_mw = 2.0;
+    params.v_ref_pu = 1.01;
+    params.sn_mva = 10.0;
+    params.eta = 0.96;
+    params.r_eq_pu = 0.015;
+    params.k_droop = 0.2;
+    DCDCConverterDynamic device(params);
+
+    int offset = 0;
+    device.assignStateIndices(offset);
+    CHECK(offset == (mode == DCDCControlMode::Power ? 1 : 0));
+    DynamicState x;
+    x.resize(static_cast<std::size_t>(offset));
+    if (offset == 1) x.x[0] = params.p_ref_mw / params.base_mva;
+    NetworkState y;
+    y.resize(0, 2);
+    y.Vdc << 1.03, 0.98;
+
+    DCDCConverter steady;
+    steady.index = params.component_index;
+    steady.bus_in = 1;
+    steady.bus_out = 2;
+    steady.control_mode = mode;
+    steady.p_ref_mw = params.p_ref_mw;
+    steady.v_ref_pu = params.v_ref_pu;
+    steady.sn_mva = params.sn_mva;
+    steady.eta = params.eta;
+    steady.r_eq_pu = params.r_eq_pu;
+    steady.k_droop = params.k_droop;
+    const auto expected =
+        powerflow::dcdc_power_transfer(steady, y.Vdc, params.base_mva);
+
+    DynamicStamp stamp(0, 2);
+    device.stamp(0.0, x, y, stamp);
+    CHECK(stamp.Idc[0] ==
+          Catch::Approx(-expected.p_in_pu / y.Vdc[0]).margin(1e-12));
+    CHECK(stamp.Idc[1] ==
+          Catch::Approx(expected.p_out_pu / y.Vdc[1]).margin(1e-12));
+    const auto output = device.output(x, y);
+    CHECK(output.values.at("p_in_mw") ==
+          Catch::Approx(expected.p_in_pu * params.base_mva).margin(1e-10));
+    CHECK(output.values.at("p_out_mw") ==
+          Catch::Approx(expected.p_out_pu * params.base_mva).margin(1e-10));
+  }
+}
+
+TEST_CASE("Classical GUI hybrid case has a consistent mass-matrix DAE initial point",
+          "[dynamics][hybrid_acdc][initialization][gui_regression]") {
+  const auto path = std::filesystem::path(HACDCPF_PROJECT_ROOT) /
+                    "external_data/classical_example/power_system.json";
+  const HybridPowerSystem sys = io::load_json(path.string());
+  auto opt = fast_options();
+  opt.solver_type = DynamicSolverType::MassMatrixDae;
+  opt.run_power_flow_initialization = true;
+  opt.t_end_s = 0.03;
+  opt.dt_s = 0.01;
+  opt.algebraic_network_tol = 1e-6;
+  opt.dynamic_trim_tol = 1e-7;
+
+  DynamicModelBuilder builder;
+  DynamicSystem dyn = builder.build(sys, opt);
+  int dc_voltage_sources = 0;
+  std::ostringstream diagnostics;
+  for (const auto& device : dyn.devices) {
+    diagnostics << "device=" << device->type() << '#' << device->componentIndex()
+                << " name=" << device->name() << '\n';
+    if (device->type() == "DCDCConverter") {
+      const auto output = device->output(dyn.x, dyn.y);
+      for (const auto& [key, value] : output.values) {
+        diagnostics << "  " << key << '=' << value << '\n';
+      }
+    }
+    if (device->type() == "DCVoltageSource") ++dc_voltage_sources;
+  }
+  diagnostics << "PF Vdc=";
+  for (double value : dyn.initial_power_flow.vdc) diagnostics << ' ' << value;
+  diagnostics << '\n';
+  diagnostics << "dynamic Vdc=" << dyn.y.Vdc.transpose() << '\n';
+  const Eigen::Map<const Eigen::VectorXd> pf_vdc(
+      dyn.initial_power_flow.vdc.data(),
+      static_cast<Eigen::Index>(dyn.initial_power_flow.vdc.size()));
+  const auto pf_transfer = powerflow::dcdc_power_transfer(
+      sys.dc.dcdc_converters.front(), pf_vdc, sys.base_mva);
+  diagnostics << "PF-equation DCDC Pin=" << pf_transfer.p_in_pu
+              << " Pout=" << pf_transfer.p_out_pu << '\n';
+  CHECK(dc_voltage_sources == 1);
+  for (const auto& warning : dyn.initialization.warnings) {
+    diagnostics << "initialization warning: " << warning << '\n';
+  }
+  INFO(diagnostics.str());
+
+  const DynamicResults result = DynamicSolver{}.solve(dyn);
+  INFO(result.message);
+  for (const auto& warning : result.initialization.warnings) INFO(warning);
+  REQUIRE(result.success);
+  CHECK(result.initialization.dynamic_residual_evaluated);
+  CHECK(result.initialization.dynamic_fast_dxdt_inf_norm <= opt.dynamic_trim_tol);
+  REQUIRE(result.final_snapshot() != nullptr);
+  CHECK(result.final_snapshot()->vdc.size() == 4);
 }
 
 TEST_CASE("Transient VSC roles separate AC and DC grid forming", "[dynamics][hybrid_acdc]") {
@@ -4504,11 +4671,13 @@ TEST_CASE("Transient initialization uses solved power flow and exposes canvas me
   const DynamicResults result = hacdcpf::run_transient_simulation(sys, opt);
 
   REQUIRE(result.success);
+  CHECK(result.initialization.initialization_attempted);
   CHECK(result.initialization.power_flow_requested);
   CHECK(result.initialization.power_flow_converged);
   CHECK_FALSE(result.initialization.fallback_voltage_setpoints);
   CHECK(result.initialization.max_ac_voltage_pu > 0.9);
   CHECK(result.initialization.dynamic_trim_iterations > 0);
+  CHECK(result.initialization.dynamic_residual_evaluated);
   CHECK(result.initialization.dynamic_fast_dxdt_inf_norm < 1e-5);
   REQUIRE(result.final_snapshot() != nullptr);
   const auto& outputs = result.final_snapshot()->device_outputs;
@@ -4520,6 +4689,70 @@ TEST_CASE("Transient initialization uses solved power flow and exposes canvas me
   CHECK(vsc->canvas_index == 1);
   CHECK(vsc->component_domain == "AC");
   CHECK(vsc->source_type == "vsc_grid_following");
+}
+
+TEST_CASE("Transient DAE rejects invalid initialization evidence before time stepping",
+          "[dynamics][initialization][dae][failure]") {
+  auto make_initialized = [] {
+    DynamicSolverOptions options = fast_options();
+    options.solver_type = DynamicSolverType::MassMatrixDae;
+    options.t_end_s = 0.01;
+    DynamicModelBuilder builder;
+    return builder.build(make_transient_2bus(), options);
+  };
+
+  SECTION("requested power flow did not converge") {
+    DynamicSystem dynamic = make_initialized();
+    dynamic.options.run_power_flow_initialization = true;
+    dynamic.initialization.power_flow_requested = true;
+    dynamic.initialization.power_flow_converged = false;
+    dynamic.initialization.fallback_voltage_setpoints = true;
+
+    const DynamicResults result = DynamicSolver{}.solve(dynamic);
+    CHECK_FALSE(result.success);
+    CHECK(result.failed_step == 0);
+    CHECK(result.steps == 0);
+    CHECK(result.snapshots.empty());
+    CHECK(result.message.find("power flow did not converge") != std::string::npos);
+  }
+
+  SECTION("dynamic residual was unavailable or non-finite") {
+    DynamicSystem dynamic = make_initialized();
+    dynamic.initialization.dynamic_residual_evaluated = false;
+    dynamic.initialization.dynamic_trim_converged = false;
+
+    const DynamicResults result = DynamicSolver{}.solve(dynamic);
+    CHECK_FALSE(result.success);
+    CHECK(result.failed_step == 0);
+    CHECK(result.steps == 0);
+    CHECK(result.snapshots.empty());
+    CHECK(result.message.find("consistent dynamic initial state") !=
+          std::string::npos);
+  }
+
+  SECTION("dynamic trim exceeded its declared tolerance") {
+    DynamicSystem dynamic = make_initialized();
+    dynamic.initialization.dynamic_residual_evaluated = true;
+    dynamic.initialization.dynamic_trim_converged = false;
+    dynamic.initialization.dynamic_fast_dxdt_inf_norm =
+        10.0 * dynamic.options.dynamic_trim_tol;
+    DynamicResidualDiagnostic diagnostic;
+    diagnostic.device_type = "SynchronousMachine";
+    diagnostic.component_index = 7;
+    diagnostic.state_index = 13;
+    diagnostic.local_state_index = 1;
+    diagnostic.residual = dynamic.initialization.dynamic_fast_dxdt_inf_norm;
+    dynamic.initialization.dynamic_residual_diagnostics.push_back(diagnostic);
+
+    const DynamicResults result = DynamicSolver{}.solve(dynamic);
+    CHECK_FALSE(result.success);
+    CHECK(result.failed_step == 0);
+    CHECK(result.steps == 0);
+    CHECK(result.snapshots.empty());
+    CHECK(result.message.find("consistent dynamic initial state") !=
+          std::string::npos);
+    CHECK(result.message.find("global=13, local=1") != std::string::npos);
+  }
 }
 
 TEST_CASE("Transient initialization trims GFL fast states to avoid artificial PLL settling",
@@ -6326,7 +6559,7 @@ TEST_CASE("PSD grid-following comparison harness is available",
     INFO("solver message: " << result.message);
     INFO("init fast_dxdt_inf_norm: " << result.initialization.dynamic_fast_dxdt_inf_norm);
     REQUIRE(result.success);
-    REQUIRE(result.initialization.dynamic_fast_dxdt_inf_norm < 1e-5);
+    REQUIRE(result.initialization.dynamic_fast_dxdt_inf_norm <= 1e-7);
     REQUIRE(result.snapshots.size() > 100);
     REQUIRE(result.final_snapshot() != nullptr);
     const double p_final = final_vsc_p_mw(result);
@@ -6412,7 +6645,9 @@ TEST_CASE("Updated GFM inverter stamps Norton voltage source and droop telemetry
 
   const DynamicResults result = hacdcpf::run_transient_simulation(sys, opt);
 
+  INFO(result.message);
   REQUIRE(result.success);
+  REQUIRE(result.initialization.dynamic_fast_dxdt_inf_norm <= opt.dynamic_trim_tol);
   REQUIRE(result.final_snapshot() != nullptr);
   const auto& outputs = result.final_snapshot()->device_outputs;
   const auto it = std::find_if(outputs.begin(), outputs.end(), [](const DynamicDeviceOutput& out) {
@@ -6610,7 +6845,9 @@ TEST_CASE("Updated GFM inverter exposes dynamic DC-link telemetry",
 
   const DynamicResults result = hacdcpf::run_transient_simulation(sys, opt);
 
+  INFO(result.message);
   REQUIRE(result.success);
+  REQUIRE(result.initialization.dynamic_fast_dxdt_inf_norm <= opt.dynamic_trim_tol);
   REQUIRE(result.final_snapshot() != nullptr);
   const auto& outputs = result.final_snapshot()->device_outputs;
   const auto it = std::find_if(outputs.begin(), outputs.end(), [](const DynamicDeviceOutput& out) {
@@ -6673,8 +6910,9 @@ TEST_CASE("PSD grid-forming VSM and VOC outer-control profiles run numerically",
 
     DynamicSolver solver;
     const DynamicResults result = solver.solve(dyn);
-    INFO(spec.model);
+    INFO(spec.model << ": " << result.message);
     REQUIRE(result.success);
+    REQUIRE(result.initialization.dynamic_fast_dxdt_inf_norm <= opt.dynamic_trim_tol);
     REQUIRE(result.final_snapshot() != nullptr);
     const auto& out = require_device_output(*result.final_snapshot(), "VSCGridForming", 1);
     CHECK(out.model_name == spec.model);
@@ -6778,6 +7016,7 @@ TEST_CASE("PSD standalone IBR dynamic injectors initialize and run",
     const DynamicResults result = hacdcpf::run_transient_simulation(sys, opt);
     INFO(result.message);
     REQUIRE(result.success);
+    REQUIRE(result.initialization.dynamic_fast_dxdt_inf_norm <= opt.dynamic_trim_tol);
     REQUIRE(result.final_snapshot() != nullptr);
     const auto& out = require_device_output(*result.final_snapshot(), "CSVGN1", 1);
     CHECK(out.model_name == "CSVGN1");
@@ -6807,7 +7046,9 @@ TEST_CASE("PSD standalone IBR dynamic injectors initialize and run",
     opt.t_end_s = 0.10;
     opt.dt_s = 0.005;
     const DynamicResults result = hacdcpf::run_transient_simulation(sys, opt);
+    INFO(result.message);
     REQUIRE(result.success);
+    REQUIRE(result.initialization.dynamic_fast_dxdt_inf_norm <= opt.dynamic_trim_tol);
     REQUIRE(result.final_snapshot() != nullptr);
     const auto& out =
         require_device_output(*result.final_snapshot(), "AggregateDistributedGenerationA", 1);
@@ -7803,6 +8044,10 @@ TEST_CASE("Machine governor / AVR / PSS control blocks are wired and effective",
   const DynamicResults avr = run_controlled_case(true, true, false);
   const DynamicResults pss = run_controlled_case(true, true, true);
 
+  INFO("base: " << base.message);
+  INFO("governor: " << gov.message);
+  INFO("AVR: " << avr.message);
+  INFO("PSS: " << pss.message);
   REQUIRE(base.success);
   REQUIRE(gov.success);
   REQUIRE(avr.success);
@@ -8311,7 +8556,9 @@ TEST_CASE("Frequency observability: single-machine COI tracks the rotor speed",
 
   DynamicSolver solver;
   const DynamicResults result = solver.solve(dyn);
+  INFO(result.message);
   REQUIRE(result.success);
+  REQUIRE(result.initialization.dynamic_fast_dxdt_inf_norm <= opt.dynamic_trim_tol);
   REQUIRE(result.snapshots.size() > 100);
 
   // The only inertial device is the machine, so the system center-of-inertia
@@ -8485,6 +8732,7 @@ TEST_CASE("Frequency observability: two-machine COI is inertia-weighted",
 
   DynamicSolver solver;
   const DynamicResults result = solver.solve(dyn);
+  INFO(result.message);
   REQUIRE(result.success);
   REQUIRE(result.snapshots.size() > 100);
 
@@ -8860,8 +9108,572 @@ TEST_CASE("IEEE 1547 DER protection: undervoltage trip and ramped reconnect",
 
   // The soft-start ramp restores the injection scale to full over the window.
   for (int i = 0; i < 20; ++i) step_at(1.0);
-  CHECK(inverter.output(x, y).values.at("protection_restore_scale") ==
-        Catch::Approx(1.0));
+  CHECK(inverter.output(x, y).values.at("protection_restore_scale") == Catch::Approx(1.0));
+}
+
+TEST_CASE("External definite-time relay matches COSMIC guard and timer equations",
+          "[dynamics][protection][relay][cosmic][event_localization]") {
+  NetworkState y;
+  y.resize(6, 0);
+  set_balanced_voltage(y, 0, std::polar(1.0, 0.0));
+  set_balanced_voltage(y, 1, std::polar(0.95, 0.0));
+  DynamicState x;
+  x.resize(2);
+  PowerFlowResult pf;
+
+  SECTION("linearly located undervoltage crossing carries a fixed delay") {
+    ProtectionRelayParams params;
+    params.component_index = 701;
+    params.bus = 5;
+    params.bus_pos = 0;
+    params.label = "COSMIC UVLS bus 5";
+    params.undervoltage_pickup_pu = 0.90;
+    params.overvoltage_pickup_pu = 2.0;
+    params.trip_delay_s = 0.5;
+    params.action_type = DynamicEventType::ACLoadScale;
+    params.target_bus = 5;
+    params.action_value = 0.75;
+    params.target_type = "ACLoad";
+    ProtectionRelay relay(params);
+    int offset = 0;
+    relay.assignStateIndices(offset);
+    relay.initializeFromPowerFlow(pf, x, y);
+
+    set_balanced_voltage(y, 0, std::polar(0.80, 0.0));
+    std::vector<DynamicEvent> events;
+    CHECK_FALSE(relay.previewProtection(10.2, 0.2, y).has_event);
+    CHECK_FALSE(relay.updateProtection(10.2, 0.2, x, y, events));
+    CHECK(events.empty());
+    // Linear interpolation from 1.0 to 0.8 crosses 0.9 at 10.1 s, so the
+    // relay has accumulated 0.1 s by t=10.2 s.
+    CHECK(relay.output(x, y).values.at("timer_s") == Catch::Approx(0.1).margin(1e-12));
+
+    const auto preview = relay.previewProtection(10.6, 0.4, y);
+    REQUIRE(preview.has_event);
+    CHECK(preview.time_s == Catch::Approx(10.6).margin(1e-12));
+    CHECK_FALSE(relay.updateProtection(10.6, 0.4, x, y, events));
+    REQUIRE(events.size() == 1);
+    CHECK(events[0].time_s == Catch::Approx(10.6).margin(1e-12));
+    CHECK(events[0].type == DynamicEventType::ACLoadScale);
+    CHECK(events[0].bus == 5);
+    CHECK(events[0].params.at("scale") == Catch::Approx(0.75));
+    CHECK(events[0].params.at("relay_component_index") == Catch::Approx(701.0));
+  }
+
+  SECTION("pickup timer recovers at the same rate after a linear threshold exit") {
+    ProtectionRelayParams params;
+    params.component_index = 704;
+    params.bus = 5;
+    params.bus_pos = 0;
+    params.label = "COSMIC UVLS recovery";
+    params.undervoltage_pickup_pu = 0.90;
+    params.overvoltage_pickup_pu = 2.0;
+    params.trip_delay_s = 1.0;
+    ProtectionRelay relay(params);
+    int offset = 0;
+    relay.assignStateIndices(offset);
+    set_balanced_voltage(y, 0, std::polar(0.80, 0.0));
+    relay.initializeFromPowerFlow(pf, x, y);
+
+    std::vector<DynamicEvent> events;
+    CHECK_FALSE(relay.updateProtection(0.2, 0.2, x, y, events));
+    CHECK(relay.output(x, y).values.at("timer_s") == Catch::Approx(0.2).margin(1e-12));
+
+    // The 0.8 -> 1.0 pu interval crosses 0.9 pu halfway through: 0.2 s
+    // pickup followed by 0.2 s recovery leaves the carried timer unchanged.
+    set_balanced_voltage(y, 0, std::polar(1.00, 0.0));
+    CHECK_FALSE(relay.previewProtection(0.6, 0.4, y).has_event);
+    CHECK_FALSE(relay.updateProtection(0.6, 0.4, x, y, events));
+    CHECK(relay.output(x, y).values.at("timer_s") == Catch::Approx(0.2).margin(1e-12));
+
+    CHECK_FALSE(relay.updateProtection(0.7, 0.1, x, y, events));
+    CHECK(relay.output(x, y).values.at("timer_s") == Catch::Approx(0.1).margin(1e-12));
+    CHECK_FALSE(relay.updateProtection(0.8, 0.1, x, y, events));
+    CHECK(relay.output(x, y).values.at("timer_s") == Catch::Approx(0.0).margin(1e-12));
+    CHECK(events.empty());
+  }
+
+  SECTION("COSMIC Zone-1 apparent-admittance pickup emits a branch trip") {
+    ProtectionRelayParams params;
+    params.component_index = 702;
+    params.label = "COSMIC distance branch 5-7";
+    params.measurement_kind = ProtectionRelayMeasurementKind::DistanceApparentAdmittance;
+    params.from_bus_pos = 0;
+    params.to_bus_pos = 1;
+    params.line_r_pu = 0.0;
+    params.line_x_pu = 0.10;
+    params.distance_reach_fraction = 0.90;
+    params.trip_delay_s = 0.5;
+    params.action_type = DynamicEventType::ACBranchTrip;
+    params.target_component_index = 6;
+    params.target_type = "ACBranch";
+    ProtectionRelay relay(params);
+    int offset = 0;
+    relay.assignStateIndices(offset);
+
+    // Vf=1 and Vt=-0.2 give |I|/|Vf|=12 pu, above the COSMIC Zone-1
+    // threshold 1/(0.9*0.1)=11.111... pu.
+    set_balanced_voltage(y, 1, std::polar(0.20, 3.14159265358979323846));
+    relay.initializeFromPowerFlow(pf, x, y);
+    std::vector<DynamicEvent> events;
+    const auto preview = relay.previewProtection(10.5, 0.5, y);
+    REQUIRE(preview.has_event);
+    CHECK(preview.time_s == Catch::Approx(10.5).margin(1e-12));
+    CHECK_FALSE(relay.updateProtection(10.5, 0.5, x, y, events));
+    REQUIRE(events.size() == 1);
+    CHECK(events[0].type == DynamicEventType::ACBranchTrip);
+    CHECK(events[0].component_index == 6);
+    CHECK(events[0].target_id == 6);
+  }
+}
+
+TEST_CASE("Mass-matrix DAE commits external relay load shedding consistently",
+          "[dynamics][protection][relay][uvls][event_localization]") {
+  auto run = [](double dt_s) {
+    auto options = fast_options();
+    options.solver_type = DynamicSolverType::MassMatrixDae;
+    options.dae_step_method = DynamicDaeStepMethod::BackwardEuler;
+    options.enable_der_protection = true;
+    options.localize_der_protection_events = true;
+    options.protection_event_time_tol_s = 1e-6;
+    options.post_event_algebraic_residual_tol = 1e-8;
+    options.algebraic_network_tol = 1e-10;
+    options.t_end_s = 0.05;
+    options.dt_s = dt_s;
+    options.record_every_step = false;
+
+    DynamicModelBuilder builder;
+    DynamicSystem dynamic = builder.build(make_transient_2bus(), options);
+    ProtectionRelayParams params;
+    params.component_index = 703;
+    params.bus = 2;
+    params.bus_pos = dynamic.network.acBusPosition(2);
+    params.label = "test UVLS bus 2";
+    params.undervoltage_pickup_pu = 1.10;
+    params.overvoltage_pickup_pu = 2.0;
+    params.trip_delay_s = 0.025;
+    params.action_type = DynamicEventType::ACLoadScale;
+    params.target_bus = 2;
+    params.action_value = 0.75;
+    params.target_type = "ACLoad";
+    dynamic.devices.push_back(std::make_unique<ProtectionRelay>(params));
+    dynamic.assignStateIndices();
+    dynamic.initializeStatesFromPowerFlow();
+
+    DynamicSolver solver;
+    return solver.solve(dynamic);
+  };
+
+  std::vector<double> action_times;
+  for (double dt_s : {0.010, 0.005, 0.001, 0.0002}) {
+    const DynamicResults result = run(dt_s);
+    INFO("dt=" << dt_s << ", message=" << result.message);
+    REQUIRE(result.success);
+    const auto event =
+        std::find_if(result.applied_event_records.begin(), result.applied_event_records.end(),
+                     [](const DynamicAppliedEventRecord& record) {
+                       const auto relay = record.params.find("relay_component_index");
+                       return record.type == "ACLoadScale" && relay != record.params.end() &&
+                              relay->second == 703.0;
+                     });
+    REQUIRE(event != result.applied_event_records.end());
+    CHECK(event->time_s == Catch::Approx(0.025).margin(1e-6));
+    CHECK(event->bus == 2);
+    action_times.push_back(event->time_s);
+    CHECK(result.protection_event_localization_used);
+    CHECK(result.protection_event_localization_trials <= 16);
+    CHECK(result.max_protection_event_bracket_s <= 1e-6);
+    CHECK(result.max_post_event_algebraic_residual <= 1e-8);
+    REQUIRE(result.final_snapshot() != nullptr);
+    const auto& load = require_device_output(*result.final_snapshot(), "ACLoad", 1);
+    CHECK(load.values.at("scale") == Catch::Approx(0.75).margin(1e-12));
+  }
+  const auto [minimum, maximum] = std::minmax_element(action_times.begin(), action_times.end());
+  CHECK(*maximum - *minimum <= 2e-6);
+}
+
+TEST_CASE("Protection event type prevents cross-asset same-index trips",
+          "[dynamics][protection][event_target]") {
+  PVDynamicParams pv_params;
+  pv_params.component_index = 1;
+  pv_params.bus = 2;
+  PVDynamic pv(pv_params);
+  DynamicState x;
+  NetworkState y;
+  int offset = 0;
+  pv.assignStateIndices(offset);
+  DynamicEvent vsc_trip;
+  vsc_trip.type = DynamicEventType::VSCTrip;
+  vsc_trip.component_index = 1;
+  vsc_trip.component_type = "VSC";
+  pv.handleEvent(vsc_trip, x, y);
+  CHECK(pv.output(x, y).values.at("in_service") == 1.0);
+
+  DynamicEvent pv_trip = vsc_trip;
+  pv_trip.type = DynamicEventType::GeneratorTrip;
+  pv_trip.component_type = "PV";
+  pv.handleEvent(pv_trip, x, y);
+  CHECK(pv.output(x, y).values.at("in_service") == 0.0);
+}
+
+TEST_CASE("Frequency relay consumes its local PT phasor measurement",
+          "[dynamics][protection][relay][frequency][ct_pt]") {
+  ProtectionRelayParams params;
+  params.component_index = 9;
+  params.bus_pos = 0;
+  params.measurement_kind = ProtectionRelayMeasurementKind::Frequency;
+  params.underfrequency_hz = 49.0;
+  params.overfrequency_hz = 51.0;
+  params.trip_delay_s = 0.1;
+  params.action_type = DynamicEventType::ACLoadScale;
+  params.target_bus = 2;
+  params.action_value = 0.5;
+  ProtectionRelay relay(params);
+  DynamicState x;
+  NetworkState y;
+  y.resize(3, 0);
+  set_balanced_voltage(y, 0, std::polar(1.0, 0.0));
+  int relay_offset = 0;
+  relay.assignStateIndices(relay_offset);
+  relay.initializeFromPowerFlow({}, x, y);
+  std::vector<DynamicEvent> events;
+  // Local positive-sequence phase advances at -2 Hz relative to the 50 Hz
+  // reference frame: Delta theta=2*pi*(-2)*Delta t.
+  set_balanced_voltage(y, 0, std::polar(1.0, -0.2 * 3.14159265358979323846));
+  CHECK_FALSE(relay.updateProtection(0.05, 0.05, x, y, events));
+  CHECK(events.empty());
+  CHECK(relay.output(x, y).values.at("measured_frequency_hz") ==
+        Catch::Approx(48.0).margin(1e-10));
+  set_balanced_voltage(y, 0, std::polar(1.0, -0.6 * 3.14159265358979323846));
+  CHECK(relay.previewProtection(0.15, 0.10, y).has_event);
+  CHECK_FALSE(relay.updateProtection(0.15, 0.10, x, y, events));
+  REQUIRE(events.size() == 1);
+  CHECK(events.front().type == DynamicEventType::ACLoadScale);
+}
+
+TEST_CASE("Protection relay local CT and PT filters use exact interval updates",
+          "[dynamics][protection][relay][ct_pt]") {
+  NetworkState y;
+  y.resize(6, 0);
+  set_balanced_voltage(y, 0, std::polar(1.0, 0.0));
+  set_balanced_voltage(y, 1, std::polar(1.0, 0.0));
+
+  ProtectionRelayParams params;
+  params.component_index = 10;
+  params.bus_pos = 0;
+  params.from_bus_pos = 0;
+  params.to_bus_pos = 1;
+  params.measurement_kind = ProtectionRelayMeasurementKind::DistanceApparentAdmittance;
+  params.line_x_pu = 0.1;
+  params.distance_reach_fraction = 0.1;
+  params.pt_filter_t_s = 0.02;
+  params.ct_filter_t_s = 0.1;
+  params.trip_delay_s = 10.0;
+  ProtectionRelay relay(params);
+  DynamicState x;
+  int offset = 0;
+  relay.assignStateIndices(offset);
+  relay.initializeFromPowerFlow({}, x, y);
+
+  set_balanced_voltage(y, 1, std::polar(0.9, 0.0));
+  std::vector<DynamicEvent> events;
+  CHECK_FALSE(relay.updateProtection(0.1, 0.1, x, y, events));
+  const auto output = relay.output(x, y);
+  // Raw |I|=1 pu and the exact CT response from zero is 1-exp(-dt/T).
+  CHECK(output.values.at("measured_apparent_admittance_pu") ==
+        Catch::Approx(1.0 - std::exp(-1.0)).margin(1e-10));
+  CHECK(output.values.at("local_ct_pt_measurement") == 1.0);
+
+  ProtectionRelayParams frequency_params;
+  frequency_params.component_index = 11;
+  frequency_params.bus_pos = 0;
+  frequency_params.measurement_kind = ProtectionRelayMeasurementKind::Frequency;
+  frequency_params.underfrequency_hz = 49.0;
+  frequency_params.overfrequency_hz = 51.0;
+  frequency_params.trip_delay_s = 1.0;
+  ProtectionRelay frequency_relay(frequency_params);
+  DynamicState frequency_x;
+  int frequency_offset = 0;
+  frequency_relay.assignStateIndices(frequency_offset);
+  set_balanced_voltage(y, 0, std::polar(1.0, 0.0));
+  frequency_relay.initializeFromPowerFlow({}, frequency_x, y);
+  set_balanced_voltage(y, 0, std::polar(1.0, -0.4 * 3.14159265358979323846));
+  CHECK_FALSE(frequency_relay.updateProtection(0.1, 0.1, frequency_x, y, events));
+  CHECK(frequency_relay.output(frequency_x, y).values.at("timer_s") ==
+        Catch::Approx(0.05).margin(1e-12));
+  set_balanced_voltage(y, 0, std::polar(0.01, -0.4 * 3.14159265358979323846));
+  CHECK_FALSE(frequency_relay.updateProtection(0.2, 0.1, frequency_x, y, events));
+  const auto invalid_frequency_output = frequency_relay.output(frequency_x, y);
+  CHECK(invalid_frequency_output.values.at("frequency_measurement_valid") == 0.0);
+  CHECK(invalid_frequency_output.values.at("timer_s") == Catch::Approx(0.05).margin(1e-12));
+  CHECK_FALSE(frequency_relay.updateProtection(0.3, 0.1, frequency_x, y, events));
+  CHECK(frequency_relay.output(frequency_x, y).values.at("timer_s") ==
+        Catch::Approx(0.0).margin(1e-12));
+
+  // Recovery needs two valid PT endpoints. The first high-voltage sample only
+  // re-establishes the phase reference and must not expose the stale 48 Hz
+  // estimate to the relay element.
+  set_balanced_voltage(y, 0, std::polar(1.0, -0.2 * 3.14159265358979323846));
+  CHECK_FALSE(frequency_relay.updateProtection(0.4, 0.1, frequency_x, y, events));
+  CHECK(frequency_relay.output(frequency_x, y).values.at("frequency_measurement_valid") == 0.0);
+  set_balanced_voltage(y, 0, std::polar(1.0, 0.0));
+  CHECK_FALSE(frequency_relay.updateProtection(0.5, 0.1, frequency_x, y, events));
+  CHECK(frequency_relay.output(frequency_x, y).values.at("frequency_measurement_valid") == 1.0);
+}
+
+TEST_CASE("Protection relay rejects EMT measurement on a phasor network",
+          "[dynamics][protection][relay][emt][failure]") {
+  ProtectionRelayParams params;
+  params.measurement_domain = ProtectionRelayMeasurementDomain::EmtInstantaneous;
+  CHECK_THROWS_AS(ProtectionRelay(params), std::invalid_argument);
+}
+
+TEST_CASE("Missing topology event target fails the DAE chronology",
+          "[dynamics][protection][event_target][failure]") {
+  auto options = fast_options();
+  options.solver_type = DynamicSolverType::MassMatrixDae;
+  options.t_end_s = 0.01;
+  options.dt_s = 0.01;
+  DynamicModelBuilder builder;
+  DynamicSystem dynamic = builder.build(make_transient_2bus(), options);
+  DynamicEvent invalid;
+  invalid.type = DynamicEventType::ACBranchTrip;
+  invalid.component_index = 999999;
+  invalid.time_s = 0.0;
+  invalid.label = "invalid branch target";
+  dynamic.events.push_back(invalid);
+  const DynamicResults result = DynamicSolver{}.solve(dynamic);
+  CHECK_FALSE(result.success);
+  CHECK(result.message.find("target not found") != std::string::npos);
+  CHECK(result.applied_event_records.empty());
+}
+
+TEST_CASE("IEEE 1547 interval event time matches the analytic guard and timer",
+          "[dynamics][protection][ieee1547][event_localization]") {
+  // Published common subset: continuous guard localization followed by a fixed
+  // protection delay (Zhao--Hu 2008; COSMIC, Song et al. 2016). For the
+  // filtered case, v_m(t)=u+(v_m(0)-u)exp(-t/T), so trip occurs at the analytic
+  // threshold crossing plus the clearing delay.
+  IEEE1547Settings settings;
+  settings.enabled = true;
+  settings.allow_reconnect = false;
+  settings.undervoltage_trip = {{0.8, 0.15}};
+  settings.v_filter_t_s = 0.0;
+  settings.f_filter_t_s = 0.0;
+
+  IEEE1547RuntimeState unfiltered;
+  REQUIRE(advance_ieee1547_interval(settings, unfiltered, 1.0, 0.0, 0.0).action ==
+          IEEE1547Action::None);
+  const IEEE1547StepResult direct = advance_ieee1547_interval(settings, unfiltered, 0.4, 0.0, 0.20);
+  REQUIRE(direct.action == IEEE1547Action::Tripped);
+  CHECK(direct.action_offset_s == Catch::Approx(0.15).margin(2e-6));
+
+  settings.v_filter_t_s = 0.02;
+  IEEE1547RuntimeState filtered;
+  REQUIRE(advance_ieee1547_interval(settings, filtered, 1.0, 0.0, 0.0).action ==
+          IEEE1547Action::None);
+  const IEEE1547StepResult delayed = advance_ieee1547_interval(settings, filtered, 0.4, 0.0, 0.20);
+  REQUIRE(delayed.action == IEEE1547Action::Tripped);
+  const double crossing_s = -settings.v_filter_t_s * std::log((0.8 - 0.4) / (1.0 - 0.4));
+  CHECK(delayed.action_offset_s == Catch::Approx(crossing_s + 0.15).margin(2e-6));
+
+  // Song et al. (COSMIC), IEEE TPWRS 31(3), Fig. 2 and Sec. II-B:
+  // undervoltage starts at about 10.2 s and a 0.5 s fixed-time relay acts at
+  // 10.7 s. This checks the published counter chronology, not full COSMIC
+  // network/model parity.
+  settings.v_filter_t_s = 0.0;
+  settings.undervoltage_trip = {{0.92, 0.5}};
+  IEEE1547RuntimeState cosmic_timer;
+  REQUIRE(advance_ieee1547_interval(settings, cosmic_timer, 1.0, 0.0, 0.0).action ==
+          IEEE1547Action::None);
+  const IEEE1547StepResult cosmic_trip =
+      advance_ieee1547_interval(settings, cosmic_timer, 0.90, 0.0, 0.5);
+  REQUIRE(cosmic_trip.action == IEEE1547Action::Tripped);
+  CHECK(10.2 + cosmic_trip.action_offset_s == Catch::Approx(10.7).margin(2e-6));
+}
+
+TEST_CASE("Mass-matrix DAE localizes and clusters protection chronology",
+          "[dynamics][protection][event_localization][chronology]") {
+  auto run_probe = [](double second_event_time_s, double cluster_window_s = 1e-6,
+                      double third_event_time_s =
+                          std::numeric_limits<double>::quiet_NaN()) {
+    auto options = fast_options();
+    options.solver_type = DynamicSolverType::MassMatrixDae;
+    options.dae_step_method = DynamicDaeStepMethod::BackwardEuler;
+    options.enable_der_protection = true;
+    options.localize_der_protection_events = true;
+    options.protection_event_time_tol_s = 1e-6;
+    options.protection_event_cluster_window_s = cluster_window_s;
+    options.post_event_algebraic_residual_tol = 1e-8;
+    options.algebraic_network_tol = 1e-10;
+    options.algebraic_network_max_iters = 25;
+    options.t_end_s = 0.38;
+    options.dt_s = 0.01;
+    options.record_every_step = false;
+
+    DynamicModelBuilder builder;
+    DynamicSystem dynamic = builder.build(make_transient_2bus(), options);
+    dynamic.devices.push_back(std::make_unique<ScheduledProtectionProbe>(901, 0.350000));
+    dynamic.devices.push_back(std::make_unique<ScheduledProtectionProbe>(902, second_event_time_s));
+    if (std::isfinite(third_event_time_s)) {
+      dynamic.devices.push_back(
+          std::make_unique<ScheduledProtectionProbe>(903, third_event_time_s));
+    }
+    DynamicSolver solver;
+    return solver.solve(dynamic);
+  };
+
+  SECTION("events separated by 50 microseconds keep their physical order") {
+    const DynamicResults result = run_probe(0.350050);
+    INFO(result.message);
+    REQUIRE(result.success);
+    REQUIRE(result.applied_event_records.size() == 2);
+    CHECK(result.applied_event_records[0].component_index == 901);
+    CHECK(result.applied_event_records[1].component_index == 902);
+    CHECK(result.applied_event_records[0].time_s == Catch::Approx(0.350000).margin(1e-12));
+    CHECK(result.applied_event_records[1].time_s == Catch::Approx(0.350050).margin(1e-12));
+    CHECK(result.protection_event_clusters == 2);
+    CHECK(result.protection_event_localization_trials <= 28);
+    CHECK(result.max_protection_event_bracket_s <= 1e-6);
+    CHECK(result.max_post_event_algebraic_residual <= 1e-8);
+  }
+
+  SECTION("future actions inside the anchored window form one cluster") {
+    const DynamicResults result = run_probe(0.350050, 100e-6);
+    INFO(result.message);
+    REQUIRE(result.success);
+    REQUIRE(result.applied_event_records.size() == 2);
+    CHECK(result.applied_event_records[0].time_s == Catch::Approx(0.350000).margin(1e-12));
+    CHECK(result.applied_event_records[1].time_s == Catch::Approx(0.350050).margin(1e-12));
+    CHECK(result.protection_event_clusters == 1);
+    CHECK(result.applied_event_records[0].protection_cluster_id == 0);
+    CHECK(result.applied_event_records[1].protection_cluster_id == 0);
+    CHECK(result.max_protection_event_cluster_span_s ==
+          Catch::Approx(50e-6).margin(1e-12));
+  }
+
+  SECTION("an action exactly on the forward boundary is included") {
+    const DynamicResults result = run_probe(0.350100, 100e-6);
+    INFO(result.message);
+    REQUIRE(result.success);
+    REQUIRE(result.applied_event_records.size() == 2);
+    CHECK(result.protection_event_clusters == 1);
+    CHECK(result.applied_event_records[0].protection_cluster_id == 0);
+    CHECK(result.applied_event_records[1].protection_cluster_id == 0);
+    CHECK(result.max_protection_event_cluster_span_s ==
+          Catch::Approx(100e-6).margin(1e-12));
+  }
+
+  SECTION("future actions outside the anchored window start a new cluster") {
+    const DynamicResults result = run_probe(0.350050, 10e-6);
+    INFO(result.message);
+    REQUIRE(result.success);
+    CHECK(result.protection_event_clusters == 2);
+    CHECK(result.applied_event_records[0].protection_cluster_id == 0);
+    CHECK(result.applied_event_records[1].protection_cluster_id == 1);
+    CHECK(result.max_protection_event_cluster_span_s == Catch::Approx(0.0));
+  }
+
+  SECTION("the future window is anchored and does not roll forward") {
+    const DynamicResults result = run_probe(0.350075, 100e-6, 0.350150);
+    INFO(result.message);
+    REQUIRE(result.success);
+    REQUIRE(result.applied_event_records.size() == 3);
+    CHECK(result.protection_event_clusters == 2);
+    CHECK(result.applied_event_records[0].protection_cluster_id == 0);
+    CHECK(result.applied_event_records[1].protection_cluster_id == 0);
+    CHECK(result.applied_event_records[2].protection_cluster_id == 1);
+    CHECK(result.max_protection_event_cluster_span_s ==
+          Catch::Approx(75e-6).margin(1e-12));
+  }
+
+  SECTION("events at the same physical time are committed as one cluster") {
+    const DynamicResults result = run_probe(0.350000);
+    INFO(result.message);
+    REQUIRE(result.success);
+    REQUIRE(result.applied_event_records.size() == 2);
+    CHECK(result.applied_event_records[0].time_s ==
+          Catch::Approx(result.applied_event_records[1].time_s).margin(1e-12));
+    CHECK(result.protection_event_clusters == 1);
+    CHECK(result.max_post_event_algebraic_residual <= 1e-8);
+  }
+}
+
+TEST_CASE("Mass-matrix IEEE 1547 trip time is step-size convergent",
+          "[dynamics][protection][ieee1547][event_localization][crossval]") {
+  auto run_fault = [](double dt_s) {
+    HybridPowerSystem sys = make_transient_2bus();
+    StaticGenerator der;
+    der.index = 1;
+    der.bus = 2;
+    der.in_service = true;
+    der.p_mw = 15.0;
+    der.q_mvar = 0.0;
+    der.sn_mva = 40.0;
+    der.v_ref_pu = 1.0;
+    der.f_ref_hz = 50.0;
+    der.dynamic_model.standard = "IEEE";
+    der.dynamic_model.model_name = "GridFollowingInverter";
+    der.dynamic_model.parameters = {
+        {"ieee1547_enabled", 1.0},
+        {"ieee1547_category", 2.0},
+        {"ieee1547_allow_reconnect", 0.0},
+    };
+    sys.ac.static_generators.push_back(der);
+
+    auto options = fast_options();
+    options.solver_type = DynamicSolverType::MassMatrixDae;
+    options.dae_step_method = DynamicDaeStepMethod::BackwardEuler;
+    options.enable_der_protection = true;
+    options.localize_der_protection_events = true;
+    options.protection_event_time_tol_s = 1e-6;
+    options.post_event_algebraic_residual_tol = 1e-8;
+    options.algebraic_network_tol = 1e-10;
+    options.algebraic_network_max_iters = 25;
+    options.t_end_s = 0.45;
+    options.dt_s = dt_s;
+    options.record_every_step = false;
+    options.enforce_voltage_health_check = false;
+
+    DynamicModelBuilder builder;
+    DynamicSystem dynamic = builder.build(sys, options);
+    DynamicEvent fault;
+    fault.time_s = 0.20;
+    fault.type = DynamicEventType::FaultShunt;
+    fault.bus = 2;
+    fault.component_type = "AC";
+    fault.label = "event-localization cross-validation fault";
+    fault.params["r_pu"] = 0.01;
+    fault.params["x_pu"] = 0.01;
+    fault.params["duration_s"] = 0.30;
+    dynamic.events.push_back(fault);
+
+    DynamicSolver solver;
+    DynamicResults result = solver.solve(dynamic);
+    double trip_time_s = std::numeric_limits<double>::quiet_NaN();
+    for (const auto& event : result.applied_event_records) {
+      if (event.type == "VSCTrip" && event.label.find("IEEE1547") != std::string::npos) {
+        trip_time_s = event.time_s;
+        break;
+      }
+    }
+    return std::pair{std::move(result), trip_time_s};
+  };
+
+  const std::vector<double> step_sizes{0.010, 0.005, 0.001, 0.0002};
+  std::vector<double> trip_times;
+  for (double dt_s : step_sizes) {
+    auto [result, trip_time_s] = run_fault(dt_s);
+    INFO("dt=" << dt_s << ", message=" << result.message);
+    REQUIRE(result.success);
+    REQUIRE(std::isfinite(trip_time_s));
+    CHECK(result.protection_event_localization_used);
+    CHECK(result.max_protection_event_bracket_s <= 1e-6);
+    CHECK(result.max_post_event_algebraic_residual <= 1e-8);
+    trip_times.push_back(trip_time_s);
+  }
+  const auto [min_time, max_time] = std::minmax_element(trip_times.begin(), trip_times.end());
+  CHECK(*max_time - *min_time <= 5e-6);
 }
 
 TEST_CASE("IEEE 1547 protection hook is a live no-op without opted-in devices",
@@ -9160,6 +9972,117 @@ TEST_CASE("IEEE 1547 smart-inverter filter and slew-rate limiter",
     CHECK(gfl.output(x, y).values.at("smart_var_q_pu") > 0.0);
     CHECK(gfl.output(x, y).values.at("smart_var_q_pu") ==
           Catch::Approx(volt_var_q_pu(params.volt_var, 0.90)).margin(1e-2));
+  }
+}
+
+TEST_CASE("WECC DER_A matches PSD initialization and frequency-control equations",
+          "[dynamics][renewable][dera][oracle]") {
+  DERAADynamicParams params;
+  params.component_index = 40;
+  params.bus = 1;
+  params.bus_pos = 0;
+  params.base_mva = 100.0;
+  params.model_base_mva = 100.0;
+  params.p_ref_mw = 60.0;
+  params.q_ref_mvar = 20.0;
+  params.pf_angle_ref_rad = std::atan2(20.0, 60.0);
+  params.freq_flag = 1;
+  params.pq_flag = 0;
+  params.gen_flag = 1;
+  params.D_dn = 20.0;
+  params.D_up = 10.0;
+  params.fdbd1 = -0.0006;
+  params.fdbd2 = 0.0006;
+  params.fe_min = -99.0;
+  params.fe_max = 99.0;
+  params.p_min = 0.0;
+  params.p_max = 1.1;
+  params.dp_min = -0.5;
+  params.dp_max = 0.5;
+  params.Tpord = 0.02;
+  params.Tg = 0.02;
+  DERAADynamic dera(params);
+  int offset = 0;
+  dera.assignStateIndices(offset);
+  REQUIRE(offset == 10);
+  DynamicState x;
+  x.resize(static_cast<std::size_t>(offset));
+  NetworkState y;
+  y.resize(3, 0);
+  set_balanced_voltage(y, 0, std::polar(1.0, 0.0));
+
+  SECTION("power-flow seed is the ten-state PSD equilibrium") {
+    dera.initializeFromPowerFlow(PowerFlowResult{}, x, y);
+    CHECK(x.x[0] == Catch::Approx(1.0));
+    CHECK(x.x[1] == Catch::Approx(0.6));
+    CHECK(x.x[2] == Catch::Approx(0.2));
+    CHECK(x.x[3] == Catch::Approx(0.2));
+    CHECK(x.x[4] == Catch::Approx(1.0));
+    CHECK(x.x[5] == Catch::Approx(1.0));
+    CHECK(x.x[6] == Catch::Approx(0.6));
+    CHECK(x.x[7] == Catch::Approx(0.6));
+    CHECK(x.x[8] == Catch::Approx(0.6));
+    CHECK(x.x[9] == Catch::Approx(0.6));
+    Eigen::VectorXd dxdt = Eigen::VectorXd::Zero(offset);
+    dera.computeDerivatives(0.0, x, y, dxdt);
+    CHECK(dxdt.lpNorm<Eigen::Infinity>() <= 1e-12);
+  }
+
+  SECTION("non-saturated frequency chain is equation-identical to PSD") {
+    dera.initializeFromPowerFlow(PowerFlowResult{}, x, y);
+    y.system_frequency_pu = 0.98;
+    x.x[1] = 0.55;  // Pmeas
+    x.x[2] = 0.0;   // isolate the active-power chain
+    x.x[3] = 0.0;
+    x.x[5] = 0.99;  // Fmeas
+    x.x[6] = 0.06;  // PowerPI
+    x.x[7] = 0.55;  // dPord
+    x.x[8] = 0.50;  // Pord
+    x.x[9] = 0.50;  // Ip
+    Eigen::VectorXd dxdt = Eigen::VectorXd::Zero(offset);
+    dera.computeDerivatives(0.0, x, y, dxdt);
+
+    // db(0.01)=0.0094; under-frequency term=0.094; -Pmeas+Pref=0.05.
+    constexpr double expected_pi_input = 0.144;
+    CHECK(dxdt[5] == Catch::Approx(-0.5).margin(1e-12));
+    CHECK(dxdt[6] == Catch::Approx(expected_pi_input).margin(1e-12));
+    CHECK(dxdt[7] == Catch::Approx(expected_pi_input).margin(1e-12));
+    CHECK(dxdt[8] == Catch::Approx(2.5).margin(1e-12));
+    CHECK(dxdt[9] == Catch::Approx(0.0).margin(1e-12));
+  }
+
+  SECTION("PI, power-order, and current-rate non-windup limits are explicit") {
+    dera.initializeFromPowerFlow(PowerFlowResult{}, x, y);
+    x.x[1] = 0.55;
+    x.x[5] = 0.99;
+    x.x[6] = 0.20;  // Kpg*u + Kig*PowerPI exceeds Pmax
+    x.x[7] = 1.20;
+    x.x[8] = 1.10;  // at Pmax with outward residual
+    x.x[9] = 0.50;
+    Eigen::VectorXd dxdt = Eigen::VectorXd::Zero(offset);
+    dera.computeDerivatives(0.0, x, y, dxdt);
+    CHECK(dxdt[6] == Catch::Approx(0.0));
+    CHECK(dxdt[7] == Catch::Approx(0.0));
+    CHECK(dxdt[8] == Catch::Approx(0.0));
+
+    DERAADynamicParams rate_params = params;
+    rate_params.D_up = 100.0;
+    rate_params.rr_pwr = 1.0;
+    DERAADynamic rate_limited(rate_params);
+    int rate_offset = 0;
+    rate_limited.assignStateIndices(rate_offset);
+    DynamicState xr;
+    xr.resize(static_cast<std::size_t>(rate_offset));
+    rate_limited.initializeFromPowerFlow(PowerFlowResult{}, xr, y);
+    xr.x[1] = 0.60;
+    xr.x[5] = 0.99;
+    xr.x[6] = 0.0;
+    xr.x[8] = 1.10;
+    xr.x[9] = 0.50;
+    dxdt.setZero();
+    rate_limited.computeDerivatives(0.0, xr, y, dxdt);
+    CHECK(dxdt[7] == Catch::Approx(0.5).margin(1e-12));
+    CHECK(dxdt[9] == Catch::Approx(1.0).margin(1e-12));
   }
 }
 

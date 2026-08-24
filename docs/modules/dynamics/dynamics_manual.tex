@@ -94,7 +94,10 @@ BackwardEulerNewton、TrapezoidalNewton、RosenbrockEuler、MassMatrixDae）、
 \compmeta{DynamicResults}{include/hacdcpf/dynamics/DynamicResults.hpp}
 主要字段：\fld{success}、\fld{snapshots}（\texttt{DynamicSnapshot} 序列）、\fld{initialization}、
 \fld{modal}（\texttt{DynamicModalSummary}）、\fld{applied\_event\_records} 与求解统计
-\fld{newton\_iterations}、\fld{linear\_factorizations}、\fld{rejected\_steps}。快照
+\fld{newton\_iterations}、\fld{linear\_factorizations}、\fld{rejected\_steps}；保护事件
+审计字段为 \fld{protection\_event\_localization\_trials}、
+\fld{protection\_event\_clusters}、\fld{max\_protection\_event\_bracket\_s} 与
+\fld{max\_post\_event\_algebraic\_residual}。快照
 \texttt{DynamicSnapshot} 含 \fld{time\_s}、\fld{state}、\fld{vac\_abc}、\fld{vdc}、
 \fld{coi\_frequency\_hz}、\fld{coi\_rocof\_hz\_s}、\fld{island\_frequencies}、\fld{device\_outputs}；
 模态摘要含特征值、\fld{damping\_ratio}、\fld{min\_damping\_ratio}、\fld{stable}；孤岛频率
@@ -124,6 +127,10 @@ BackwardEulerNewton、TrapezoidalNewton、RosenbrockEuler、MassMatrixDae）、
 \fld{auto\_select\_stiff\_solver} & — & — & 布尔 & — & 刚性时自动切换稳定积分器\\
 \fld{compute\_small\_signal} & — & — & 布尔 & — & 是否输出小信号/模态摘要\\
 \fld{enable\_der\_protection} & — & — & 布尔 & — & 启用 IEEE 1547 DER 保护\\
+\fld{localize\_der\_protection\_events} & — & — & 布尔 & — & MassMatrixDae 内回滚/二分定位保护动作\\
+\fld{protection\_event\_time\_tol\_s} & $\varepsilon_e$ & s & 正有限数 & $10^{-6}$ & 事件时间括号宽度上限\\
+\fld{protection\_event\_max\_localization\_iters} & $N_{e,\max}$ & 次 & 正整数 & 64 & 单事件定位试积分上限\\
+\fld{post\_event\_algebraic\_residual\_tol} & $\varepsilon_g$ & pu & 正有限数 & $10^{-6}$ & 事件后代数残差失败阈值\\
 \fld{success} & — & — & 布尔 & — & 结果：整体是否成功\\
 \fld{min\_damping\_ratio} & $\zeta_{\min}$ & — & — & — & 结果：最小阻尼比（模态摘要）\\
 \end{paramtable}
@@ -136,6 +143,14 @@ BackwardEulerNewton、TrapezoidalNewton、RosenbrockEuler、MassMatrixDae）、
 \srcpath{test\_dynamic\_model\_catalog}（\srcpath{tests/test\_dynamic\_model\_catalog.cpp}），以及
 ctest 项 \srcpath{transient\_native\_disturbance\_matrix}（标签
 \texttt{dynamics;transient;validation}，来自目标 \srcpath{transient\_validation\_matrix}）。
+事件定位子集以解析指数滤波/定时限公式、相隔 $50~\mu$s 的双事件、直接 API
+UVLS/Zone-1 继电器和四档步长 DAE 故障轨迹交叉检查；当前
+实测步长间动作时刻极差 $1.520~\mu$s，最大二分括号 $0.977~\mu$s，事件后最大
+代数残差 $3.845\times10^{-10}$，对应固定门限分别为 $5~\mu$s、$1~\mu$s 与
+$10^{-8}$。MATLAB R2025b 对作者 COSMIC 固定提交的外部运行复现其自带案例
+（支路 6 于 10.0~s 切除、母线 5 于 10.5~s 切除 31.25~MW），但按论文图~2
+参数重建时支路 6 最大距离拾取比仅为 $0.3098124214893234<1$，没有论文所示
+10.5~s/10.7~s 动作；因此论文图~2 交叉验证明确记为未通过。
 
 \subsection{边界与局限（如实标注）}
 \begin{itemize}
@@ -144,6 +159,11 @@ ctest 项 \srcpath{transient\_native\_disturbance\_matrix}（标签
   \item 与 GridLAB-D/OpenDSS 的对比仅校核共享的平衡快照范围，不认证逆变器、电机、直流环节、储能或
         事件方程；
   \item 电压健康失败与初始化不收敛保持为可见错误，不得改写为收敛；
+  \item 事件定位是 MassMatrixDae 下 IEEE 1547 与直接 API 定时限 UVLS/正序
+        Zone-1 继电器的数值基线，不是形式化 ``certified chronology''；外部继电器
+        尚无 rich-model/JSON/HTTP/GUI 自动装配，分块积分器仍按接受步末动作，频率
+        动态信号、CT/PT 动态、反时限、多区距离、步内未采样越限脉冲、擦边/芝诺与
+        EMT 开关不在当前覆盖范围；
   \item 权威文档 \srcpath{docs/theory/transient\_runtime.md}；历史理论见
         \srcpath{docs/archive/theory/dynamics\_electromechanical\_transient\_design.md}。
 \end{itemize}

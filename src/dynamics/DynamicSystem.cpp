@@ -12,6 +12,7 @@
 #include <Eigen/Sparse>
 #include <Eigen/SparseLU>
 
+#include "hacdcpf/dynamics/DynamicFrequency.hpp"
 #include "hacdcpf/dynamics/solvers/SparseLinearSolver.hpp"
 #include "hacdcpf/model/defaults.hpp"
 
@@ -124,7 +125,10 @@ std::vector<DynamicResidualDiagnostic> collect_residual_diagnostics(
     double min_abs_residual) {
   std::vector<DynamicResidualDiagnostic> diagnostics;
   if (x.x.size() == 0) return diagnostics;
+  int device_state_offset = 0;
   for (const auto& device : devices) {
+    const int device_state_begin = device_state_offset;
+    device->assignStateIndices(device_state_offset);
     Eigen::VectorXd contribution = Eigen::VectorXd::Zero(x.x.size());
     device->computeDerivatives(t, x, y, contribution);
     mask_slow_residuals(devices, contribution);
@@ -137,6 +141,10 @@ std::vector<DynamicResidualDiagnostic> collect_residual_diagnostics(
     diag.device_type = device->type();
     diag.component_index = device->componentIndex();
     diag.state_index = static_cast<int>(idx);
+    if (diag.state_index >= device_state_begin &&
+        diag.state_index < device_state_offset) {
+      diag.local_state_index = diag.state_index - device_state_begin;
+    }
     diag.residual = contribution[idx];
     diagnostics.push_back(std::move(diag));
   }
@@ -200,16 +208,31 @@ bool numerical_masked_dynamic_jacobian(DynamicSystem& sys,
   const Eigen::Index n = state.size();
   jac = Eigen::MatrixXd::Zero(n, n);
   if (n == 0) return true;
-  constexpr double eps0 = NumericalConstants::kSqrtMachineEpsilon;
+  // Higham, Accuracy and Stability of Numerical Algorithms, 2nd ed., Sec. 1.4:
+  // a forward difference with function-evaluation error eta has the error
+  // model O(h) + O(eta / h), hence h ~ sqrt(eta).  Each residual evaluation
+  // contains an iterative algebraic-network solve, so its declared tolerance
+  // is the relevant eta whenever it dominates floating-point roundoff.
+  constexpr double kMaxRelativeDifferenceStep = 1e-4;
+  const double eps0 = std::min(
+      kMaxRelativeDifferenceStep,
+      std::max(NumericalConstants::kSqrtMachineEpsilon,
+               std::sqrt(std::max(0.0, sys.options.algebraic_network_tol))));
+  const NetworkState algebraic_base = sys.y;
   for (Eigen::Index col = 0; col < n; ++col) {
     Eigen::VectorXd trial = state;
     const double h = eps0 * std::max(1.0, std::abs(state[col]));
     trial[col] += h;
     Eigen::VectorXd residual_p;
+    // Every column represents the same reduced map f(x, y(x)).  Reuse of the
+    // previous column's algebraic warm start makes a tolerance-bounded network
+    // solve history-dependent and contaminates the finite difference.
+    sys.y = algebraic_base;
     if (!evaluate_masked_dynamic_residual(sys, t, trial, residual_p, error)) return false;
     jac.col(col) = (residual_p - residual0) / h;
   }
   Eigen::VectorXd restored;
+  sys.y = algebraic_base;
   return evaluate_masked_dynamic_residual(sys, t, state, restored, error);
 }
 
@@ -244,6 +267,21 @@ ConsistentInitializationResult solve_consistent_dynamic_initial_state(
     double tolerance,
     int max_iterations) {
   ConsistentInitializationResult result;
+  struct AlgebraicToleranceRestore {
+    double& target;
+    double saved;
+    ~AlgebraicToleranceRestore() { target = saved; }
+  } tolerance_restore{sys.options.algebraic_network_tol,
+                      sys.options.algebraic_network_tol};
+  // The reduced residual f(x,y(x)) cannot be certified more tightly than the
+  // algebraic solve used to evaluate y(x). Keep its evaluation noise at least
+  // one decade below the requested dynamic gate during initialization only.
+  // Higham, Accuracy and Stability of Numerical Algorithms, 2nd ed., Sec. 1.4.
+  const double initialization_network_tol =
+      std::max(100.0 * std::numeric_limits<double>::epsilon(),
+               0.1 * std::max(0.0, tolerance));
+  sys.options.algebraic_network_tol =
+      std::min(sys.options.algebraic_network_tol, initialization_network_tol);
   std::string error;
   Eigen::VectorXd state = initial_state;
   Eigen::VectorXd residual;
@@ -472,6 +510,8 @@ void DynamicSystem::assignStateIndices() {
 }
 
 void DynamicSystem::initializeStatesFromPowerFlow() {
+  initialization.initialization_attempted = true;
+  initialization.dynamic_residual_evaluated = false;
   if (x.size() == 0 && !devices.empty()) {
     assignStateIndices();
   }
@@ -556,10 +596,17 @@ void DynamicSystem::initializeStatesFromPowerFlow() {
         changed = reanchor_machine_controllers(devices, x, y) || changed;
       }
 
+      const DynamicFrequencyReport frequency =
+          computeFrequencyReport(*this, x, y);
+      y.system_frequency_pu =
+          frequency.system_coi_frequency_hz /
+          frequency.nominal_frequency_hz;
+
       Eigen::VectorXd dxdt = Eigen::VectorXd::Zero(x.x.size());
       for (const auto& device : devices) {
         device->computeDerivatives(options.t_start_s, x, y, dxdt);
       }
+      initialization.dynamic_residual_evaluated = dxdt.allFinite();
       x.dxdt = dxdt;
       initialization.dynamic_initial_dxdt_inf_norm =
           dxdt.size() > 0 ? dxdt.lpNorm<Eigen::Infinity>() : 0.0;
@@ -584,7 +631,8 @@ void DynamicSystem::initializeStatesFromPowerFlow() {
     initialization.dynamic_fast_dxdt_inf_norm =
         std::isfinite(fast_norm) ? fast_norm : 0.0;
     initialization.dynamic_trim_converged =
-        trimmed || initialization.dynamic_fast_dxdt_inf_norm <= options.dynamic_trim_tol;
+        initialization.dynamic_residual_evaluated &&
+        (trimmed || initialization.dynamic_fast_dxdt_inf_norm <= options.dynamic_trim_tol);
     if (options.trim_dynamic_initial_conditions &&
         !initialization.dynamic_trim_converged) {
       initialization.warnings.push_back(
@@ -599,6 +647,7 @@ void DynamicSystem::initializeStatesFromPowerFlow() {
     std::string error;
     Eigen::VectorXd dxdt;
     if (evaluateDerivatives(options.t_start_s, x.x, dxdt, error)) {
+      initialization.dynamic_residual_evaluated = dxdt.allFinite();
       initialization.dynamic_initial_dxdt_inf_norm =
           dxdt.size() > 0 ? dxdt.lpNorm<Eigen::Infinity>() : 0.0;
       mask_slow_residuals(devices, dxdt);
@@ -642,6 +691,7 @@ void DynamicSystem::initializeStatesFromPowerFlow() {
       initialization.warnings.push_back("Dynamic equilibrium trim residual unavailable: " + error);
       break;
     }
+    initialization.dynamic_residual_evaluated = dxdt.allFinite();
     x.dxdt = dxdt;
     initialization.dynamic_initial_dxdt_inf_norm =
         dxdt.size() > 0 ? dxdt.lpNorm<Eigen::Infinity>() : 0.0;
@@ -685,6 +735,7 @@ void DynamicSystem::initializeStatesFromPowerFlow() {
 
   Eigen::VectorXd final_dxdt;
   if (evaluateDerivatives(options.t_start_s, x.x, final_dxdt, error)) {
+    initialization.dynamic_residual_evaluated = final_dxdt.allFinite();
     x.dxdt = final_dxdt;
     initialization.dynamic_initial_dxdt_inf_norm =
         final_dxdt.size() > 0 ? final_dxdt.lpNorm<Eigen::Infinity>() : 0.0;
@@ -701,8 +752,8 @@ void DynamicSystem::initializeStatesFromPowerFlow() {
     fast_norm = derivativeInfinityNorm(options.t_start_s, error);
   }
   initialization.dynamic_fast_dxdt_inf_norm = std::isfinite(fast_norm) ? fast_norm : 0.0;
-  initialization.dynamic_trim_converged = trimmed ||
-      initialization.dynamic_fast_dxdt_inf_norm <= options.dynamic_trim_tol;
+  initialization.dynamic_trim_converged = initialization.dynamic_residual_evaluated &&
+      (trimmed || initialization.dynamic_fast_dxdt_inf_norm <= options.dynamic_trim_tol);
   if (!initialization.dynamic_trim_converged) {
     initialization.warnings.push_back(
         "Dynamic equilibrium trim did not fully converge; initial fast-state residual ||dx/dt||_inf=" +
@@ -773,6 +824,8 @@ bool DynamicSystem::dcSolveCached(const Eigen::SparseMatrix<double>& a,
 bool DynamicSystem::solveNetwork(double t, std::string& error) {
   const int max_iters = std::max(1, options.algebraic_network_max_iters);
   const double tol = std::max(0.0, options.algebraic_network_tol);
+  const Eigen::VectorXcd vac_seed = y.Vac_abc;
+  const Eigen::VectorXd vdc_seed = y.Vdc;
   double final_delta = std::numeric_limits<double>::infinity();
   double final_ac_delta = 0.0;
   double final_dc_delta = 0.0;
@@ -947,6 +1000,12 @@ bool DynamicSystem::solveNetwork(double t, std::string& error) {
     // failure, try a finite-difference Newton solve of the same algebraic
     // network residual, which converges quadratically where Picard is only
     // linear (design doc §15.2, §20 item 1).
+    // Kelley, Solving Nonlinear Equations with Newton's Method, Ch. 2: Newton
+    // is local. A non-contractive Picard map can drive a good PF seed far
+    // outside that local basin, so the fallback must restart from the seed,
+    // not from the final divergent fixed-point iterate.
+    y.Vac_abc = vac_seed;
+    y.Vdc = vdc_seed;
     std::string newton_error;
     if (options.network_newton_fallback && solveNetworkNewton(t, newton_error)) {
       converged = true;
@@ -1138,6 +1197,10 @@ bool DynamicSystem::evaluateDerivatives(double t,
                                         std::string& error) {
   x.x = state;
   if (!solveNetwork(t, error)) return false;
+  const DynamicFrequencyReport frequency = computeFrequencyReport(*this, x, y);
+  y.system_frequency_pu =
+      frequency.system_coi_frequency_hz /
+      frequency.nominal_frequency_hz;
   dxdt = Eigen::VectorXd::Zero(state.size());
   for (const auto& device : devices) {
     device->computeDerivatives(t, x, y, dxdt);
@@ -1166,15 +1229,22 @@ bool DynamicSystem::evaluateDaeResidual(
   state_view.dxdt = state_derivative;
   state_view.time_s = t;
 
+  NetworkState algebraic_view = algebraic;
+  const DynamicFrequencyReport frequency =
+      computeFrequencyReport(*this, state_view, algebraic_view);
+  algebraic_view.system_frequency_pu =
+      frequency.system_coi_frequency_hz /
+      frequency.nominal_frequency_hz;
+
   Eigen::VectorXd field = Eigen::VectorXd::Zero(state.size());
   for (const auto& device : devices) {
-    device->computeDerivatives(t, state_view, algebraic, field);
+    device->computeDerivatives(t, state_view, algebraic_view, field);
   }
   r_f = state_derivative - field;
 
   DynamicStamp stamp(n_ac, n_dc);
   for (const auto& device : devices) {
-    device->stamp(t, state_view, algebraic, stamp);
+    device->stamp(t, state_view, algebraic_view, stamp);
   }
   Eigen::SparseMatrix<Complex> yac;
   Eigen::VectorXcd iac;

@@ -251,6 +251,7 @@ TEST_CASE("Governor / exciter / PSS catalog keys are consumed by the builder",
       {"exciter", {{"Ka", 42.0}}},
       {"pss", {{"Ks", 7.5}}},
   });
+  INFO(r.message);
   REQUIRE(r.success);
   CHECK(device_value(r, "Governor", "droop_r") == Catch::Approx(0.037));
   CHECK(device_value(r, "Exciter", "ka") == Catch::Approx(42.0));
@@ -264,6 +265,7 @@ TEST_CASE("Phase 3 generator composition publishes the inner-variable bus",
       {"exciter", {{"Ka", 42.0}}},
       {"pss", {{"Ks", 7.5}}},
   });
+  INFO(r.message);
   REQUIRE(r.success);
   CHECK(device_value(r, "SynchronousMachine", 2, "composed_generator") ==
         Catch::Approx(1.0));

@@ -5,7 +5,9 @@
 #include <complex>
 #include <limits>
 #include <map>
+#include <stdexcept>
 #include <string>
+#include <string_view>
 #include <vector>
 
 #include <Eigen/Dense>
@@ -13,6 +15,7 @@
 #include <Eigen/SparseLU>
 
 #include "hacdcpf/model/defaults.hpp"
+#include "hacdcpf/power_flow/converter_model.hpp"
 
 namespace hacdcpf::dynamics {
 namespace {
@@ -23,6 +26,20 @@ constexpr double kTwoPi = 2.0 * kPi;
 constexpr double kMinVoltage = 1e-4;
 constexpr double kMinTimeConstant = 1e-4;
 constexpr double kMachinePowerBalanceTolPu = 1e-4;
+
+// Protection actions carry a semantic component_type.  A zero/empty type is
+// retained for backwards-compatible hand-authored events, but an explicit
+// type is authoritative: equal numeric indices in different asset families
+// must never cross-trigger one another.
+bool protection_target_matches(const DynamicEvent& event,
+                               std::string_view expected_type,
+                               int component_index,
+                               int bus = 0) {
+  if (event.component_index != 0 && event.component_index != component_index) return false;
+  if (!event.component_type.empty() && event.component_type != expected_type) return false;
+  if (event.bus != 0 && bus != 0 && event.bus != bus) return false;
+  return true;
+}
 
 int state_index(const StateIndexRange& range, int local) {
   return range.offset + local;
@@ -502,17 +519,19 @@ IEEE1547Action evaluate_der_protection(const IEEE1547Settings& settings,
   if (!settings.enabled || bus_pos < 0) return IEEE1547Action::None;
   const Eigen::Vector3cd vabc = bus_voltage(y, bus_pos);
   const Complex vpos = positive_sequence_voltage(vabc);
-  const IEEE1547Action action =
-      step_ieee1547(settings, state, std::abs(vpos), std::arg(vpos), dt);
+  const IEEE1547StepResult step =
+      advance_ieee1547_interval(settings, state, std::abs(vpos), std::arg(vpos), dt);
+  const IEEE1547Action action = step.action;
   if (action == IEEE1547Action::None) return action;
+  const double event_time_s = t - std::max(0.0, dt) + step.action_offset_s;
   DynamicEvent ev;
-  ev.time_s = t;
+  ev.time_s = event_time_s;
   ev.component_index = component_index;
   ev.bus = bus;
   ev.component_type = component_type;
   ev.applied = true;
   if (action == IEEE1547Action::Tripped) {
-    state.trip_time_s = t;
+    state.trip_time_s = event_time_s;
     in_service = false;
     ev.type = trip_type;
     ev.label = "IEEE1547 " + state.last_reason + " trip: " + device_name;
@@ -523,6 +542,20 @@ IEEE1547Action evaluate_der_protection(const IEEE1547Settings& settings,
   }
   events.push_back(ev);
   return action;
+}
+
+DynamicProtectionEventPreview preview_der_protection(const IEEE1547Settings& settings,
+                                                     const IEEE1547RuntimeState& state,
+                                                     const NetworkState& y, int bus_pos, double t,
+                                                     double dt) {
+  if (!settings.enabled || bus_pos < 0) return {};
+  const Eigen::Vector3cd vabc = bus_voltage(y, bus_pos);
+  const Complex vpos = positive_sequence_voltage(vabc);
+  IEEE1547RuntimeState preview_state = state;
+  const IEEE1547StepResult step =
+      advance_ieee1547_interval(settings, preview_state, std::abs(vpos), std::arg(vpos), dt);
+  if (step.action == IEEE1547Action::None) return {};
+  return {true, t - std::max(0.0, dt) + step.action_offset_s};
 }
 
 // IEEE 1547 volt-var / frequency-watt smart-inverter references for a
@@ -2713,7 +2746,7 @@ void DCVoltageSourceDynamic::addJacobian(double,
 void DCVoltageSourceDynamic::handleEvent(const DynamicEvent& event, DynamicState&, NetworkState&) {
   if (params_.trip_on_vsc_event &&
       event.type == DynamicEventType::VSCTrip &&
-      (event.component_index == 0 || event.component_index == params_.component_index)) {
+      protection_target_matches(event, "VSC", params_.component_index, params_.bus)) {
     params_.in_service = false;
   }
 }
@@ -3203,28 +3236,42 @@ bool SynchronousMachine::trimToNetworkEquilibrium(DynamicState& x, NetworkState&
     return changed;
   }
   if (params_.dynamic_angle) {
-    // Re-derive the internal EMF from the network-solved terminal voltage and
-    // the scheduled S, then anchor Pm to the scheduled real power. This drives
-    // the machine to the *correct* equilibrium (delivering its scheduled MW with
-    // dx/dt=0), rather than the previous behaviour of dragging Pm down to match
-    // whatever near-zero power the E==Vt initial guess happened to produce.
-    const double p_pu = params_.p_mech_mw / safe_base(params_.base_mva);
-    const double q_pu = params_.q_elec_mvar / safe_base(params_.base_mva);
     const Complex vt_raw = positive_sequence_voltage(bus_voltage(y, params_.bus_pos));
     const Complex vt = std::abs(vt_raw) > kMinVoltage
                            ? vt_raw
                            : std::polar(clamp_voltage(params_.vm_set_pu), std::arg(vt_raw));
-    const double phase_power_scale =
-        std::max(0.0, std::abs(params_.phase_power_scale));
-    const Complex s_phase(p_pu * phase_power_scale, q_pu * phase_power_scale);
-    const Complex i_phase = std::conj(s_phase / vt);
     const Complex z(params_.r_pu, source_series_reactance_pu(params_.x_pu));
-    const Complex e_internal = vt + z * i_phase;
-    if (std::isfinite(std::abs(e_internal)) && std::abs(e_internal) > 0.0) {
-      changed = set_if_changed(x.x, state_index(range_, 0), std::arg(e_internal)) || changed;
-      changed = set_if_changed(x.x, state_index(range_, 2), std::abs(e_internal)) || changed;
+    if (params_.network_balance_reference) {
+      // Kundur, Power System Stability and Control, Ch. 3: the reference
+      // machine absorbs the residual system balance, so at omega=1 its
+      // mechanical input equals actual electrical air-gap power plus braking.
+      const Complex yv = Complex(1.0, 0.0) / z;
+      const Eigen::Vector3cd vabc = bus_voltage(y, params_.bus_pos);
+      const Eigen::Vector3cd eabc = balanced_phasors(
+          x.x[state_index(range_, 2)], x.x[state_index(range_, 0)]);
+      const Eigen::Vector3cd iabc = yv * (eabc - vabc);
+      const double pe = average_complex_power(vabc, iabc).real() *
+                        phase_sum_to_total_power_scale(params_.phase_power_scale);
+      const double tau_brake = negative_sequence_braking_torque(params_, vabc);
+      changed = set_if_changed(x.x, state_index(range_, 3), pe + tau_brake) || changed;
+    } else {
+      // A non-reference machine must retain its dispatched P+jQ.  Reconstruct
+      // the internal EMF against the latest network voltage, then keep Pm at
+      // the scheduled real-power input.  The reference machine closes the
+      // remaining system mismatch.
+      const double p_pu = params_.p_mech_mw / safe_base(params_.base_mva);
+      const double q_pu = params_.q_elec_mvar / safe_base(params_.base_mva);
+      const double phase_power_scale =
+          std::max(0.0, std::abs(params_.phase_power_scale));
+      const Complex s_phase(p_pu * phase_power_scale, q_pu * phase_power_scale);
+      const Complex i_phase = std::conj(s_phase / vt);
+      const Complex e_internal = vt + z * i_phase;
+      if (std::isfinite(std::abs(e_internal)) && std::abs(e_internal) > 0.0) {
+        changed = set_if_changed(x.x, state_index(range_, 0), std::arg(e_internal)) || changed;
+        changed = set_if_changed(x.x, state_index(range_, 2), std::abs(e_internal)) || changed;
+      }
+      changed = set_if_changed(x.x, state_index(range_, 3), p_pu) || changed;
     }
-    changed = set_if_changed(x.x, state_index(range_, 3), p_pu) || changed;
   }
   return changed;
 }
@@ -3676,8 +3723,11 @@ void SynchronousMachine::addJacobian(
 }
 
 void SynchronousMachine::handleEvent(const DynamicEvent& event, DynamicState& x, NetworkState&) {
-  const bool matching =
-      event.component_index == 0 || event.component_index == params_.component_index;
+  const bool matching = protection_target_matches(event, "Generator",
+                                                  params_.component_index, params_.bus) ||
+                        (event.type == DynamicEventType::Custom &&
+                         protection_target_matches(event, "SynchronousMachine",
+                                                  params_.component_index, params_.bus));
   if (!matching) return;
   if (event.type == DynamicEventType::GeneratorTrip) {
     params_.in_service = false;
@@ -3711,6 +3761,12 @@ bool SynchronousMachine::updateProtection(double t,
       params_.component_index, params_.bus, name(), "Generator",
       DynamicEventType::GeneratorTrip, params_.in_service, events);
   return action != IEEE1547Action::None;
+}
+
+DynamicProtectionEventPreview SynchronousMachine::previewProtection(double t, double dt,
+                                                                    const NetworkState& y) const {
+  if (range_.empty()) return {};
+  return preview_der_protection(params_.protection, protection_state_, y, params_.bus_pos, t, dt);
 }
 
 std::string SynchronousMachine::name() const {
@@ -4137,9 +4193,10 @@ void FiveMassShaft::addJacobian(double,
                                 std::vector<Eigen::Triplet<double>>&) const {}
 
 void FiveMassShaft::handleEvent(const DynamicEvent& event, DynamicState& x, NetworkState&) {
-  const bool matching = event.component_index == 0 ||
-                        event.component_index == params_.component_index ||
-                        event.component_index == params_.machine_index;
+  const bool matching = protection_target_matches(event, "Generator",
+                                                  params_.component_index, 0) ||
+                        (event.component_type.empty() &&
+                         event.component_index == params_.machine_index);
   if (!matching) return;
   if (event.type == DynamicEventType::GeneratorTrip) {
     params_.in_service = false;
@@ -4616,8 +4673,8 @@ void Governor::addJacobian(double t,
 }
 
 void Governor::handleEvent(const DynamicEvent& event, DynamicState& x, NetworkState&) {
-  const bool matching = event.component_index == 0 ||
-                        event.component_index == params_.component_index;
+  const bool matching = protection_target_matches(event, "Generator",
+                                                  params_.component_index, 0);
   if (!matching) return;
   if (event.type == DynamicEventType::GeneratorTrip) {
     params_.in_service = false;
@@ -5295,8 +5352,8 @@ void Exciter::addJacobian(double t,
 }
 
 void Exciter::handleEvent(const DynamicEvent& event, DynamicState& x, NetworkState&) {
-  const bool matching = event.component_index == 0 ||
-                        event.component_index == params_.component_index;
+  const bool matching = protection_target_matches(event, "Generator",
+                                                  params_.component_index, 0);
   if (!matching) return;
   if (event.type == DynamicEventType::GeneratorTrip) {
     params_.in_service = false;
@@ -5625,8 +5682,8 @@ void PowerSystemStabilizer::addJacobian(
 
 void PowerSystemStabilizer::handleEvent(const DynamicEvent& event, DynamicState& x,
                                         NetworkState&) {
-  const bool matching = event.component_index == 0 ||
-                        event.component_index == params_.component_index;
+  const bool matching = protection_target_matches(event, "Generator",
+                                                  params_.component_index, 0);
   if (!matching) return;
   if (event.type == DynamicEventType::GeneratorTrip) {
     params_.in_service = false;
@@ -6069,11 +6126,11 @@ void GridFormingInverter::addJacobian(
 
 void GridFormingInverter::handleEvent(const DynamicEvent& event, DynamicState&, NetworkState&) {
   if (event.type == DynamicEventType::VSCTrip &&
-      (event.component_index == 0 || event.component_index == params_.component_index)) {
+      protection_target_matches(event, "VSC", params_.component_index, params_.bus)) {
     params_.in_service = false;
   } else if (event.type == DynamicEventType::Custom &&
              event.component_type == "VSC" &&
-             (event.component_index == 0 || event.component_index == params_.component_index)) {
+             protection_target_matches(event, "VSC", params_.component_index, params_.bus)) {
     const auto p_it = event.params.find("p_ref_mw");
     if (p_it != event.params.end()) params_.p_ref_mw = p_it->second;
     const auto q_it = event.params.find("q_ref_mvar");
@@ -6095,6 +6152,12 @@ bool GridFormingInverter::updateProtection(double t,
       params_.component_index, params_.bus, name(), "VSC",
       DynamicEventType::VSCTrip, params_.in_service, events);
   return action != IEEE1547Action::None;
+}
+
+DynamicProtectionEventPreview GridFormingInverter::previewProtection(double t, double dt,
+                                                                     const NetworkState& y) const {
+  if (range_.empty()) return {};
+  return preview_der_protection(params_.protection, protection_state_, y, params_.bus_pos, t, dt);
 }
 
 void GridFormingInverter::updateSmartControls(double dt, const NetworkState& y) {
@@ -6536,8 +6599,27 @@ void GridFollowingInverter::seedFullFidelityEquilibrium(DynamicState& x,
   const Complex vpos = positive_sequence_voltage(bus_voltage(y, params_.bus_pos));
   const Complex s0(params_.p_ref_mw / safe_base(params_.base_mva),
                    params_.q_ref_mvar / safe_base(params_.base_mva));
-  const Complex i_grid = std::conj(s0 / vpos);
   const Complex z_g(params_.lcl_rg_pu, std::max(1e-6, params_.lcl_lg_pu));
+  Complex i_grid = std::conj(s0 / vpos);
+  if (!set_reference) {
+    // PSD measures outer-loop power at the LCL capacitor node, not at the
+    // network bus.  Its steady state therefore satisfies
+    //   Vf = Vbus + Zg I,  Sf = Vf conj(I).
+    // Solve I = conj(Sf / (Vbus + Zg I)) so the authored outer-loop reference
+    // and its measured feedback share the same port.  This is the stationary
+    // LCL relation used by PowerSimulationsDynamics.jl init_filter.
+    for (int iter = 0; iter < 20; ++iter) {
+      const Complex v_filter_iter = vpos + z_g * i_grid;
+      if (std::abs(v_filter_iter) <= kMinVoltage) break;
+      const Complex next = std::conj(s0 / v_filter_iter);
+      if (std::abs(next - i_grid) <=
+          1e-13 * std::max({1.0, std::abs(next), std::abs(i_grid)})) {
+        i_grid = next;
+        break;
+      }
+      i_grid = next;
+    }
+  }
   const Complex v_filter = vpos + z_g * i_grid;
   // Capacitor steady state: I_cnv = I_grid + j·ω·cf·V_filter (PSD init_filter).
   const Complex i_cnv = i_grid + Complex(0.0, params_.lcl_cf_pu) * v_filter;
@@ -7042,14 +7124,14 @@ void GridFollowingInverter::handleEvent(const DynamicEvent& event,
                                         DynamicState& x,
                                         NetworkState&) {
   if (event.type == DynamicEventType::VSCTrip &&
-      (event.component_index == 0 || event.component_index == params_.component_index)) {
+      protection_target_matches(event, "VSC", params_.component_index, params_.bus)) {
     params_.in_service = false;
     if (!range_.empty() && state_index(range_, 5) < x.x.size()) {
       x.x.segment(range_.offset, range_.size).setZero();
     }
   } else if (event.type == DynamicEventType::Custom &&
              event.component_type == "VSC" &&
-             (event.component_index == 0 || event.component_index == params_.component_index)) {
+             protection_target_matches(event, "VSC", params_.component_index, params_.bus)) {
     const auto p_it = event.params.find("p_ref_mw");
     if (p_it != event.params.end()) params_.p_ref_mw = p_it->second;
     const auto q_it = event.params.find("q_ref_mvar");
@@ -7073,6 +7155,12 @@ bool GridFollowingInverter::updateProtection(double t,
   // On reconnect the soft-start ramp in stamp() (restore_scale) eases the
   // injected current back to full over the configured window.
   return action != IEEE1547Action::None;
+}
+
+DynamicProtectionEventPreview GridFollowingInverter::previewProtection(
+    double t, double dt, const NetworkState& y) const {
+  if (range_.empty()) return {};
+  return preview_der_protection(params_.protection, protection_state_, y, params_.bus_pos, t, dt);
 }
 
 void GridFollowingInverter::updateSmartControls(double dt, const NetworkState& y) {
@@ -7507,6 +7595,11 @@ bool VSCConverterDynamic::updateProtection(double t,
                               : gfl_.updateProtection(t, dt, x, y, events);
 }
 
+DynamicProtectionEventPreview VSCConverterDynamic::previewProtection(double t, double dt,
+                                                                     const NetworkState& y) const {
+  return params_.grid_forming ? gfm_.previewProtection(t, dt, y) : gfl_.previewProtection(t, dt, y);
+}
+
 void VSCConverterDynamic::updateSmartControls(double dt, const NetworkState& y) {
   if (params_.grid_forming) {
     gfm_.updateSmartControls(dt, y);
@@ -7810,7 +7903,19 @@ DynamicDeviceOutput CSVGN1Dynamic::output(const DynamicState& x,
 }
 
 DERAADynamic::DERAADynamic(DERAADynamicParams params)
-    : params_(std::move(params)) {}
+    : params_(std::move(params)) {
+  const auto binary_flag = [](int value) { return value == 0 || value == 1; };
+  if (!binary_flag(params_.pf_flag) || !binary_flag(params_.freq_flag) ||
+      !binary_flag(params_.pq_flag) || !binary_flag(params_.gen_flag)) {
+    throw std::invalid_argument("DER_A Pf/Freq/PQ/Gen flags must be 0 or 1");
+  }
+  if (params_.dbd1 > params_.dbd2 || params_.fdbd1 > params_.fdbd2 ||
+      params_.fe_min > params_.fe_max || params_.p_min > params_.p_max ||
+      params_.dp_min > params_.dp_max || params_.Iq_min > params_.Iq_max ||
+      params_.I_max < 0.0 || params_.rr_pwr < 0.0) {
+    throw std::invalid_argument("DER_A limit or deadband parameters are invalid");
+  }
+}
 
 namespace {
 
@@ -7863,19 +7968,19 @@ void DERAADynamic::initializeFromPowerFlow(const PowerFlowResult&,
                     std::max(1e-9, params_.model_base_mva);
   const double iq = -idq.imag() * safe_base(params_.base_mva) /
                     std::max(1e-9, params_.model_base_mva);
+  const double pord = ip * vm;
   x.x[state_index(range_, 0)] = vm;
-  x.x[state_index(range_, 1)] = params_.p_ref_mw / std::max(1e-9, params_.model_base_mva);
-  x.x[state_index(range_, 2)] =
-      params_.pf_flag == 1
-          ? std::tan(params_.pf_angle_ref_rad) * x.x[state_index(range_, 1)] / vm
-          : params_.q_ref_mvar / std::max(1e-9, params_.model_base_mva) / vm;
+  // PowerSimulationsDynamics.jl initialization/init_device.jl, DER_A:
+  // Pord = dPord = Pmeas = Ip*Vmeas and Q_V = Iq at the PF equilibrium.
+  x.x[state_index(range_, 1)] = pord;
+  x.x[state_index(range_, 2)] = iq;
   x.x[state_index(range_, 3)] = iq;
   x.x[state_index(range_, 4)] = 1.0;
   x.x[state_index(range_, 5)] = 1.0;
   if (params_.freq_flag == 1) {
-    x.x[state_index(range_, 6)] = 0.0;
-    x.x[state_index(range_, 7)] = 0.0;
-    x.x[state_index(range_, 8)] = x.x[state_index(range_, 1)];
+    x.x[state_index(range_, 6)] = pord;
+    x.x[state_index(range_, 7)] = pord;
+    x.x[state_index(range_, 8)] = pord;
     x.x[state_index(range_, 9)] = ip;
   } else {
     x.x[state_index(range_, 6)] = ip;
@@ -7892,6 +7997,31 @@ double dera_deadband(double value, double low, double high) {
   if (value > high) return value - high;
   if (value < low) return value - low;
   return 0.0;
+}
+
+struct DeraCurrentLimits {
+  double ip_min{0.0};
+  double ip_max{0.0};
+  double iq_min{0.0};
+  double iq_max{0.0};
+};
+
+DeraCurrentLimits dera_current_limits(const DERAADynamicParams& params,
+                                      double ip_cmd,
+                                      double iq_cmd) {
+  const double imax = std::max(0.0, params.I_max);
+  double ip_max = imax;
+  double iq_max = imax;
+  // PowerSimulationsDynamics.jl models/saturation_models.jl,
+  // current_limit_logic(AggregateDistributedGenerationA): PQ_Flag selects the
+  // current component with priority under the circular Imax capability.
+  if (params.pq_flag == 1) {
+    iq_max = std::sqrt(std::max(0.0, imax * imax - ip_cmd * ip_cmd));
+  } else {
+    ip_max = std::sqrt(std::max(0.0, imax * imax - iq_cmd * iq_cmd));
+  }
+  const double ip_min = params.gen_flag == 1 ? 0.0 : -ip_max;
+  return {ip_min, ip_max, -iq_max, iq_max};
 }
 
 }  // namespace
@@ -7930,44 +8060,84 @@ void DERAADynamic::computeDerivatives(double,
           ? std::tan(params_.pf_angle_ref_rad) * pmeas / std::max(kMinVoltage, vmeas)
           : q_ref / std::max(kMinVoltage, vmeas);
   dxdt[state_index(range_, 2)] = (qv_ref - qv) / std::max(kMinTimeConstant, params_.T_iq);
-  const double iq_cmd =
-      std::clamp(dera_deadband(params_.v_ref_pu - vmeas, params_.dbd1, params_.dbd2) *
-                         params_.K_qv +
-                     qv,
-                 params_.Iq_min,
-                 params_.Iq_max) *
-      mult;
-  dxdt[state_index(range_, 3)] = (iq_cmd - iq) / std::max(kMinTimeConstant, params_.Tg);
   dxdt[state_index(range_, 4)] = (mult_target - mult) / std::max(kMinTimeConstant, params_.Tv);
-  dxdt[state_index(range_, 5)] = (1.0 - fmeas) / std::max(kMinTimeConstant, params_.Trf);
+  dxdt[state_index(range_, 5)] =
+      (y.system_frequency_pu - fmeas) /
+      std::max(kMinTimeConstant, params_.Trf);
   if (trip_timer_local >= 0) {
     dxdt[state_index(range_, trip_timer_local)] =
         trip_violation ? 1.0
                        : -trip_timer / std::max(kMinTimeConstant, params_.trip_delay_s);
   }
-  double ip_ref = std::clamp(p_ref / std::max(kMinVoltage, vmeas),
-                             params_.Ip_min,
-                             params_.Ip_max) *
-                  mult;
+  const DeraCurrentLimits current_limits =
+      dera_current_limits(params_, ip, iq);
+  const double iq_voltage_support =
+      std::clamp(dera_deadband(params_.v_ref_pu - vmeas,
+                              params_.dbd1,
+                              params_.dbd2) * params_.K_qv,
+                 params_.Iq_min,
+                 params_.Iq_max);
+  const double iq_limited_cmd =
+      std::clamp(iq_voltage_support + qv,
+                 current_limits.iq_min,
+                 current_limits.iq_max) * mult;
+  dxdt[state_index(range_, 3)] =
+      (iq_limited_cmd - iq) / std::max(kMinTimeConstant, params_.Tg);
+
+  double ip_ref =
+      std::clamp(p_ref / std::max(kMinVoltage, vmeas),
+                 current_limits.ip_min,
+                 current_limits.ip_max) * mult;
   if (params_.freq_flag == 1) {
     const double power_pi = x.x[state_index(range_, 6)];
     const double dpord = x.x[state_index(range_, 7)];
     const double pord = x.x[state_index(range_, 8)];
-    const double freq_error = 1.0 - fmeas;
-    dxdt[state_index(range_, 6)] = params_.Kig * freq_error;
-    const double pord_cmd =
-        std::clamp(p_ref + params_.Kpg * freq_error + power_pi,
-                   params_.Ip_min,
-                   params_.Ip_max);
-    dxdt[state_index(range_, 7)] = (pord_cmd - dpord) / std::max(kMinTimeConstant, params_.Tpord);
-    dxdt[state_index(range_, 8)] = dpord;
-    ip_ref = std::clamp(pord / std::max(kMinVoltage, vmeas),
-                        params_.Ip_min,
-                        params_.Ip_max) *
-             mult;
+    const double frequency_error =
+        dera_deadband(1.0 - fmeas, params_.fdbd1, params_.fdbd2);
+    const double power_pi_input = std::clamp(
+        std::min(frequency_error * params_.D_dn, 0.0) +
+            std::max(frequency_error * params_.D_up, 0.0) - pmeas + p_ref,
+        params_.fe_min,
+        params_.fe_max);
+
+    // PSD common_controls.jl::pi_block_nonwindup and IEEE Std 421.5:
+    // freeze the integrator whenever its PI output is at either bound.
+    const double power_pi_output =
+        params_.Kpg * power_pi_input + params_.Kig * power_pi;
+    const bool pi_active = params_.p_min < power_pi_output &&
+                           power_pi_output < params_.p_max;
+    const double power_pi_derivative = pi_active ? power_pi_input : 0.0;
+    dxdt[state_index(range_, 6)] = power_pi_derivative;
+    dxdt[state_index(range_, 7)] =
+        std::clamp(power_pi_derivative, params_.dp_min, params_.dp_max);
+
+    // PSD device.jl, Freq_Flag=1: dPord drives a non-windup first-order Pord
+    // block. The mass-matrix form T_pord*dPord_dt=dPord-Pord is converted here
+    // to the physical time derivative used by this solver.
+    const double pord_residual = dpord - pord;
+    const bool pord_active =
+        !((pord >= params_.p_max && pord_residual > 0.0) ||
+          (pord <= params_.p_min && pord_residual < 0.0));
+    dxdt[state_index(range_, 8)] =
+        (pord_active ? pord_residual : 0.0) /
+        std::max(kMinTimeConstant, params_.Tpord);
+    const double pord_limited = std::clamp(pord, params_.p_min, params_.p_max);
+    ip_ref = std::clamp(pord_limited / std::max(kMinVoltage, vmeas),
+                        current_limits.ip_min,
+                        current_limits.ip_max) * mult;
   }
-  dxdt[state_index(range_, ip_index)] =
+  // PSD common_controls.jl::low_pass_nonwindup_ramp_limits. DER_A applies only
+  // an upward ramp to positive generation and only a downward ramp to charging.
+  const double raw_ip_derivative =
       (ip_ref - ip) / std::max(kMinTimeConstant, params_.Tg);
+  const double ip_rate_min = ip >= 0.0
+                                 ? -std::numeric_limits<double>::infinity()
+                                 : -std::abs(params_.rr_pwr);
+  const double ip_rate_max = ip >= 0.0
+                                 ? std::abs(params_.rr_pwr)
+                                 : std::numeric_limits<double>::infinity();
+  dxdt[state_index(range_, ip_index)] =
+      std::clamp(raw_ip_derivative, ip_rate_min, ip_rate_max);
 }
 
 std::pair<double, double> DERAADynamic::currentDq(const DynamicState& x) const {
@@ -8051,6 +8221,11 @@ DynamicDeviceOutput DERAADynamic::output(const DynamicState& x,
   out.values["Mult"] = range_.empty() ? 0.0 : x.x[state_index(range_, 4)];
   out.values["Fmeas"] = range_.empty() ? 0.0 : x.x[state_index(range_, 5)];
   out.values["Ip"] = range_.empty() ? 0.0 : x.x[state_index(range_, params_.freq_flag == 1 ? 9 : 6)];
+  if (!range_.empty() && params_.freq_flag == 1) {
+    out.values["PowerPI"] = x.x[state_index(range_, 6)];
+    out.values["dPord"] = x.x[state_index(range_, 7)];
+    out.values["Pord"] = x.x[state_index(range_, 8)];
+  }
   out.values["p_mw"] = s.real() * safe_base(params_.base_mva);
   out.values["q_mvar"] = s.imag() * safe_base(params_.base_mva);
   out.values["freq_flag"] = static_cast<double>(params_.freq_flag);
@@ -8901,13 +9076,17 @@ DCDCConverterDynamic::DCDCConverterDynamic(DCDCConverterDynamicParams params)
     : params_(std::move(params)) {}
 
 void DCDCConverterDynamic::assignStateIndices(int& offset) {
-  range_ = {offset, 1};
+  // Erickson & Maksimovic, Fundamentals of Power Electronics, averaged-switch
+  // modeling: the fast Voltage/Droop inner loop is algebraic on the
+  // electromechanical time scale; only Power mode retains the actuator state.
+  range_ = {offset, params_.control_mode == DCDCControlMode::Power ? 1 : 0};
   offset += range_.size;
 }
 
 void DCDCConverterDynamic::initializeFromPowerFlow(const PowerFlowResult&,
                                                   DynamicState& x,
                                                   NetworkState&) {
+  if (range_.empty()) return;
   x.x[range_.offset] = params_.p_ref_mw / std::max(1.0, params_.base_mva);
 }
 
@@ -8928,19 +9107,51 @@ void DCDCConverterDynamic::computeDerivatives(double,
       (params_.p_ref_mw / std::max(1.0, params_.base_mva) - x.x[range_.offset]) / tau;
 }
 
+namespace {
+
+powerflow::DCDCPowerTransfer dynamic_dcdc_transfer(
+    const DCDCConverterDynamicParams& params,
+    const DynamicState& x,
+    const StateIndexRange& range,
+    const NetworkState& y) {
+  DCDCConverter model;
+  model.bus_in = params.bus_in_pos + 1;
+  model.bus_out = params.bus_out_pos + 1;
+  model.in_service = params.in_service;
+  model.control_mode = params.control_mode;
+  model.p_ref_mw = params.p_ref_mw;
+  model.v_ref_pu = params.v_ref_pu;
+  model.sn_mva = params.sn_mva;
+  model.eta = params.eta;
+  model.r_eq_pu = params.r_eq_pu;
+  model.pmax_mw = params.pmax_mw;
+  model.pmin_mw = params.pmin_mw;
+  model.k_droop = params.k_droop;
+  if (params.control_mode == DCDCControlMode::Power && !range.empty()) {
+    model.p_ref_mw = x.x[range.offset] * std::max(1.0, params.base_mva);
+  }
+  // Single source of truth with steady-state PF: Voltage/Droop are the fast
+  // algebraic part of the semi-explicit DAE; Power mode supplies its filtered
+  // state as the shared equation's power reference.
+  return powerflow::dcdc_power_transfer(model, y.Vdc, params.base_mva);
+}
+
+}  // namespace
+
 void DCDCConverterDynamic::stamp(double,
                                  const DynamicState& x,
                                  const NetworkState& y,
                                  DynamicStamp& stamp) const {
   if (!params_.in_service || params_.bus_in_pos < 0 || params_.bus_out_pos < 0 ||
-      range_.empty()) {
+      params_.bus_in_pos >= y.Vdc.size() || params_.bus_out_pos >= y.Vdc.size()) {
     return;
   }
-  const double p_out = x.x[range_.offset];
+  const powerflow::DCDCPowerTransfer transfer =
+      dynamic_dcdc_transfer(params_, x, range_, y);
   const double v_in = clamp_voltage(y.Vdc[params_.bus_in_pos]);
   const double v_out = clamp_voltage(y.Vdc[params_.bus_out_pos]);
-  stamp.addDcCurrent(params_.bus_in_pos, -p_out / std::max(1e-6, params_.eta) / v_in);
-  stamp.addDcCurrent(params_.bus_out_pos, p_out / v_out);
+  stamp.addDcCurrent(params_.bus_in_pos, -transfer.p_in_pu / v_in);
+  stamp.addDcCurrent(params_.bus_out_pos, transfer.p_out_pu / v_out);
 }
 
 void DCDCConverterDynamic::addJacobian(
@@ -8949,35 +9160,13 @@ void DCDCConverterDynamic::addJacobian(
     const NetworkState& y,
     const DynamicJacobianContext& context,
     std::vector<Eigen::Triplet<double>>& triplets) const {
-  if (!params_.in_service || range_.empty()) return;
+  if (!params_.in_service) return;
   std::vector<int> columns;
   append_state_range_columns(context, range_, columns);
+  if (params_.bus_in_pos >= 0) columns.push_back(context.dcCol(params_.bus_in_pos));
+  if (params_.bus_out_pos >= 0) columns.push_back(context.dcCol(params_.bus_out_pos));
+  add_device_current_jacobian_by_local_fd(*this, t, x, y, context, columns, triplets);
   add_device_differential_jacobian_by_local_fd(*this, t, x, y, context, columns, triplets);
-  if (params_.bus_in_pos < 0 || params_.bus_out_pos < 0 ||
-      params_.bus_in_pos >= y.Vdc.size() ||
-      params_.bus_out_pos >= y.Vdc.size()) {
-    return;
-  }
-  const int p_col = range_.offset;
-  if (!context.validStateIndex(p_col)) return;
-  const double eta = std::max(1e-6, params_.eta);
-  const double p_out = x.x[p_col];
-  const double raw_v_in = y.Vdc[params_.bus_in_pos];
-  const double raw_v_out = y.Vdc[params_.bus_out_pos];
-  const double v_in = clamp_voltage(raw_v_in);
-  const double v_out = clamp_voltage(raw_v_out);
-  add_dc_current_derivative(context, params_.bus_in_pos, p_col, -1.0 / (eta * v_in), triplets);
-  add_dc_current_derivative(context, params_.bus_out_pos, p_col, 1.0 / v_out, triplets);
-  add_dc_current_derivative(context,
-                            params_.bus_in_pos,
-                            context.dcCol(params_.bus_in_pos),
-                            p_out * clamp_voltage_slope(raw_v_in) / (eta * v_in * v_in),
-                            triplets);
-  add_dc_current_derivative(context,
-                            params_.bus_out_pos,
-                            context.dcCol(params_.bus_out_pos),
-                            -p_out * clamp_voltage_slope(raw_v_out) / (v_out * v_out),
-                            triplets);
 }
 
 void DCDCConverterDynamic::handleEvent(const DynamicEvent& event, DynamicState&, NetworkState&) {
@@ -8992,6 +9181,12 @@ std::string DCDCConverterDynamic::name() const {
                                : params_.label;
 }
 
+std::string DCDCConverterDynamic::modelName() const {
+  return params_.control_mode == DCDCControlMode::Power
+             ? "FirstOrderPowerDCDCConverter"
+             : "QuasiSteadyVoltageDroopDCDCConverter";
+}
+
 std::vector<DynamicModelProfile> DCDCConverterDynamic::modelProfiles() const {
   return profiles_or_default(params_.model_profiles, *this);
 }
@@ -9004,12 +9199,17 @@ DynamicDeviceOutput DCDCConverterDynamic::output(const DynamicState& x,
                                              params_.component_domain,
                                              params_.source_type);
   out.values["in_service"] = params_.in_service ? 1.0 : 0.0;
-  if (!range_.empty() && range_.offset < x.x.size()) {
-    out.values["p_out_mw"] = x.x[range_.offset] * safe_base(params_.base_mva);
-    out.values["p_in_mw"] =
-        out.values["p_out_mw"] / std::max(1e-6, params_.eta);
+  if (params_.in_service && params_.bus_in_pos >= 0 && params_.bus_out_pos >= 0 &&
+      params_.bus_in_pos < y.Vdc.size() && params_.bus_out_pos < y.Vdc.size()) {
+    const powerflow::DCDCPowerTransfer transfer =
+        dynamic_dcdc_transfer(params_, x, range_, y);
+    out.values["p_out_mw"] = transfer.p_out_pu * safe_base(params_.base_mva);
+    out.values["p_in_mw"] = transfer.p_in_pu * safe_base(params_.base_mva);
+    out.values["loss_mw"] = transfer.i2r_loss_pu * safe_base(params_.base_mva);
   }
   out.values["eta"] = params_.eta;
+  out.values["algebraic_voltage_control"] =
+      params_.control_mode == DCDCControlMode::Power ? 0.0 : 1.0;
   if (params_.bus_in_pos >= 0 && params_.bus_in_pos < y.Vdc.size()) {
     out.values["vdc_in_pu"] = y.Vdc[params_.bus_in_pos];
   }
@@ -9312,8 +9512,8 @@ void PVDynamic::addJacobian(double t,
 }
 
 void PVDynamic::handleEvent(const DynamicEvent& event, DynamicState& x, NetworkState&) {
-  const bool matching = event.component_index == 0 ||
-                        event.component_index == params_.component_index;
+  const bool matching = protection_target_matches(event, "PV", params_.component_index,
+                                                  params_.bus);
   if (!matching) return;
   if (event.type == DynamicEventType::GeneratorTrip ||
       event.type == DynamicEventType::VSCTrip) {
@@ -9358,69 +9558,307 @@ DynamicDeviceOutput PVDynamic::output(const DynamicState& x, const NetworkState&
   return out;
 }
 
-ProtectionRelay::ProtectionRelay(ProtectionRelayParams params) : params_(std::move(params)) {}
+namespace {
+
+struct RelayIntervalAdvance {
+  bool has_action{false};
+  double action_offset_s{0.0};
+  double final_timer_s{0.0};
+  double final_margin{0.0};
+};
+
+// Song et al. (2016), DOI:10.1109/TPWRS.2015.2439237, Sec. II-B/C:
+// a definite-time relay counts down while its guard is violated and restores
+// at the same rate otherwise. COSMIC locates the guard by linear interpolation
+// between accepted DAE endpoints. The equivalent elapsed-pickup timer below
+// increases toward delay_s in the positive-margin interval and decreases toward
+// zero outside it.
+RelayIntervalAdvance advance_relay_interval(double initial_margin, double final_margin,
+                                            double initial_timer_s, double delay_s, double dt) {
+  RelayIntervalAdvance out;
+  dt = std::max(0.0, dt);
+  delay_s = std::max(0.0, delay_s);
+  double active_begin_s = 0.0;
+  double active_end_s = 0.0;
+  bool has_active_window = false;
+  const bool active_at_start = initial_margin > 0.0;
+  const bool active_at_end = final_margin > 0.0;
+  if (active_at_start && active_at_end) {
+    has_active_window = true;
+    active_end_s = dt;
+  } else if (active_at_start != active_at_end && dt > 0.0) {
+    const double denominator = final_margin - initial_margin;
+    const double crossing_s = std::abs(denominator) > 1e-15
+                                  ? std::clamp(-initial_margin / denominator * dt, 0.0, dt)
+                                  : dt;
+    has_active_window = true;
+    if (active_at_start) {
+      active_end_s = crossing_s;
+    } else {
+      active_begin_s = crossing_s;
+      active_end_s = dt;
+    }
+  }
+
+  double timer_s = std::clamp(initial_timer_s, 0.0, delay_s);
+  if (!has_active_window) {
+    out.final_timer_s = std::max(0.0, timer_s - dt);
+    out.final_margin = final_margin;
+    return out;
+  }
+
+  timer_s = std::max(0.0, timer_s - active_begin_s);
+  const double remaining_s = std::max(0.0, delay_s - timer_s);
+  const double candidate_s = active_begin_s + remaining_s;
+  if (candidate_s <= active_end_s + 1e-12) {
+    out.has_action = true;
+    out.action_offset_s = std::clamp(candidate_s, 0.0, dt);
+    out.final_timer_s = delay_s;
+    out.final_margin =
+        dt > 0.0 ? initial_margin + (final_margin - initial_margin) * (out.action_offset_s / dt)
+                 : final_margin;
+    return out;
+  }
+
+  timer_s += std::max(0.0, active_end_s - active_begin_s);
+  timer_s = std::max(0.0, timer_s - (dt - active_end_s));
+  out.final_timer_s = std::min(timer_s, delay_s);
+  out.final_margin = final_margin;
+  return out;
+}
+
+}  // namespace
+
+ProtectionRelay::ProtectionRelay(ProtectionRelayParams params)
+    : params_(std::move(params)), pickup_timer_s_(0.0) {
+  if (params_.measurement_domain == ProtectionRelayMeasurementDomain::EmtInstantaneous) {
+    throw std::invalid_argument(
+        "ProtectionRelay EMT measurement requires an instantaneous-waveform network; "
+        "the transient DAE supplies phasors only");
+  }
+  if (!(params_.nominal_frequency_hz > 0.0) ||
+      !std::isfinite(params_.nominal_frequency_hz) ||
+      !(params_.frequency_min_voltage_pu > 0.0) ||
+      !std::isfinite(params_.frequency_min_voltage_pu) ||
+      !std::isfinite(params_.pt_filter_t_s) || params_.pt_filter_t_s < 0.0 ||
+      !std::isfinite(params_.ct_filter_t_s) || params_.ct_filter_t_s < 0.0 ||
+      !std::isfinite(params_.frequency_filter_t_s) || params_.frequency_filter_t_s < 0.0) {
+    throw std::invalid_argument("ProtectionRelay local CT/PT measurement parameters are invalid");
+  }
+  measurement_state_.frequency_hz = params_.nominal_frequency_hz;
+}
 
 void ProtectionRelay::assignStateIndices(int& offset) {
   range_ = {offset, 1};
   offset += range_.size;
 }
 
-void ProtectionRelay::initializeFromPowerFlow(const PowerFlowResult&, DynamicState& x, NetworkState&) {
-  if (!range_.empty()) x.x[range_.offset] = 0.0;
+void ProtectionRelay::initializeFromPowerFlow(const PowerFlowResult&, DynamicState& x,
+                                              NetworkState& y) {
+  pickup_timer_s_ = 0.0;
+  measurement_state_ = {};
+  measurement_state_.frequency_hz = params_.nominal_frequency_hz;
+  const LocalMeasurement measurement = advanceMeasurement(y, 0.0, measurement_state_);
+  last_pickup_margin_ = pickupMargin(measurement);
+  have_pickup_margin_ = std::isfinite(last_pickup_margin_);
+  mirrorTimerToState(x);
 }
 
 bool ProtectionRelay::trimToNetworkEquilibrium(DynamicState& x, NetworkState&) {
   if (range_.empty()) return false;
-  return set_if_changed(x.x, range_.offset, 0.0);
+  pickup_timer_s_ = 0.0;
+  return set_if_changed(x.x, range_.offset, pickup_timer_s_);
 }
 
-void ProtectionRelay::computeDerivatives(double,
-                                         const DynamicState& x,
-                                         const NetworkState& y,
+void ProtectionRelay::computeDerivatives(double, const DynamicState& x, const NetworkState& y,
                                          Eigen::Ref<Eigen::VectorXd> dxdt) const {
-  if (!params_.in_service || params_.tripped || range_.empty()) return;
-  const double v = params_.bus_pos >= 0 ? avg_voltage_mag(bus_voltage(y, params_.bus_pos)) : 1.0;
-  const bool voltage_violation =
-      v < params_.undervoltage_pickup_pu || v > params_.overvoltage_pickup_pu;
-  if (voltage_violation) {
-    dxdt[range_.offset] = 1.0;
-  } else {
-    dxdt[range_.offset] = -x.x[range_.offset] / std::max(kMinTimeConstant, params_.trip_delay_s);
-  }
+  (void)x;
+  (void)y;
+  if (!range_.empty()) dxdt[range_.offset] = 0.0;
 }
 
-void ProtectionRelay::stamp(double,
-                            const DynamicState&,
-                            const NetworkState&,
-                            DynamicStamp&) const {}
+void ProtectionRelay::stamp(double, const DynamicState&, const NetworkState&, DynamicStamp&) const {
+}
 
 void ProtectionRelay::handleEvent(const DynamicEvent& event, DynamicState& x, NetworkState&) {
-  const bool matching = event.component_index == 0 ||
-                        event.component_index == params_.component_index;
+  const bool matching =
+      event.component_index == 0 || event.component_index == params_.component_index;
   if (!matching) return;
   if (event.type == DynamicEventType::Custom && event.component_type == "ProtectionRelay") {
     params_.tripped = event.value != 0.0;
-    if (!range_.empty() && range_.offset < x.x.size() && !params_.tripped) {
-      x.x[range_.offset] = 0.0;
+    if (!params_.tripped) {
+      pickup_timer_s_ = 0.0;
+      mirrorTimerToState(x);
     }
   }
 }
 
-std::string ProtectionRelay::name() const {
-  return params_.label.empty()
-             ? "Protection relay " + std::to_string(params_.component_index)
-             : params_.label;
+ProtectionRelay::LocalMeasurement ProtectionRelay::advanceMeasurement(
+    const NetworkState& y, double dt, LocalMeasurementState& state) const {
+  dt = std::max(0.0, dt);
+  const int from_pos = params_.from_bus_pos >= 0 ? params_.from_bus_pos : params_.bus_pos;
+  const Complex raw_v_from = positive_sequence_voltage(bus_voltage(y, from_pos));
+  const Complex raw_v_to = params_.to_bus_pos >= 0
+                               ? positive_sequence_voltage(bus_voltage(y, params_.to_bus_pos))
+                               : raw_v_from;
+  Complex raw_i_from{0.0, 0.0};
+  const Complex z(params_.line_r_pu, params_.line_x_pu);
+  if (std::abs(z) > 1e-12 && params_.from_bus_pos >= 0 && params_.to_bus_pos >= 0) {
+    raw_i_from = (raw_v_from - raw_v_to) / z +
+                 Complex(0.0, 0.5 * params_.line_total_b_pu) * raw_v_from;
+  }
+
+  if (!state.initialized) {
+    state.v_from_pt = raw_v_from;
+    state.v_to_pt = raw_v_to;
+    state.i_from_ct = raw_i_from;
+    state.previous_pt_angle_rad = std::arg(state.v_from_pt);
+    state.frequency_hz = params_.nominal_frequency_hz;
+    state.frequency_valid =
+        std::abs(state.v_from_pt) >= params_.frequency_min_voltage_pu;
+    state.initialized = true;
+  } else {
+    // Exact zero-order-hold solution of dz_m/dt=(z-z_m)/T for the complex
+    // positive-sequence PT/CT phasors. Song et al. (2016), Sec. II-B;
+    // docs/modules/dynamics/chapters/theory_machine_dae.tex.
+    const auto filter = [dt](Complex previous, Complex raw, double tau_s) {
+      if (tau_s <= 1e-12) return raw;
+      const double a = std::exp(-dt / tau_s);
+      return raw + (previous - raw) * a;
+    };
+    const Complex previous_v_from = state.v_from_pt;
+    state.v_from_pt = filter(state.v_from_pt, raw_v_from, params_.pt_filter_t_s);
+    state.v_to_pt = filter(state.v_to_pt, raw_v_to, params_.pt_filter_t_s);
+    state.i_from_ct = filter(state.i_from_ct, raw_i_from, params_.ct_filter_t_s);
+
+    const bool interval_frequency_valid =
+        dt > 0.0 && std::abs(previous_v_from) >= params_.frequency_min_voltage_pu &&
+        std::abs(state.v_from_pt) >= params_.frequency_min_voltage_pu;
+    if (interval_frequency_valid) {
+      // IEEE C37.118.1 frequency definition in a nominally rotating phasor
+      // frame: f=f_n+unwrap(Delta angle)/(2*pi*Delta t).
+      double delta = std::arg(state.v_from_pt) - state.previous_pt_angle_rad;
+      while (delta > kPi) delta -= kTwoPi;
+      while (delta <= -kPi) delta += kTwoPi;
+      const double instantaneous_hz =
+          params_.nominal_frequency_hz + delta / (kTwoPi * dt);
+      const double a = params_.frequency_filter_t_s <= 1e-12
+                           ? 0.0
+                           : std::exp(-dt / params_.frequency_filter_t_s);
+      state.frequency_hz = instantaneous_hz +
+                           (state.frequency_hz - instantaneous_hz) * a;
+    }
+    // A frequency estimate becomes usable only after one complete interval
+    // whose two PT endpoints are valid. At a zero-time topology closure, a
+    // voltage collapse can block the element immediately, while recovery
+    // cannot make a stale pre-collapse estimate valid again.
+    state.frequency_valid = dt > 0.0
+                                ? interval_frequency_valid
+                                : state.frequency_valid &&
+                                      std::abs(state.v_from_pt) >=
+                                          params_.frequency_min_voltage_pu;
+    state.previous_pt_angle_rad = std::arg(state.v_from_pt);
+  }
+
+  LocalMeasurement measurement;
+  measurement.voltage_pu = std::abs(state.v_from_pt);
+  measurement.frequency_hz = state.frequency_hz;
+  measurement.frequency_valid = state.frequency_valid;
+  measurement.apparent_admittance_pu =
+      std::abs(state.i_from_ct) / std::max(1e-12, std::abs(state.v_from_pt));
+  return measurement;
 }
 
-DynamicDeviceOutput ProtectionRelay::output(const DynamicState& x,
-                                            const NetworkState& y) const {
-  DynamicDeviceOutput out = make_output_base(*this,
-                                             params_.bus,
-                                             params_.canvas_type,
-                                             params_.component_domain,
-                                             params_.source_type);
-  const double timer =
-      (!range_.empty() && range_.offset < x.x.size()) ? std::max(0.0, x.x[range_.offset]) : 0.0;
+double ProtectionRelay::pickupMargin(const LocalMeasurement& measurement) const {
+  if (params_.measurement_kind == ProtectionRelayMeasurementKind::Frequency) {
+    if (!measurement.frequency_valid) return -std::numeric_limits<double>::infinity();
+    return std::max(params_.underfrequency_hz - measurement.frequency_hz,
+                    measurement.frequency_hz - params_.overfrequency_hz);
+  }
+  if (params_.measurement_kind == ProtectionRelayMeasurementKind::DistanceApparentAdmittance) {
+    const Complex z(params_.line_r_pu, params_.line_x_pu);
+    if (std::abs(z) <= 1e-12 || params_.distance_reach_fraction <= 0.0) {
+      return -std::numeric_limits<double>::infinity();
+    }
+    // COSMIC commit 6acc77e, get_relays.m/endo_event.m: Zone-1 pickup is
+    // |I_CT|/|V_PT| - 1/(reach*|Zline|).
+    return measurement.apparent_admittance_pu -
+           1.0 / (params_.distance_reach_fraction * std::abs(z));
+  }
+  return std::max(params_.undervoltage_pickup_pu - measurement.voltage_pu,
+                  measurement.voltage_pu - params_.overvoltage_pickup_pu);
+}
+
+double ProtectionRelay::pickupMargin(const NetworkState& y, double dt) const {
+  LocalMeasurementState trial = measurement_state_;
+  return pickupMargin(advanceMeasurement(y, dt, trial));
+}
+
+void ProtectionRelay::mirrorTimerToState(DynamicState& x) const {
+  if (!range_.empty() && range_.offset < x.x.size()) {
+    x.x[range_.offset] = pickup_timer_s_;
+  }
+}
+
+DynamicProtectionEventPreview ProtectionRelay::previewProtection(double t, double dt,
+                                                                 const NetworkState& y) const {
+  if (!params_.in_service || params_.tripped) return {};
+  const double measured_margin = pickupMargin(y, dt);
+  const double final_margin = std::isfinite(measured_margin) ? measured_margin : -1.0;
+  const double initial_margin = have_pickup_margin_ ? last_pickup_margin_ : final_margin;
+  const RelayIntervalAdvance advance = advance_relay_interval(
+      initial_margin, final_margin, pickup_timer_s_, params_.trip_delay_s, dt);
+  if (!advance.has_action) return {};
+  return {true, t - std::max(0.0, dt) + advance.action_offset_s};
+}
+
+bool ProtectionRelay::updateProtection(double t, double dt, DynamicState& x, NetworkState& y,
+                                       std::vector<DynamicEvent>& events) {
+  if (!params_.in_service || params_.tripped) return false;
+  const LocalMeasurement measurement = advanceMeasurement(y, dt, measurement_state_);
+  const double measured_margin = pickupMargin(measurement);
+  const double final_margin = std::isfinite(measured_margin) ? measured_margin : -1.0;
+  const double initial_margin = have_pickup_margin_ ? last_pickup_margin_ : final_margin;
+  const RelayIntervalAdvance advance = advance_relay_interval(
+      initial_margin, final_margin, pickup_timer_s_, params_.trip_delay_s, dt);
+  pickup_timer_s_ = advance.final_timer_s;
+  last_pickup_margin_ = advance.final_margin;
+  have_pickup_margin_ = true;
+  mirrorTimerToState(x);
+  if (!advance.has_action) return false;
+
+  params_.tripped = true;
+  DynamicEvent event;
+  event.time_s = t - std::max(0.0, dt) + advance.action_offset_s;
+  event.type = params_.action_type;
+  event.component_index = params_.target_component_index != 0 ? params_.target_component_index
+                                                              : params_.component_index;
+  event.target_id = event.component_index;
+  event.bus = params_.target_bus != 0 ? params_.target_bus : params_.bus;
+  event.value = params_.action_value;
+  event.component_type = "ProtectionRelay";
+  event.target_type = params_.target_type;
+  event.label = name() + " operated";
+  event.params["relay_component_index"] = params_.component_index;
+  if (event.type == DynamicEventType::ACLoadScale || event.type == DynamicEventType::DCLoadScale) {
+    event.params["scale"] = params_.action_value;
+  }
+  event.applied = true;
+  events.push_back(std::move(event));
+  return false;
+}
+
+std::string ProtectionRelay::name() const {
+  return params_.label.empty() ? "Protection relay " + std::to_string(params_.component_index)
+                               : params_.label;
+}
+
+DynamicDeviceOutput ProtectionRelay::output(const DynamicState& x, const NetworkState& y) const {
+  DynamicDeviceOutput out = make_output_base(*this, params_.bus, params_.canvas_type,
+                                             params_.component_domain, params_.source_type);
+  const double timer = (!range_.empty() && range_.offset < x.x.size())
+                           ? std::max(0.0, x.x[range_.offset])
+                           : pickup_timer_s_;
   out.values["in_service"] = params_.in_service ? 1.0 : 0.0;
   out.values["tripped"] = params_.tripped ? 1.0 : 0.0;
   out.values["timer_s"] = timer;
@@ -9428,6 +9866,17 @@ DynamicDeviceOutput ProtectionRelay::output(const DynamicState& x,
   out.values["pickup_active"] = timer >= params_.trip_delay_s ? 1.0 : 0.0;
   out.values["undervoltage_pickup_pu"] = params_.undervoltage_pickup_pu;
   out.values["overvoltage_pickup_pu"] = params_.overvoltage_pickup_pu;
+  LocalMeasurementState measurement_state = measurement_state_;
+  const LocalMeasurement measurement = advanceMeasurement(y, 0.0, measurement_state);
+  out.values["pickup_margin"] = pickupMargin(measurement);
+  out.values["measured_voltage_pu"] = measurement.voltage_pu;
+  out.values["measured_frequency_hz"] = measurement.frequency_hz;
+  out.values["frequency_measurement_valid"] = measurement.frequency_valid ? 1.0 : 0.0;
+  out.values["measured_apparent_admittance_pu"] = measurement.apparent_admittance_pu;
+  out.values["local_ct_pt_measurement"] = 1.0;
+  out.values["distance_element"] =
+      params_.measurement_kind == ProtectionRelayMeasurementKind::DistanceApparentAdmittance ? 1.0
+                                                                                             : 0.0;
   add_voltage_metrics(out, y, params_.bus_pos);
   return out;
 }

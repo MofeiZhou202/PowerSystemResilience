@@ -1,10 +1,140 @@
 # Development Status
 
-Updated: 2026-08-23
+Updated: 2026-08-24
 
 This is the living handoff for verified build state and active engineering work.
 Update it in place; do not create dated copies. Source, registered tests, and
 the current Git worktrees remain authoritative.
+
+## Electromechanical phasor DAE closure (2026-08-24)
+
+The declared electromechanical transient envelope is now closed for the
+phasor-domain model actually implemented: balanced positive-sequence and
+explicit three-phase phasor networks, average-value differential devices,
+coupled AC/DC algebraic networks, power-flow-consistent initialization,
+`MassMatrixDae`, and the numerical event localization/consistent-restart scope
+documented below. This is not a claim that EMT, travelling waves, converter
+switching waveforms, or formal chronology certification are implemented.
+
+The mixed AC/DC initialization now uses the same DC/DC port-power equation as
+steady-state power flow for Power, Voltage and Droop controls. The classical
+GUI mixed case has one authored DC voltage source, reproduces PF DC voltages
+`[0.99996, 1, 1.00003, 1.06]` as dynamic initial voltages
+`[0.999961, 1, 1.00003, 1.06]`, reports DC/DC input/output powers
+`-0.293981/-0.299989 MW`, and has initial fast-state residual
+`2.1019922e-10 < 1e-7`. During consistent-initialization Newton evaluations,
+the algebraic network tolerance is temporarily bounded by
+`0.1 * dynamic_trim_tol` and is restored before time stepping; the public
+default network tolerance remains `1e-6`. The Anderson--Picard budget is ten
+iterations with early exit and the existing Newton fallback.
+
+`DERAADynamic` now follows the PowerSimulationsDynamics/WECC 7-state
+(`Freq_Flag=0`) and 10-state (`Freq_Flag=1`) state order and equations,
+including frequency deadband/droop, P/Q current priority, generator/load sign,
+IEEE 421.5-style directional non-windup, power-order limits, and current ramp
+limits. Reduced-ODE, implicit-DAE and initialization residual evaluations feed
+DER_A the system COI frequency recomputed from the current trial state. This is
+separate from directly attached protection relays, which retain local phasor
+PT-angle frequency and local CT current measurements.
+
+The focused DER_A oracle passed 27 assertions with `1e-12` equation gates; the
+shared DC/DC equation test passed 15 assertions and the real GUI mixed-case
+initialization test passed six. After rebuilding the affected macOS Release
+targets, the complete `test_transient_dynamics` executable passed 115 cases /
+116774 assertions, `test_dynamic_model_catalog` passed 8 / 4034,
+`test_intelligent_cyber_physical_reliability` passed 7 / 60, and the rebuilt
+production server passed `gui_api_e2e` in 3.31 s. The HTTP transient response
+now echoes the effective `algebraic_network_max_iters` and
+`algebraic_network_tol` under its actual `options` object. This pass did not
+rerun every registered non-dynamics CTest target. The dynamics manual rebuilt
+successfully with XeLaTeX/latexmk to 86 pages with no unresolved references;
+only the existing long-identifier box and font-substitution warnings remain.
+
+PSD Test 42 trajectory parity remains open. A direct clean-worktree run of
+`julia --project=test test/runtests.jl test_case42_dera` failed before executing
+the case because the checked-out SciML environment cannot precompile:
+`LinearVerbosity` is undefined and the DiffEq/SciML ChainRules extensions
+overwrite a method during precompilation. The external PSD repository was not
+modified or instantiated. Consequently, the current evidence is exact
+source-equation validation plus internal DAE regression, not a PSD Test 42
+trajectory certificate.
+
+## Event-consistent IEEE 1547 and definite-time relay DAE baseline (2026-08-23)
+
+The `MassMatrixDae` path now provides numerical localization for endogenous
+IEEE 1547 device-protection actions and directly attached definite-time
+`ProtectionRelay` devices. Protection preview is side-effect free; the
+accepted candidate step is rolled back and bisected to a bounded time bracket,
+actions inside a separately configured anchored forward window are reported as
+one event cluster, and the
+post-reset algebraic network is solved and audited while the post-reset
+differential state is held fixed. First-order IEEE 1547 measurement filters
+use their exact interval solution. The external relay implements voltage,
+local-frequency, and COSMIC-type balanced positive-sequence Zone-1
+apparent-admittance guards with local PT/CT/filter states,
+linearly interpolates a guard crossing between accepted endpoints, and emits
+`ACLoadScale` or `ACBranchTrip` through the same reset path as authored events.
+The production HTTP route parses and echoes localization controls and reports
+trial integrations, cluster count, maximum final bracket/cluster span and maximum
+post-event algebraic residual; it does not yet construct external relays from
+the rich model or request JSON.
+
+The verification is a theory--implementation--test--numerical-evidence
+closure, not a formal chronology certificate. The implementation follows the
+consistent-state hybrid-DAE event/reinitialization equations documented from
+Hiskens--Pai, Zhao--Hu, Henningsson et al. and Song et al. The authors' COSMIC
+repository was run with MATLAB R2025b at clean commit
+`6acc77e4d3f17925f1f4b79a93652eef0d1314cc`. Its public `sim_case9.m` scenario
+is reproduced: branch 6 trips at `10.0 s`, bus 5 UVLS acts at `10.5 s`, and
+`31.25 MW` (25%) is shed.
+
+The paper Fig. 2 chronology is not reproduced by that public source. With its
+stated branch-7 outage, `0.92 pu` UVLS threshold and `0.5 s` distance/UVLS
+delays, the authors' code records only the initial `10.0 s` branch-7 trip.
+Bus 5 reaches `0.896065 pu`, but branch 6's maximum distance pickup ratio is
+`0.3098124214893234 < 1`; neither the claimed `10.5 s` distance trip nor the
+`10.7 s` UVLS action occurs. The fixed public commit therefore does not fully
+contain the paper configuration or code version. This is retained as an
+explicit failed external cross-validation rather than adjusted away.
+
+Focused Release evidence comprises an analytic filtered-threshold action with
+error below `2 us`, a pair of actions separated by `50 us` under a `10 ms`
+base step, a simultaneous-action cluster, direct voltage/Zone-1 relay equation
+checks, a linear threshold-exit/equal-rate timer-recovery check, and four-step
+studies at `0.010`, `0.005`, `0.001` and `0.0002 s`.
+The IEEE 1547 action-time range was `1.51996255093 us`, the largest terminal
+bisection bracket was `0.9765625 us`, and the largest post-event algebraic
+residual was `3.8448755e-10`; the configured gates were `5 us`, `1 us` and
+`1e-8`, with at most 14 trial integrations per event. The new relay selection
+passed 85 assertions in two cases, and the complete dynamics target passed
+116637 assertions in 106 cases. The previously verified online-protection
+reliability target remains 60 assertions in seven cases, and `gui_api_e2e`
+passed. The updated dynamics manual compiled with XeLaTeX to 85 pages with no
+unresolved references; the new formula/evidence pages were rendered and
+visually checked, and only pre-existing long-identifier and font-substitution
+warnings remain.
+
+After a complete macOS Release rebuild, CTest processed 1676 registered tests
+in 187.28 s: 1666 passed, four were conditionally skipped, and six failed.
+All six failures reproduced in an isolated six-test replay and are outside the
+modified dynamics/protection/HTTP paths: two VSC/AC-OPF exception/reference
+contracts (`#812`, `#925`), one invalid reliability-polygon contract (`#1514`),
+two graph-island/reference contracts (`#1517`, `#1520`), and the IEEE13
+OpenDSS harmonic fixture whose source bus `675` was not found (`#1675`). These
+remain open repository-baseline failures; this work neither repairs nor masks
+them.
+
+The implemented guarantee is deliberately narrow: it applies only to
+`MassMatrixDae` devices implementing `DynamicDevice::previewProtection`.
+External relay construction is direct-API only; rich-model builder,
+JSON/HTTP/GUI construction, inverse-time integration, multi-zone distance
+protection, grazing/Zeno handling, EMT switching, uncertainty/reachability and
+formal interval proof remain unsupported. EMT relay measurement is explicitly
+rejected because this network supplies phasors. The Zone-1 guard assumes a balanced positive-sequence,
+no-tap line model. Partitioned integrators retain accepted-step-end semantics.
+Linear endpoint interpolation can miss a within-step pulse whose two endpoints
+are both safe; the current mitigation is a sufficiently small base step,
+pending dense-output guard root finding.
 
 ## `liuyanhui` branch integration and BPA/DSP closure (2026-08-23)
 
@@ -2119,6 +2249,30 @@ focused results above therefore record the actual dependency HEAD and do not imp
 pinned clean-clone build.
 
 ## Fast orientation
+
+### Protection chronology and local measurement closure (2026-08-24)
+
+The follow-up audit closed three previously open correctness gaps: protection
+events now require semantic target qualification (preventing same-index PV/VSC/
+generator cross-trips), missing topology targets fail explicitly without a false
+`applied_event_records` entry, and MassMatrixDae performs bounded same-time
+protection closure after topology reinitialization. A separate
+`protection_event_cluster_window_s` opens at the earliest physical action,
+forces an accepted DAE endpoint at its fixed right boundary, and groups later
+actions without rolling the boundary. Direct relays derive frequency from their
+local positive-sequence PT angle, apply exact first-order PT/CT/frequency-filter
+updates, and block invalid low-voltage frequency measurements until one complete
+recovery interval has valid PT voltage at both endpoints; system COI is no
+longer a relay input. The focused Release protection subset passes 16 cases /
+380 assertions, including boundary-inclusive and three-event
+non-rolling-window oracles,
+local frequency error below `1e-10 Hz`, and the CT response `1-exp(-1)` within
+`1e-10`. EMT measurement remains explicitly unsupported and rejected. Same-time
+closure is bounded at 32 iterations and is not a formal Zeno proof. The complete
+transient suite passes 111 cases / 116701 assertions, the online-protection
+reliability target passes 7 cases / 60 assertions, and `gui_api_e2e` passes in
+3.29 s. The XeLaTeX dynamics manual rebuild succeeds at 85 pages; pre-existing
+long-identifier box and font-substitution warnings remain.
 
 ```bash
 git status --short --branch

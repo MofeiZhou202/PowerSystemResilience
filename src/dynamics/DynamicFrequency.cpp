@@ -54,7 +54,9 @@ struct IslandAccumulator {
 
 }  // namespace
 
-DynamicFrequencyReport computeFrequencyReport(const DynamicSystem& sys) {
+DynamicFrequencyReport computeFrequencyReport(const DynamicSystem& sys,
+                                              const DynamicState& state,
+                                              const NetworkState& algebraic) {
   DynamicFrequencyReport report;
   const double nominal =
       sys.network.frequency_hz > 0.0 ? sys.network.frequency_hz : 50.0;
@@ -92,7 +94,7 @@ DynamicFrequencyReport computeFrequencyReport(const DynamicSystem& sys) {
   //    accumulate the inertia-weighted speed sums.
   for (const auto& device : sys.devices) {
     const FrequencyParticipation fp =
-        device->frequencyParticipation(sys.x, sys.y);
+        device->frequencyParticipation(state, algebraic);
     if (fp.ac_bus_pos < 0 || fp.ac_bus_pos >= n_bus) continue;
     const int island = bus_island[fp.ac_bus_pos];
     if (island < 0) continue;
@@ -170,6 +172,10 @@ DynamicFrequencyReport computeFrequencyReport(const DynamicSystem& sys) {
         nominal * (sys_sum_anchor_s_domega / sys_sum_anchor_s);
   }
   return report;
+}
+
+DynamicFrequencyReport computeFrequencyReport(const DynamicSystem& sys) {
+  return computeFrequencyReport(sys, sys.x, sys.y);
 }
 
 }  // namespace hacdcpf::dynamics

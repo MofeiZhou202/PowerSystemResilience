@@ -36,6 +36,7 @@ struct DynamicDeviceOutput {
 
 struct DynamicAppliedEventRecord {
   double time_s{0.0};
+  int protection_cluster_id{-1};  // 0-based; -1 for authored/non-protection events
   std::string type;
   std::string label;
   int component_index{0};
@@ -53,7 +54,8 @@ struct DynamicResidualDiagnostic {
   std::string device_name;
   std::string device_type;
   int component_index{0};
-  int state_index{-1};
+  int state_index{-1};        // global differential-state index
+  int local_state_index{-1};  // device-local differential-state index
   double residual{0.0};
 };
 
@@ -72,12 +74,14 @@ struct DynamicIslandFrequency {
 };
 
 struct DynamicInitializationSummary {
+  bool initialization_attempted{false};
   bool power_flow_requested{true};
   bool power_flow_converged{false};
   bool fallback_voltage_setpoints{false};
   int iterations{0};
   double residual{0.0};
   bool dynamic_trim_converged{false};
+  bool dynamic_residual_evaluated{false};
   int dynamic_trim_iterations{0};
   double dynamic_initial_dxdt_inf_norm{0.0};
   double dynamic_fast_dxdt_inf_norm{0.0};
@@ -166,6 +170,12 @@ struct DynamicResults {
   double max_local_error_norm{0.0};
   double min_accepted_step_s{0.0};
   double max_accepted_step_s{0.0};
+  bool protection_event_localization_used{false};
+  int protection_event_localization_trials{0};
+  int protection_event_clusters{0};
+  double max_protection_event_bracket_s{0.0};  // seconds
+  double max_protection_event_cluster_span_s{0.0};  // last action - first action, seconds
+  double max_post_event_algebraic_residual{0.0};  // pu current-balance inf-norm
 
   std::vector<DynamicSnapshot> snapshots;
   std::vector<std::string> warnings;

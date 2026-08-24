@@ -147,6 +147,18 @@ LOD0 按电气域聚合。空间坐标是 API 布局空间，不是图索引，�
 | `POST /api/session/run_reliability*` | 非序贯、序贯、FMEA、馈线与三阶段可靠性。 |
 | `POST /api/session/run_reconfig` | 拓扑重构。 |
 
+`POST /api/session/run_transient` 接受 MassMatrixDae 的 IEEE 1547 事件控制：
+`enable_der_protection`、`localize_der_protection_events`、
+`protection_event_time_tol_s`、`protection_event_max_localization_iters`、
+`protection_event_cluster_window_s` 与 `post_event_algebraic_residual_tol`。聚类窗口
+固定锚定最早物理动作，不滚动延长。结果返回是否实际定位、试积分次数、事件簇数、
+最大时间括号/簇跨度（s）和最大事件后代数电流平衡无穷范数（pu）。保护事件记录
+包含零基 `protection_cluster_id`，非保护事件为 `-1`。精确数值范围与不支持
+的继电器/步内脉冲见[暂态运行时契约](../theory/transient_runtime.zh.md)。
+该路由还接受并在 `options` 回显 `algebraic_network_max_iters`
+（默认 10）与 `algebraic_network_tol`（默认 `1e-6`）。一致初始化阶段可按暂态契约
+临时使用更严的内部代数容差；回显值仍是时间积分阶段实际采用的请求值。
+
 潮流数值覆盖项是稀疏意图。特别地，省略
 `options.robust_nonlinear.enable_auto_fallback_scheduling` 会保留 C++
 后端默认值；GUI 的 `后端默认` 选项刻意省略该键。

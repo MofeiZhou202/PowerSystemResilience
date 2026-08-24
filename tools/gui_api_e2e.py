@@ -1482,9 +1482,16 @@ def main() -> int:
 
         st, transient = c.post_json(
             "/api/session/run_transient",
-            {"t_start_s": 0.0, "t_end_s": 0.03, "dt_s": 0.01,
+            {"solver_type": "mass_matrix_dae",
+             "t_start_s": 0.0, "t_end_s": 0.03, "dt_s": 0.01,
              "record_every_step": True, "record_device_outputs": True,
              "run_power_flow_initialization": True,
+             "enable_der_protection": True,
+             "localize_der_protection_events": True,
+             "protection_event_time_tol_s": 2.0e-6,
+             "protection_event_cluster_window_s": 75.0e-6,
+             "protection_event_max_localization_iters": 48,
+             "post_event_algebraic_residual_tol": 2.0e-6,
              "enforce_voltage_health_check": False,
              "snapshot_budget": 16},
         )
@@ -1499,6 +1506,29 @@ def main() -> int:
             and len(transient_frame.get("frequency_hz", [])) > 0
             and len(transient_frame.get("component_results", [])) > 0,
             "Transient frame exposes real telemetry without fabricated static branch flow",
+        )
+        transient_options = transient.get("options", {})
+        chk.check(
+            transient_options.get("solver_type") == "MassMatrixDae"
+            and transient_options.get("algebraic_network_max_iters") == 10
+            and abs(float(transient_options.get("algebraic_network_tol", 0.0))
+                    - 1.0e-6) <= 1.0e-15
+            and transient_options.get("enable_der_protection") is True
+            and transient_options.get("localize_der_protection_events") is True
+            and abs(float(transient_options.get("protection_event_time_tol_s", 0.0))
+                    - 2.0e-6) <= 1.0e-15
+            and abs(float(transient_options.get("protection_event_cluster_window_s", 0.0))
+                    - 75.0e-6) <= 1.0e-15
+            and transient_options.get("protection_event_max_localization_iters") == 48
+            and abs(float(transient_options.get("post_event_algebraic_residual_tol", 0.0))
+                    - 2.0e-6) <= 1.0e-15
+            and isinstance(transient.get("protection_event_localization_used"), bool)
+            and isinstance(transient.get("protection_event_localization_trials"), int)
+            and isinstance(transient.get("protection_event_clusters"), int)
+            and float(transient.get("max_protection_event_bracket_s", -1.0)) >= 0.0
+            and float(transient.get("max_protection_event_cluster_span_s", -1.0)) >= 0.0
+            and float(transient.get("max_post_event_algebraic_residual", -1.0)) >= 0.0,
+            "Transient event-localization request and diagnostics round-trip",
         )
 
         if args.skip_etap:

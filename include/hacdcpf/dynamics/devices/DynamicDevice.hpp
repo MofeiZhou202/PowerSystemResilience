@@ -81,6 +81,11 @@ struct FrequencyParticipation {
   double speed_derivative_pu_s{0.0};  // derivative of speed_pu [pu/s]
 };
 
+struct DynamicProtectionEventPreview {
+  bool has_event{false};
+  double time_s{0.0};
+};
+
 class DynamicDevice {
  public:
   virtual ~DynamicDevice() = default;
@@ -171,6 +176,20 @@ class DynamicDevice {
     (void)y;
     (void)events;
     return false;
+  }
+
+  // Non-mutating protection preview used by the MassMatrixDae state-event
+  // locator. Implementations must evaluate the same state transition as
+  // updateProtection() on a copied runtime state and return the first action in
+  // [t-dt,t]. Henningsson et al. (2019), DOI:10.3384/ecp19157491.
+  [[nodiscard]] virtual DynamicProtectionEventPreview previewProtection(
+      double t,
+      double dt,
+      const NetworkState& y) const {
+    (void)t;
+    (void)dt;
+    (void)y;
+    return {};
   }
 
   // Smart-inverter control hook (IEEE 1547 volt-var / frequency-watt, design doc

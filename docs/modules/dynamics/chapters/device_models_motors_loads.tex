@@ -154,19 +154,34 @@ $\tau_m$ 为汽轮机输入转矩、$\tau_e$ 为发电机气隙转矩（\srcpath
 
 \subsection{WECC 聚合分布式电源}
 \label{sec:dynamics-wecc-der}
-\texttt{DERAADynamic}（WECC DER\_A）为六个基本状态（电压量测 $V_m$、有功量测 $P_m$、无功控制 $Q_v$、
-无功电流 $I_q$、跳闸乘子 $\mathrm{mult}$、频率量测 $F_m$），可选跳闸计时与频率—有功（$\mathrm{freq\_flag}$）
-分支：
+\texttt{DERAADynamic}（WECC DER\_A）在 $\mathrm{Freq\_Flag}=0$ 时有七个基本状态
+$(V_m,P_m,Q_v,I_q,\mathrm{mult},F_m,I_p)$；$\mathrm{Freq\_Flag}=1$ 时以
+$(P_{PI},dP_{ord},P_{ord},I_p)$ 替换末尾 $I_p$，共十个状态。基础量测与无功链为
 \begin{align}
  \dot V_m&=\frac{V_t-V_m}{T_{rv}},\qquad \dot P_m=\frac{P_{\mathrm{ref}}-P_m}{T_p},\qquad
- \dot F_m=\frac{1-F_m}{T_{rf}},\\
+ \dot F_m=\frac{\omega_{\mathrm{COI}}-F_m}{T_{rf}},\\
  \dot Q_v&=\frac{Q_v^{\mathrm{ref}}-Q_v}{T_{iq}},\qquad
- I_q^{\mathrm{cmd}}=\mathrm{clamp}\!\big(K_{qv}\,\mathrm{db}(V_{\mathrm{ref}}-V_m)+Q_v\big)\cdot\mathrm{mult},\\
+ I_q^{\mathrm{cmd}}&=\mathrm{clamp}_{I_{q,\min}^{I_{\max}},I_{q,\max}^{I_{\max}}}
+ \!\left(\mathrm{clamp}_{I_{q,\min},I_{q,\max}}
+ (K_{qv}\mathrm{db}(V_{\mathrm{ref}}-V_m))+Q_v\right)\mathrm{mult},\\
  \dot I_q&=\frac{I_q^{\mathrm{cmd}}-I_q}{T_g},\qquad \dot{\mathrm{mult}}=\frac{\mathrm{mult}_{\mathrm{tgt}}-\mathrm{mult}}{T_v},
 \end{align}
-$\mathrm{db}(\cdot)$ 为死区（\srcpath{dera\_deadband}），$\mathrm{mult}_{\mathrm{tgt}}$ 由电压 / 频率越限
-计时触发跳闸；$\mathrm{freq\_flag}=1$ 时增设有功 PI（$K_{pg},K_{ig}$）与有功指令斜坡 $T_{pord}$。有功电流
-$I_p$ 按 $P/V_m$ 限幅并乘 $\mathrm{mult}$。依据：\srcpath{DERAADynamic::computeDerivatives}。
+$I_{p/q}^{I_{\max}}$ 由 $\mathrm{PQ\_Flag}$ 指定的 P/Q 优先级和圆形 $I_{\max}$ 能力计算；
+$\mathrm{Gen\_Flag}$ 决定是否允许负有功电流。频率有功链逐式采用 PSD/WECC 形式：
+\begin{align}
+ e_f&=\mathrm{clamp}_{f_{e,\min},f_{e,\max}}
+ \left[\min(D_{dn}\mathrm{db}(1-F_m),0)+\max(D_{up}\mathrm{db}(1-F_m),0)-P_m+P_{\mathrm{ref}}\right],\\
+ y_{PI}&=K_{pg}e_f+K_{ig}P_{PI},\qquad
+ \dot P_{PI}=\begin{cases}e_f,&P_{\min}<y_{PI}<P_{\max},\\0,&\text{otherwise},\end{cases}\\
+ \dot{dP}_{ord}&=\mathrm{clamp}_{dP_{\min},dP_{\max}}(\dot P_{PI}),\qquad
+ \dot P_{ord}=\frac{\mathcal N(dP_{ord}-P_{ord};P_{\min},P_{\max})}{T_{pord}},\\
+ I_p^{\mathrm{cmd}}&=\mathrm{clamp}_{I_{p,\min}^{I_{\max}},I_{p,\max}^{I_{\max}}}
+ \left(\frac{\mathrm{clamp}(P_{ord})}{\max(V_m,0.01)}\right)\mathrm{mult},
+ \end{align}
+其中 $\mathcal N$ 为 IEEE~421.5 方向性非抗饱和逻辑，$I_p$ 的一阶环节再施加符号相关的
+$rrpwr$ 斜率限制。潮流初始化严格取 $P_m=P_{PI}=dP_{ord}=P_{ord}=I_pV_m$、
+$Q_v=I_q$。实现与方程 oracle 分别见 \srcpath{DERAADynamic::computeDerivatives} 和
+\srcpath{tests/test\_transient\_dynamics.cpp}；PSD Test~42 轨迹门尚未闭合，不能据此宣称完整轨迹等价。
 
 \texttt{REGCADynamic}（WECC REGC\_A $+$ REEC\_A $+$ REPC\_A）以并网电流 $i_p,i_q$ 与滤波电压 $v_{flt}$ 为基本
 状态（REEC\_A 使能时加有功指令 $P_{\mathrm{ord}}$，REPC\_A 使能时加无功 PI $Q_{PI}$）：
@@ -211,9 +226,11 @@ $(i_p^{\mathrm{lim}},i_q^{\mathrm{lim}})$ 经限流器分配（\srcpath{limited\
 \begin{itemize}
   \item \textbf{直流电压源} \texttt{DCVoltageSourceDynamic}：无状态代数诺顿源，印直流电导 $G$ 与电流
         $G\,V_{\mathrm{ref}}$，作刚性直流电压支撑。依据：\srcpath{DCVoltageSourceDynamic::stamp}。
-  \item \textbf{DC/DC 变换器} \texttt{DCDCConverterDynamic}：单状态出力 $\dot P=(P_{\mathrm{ref}}-P)/T$，
-        直流侧印入口电流 $-P/(\eta V_{\mathrm{in}})$、出口电流 $+P/V_{\mathrm{out}}$。依据：
-        \srcpath{DCDCConverterDynamic::computeDerivatives}。
+  \item \textbf{DC/DC 变换器} \texttt{DCDCConverterDynamic}：Power 模式保留单状态执行器
+        $\dot P=(P_{\mathrm{ref}}-P)/T$；Voltage/Droop 模式在机电时间尺度作快内环代数约化。
+        三种模式均调用 \texttt{powerflow::dcdc\_power\_transfer}，因此正反向效率、$I^2R$ 损耗、
+        功率/电压控制与稳态潮流共用同一端口方程，再按 $-P_{in}/V_{in}$、$P_{out}/V_{out}$ 印入
+        直流网络。依据：\srcpath{DCDCConverterDynamic::stamp}。
   \item \textbf{电池储能} \texttt{BatteryDynamic}：两状态（有功 $P$、荷电 $\mathrm{SOC}$）：
         \begin{equation}
          \dot P=\frac{P_{\mathrm{ref}}-P}{T},\qquad
@@ -273,7 +290,7 @@ $(i_p^{\mathrm{lim}},i_q^{\mathrm{lim}})$ 经限流器分配（\srcpath{limited\
   \implfull{BasicDynamicDevices.cpp:REGCADynamic::computeDerivatives}\\
 \texttt{DCVoltageSourceDynamic} & 0 & 代数直流诺顿源 &
   \implfull{BasicDynamicDevices.cpp:DCVoltageSourceDynamic::stamp}\\
-\texttt{DCDCConverterDynamic} & 1 & 出力滞后 $+$ 直流功率平衡 &
+\texttt{DCDCConverterDynamic} & 0/1 & Voltage/Droop 快内环代数约化；Power 出力滞后 &
   \implfull{BasicDynamicDevices.cpp:DCDCConverterDynamic::computeDerivatives}\\
 \texttt{BatteryDynamic} & 2 & 有功滞后 $+$ SOC 慢状态 &
   \implfull{BasicDynamicDevices.cpp:BatteryDynamic::computeDerivatives}\\

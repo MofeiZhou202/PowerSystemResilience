@@ -91,7 +91,10 @@ struct DynamicSolverOptions {
   int max_recorded_snapshots{0};
   double dynamic_trim_tol{1e-7};
   bool use_consistent_dynamic_initialization{true};
-  int algebraic_network_max_iters{6};
+  // Anderson-accelerated Picard iterations. Ten retains early exit for easy
+  // networks while covering mixed AC/DC post-event states before Newton's
+  // local fallback is attempted (Kelley, Newton's Method, Ch. 2).
+  int algebraic_network_max_iters{10};
   double algebraic_network_tol{1e-6};
   // When the partitioned Gauss/Picard network fixed-point stalls (linear
   // convergence on stiff constant-power / IBR mixes), fall back to a
@@ -125,6 +128,24 @@ struct DynamicSolverOptions {
   // their own per-device enable flag, so this defaults off and is fully
   // backward-compatible.
   bool enable_der_protection{false};
+  // Locate endogenous IEEE 1547 actions inside accepted MassMatrixDae steps by
+  // rollback and bisection. The predicate is a non-mutating protection preview;
+  // the right bracket is committed only after its width reaches the tolerance.
+  // Other solver families retain explicit step-end semantics and report that
+  // limitation in DynamicResults::warnings. Zhao--Hu (2008),
+  // DOI:10.1109/DRPT.2008.4523550; dynamics manual event-cost equation.
+  bool localize_der_protection_events{true};
+  double protection_event_time_tol_s{1e-6};
+  int protection_event_max_localization_iters{64};
+  // Forward chronology window: once the earliest protection action occurs at
+  // t_e, all later protection actions with physical time <= t_e + window are
+  // reported as the same cluster while retaining their individual timestamps.
+  // This is independent of the root-localization tolerance above.
+  double protection_event_cluster_window_s{1e-6};
+  // Maximum accepted infinity norm of the algebraic current-balance residual
+  // after a topology-changing event with post-reset differential states frozen.
+  // Henningsson et al. (2019), DOI:10.3384/ecp19157491.
+  double post_event_algebraic_residual_tol{1e-6};
 
   // Compute a small-signal (modal) screen about the initialized operating point
   // and attach a compact summary to DynamicResults::modal (design doc §18).

@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <limits>
 
 namespace hacdcpf::dynamics {
 
@@ -10,31 +11,134 @@ namespace {
 constexpr double kPi = 3.14159265358979323846;
 constexpr double kTwoPi = 2.0 * kPi;
 
-// Accumulates the violation timer for one band table on the measured value
-// `meas`; `below` selects the under- (true) or over- (false) comparison. Sets
-// `tripped` and `reason` when any entry stays in violation past its clearing
-// time. A brief recovery resets that entry's timer (continuous-violation
-// semantics).
-void scan_band(const std::vector<RideThroughTrip>& table,
-               std::vector<double>& timers,
-               double meas,
-               bool below,
-               double dt,
-               const char* tag,
-               bool& tripped,
-               std::string& reason) {
+// Comparison-only guard, six orders below the public 1 us localization default;
+// derivation and numerical boundary: dynamics manual Eq. event-filter/event-cost.
+constexpr double kFilterEpsilon = 1e-12;
+
+// Exact solution of dm/dt=(target-m)/tau for a piecewise-constant raw
+// measurement. This is the protection measurement model used by IEEE 1547
+// interval event localization; it removes the step-size-dependent forward-Euler
+// filter error from the old post-step implementation. Song et al. (2016),
+// DOI:10.1109/TPWRS.2015.2439237, Sec. II-B; derivation in the dynamics manual.
+struct FirstOrderSignal {
+  double initial{0.0};
+  double target{0.0};
+  double tau_s{0.0};
+
+  [[nodiscard]] double value(double t) const {
+    if (tau_s <= kFilterEpsilon) return target;
+    return target + (initial - target) * std::exp(-std::max(0.0, t) / tau_s);
+  }
+
+  [[nodiscard]] double crossing(double threshold, double dt) const {
+    if (tau_s <= kFilterEpsilon) return 0.0;
+    const double denominator = initial - target;
+    if (std::abs(denominator) <= kFilterEpsilon) return dt;
+    const double ratio = (threshold - target) / denominator;
+    if (!(ratio > 0.0) || !std::isfinite(ratio)) return dt;
+    return std::clamp(-tau_s * std::log(ratio), 0.0, dt);
+  }
+};
+
+struct TimeWindow {
+  bool valid{false};
+  double begin_s{0.0};
+  double end_s{0.0};
+};
+
+TimeWindow comparison_window(const FirstOrderSignal& signal,
+                             double threshold,
+                             double dt,
+                             bool below) {
+  const auto satisfies = [&](double value) {
+    return below ? value < threshold : value > threshold;
+  };
+  const bool at_start = satisfies(signal.value(0.0));
+  const bool at_end = satisfies(signal.value(dt));
+  if (at_start && at_end) return {true, 0.0, dt};
+  if (!at_start && !at_end) return {};
+  const double crossing_s = signal.crossing(threshold, dt);
+  return at_start ? TimeWindow{true, 0.0, crossing_s}
+                  : TimeWindow{true, crossing_s, dt};
+}
+
+TimeWindow inclusive_window(const FirstOrderSignal& signal,
+                            double threshold,
+                            double dt,
+                            bool at_least) {
+  const auto satisfies = [&](double value) {
+    return at_least ? value >= threshold : value <= threshold;
+  };
+  const bool at_start = satisfies(signal.value(0.0));
+  const bool at_end = satisfies(signal.value(dt));
+  if (at_start && at_end) return {true, 0.0, dt};
+  if (!at_start && !at_end) return {};
+  const double crossing_s = signal.crossing(threshold, dt);
+  return at_start ? TimeWindow{true, 0.0, crossing_s}
+                  : TimeWindow{true, crossing_s, dt};
+}
+
+TimeWindow intersect_windows(const TimeWindow& lhs, const TimeWindow& rhs) {
+  if (!lhs.valid || !rhs.valid) return {};
+  const double begin_s = std::max(lhs.begin_s, rhs.begin_s);
+  const double end_s = std::min(lhs.end_s, rhs.end_s);
+  if (end_s + kFilterEpsilon < begin_s) return {};
+  return {true, begin_s, end_s};
+}
+
+double band_event_time(const RideThroughTrip& band,
+                       double timer_s,
+                       const TimeWindow& violation) {
+  if (!violation.valid) return std::numeric_limits<double>::infinity();
+  const double carried_timer = violation.begin_s <= kFilterEpsilon ? timer_s : 0.0;
+  const double remaining_s = std::max(0.0, band.clearing_s - carried_timer);
+  const double event_s = violation.begin_s + remaining_s;
+  return event_s <= violation.end_s + kFilterEpsilon
+             ? event_s
+             : std::numeric_limits<double>::infinity();
+}
+
+void advance_band_timers(const std::vector<RideThroughTrip>& table,
+                         std::vector<double>& timers,
+                         const FirstOrderSignal& signal,
+                         bool below,
+                         double full_dt,
+                         double advance_dt) {
   if (timers.size() != table.size()) timers.assign(table.size(), 0.0);
   for (std::size_t i = 0; i < table.size(); ++i) {
-    const bool violating =
-        below ? (meas < table[i].threshold) : (meas > table[i].threshold);
-    if (violating) {
-      timers[i] += dt;
-      if (timers[i] >= table[i].clearing_s) {
-        tripped = true;
-        if (reason.empty()) reason = tag;
-      }
-    } else {
+    const TimeWindow violation =
+        comparison_window(signal, table[i].threshold, full_dt, below);
+    if (!violation.valid || advance_dt + kFilterEpsilon < violation.begin_s) {
       timers[i] = 0.0;
+      continue;
+    }
+    const double active_end = std::min(advance_dt, violation.end_s);
+    if (active_end + kFilterEpsilon < violation.begin_s) {
+      timers[i] = 0.0;
+      continue;
+    }
+    const double carried = violation.begin_s <= kFilterEpsilon ? timers[i] : 0.0;
+    timers[i] = carried + std::max(0.0, active_end - violation.begin_s);
+    if (violation.end_s + kFilterEpsilon < advance_dt) timers[i] = 0.0;
+  }
+}
+
+void consider_band_events(const std::vector<RideThroughTrip>& table,
+                          const std::vector<double>& timers,
+                          const FirstOrderSignal& signal,
+                          bool below,
+                          double dt,
+                          const char* tag,
+                          double& earliest_s,
+                          std::string& reason) {
+  for (std::size_t i = 0; i < table.size(); ++i) {
+    const double timer_s = i < timers.size() ? timers[i] : 0.0;
+    const TimeWindow violation =
+        comparison_window(signal, table[i].threshold, dt, below);
+    const double candidate_s = band_event_time(table[i], timer_s, violation);
+    if (candidate_s + kFilterEpsilon < earliest_s) {
+      earliest_s = candidate_s;
+      reason = tag;
     }
   }
 }
@@ -87,85 +191,132 @@ IEEE1547Settings make_default_ieee1547(IEEE1547Category category,
   return cfg;
 }
 
+IEEE1547StepResult advance_ieee1547_interval(const IEEE1547Settings& s,
+                                             IEEE1547RuntimeState& st,
+                                             double v_mag_pu,
+                                             double angle_rad,
+                                             double dt) {
+  IEEE1547StepResult result;
+  if (!s.enabled) return result;
+  dt = std::max(0.0, dt);
+
+  double angle_delta = 0.0;
+  double f_inst = s.nominal_frequency_hz;
+  if (st.have_prev_angle && dt > 0.0) {
+    angle_delta = angle_rad - st.prev_angle_rad;
+    while (angle_delta > kPi) angle_delta -= kTwoPi;
+    while (angle_delta <= -kPi) angle_delta += kTwoPi;
+    f_inst = s.nominal_frequency_hz + (angle_delta / dt) / kTwoPi;
+  }
+  if (!st.initialized) {
+    st.v_meas_pu = v_mag_pu;
+    st.f_meas_hz = s.nominal_frequency_hz;
+    st.initialized = true;
+  }
+
+  // IEEE 1547 acts on measured quantities. Under the interval's zero-order-hold
+  // input, the filter solution below is exact; event localization then operates
+  // on this continuous curve rather than a right-endpoint sample.
+  const FirstOrderSignal voltage{st.v_meas_pu, v_mag_pu, s.v_filter_t_s};
+  const FirstOrderSignal frequency{st.f_meas_hz, f_inst, s.f_filter_t_s};
+  double action_s = std::numeric_limits<double>::infinity();
+  std::string reason;
+
+  if (!st.tripped) {
+    consider_band_events(s.undervoltage_trip, st.uv_timer_s, voltage, true, dt,
+                         "undervoltage", action_s, reason);
+    consider_band_events(s.overvoltage_trip, st.ov_timer_s, voltage, false, dt,
+                         "overvoltage", action_s, reason);
+    consider_band_events(s.underfrequency_trip, st.uf_timer_s, frequency, true, dt,
+                         "underfrequency", action_s, reason);
+    consider_band_events(s.overfrequency_trip, st.of_timer_s, frequency, false, dt,
+                         "overfrequency", action_s, reason);
+  } else if (s.allow_reconnect) {
+    TimeWindow healthy = inclusive_window(
+        voltage, s.v_continuous_min_pu, dt, true);
+    healthy = intersect_windows(
+        healthy, inclusive_window(voltage, s.v_continuous_max_pu, dt, false));
+    healthy = intersect_windows(
+        healthy, inclusive_window(frequency, s.f_continuous_min_hz, dt, true));
+    healthy = intersect_windows(
+        healthy, inclusive_window(frequency, s.f_continuous_max_hz, dt, false));
+    if (healthy.valid) {
+      const double carried =
+          healthy.begin_s <= kFilterEpsilon ? st.continuous_ok_timer_s : 0.0;
+      const double remaining_s = std::max(0.0, s.reconnect_delay_s - carried);
+      const double candidate_s = healthy.begin_s + remaining_s;
+      if (candidate_s <= healthy.end_s + kFilterEpsilon) action_s = candidate_s;
+    }
+  }
+
+  const bool has_action = std::isfinite(action_s);
+  const double advance_dt = has_action ? std::clamp(action_s, 0.0, dt) : dt;
+  advance_band_timers(s.undervoltage_trip, st.uv_timer_s, voltage, true, dt,
+                      advance_dt);
+  advance_band_timers(s.overvoltage_trip, st.ov_timer_s, voltage, false, dt,
+                      advance_dt);
+  advance_band_timers(s.underfrequency_trip, st.uf_timer_s, frequency, true, dt,
+                      advance_dt);
+  advance_band_timers(s.overfrequency_trip, st.of_timer_s, frequency, false, dt,
+                      advance_dt);
+  st.v_meas_pu = voltage.value(advance_dt);
+  st.f_meas_hz = frequency.value(advance_dt);
+  if (st.have_prev_angle && dt > 0.0) {
+    st.prev_angle_rad += angle_delta * (advance_dt / dt);
+  } else {
+    st.prev_angle_rad = angle_rad;
+  }
+  st.have_prev_angle = true;
+
+  if (!has_action) {
+    if (st.tripped && s.allow_reconnect) {
+      TimeWindow healthy = inclusive_window(
+          voltage, s.v_continuous_min_pu, dt, true);
+      healthy = intersect_windows(
+          healthy, inclusive_window(voltage, s.v_continuous_max_pu, dt, false));
+      healthy = intersect_windows(
+          healthy, inclusive_window(frequency, s.f_continuous_min_hz, dt, true));
+      healthy = intersect_windows(
+          healthy, inclusive_window(frequency, s.f_continuous_max_hz, dt, false));
+      if (healthy.valid && healthy.end_s + kFilterEpsilon >= dt) {
+        const double carried =
+            healthy.begin_s <= kFilterEpsilon ? st.continuous_ok_timer_s : 0.0;
+        st.continuous_ok_timer_s = carried + dt - healthy.begin_s;
+      } else {
+        st.continuous_ok_timer_s = 0.0;
+      }
+    }
+    if (!st.tripped && st.restore_scale < 1.0 && s.power_ramp_s > 0.0) {
+      st.restore_scale =
+          std::min(1.0, st.restore_scale + advance_dt / s.power_ramp_s);
+    }
+    return result;
+  }
+
+  result.action_offset_s = advance_dt;
+  if (!st.tripped) {
+    st.tripped = true;
+    st.restore_scale = 0.0;
+    st.continuous_ok_timer_s = 0.0;
+    st.last_reason = reason;
+    reset_timers(st);
+    result.action = IEEE1547Action::Tripped;
+  } else {
+    st.tripped = false;
+    st.continuous_ok_timer_s = 0.0;
+    st.restore_scale = s.power_ramp_s > 0.0 ? 0.0 : 1.0;
+    reset_timers(st);
+    result.action = IEEE1547Action::Reconnected;
+  }
+  return result;
+}
+
 IEEE1547Action step_ieee1547(const IEEE1547Settings& s,
                              IEEE1547RuntimeState& st,
                              double v_mag_pu,
                              double angle_rad,
                              double dt) {
-  if (!s.enabled) return IEEE1547Action::None;
-
-  // Measured frequency from the terminal voltage-angle derivative (§7 role 4).
-  // The first sample seeds the frame at nominal (no derivative available yet).
-  double f_inst = s.nominal_frequency_hz;
-  if (st.have_prev_angle && dt > 0.0) {
-    double dtheta = angle_rad - st.prev_angle_rad;
-    while (dtheta > kPi) dtheta -= kTwoPi;
-    while (dtheta <= -kPi) dtheta += kTwoPi;
-    f_inst = s.nominal_frequency_hz + (dtheta / dt) / kTwoPi;
-  }
-  st.prev_angle_rad = angle_rad;
-  st.have_prev_angle = true;
-
-  // Measurement low-pass filters.
-  if (!st.initialized) {
-    st.v_meas_pu = v_mag_pu;
-    st.f_meas_hz = s.nominal_frequency_hz;
-    st.initialized = true;
-  } else if (dt > 0.0) {
-    const double av = std::clamp(dt / std::max(1e-9, s.v_filter_t_s), 0.0, 1.0);
-    const double af = std::clamp(dt / std::max(1e-9, s.f_filter_t_s), 0.0, 1.0);
-    st.v_meas_pu += av * (v_mag_pu - st.v_meas_pu);
-    st.f_meas_hz += af * (f_inst - st.f_meas_hz);
-  }
-
-  const double v = st.v_meas_pu;
-  const double f = st.f_meas_hz;
-
-  if (!st.tripped) {
-    bool trip = false;
-    std::string reason;
-    scan_band(s.undervoltage_trip, st.uv_timer_s, v, true, dt, "undervoltage",
-              trip, reason);
-    scan_band(s.overvoltage_trip, st.ov_timer_s, v, false, dt, "overvoltage",
-              trip, reason);
-    scan_band(s.underfrequency_trip, st.uf_timer_s, f, true, dt,
-              "underfrequency", trip, reason);
-    scan_band(s.overfrequency_trip, st.of_timer_s, f, false, dt,
-              "overfrequency", trip, reason);
-    if (trip) {
-      st.tripped = true;
-      st.restore_scale = 0.0;
-      st.continuous_ok_timer_s = 0.0;
-      st.last_reason = reason;
-      reset_timers(st);
-      return IEEE1547Action::Tripped;
-    }
-    // Operating normally: advance the soft-start ramp if a reconnect is in
-    // progress.
-    if (st.restore_scale < 1.0 && s.power_ramp_s > 0.0 && dt > 0.0) {
-      st.restore_scale = std::min(1.0, st.restore_scale + dt / s.power_ramp_s);
-    }
-    return IEEE1547Action::None;
-  }
-
-  // Tripped: qualify a reconnect once the terminal has held the continuous
-  // window for the reconnect delay.
-  if (!s.allow_reconnect) return IEEE1547Action::None;
-  const bool healthy = v >= s.v_continuous_min_pu && v <= s.v_continuous_max_pu &&
-                       f >= s.f_continuous_min_hz && f <= s.f_continuous_max_hz;
-  if (healthy) {
-    st.continuous_ok_timer_s += dt;
-    if (st.continuous_ok_timer_s >= s.reconnect_delay_s) {
-      st.tripped = false;
-      st.continuous_ok_timer_s = 0.0;
-      st.restore_scale = s.power_ramp_s > 0.0 ? 0.0 : 1.0;
-      reset_timers(st);
-      return IEEE1547Action::Reconnected;
-    }
-  } else {
-    st.continuous_ok_timer_s = 0.0;
-  }
-  return IEEE1547Action::None;
+  return advance_ieee1547_interval(s, st, v_mag_pu, angle_rad, dt).action;
 }
 
 double volt_var_q_pu(const VoltVarSettings& s, double v_pu) {

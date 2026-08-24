@@ -5540,11 +5540,24 @@ json dynamic_options_to_json(const hacdcpf::dynamics::DynamicSolverOptions& opt)
               {"dc_link_coupling_conductance_pu", opt.dc_link_coupling_conductance_pu},
               {"dynamic_trim_tol", opt.dynamic_trim_tol},
               {"max_dynamic_trim_iters", opt.max_dynamic_trim_iters},
+              {"algebraic_network_max_iters", opt.algebraic_network_max_iters},
+              {"algebraic_network_tol", opt.algebraic_network_tol},
               {"dae_reuse_jacobian_factorization", opt.dae_reuse_jacobian_factorization},
               {"dae_use_analytic_network_jacobian", opt.dae_use_analytic_network_jacobian},
               {"dae_use_analytic_device_jacobian", opt.dae_use_analytic_device_jacobian},
               {"dae_use_fd_current_jacobian_corrections",
                opt.dae_use_fd_current_jacobian_corrections},
+              {"enable_der_protection", opt.enable_der_protection},
+              {"localize_der_protection_events",
+               opt.localize_der_protection_events},
+              {"protection_event_time_tol_s",
+               opt.protection_event_time_tol_s},
+              {"protection_event_cluster_window_s",
+               opt.protection_event_cluster_window_s},
+              {"protection_event_max_localization_iters",
+               opt.protection_event_max_localization_iters},
+              {"post_event_algebraic_residual_tol",
+               opt.post_event_algebraic_residual_tol},
               {"use_consistent_dynamic_initialization",
                opt.use_consistent_dynamic_initialization}};
 }
@@ -5570,12 +5583,24 @@ json dynamic_results_to_json(
   out["max_local_error_norm"] = result.max_local_error_norm;
   out["min_accepted_step_s"] = result.min_accepted_step_s;
   out["max_accepted_step_s"] = result.max_accepted_step_s;
+  out["protection_event_localization_used"] =
+      result.protection_event_localization_used;
+  out["protection_event_localization_trials"] =
+      result.protection_event_localization_trials;
+  out["protection_event_clusters"] = result.protection_event_clusters;
+  out["max_protection_event_bracket_s"] =
+      result.max_protection_event_bracket_s;
+  out["max_protection_event_cluster_span_s"] =
+      result.max_protection_event_cluster_span_s;
+  out["max_post_event_algebraic_residual"] =
+      result.max_post_event_algebraic_residual;
   out["warnings"] = result.warnings;
   out["applied_events"] = result.applied_events;
   json applied_event_records = json::array();
   for (const auto& record : result.applied_event_records) {
     applied_event_records.push_back(
         json{{"time_s", record.time_s},
+             {"protection_cluster_id", record.protection_cluster_id},
              {"type", record.type},
              {"label", record.label},
              {"component_index", record.component_index},
@@ -5597,15 +5622,18 @@ json dynamic_results_to_json(
              {"device_type", diag.device_type},
              {"component_index", diag.component_index},
              {"state_index", diag.state_index},
+             {"local_state_index", diag.local_state_index},
              {"residual", diag.residual}});
   }
   out["initialization"] =
-      json{{"power_flow_requested", result.initialization.power_flow_requested},
+      json{{"initialization_attempted", result.initialization.initialization_attempted},
+           {"power_flow_requested", result.initialization.power_flow_requested},
            {"power_flow_converged", result.initialization.power_flow_converged},
            {"fallback_voltage_setpoints", result.initialization.fallback_voltage_setpoints},
            {"iterations", result.initialization.iterations},
            {"residual", result.initialization.residual},
            {"dynamic_trim_converged", result.initialization.dynamic_trim_converged},
+           {"dynamic_residual_evaluated", result.initialization.dynamic_residual_evaluated},
            {"dynamic_trim_iterations", result.initialization.dynamic_trim_iterations},
            {"dynamic_initial_dxdt_inf_norm", result.initialization.dynamic_initial_dxdt_inf_norm},
            {"dynamic_fast_dxdt_inf_norm", result.initialization.dynamic_fast_dxdt_inf_norm},
@@ -16792,6 +16820,23 @@ int main(int argc, char** argv) {
       opt.dae_use_fd_current_jacobian_corrections =
           j.value("dae_use_fd_current_jacobian_corrections",
                   opt.dae_use_fd_current_jacobian_corrections);
+      opt.enable_der_protection =
+          j.value("enable_der_protection", opt.enable_der_protection);
+      opt.localize_der_protection_events =
+          j.value("localize_der_protection_events",
+                  opt.localize_der_protection_events);
+      opt.protection_event_time_tol_s =
+          j.value("protection_event_time_tol_s",
+                  opt.protection_event_time_tol_s);
+      opt.protection_event_cluster_window_s =
+          j.value("protection_event_cluster_window_s",
+                  opt.protection_event_cluster_window_s);
+      opt.protection_event_max_localization_iters =
+          j.value("protection_event_max_localization_iters",
+                  opt.protection_event_max_localization_iters);
+      opt.post_event_algebraic_residual_tol =
+          j.value("post_event_algebraic_residual_tol",
+                  opt.post_event_algebraic_residual_tol);
       opt.algebraic_network_max_iters =
           j.value("algebraic_network_max_iters", opt.algebraic_network_max_iters);
       opt.algebraic_network_tol =

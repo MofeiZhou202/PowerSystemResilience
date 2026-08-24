@@ -571,6 +571,16 @@ $\sum_kW_k\tilde\delta_k=\sum_kW_k\delta_k-\delta_{\mathrm{COI}}\sum_kW_k=0$
 需在全岛权重和为零（无任何携频设备）时回退到指定锚点并如实报告。
 \end{remark}
 
+\begin{remark}[系统控制频率与本地保护频率不可混用]\label{rem:dy-th-mac-frequency-semantics}
+系统级频率控制器需要反映全系统有功失衡，故 DER\_A 的频率测量状态采用当前
+试探动态状态按式~\eqref{eq:dy-th-mac-coi} 计算的系统 COI 频率；在联立 DAE
+Newton 与一致初始化残差评估中也必须随试探状态重算，不能固定为额定值。直接保护
+继电器回答的是设备安装点的局部量测问题，因而使用本地 PT 相角频率以及（距离元件）
+本地 CT 电流，见式~\eqref{eq:dy-th-mac-local-frequency}。前者是系统控制输入，后者是
+保护测量输入；用 COI 替代本地 PT/CT 会抹去空间差异，用局部相角频率替代 COI 则会
+把局部相位摆动误作全系统功率失衡。
+\end{remark}
+
 \subsection{机电暂态 DAE：一般形式、指标与求解架构}\label{sec:dy-th-mac-dae}
 
 \subsubsection{一般形式与质量矩阵表述}
@@ -1034,6 +1044,21 @@ $y^{(k+1)}=y^{(k)}-g_y(x_0,y^{(k)})^{-1}g(x_0,y^{(k)})$ 的局部二次收敛是
         如实写入初始化摘要，未达标保持可见警告。
 \end{enumerate}
 
+\begin{remark}[一致初始化的嵌套容差预算]\label{rem:dy-th-mac-init-tolerance}
+动态修整评估的是约化残差 $f(x,\eta(x))$，其中代数映射
+$y=\eta(x)$ 由内层网络求解得到。若内层代数门限 $\varepsilon_{g}$ 比外层动态门限
+$\varepsilon_{f}$ 更松，则 $y$ 的求解噪声会成为外层残差的精度下限，使
+``$\lVert f\rVert_\infty\le\varepsilon_f$''失去数值意义。当前实现只在一致初始化
+Newton 阶段取
+\begin{equation}
+ \varepsilon_{g,\mathrm{init}}
+ =\min\bigl(\varepsilon_{g,\mathrm{user}},\,0.1\varepsilon_f\bigr),
+ \label{eq:dy-th-mac-init-tolerance}
+\end{equation}
+并在阶段结束后恢复用户指定的时间积分网络容差。该一数量级裕量用于分离内外层误差
+预算，不改变用户的运行期收敛合同；若内层网络仍不收敛，初始化必须显式失败。
+\end{remark}
+
 \begin{remark}[慢状态钉住]\label{rem:dy-th-mac-slowpin}
 小时级动态的状态（电池 SOC、热过程）不参与平衡残差：其方程行从
 式~\eqref{eq:dy-th-mac-equil} 第一式中移除（钉住取运行点值），其导数在 $t_0$
@@ -1048,6 +1073,100 @@ $y^{(k+1)}=y^{(k)}-g_y(x_0,y^{(k)})^{-1}g(x_0,y^{(k)})$ 的局部二次收敛是
 积分器内部作为分段光滑右端处理；真正离散的跳变（跳闸、模式切换）一律走事件
 队列，积分到事件时刻、施加编辑、重一致化、重启。
 \end{remark}
+
+\subsection{保护状态事件的定位与一致重启}\label{sec:dy-th-mac-event}
+
+保护测量滤波器在一个候选区间内采用零阶保持端子输入 $u$，并精确推进
+\begin{equation}
+ \dot m=\frac{u-m}{T},\qquad
+ m(t_0+\tau)=u+\bigl(m(t_0)-u\bigr)e^{-\tau/T}.
+ \label{eq:dy-th-mac-protection-filter}
+\end{equation}
+对直接继电器，$u$ 是继电器所在母线的本地正序 PT 相量；距离元件还对由线路
+方程得到的本地电流施加同形 CT 滤波。频率不再取系统 COI，而由连续两个本地
+PT 相角定义
+\begin{equation}
+ f_{\rm loc}=f_n+\frac{\operatorname{unwrap}
+ (\angle V_{{\rm PT},k}-\angle V_{{\rm PT},k-1})}{2\pi\Delta t},
+ \qquad
+ f_m(t+\Delta t)=f_{\rm loc}+(f_m(t)-f_{\rm loc})e^{-\Delta t/T_f}.
+ \label{eq:dy-th-mac-local-frequency}
+\end{equation}
+当 $|V_{\rm PT}|$ 低于配置的有效门槛时频率元件闭锁；电压恢复后，必须经过一个
+首尾 PT 电压均有效的完整区间才解除闭锁，不能把跌落前的陈旧频率重新标为有效，
+也不能用零值或 COI 伪装本地测量。该模型是相量域 CT/PT 等效动态，不生成 EMT 瞬时波形；请求 EMT
+测量会显式失败。
+相角差解缠要求每个接受区间 $|\Delta\theta|<\pi$；当前线性 CT/PT 等效模型不含
+饱和、磁滞、变比误差、抗混叠和数字继电器采样固件。
+令 $q(m)$ 为 IEEE~1547 电压或频率越限守卫，$d$ 为连续越限计时器，则定时限
+动作时刻是
+\begin{equation}
+ t_e=\inf\left\{t:\ q(m(s))\ \text{在连续区间 }[t-d_{\rm set},t]
+ \text{ 上成立}\right\}.
+ \label{eq:dy-th-mac-fixed-delay-event}
+\end{equation}
+这与 Zhao--Hu 的混合电力系统守卫/步长反馈事件定位\cite{dym:zhao-hu}及
+COSMIC 的越限连续计时器\cite{dym:cosmic}共享同一事件语义。除 IEEE~1547 外，
+\texttt{ProtectionRelay} 已实现定时限电压守卫和 COSMIC 型 Zone-1 表观导纳守卫
+\begin{equation}
+ q_Z=\frac{|I_{\rm from}|}{|V_{\rm from}|}
+      -\frac{1}{\rho|Z_{\rm line}|}>0,
+ \qquad
+ I_{\rm from}=\frac{V_{\rm from}-V_{\rm to}}{Z_{\rm line}}
+              +\mathrm{j}\frac{B_{\rm line}}{2}V_{\rm from},
+ \label{eq:dy-th-mac-zone1-guard}
+\end{equation}
+其中 $\rho=0.9$ 为默认 Zone-1 reach。该式只覆盖平衡正序、无变比线路子集；
+守卫在两个接受步端点间线性插值，计时器在越限区间等速累积、退出后等速恢复。
+动作可生成 \texttt{ACLoadScale} 或 \texttt{ACBranchTrip}，并进入与预定事件相同的
+网络重置路径。当前继电器须通过 \texttt{DynamicSystem} API 直接挂接，rich-model
+builder 与 JSON/HTTP/GUI 尚未自动装配。
+
+\texttt{MassMatrixDae} 对每个已接受候选步先调用不改变设备状态的保护预览。
+若右端已发生动作，则回滚到左端一致状态，在 $[0,h]$ 上二分``截至该时刻是否
+已动作''，直至括号 $[h_L,h_R]$ 满足
+\begin{equation}
+ h_R-h_L\le\varepsilon_e,\qquad
+ N_e\le\left\lceil\log_2\frac{h}{\varepsilon_e}\right\rceil.
+ \label{eq:dy-th-mac-event-cost}
+\end{equation}
+例如 $h=10$~ms、$\varepsilon_e=1~\mu$s 时每个事件至多 14 次试积分。
+该回滚/求根结构对应 DAE 状态事件必须在一致代数状态上定位的要求
+\cite{dym:henningsson}；论文报告典型状态事件约需十次高精度代数环求解，本项目的
+14 次是二分法的预声明上界，而非对该论文性能结果的复现。
+
+到达右括号后，最早物理动作 $t_e$ 打开与定位容差独立的固定前向窗口
+\begin{equation}
+ \mathcal C(t_e)=\{e_i\mid t_e\le t_i\le t_e+\tau_c\}.
+ \label{eq:dy-th-mac-event-cluster}
+\end{equation}
+窗口不随其中后续动作滚动延长；求解器把 $t_e+\tau_c$ 设为显式接受步端点，
+确保整个窗口都经过保护预览。各动作保留 $t_i$，但共享一个簇编号。随后先应用离散
+重置映射 $(x^-,d^-)\mapsto(x^+,d^+)$，再固定重置后的 $x^+$ 解
+\begin{equation}
+ g(x^+,y^+,t_e)=0,
+ \qquad \lVert g(x^+,y^+,t_e)\rVert_\infty\le\varepsilon_g,
+ \label{eq:dy-th-mac-event-reinit}
+\end{equation}
+否则仿真失败关闭。该次序与混合 DAE 的离散重置语义\cite{dym:hiskens-pai}及
+COSMIC ``保持微分变量、更新代数变量''的事件后处理一致。当前定位覆盖实现
+\texttt{DynamicDevice::previewProtection} 的 IEEE~1547 设备保护与上述本地
+CT/PT 定时限继电器守卫；分块积分器、反时限积分、多区距离保护、
+擦边/芝诺事件和 EMT 开关仍不在此数值保证内。这里的括号和残差是运行时数值
+审计，不是区间算术或形式化可达性认证。继电器端点间线性插值仍无法发现两个
+端点均安全而步内短暂越限的脉冲，必须减小 $h$ 或引入带稠密输出的守卫求根后
+才可覆盖。
+
+外部交叉验证直接运行作者 COSMIC 固定干净提交
+\texttt{6acc77e4d3f17925f1f4b79a93652eef0d1314cc}。其自带
+\texttt{sim\_case9.m} 可复现 $t=10.0$~s 切除支路 6、$t=10.5$~s 母线 5
+UVLS 动作及 $31.25$~MW（25\%）切负荷。按论文图~2 重建支路 7 初始切除、
+$0.92$~pu UVLS 阈值和 $0.5$~s 延时后，作者程序得到母线 5 最低电压
+$0.896065$~pu，但支路 6 最大距离拾取比仅
+$0.3098124214893234<1$，因而不产生论文所示 $10.5$~s 距离动作和 $10.7$~s
+UVLS。该负结果说明论文配置或代码版本未完整进入公开提交，不能记为本项目已
+复现图~2；复现实验入口为
+\srcpath{tools/transient\_validation/run\_cosmic\_reference.py}。
 
 \subsection{数值算例与基准}\label{sec:dy-th-mac-numexp}
 
@@ -1126,6 +1245,12 @@ Park 变换与 RI$\leftrightarrow$dq 坐标换算（式~\eqref{eq:dy-th-mac-ri-d
 \implfull{src/dynamics/DynamicFrequency.cpp:computeFrequencyReport}（逐岛 $H\cdot S$ 加权 COI 频率/ROCOF 与系统级 COI；设备权重元数据见 DynamicDevice 的 contributes\_coi/inertia\_h）\\
 DAE 半显式形式与质量矩阵联立求解（式~\eqref{eq:dy-th-mac-massform}、\eqref{eq:dy-th-mac-simnewton}） &
 \implfull{src/dynamics/DynamicSystem.cpp:evaluateDaeResidual}（$r_f=\dot x-f$、$r_g=$ 网络电流平衡；驱动见 src/dynamics/DynamicSolver.cpp:solve\_mass\_matrix\_dae，MassMatrixDae 求解器类型）\\
+IEEE~1547/定时限继电器状态事件定位、本地 CT/PT 测量、前向窗口聚类与一致重启（式~\eqref{eq:dy-th-mac-protection-filter}--\eqref{eq:dy-th-mac-event-reinit}，本地频率式~\eqref{eq:dy-th-mac-local-frequency}，聚类式~\eqref{eq:dy-th-mac-event-cluster}） &
+\implpart{\srcpath{IEEE1547Protection.cpp:advance\_ieee1547\_interval}、
+\srcpath{BasicDynamicDevices.cpp:ProtectionRelay::previewProtection} 与
+\srcpath{DynamicSolver.cpp:solve\_mass\_matrix\_dae}；仅 MassMatrixDae 内实现
+\srcpath{DynamicDevice::previewProtection} 的设备，其他积分器保留步末语义并返回警告；
+外部继电器尚无 rich-model/HTTP 自动装配，EMT 测量在相量网络显式拒绝}\\
 指标概念与指标 $\ge2$ 处置（约束稳定化/降指标） &
 \implpart{指标 1 口径由代数网络求解与奇异正则化维持（solveNetwork、singular\_regularization\_pu）；无显式指标诊断与高指标约化算法}\\
 分块求解架构（定义~\ref{def:dy-th-mac-partitioned}） &
@@ -1179,4 +1304,17 @@ Equations}, SIAM, 1996.
 \bibitem{dym:ascher-petzold} U.~M. Ascher and L.~R. Petzold, \emph{Computer
 Methods for Ordinary Differential Equations and Differential-Algebraic Equations},
 SIAM, 1998.
+\bibitem{dym:hiskens-pai} I.~A. Hiskens and M.~A. Pai, ``Trajectory sensitivity
+analysis of hybrid systems,'' \emph{IEEE Trans. Circuits Syst. I}, vol.~47,
+no.~2, 2000, doi:10.1109/81.828574.
+\bibitem{dym:zhao-hu} H.-S. Zhao and Y.-B. Hu, ``Algorithm of event detection
+for hybrid power system simulation,'' \emph{Proc. DRPT}, 2008,
+doi:10.1109/DRPT.2008.4523550.
+\bibitem{dym:henningsson} E.~Henningsson, H.~Olsson and L.~Vanfretti,
+``DAE Solvers for Large-Scale Hybrid Models,'' \emph{Proc. 13th Modelica Conf.},
+2019, doi:10.3384/ecp19157491.
+\bibitem{dym:cosmic} J.~Song, E.~Cotilla-Sanchez, G.~Ghanavati and P.~D.~H.
+Hines, ``Dynamic Modeling of Cascading Failure in Power Systems,''
+\emph{IEEE Trans. Power Syst.}, vol.~31, no.~3, 2016,
+doi:10.1109/TPWRS.2015.2439237.
 \end{thebibliography}}

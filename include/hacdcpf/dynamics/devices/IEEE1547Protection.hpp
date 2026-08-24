@@ -83,18 +83,36 @@ struct IEEE1547RuntimeState {
 // Status transition produced by one protection step.
 enum class IEEE1547Action { None, Tripped, Reconnected };
 
+// Result of advancing one protection interval. `action_offset_s` is measured
+// from the beginning of the interval and is finite only when `action` is not
+// None. The interval update is deterministic, so the same function can be run
+// on a copied runtime state to preview an event without mutating the device.
+struct IEEE1547StepResult {
+  IEEE1547Action action{IEEE1547Action::None};
+  double action_offset_s{0.0};
+};
+
 // Builds the default ride-through band tables for `category` at `nominal_hz`
 // (IEEE 1547-2018 default trip settings; the 60 Hz frequency bands are scaled to
 // the system nominal). Leaves `enabled` false so the caller opts in.
 IEEE1547Settings make_default_ieee1547(IEEE1547Category category,
                                        double nominal_hz);
 
-// Advances the protection state machine by one accepted step of length `dt`,
-// given the DER terminal positive-sequence voltage magnitude `v_mag_pu` and
-// angle `angle_rad` (rad). Updates the measurement filters and the violation
-// timers, and returns Tripped / Reconnected on a status change (None otherwise).
-// Pure: it does not touch any device or the network — the caller applies the
-// status change and any state re-seeding. Design doc §11.7, §7 role 4, §17.
+// Advances the protection state machine over one accepted interval. The raw
+// terminal measurement is held constant over the interval and the first-order
+// measurement filters are integrated analytically. Threshold-crossing times and
+// continuous-violation durations are therefore resolved inside the interval
+// instead of being rounded to its right endpoint. See Zhao--Hu (2008),
+// DOI:10.1109/DRPT.2008.4523550, and docs/modules/dynamics/chapters/
+// theory_machine_dae.tex, event-restart remark.
+IEEE1547StepResult advance_ieee1547_interval(
+    const IEEE1547Settings& settings,
+    IEEE1547RuntimeState& state,
+    double v_mag_pu,
+    double angle_rad,
+    double dt);
+
+// Backward-compatible wrapper that discards the sub-step event time.
 IEEE1547Action step_ieee1547(const IEEE1547Settings& settings,
                              IEEE1547RuntimeState& state,
                              double v_mag_pu,

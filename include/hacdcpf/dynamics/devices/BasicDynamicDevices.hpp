@@ -396,6 +396,7 @@ struct VoltageSourceDynamicParams {
   std::string machine_model_name{"ClassicalMachine"};
   bool psd_genrou_model{false};
   bool dynamic_angle{false};
+  bool network_balance_reference{false};
   // IEEE 1547 ride-through / trip / reconnect protection (design doc §11.7) for a
   // synchronous DER. Disabled by default; opt-in per device.
   IEEE1547Settings protection{};
@@ -433,6 +434,9 @@ class SynchronousMachine : public DynamicDevice {
                         DynamicState& x,
                         NetworkState& y,
                         std::vector<DynamicEvent>& events) override;
+
+  [[nodiscard]] DynamicProtectionEventPreview previewProtection(
+      double t, double dt, const NetworkState& y) const override;
 
   [[nodiscard]] std::string name() const override;
   [[nodiscard]] std::string type() const override { return params_.device_type; }
@@ -973,6 +977,8 @@ class GridFormingInverter : public DynamicDevice {
                         DynamicState& x,
                         NetworkState& y,
                         std::vector<DynamicEvent>& events) override;
+  [[nodiscard]] DynamicProtectionEventPreview previewProtection(
+      double t, double dt, const NetworkState& y) const override;
   void updateSmartControls(double dt, const NetworkState& y) override;
 
   [[nodiscard]] std::string name() const override;
@@ -1109,6 +1115,8 @@ class GridFollowingInverter : public DynamicDevice {
                         DynamicState& x,
                         NetworkState& y,
                         std::vector<DynamicEvent>& events) override;
+  [[nodiscard]] DynamicProtectionEventPreview previewProtection(
+      double t, double dt, const NetworkState& y) const override;
   void updateSmartControls(double dt, const NetworkState& y) override;
 
   [[nodiscard]] std::string name() const override;
@@ -1200,6 +1208,8 @@ class VSCConverterDynamic : public DynamicDevice {
                         DynamicState& x,
                         NetworkState& y,
                         std::vector<DynamicEvent>& events) override;
+  [[nodiscard]] DynamicProtectionEventPreview previewProtection(
+      double t, double dt, const NetworkState& y) const override;
   void updateSmartControls(double dt, const NetworkState& y) override;
   [[nodiscard]] DynamicDeviceOutput output(const DynamicState& x,
                                            const NetworkState& y) const override;
@@ -1362,6 +1372,8 @@ struct DERAADynamicParams {
   double pf_angle_ref_rad{0.0};
   int pf_flag{1};
   int freq_flag{0};
+  int pq_flag{0};
+  int gen_flag{1};
   double T_rv{0.02};
   double Trf{0.02};
   double dbd1{-99.0};
@@ -1374,11 +1386,19 @@ struct DERAADynamicParams {
   double Tpord{0.02};
   double Kpg{0.1};
   double Kig{10.0};
+  double D_dn{20.0};
+  double D_up{0.0};
+  double fdbd1{-0.0006};
+  double fdbd2{0.0006};
+  double fe_min{-99.0};
+  double fe_max{99.0};
+  double p_min{0.0};
+  double p_max{1.1};
+  double dp_min{-0.5};
+  double dp_max{0.5};
   double I_max{1.2};
   double Iq_min{-1.0};
   double Iq_max{1.0};
-  double Ip_min{0.0};
-  double Ip_max{1.1};
   double rr_pwr{99.0};
   double v_trip_low_pu{0.0};
   double v_trip_high_pu{0.0};
@@ -1758,8 +1778,15 @@ struct DCDCConverterDynamicParams {
   std::string source_type{"dcdc_converter"};
   std::vector<DynamicModelProfile> model_profiles;
   double base_mva{100.0};
+  DCDCControlMode control_mode{DCDCControlMode::Power};
   double p_ref_mw{0.0};
+  double v_ref_pu{1.0};
+  double sn_mva{0.0};
   double eta{0.98};
+  double r_eq_pu{0.0};
+  double pmax_mw{0.0};
+  double pmin_mw{0.0};
+  double k_droop{0.0};
   double response_t_s{0.02};
   bool in_service{true};
 };
@@ -1795,7 +1822,7 @@ class DCDCConverterDynamic : public DynamicDevice {
   [[nodiscard]] std::string type() const override { return "DCDCConverter"; }
   [[nodiscard]] int componentIndex() const override { return params_.component_index; }
   [[nodiscard]] std::string modelStandard() const override { return "HACDCPF"; }
-  [[nodiscard]] std::string modelName() const override { return "FirstOrderDCDCConverter"; }
+  [[nodiscard]] std::string modelName() const override;
   [[nodiscard]] std::vector<DynamicModelProfile> modelProfiles() const override;
   [[nodiscard]] DynamicDeviceOutput output(const DynamicState& x,
                                            const NetworkState& y) const override;
@@ -1935,6 +1962,17 @@ class PVDynamic : public DynamicDevice {
   StateIndexRange range_;
 };
 
+enum class ProtectionRelayMeasurementKind {
+  VoltageMagnitude,
+  Frequency,
+  DistanceApparentAdmittance
+};
+
+enum class ProtectionRelayMeasurementDomain {
+  LocalPhasorCtPt,
+  EmtInstantaneous
+};
+
 struct ProtectionRelayParams {
   int component_index{0};
   int bus{0};
@@ -1951,6 +1989,26 @@ struct ProtectionRelayParams {
   double underfrequency_hz{47.0};
   double overfrequency_hz{53.0};
   double trip_delay_s{0.16};
+  double nominal_frequency_hz{50.0};
+  double pt_filter_t_s{0.0};
+  double ct_filter_t_s{0.0};
+  double frequency_filter_t_s{0.0};
+  double frequency_min_voltage_pu{0.05};
+  ProtectionRelayMeasurementKind measurement_kind{
+      ProtectionRelayMeasurementKind::VoltageMagnitude};
+  ProtectionRelayMeasurementDomain measurement_domain{
+      ProtectionRelayMeasurementDomain::LocalPhasorCtPt};
+  int from_bus_pos{-1};
+  int to_bus_pos{-1};
+  double line_r_pu{0.0};
+  double line_x_pu{0.0};
+  double line_total_b_pu{0.0};
+  double distance_reach_fraction{0.90};
+  DynamicEventType action_type{DynamicEventType::Custom};
+  int target_component_index{0};
+  int target_bus{0};
+  double action_value{1.0};
+  std::string target_type;
   bool tripped{false};
   bool in_service{true};
 };
@@ -1976,6 +2034,10 @@ class ProtectionRelay : public DynamicDevice {
   void handleEvent(const DynamicEvent& event,
                    DynamicState& x,
                    NetworkState& y) override;
+  bool updateProtection(double t, double dt, DynamicState& x, NetworkState& y,
+                        std::vector<DynamicEvent>& events) override;
+  [[nodiscard]] DynamicProtectionEventPreview previewProtection(
+      double t, double dt, const NetworkState& y) const override;
 
   [[nodiscard]] std::string name() const override;
   [[nodiscard]] std::string type() const override { return "ProtectionRelay"; }
@@ -1987,8 +2049,35 @@ class ProtectionRelay : public DynamicDevice {
                                            const NetworkState& y) const override;
 
  private:
+  struct LocalMeasurementState {
+    bool initialized{false};
+    std::complex<double> v_from_pt{1.0, 0.0};
+    std::complex<double> v_to_pt{1.0, 0.0};
+    std::complex<double> i_from_ct{0.0, 0.0};
+    double previous_pt_angle_rad{0.0};
+    double frequency_hz{50.0};
+    bool frequency_valid{true};
+  };
+
+  struct LocalMeasurement {
+    double voltage_pu{1.0};
+    double frequency_hz{50.0};
+    double apparent_admittance_pu{0.0};
+    bool frequency_valid{true};
+  };
+
+  [[nodiscard]] LocalMeasurement advanceMeasurement(
+      const NetworkState& y, double dt, LocalMeasurementState& state) const;
+  [[nodiscard]] double pickupMargin(const LocalMeasurement& measurement) const;
+  [[nodiscard]] double pickupMargin(const NetworkState& y, double dt) const;
+  void mirrorTimerToState(DynamicState& x) const;
+
   ProtectionRelayParams params_;
   StateIndexRange range_;
+  double pickup_timer_s_{0.0};
+  double last_pickup_margin_{0.0};
+  bool have_pickup_margin_{false};
+  LocalMeasurementState measurement_state_;
 };
 
 }  // namespace hacdcpf::dynamics

@@ -3872,8 +3872,8 @@
       "psd_components": "DERA aggregate distributed generation",
       "hacdcpf_candidate": "AggregateDistributedGenerationA",
       "status": "compare-limited",
-      "first_blocker": "AggregateDistributedGenerationA runtime equations, catalog parameters, local numerical smoke coverage, and voltage/frequency trip timer support exist; PSD Test 42 residual/mass-matrix trace gate is not wired yet.",
-      "next_action": "Mirror PSD Test 42 freq-flag 0/1 and trip fixtures, then compare bus voltage/current traces before promoting to full-gate."
+      "first_blocker": "State order, PF initialization, Freq_Flag 0/1, current priority, deadband/droop, non-windup and ramp equations have a 1e-12 source-derived oracle. The checked-out PSD Test 42 environment fails during SciML precompilation (LinearVerbosity/extension overwrite) before a trajectory is produced.",
+      "next_action": "Repair or pin the external PSD test environment, then compare both frequency-flag bus-voltage/current traces before promoting to full-gate."
     },
     {
       "group": "ibr",

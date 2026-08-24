@@ -1,6 +1,6 @@
 # 模块文档覆盖地图
 
-最后核实：2026-08-22
+最后核实：2026-08-23
 
 本表以当前文件系统为准。`src/<module>/` 与 `docs/modules/<module>/` 的目录名必须完全一致；覆盖等级只表示
 文档是否存在并完成源码等价核验，不表示实现已经达到生产认证。
@@ -10,7 +10,7 @@
 | `analysis` | [分析手册](../modules/analysis/analysis_manual.tex) | 理论决策模型、源码等价实现、承载力/薄弱环节/反事实数值证据 |
 | `api` | [公共 API 手册](../modules/api/api_manual.tex) | 能力门控、safe API、句柄签名与 OPF 解后审计理论及回归证据 |
 | `carbon_analysis` | [碳分析手册](../modules/carbon_analysis/carbon_analysis_manual.tex) | 碳流理论、源码等价追踪/矩阵实现、年度库存与数值证据 |
-| `dynamics` | [动力学手册](../modules/dynamics/dynamics_manual.tex) | `source_equivalent_solver.tex` |
+| `dynamics` | [动力学手册](../modules/dynamics/dynamics_manual.tex) | 机电/混合 DAE 理论、AC/DC 一致初始化、DER_A/共享 DC/DC 方程、`source_equivalent_solver.tex`、IEEE 1547 与直接 API 定时限继电器事件定位、COSMIC 固定提交对照及数值证据 |
 | `ev_power_traffic` | [电—交通手册](../modules/ev_power_traffic/ev_power_traffic_manual.tex) | CTM/LTM 守恒与 CFL、DUE/VI、A--H 源码等价模型、交叉离散模型与数值准入 |
 | `graph` | [图模块手册](../modules/graph/graph_manual.tex) | 十一章：接口/索引、通用理论、建图拓扑、收缩、计划、串联/悬垂、稠密/稀疏 Kron、恢复、HTTP、验证审计、数值交叉验证 |
 | `harmonics_power_flow` | [谐波专著](../modules/harmonics_power_flow/harmonics_power_flow_manual.tex) | 九章：范围架构、通用理论、单相 AC/DC 源码等价、三相变压器、非线性耦合、API、指标标准、数值交叉验证、审计准入 |

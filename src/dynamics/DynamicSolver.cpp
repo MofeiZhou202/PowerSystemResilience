@@ -108,6 +108,39 @@ DynamicAppliedEventRecord event_record(const DynamicEvent& event, double applied
   return record;
 }
 
+struct ProtectionEventClusterTracker {
+  bool open{false};
+  int cluster_id{-1};
+  double first_event_time_s{0.0};
+  double deadline_s{0.0};
+  double last_event_time_s{0.0};
+};
+
+void register_protection_events(DynamicResults& results, std::size_t first_new_record,
+                                double cluster_window_s,
+                                ProtectionEventClusterTracker& tracker) {
+  // Henningsson et al. (2019), event iteration: the earliest physical action
+  // anchors a non-rolling forward window [t_e,t_e+tau_c]. Individual event
+  // timestamps remain unchanged; only chronology reporting is clustered.
+  for (std::size_t i = first_new_record; i < results.applied_event_records.size(); ++i) {
+    const double event_time_s = results.applied_event_records[i].time_s;
+    if (!tracker.open || event_time_s > tracker.deadline_s + 1e-12) {
+      tracker.open = true;
+      tracker.first_event_time_s = event_time_s;
+      tracker.deadline_s = event_time_s + cluster_window_s;
+      tracker.last_event_time_s = event_time_s;
+      ++results.protection_event_clusters;
+      tracker.cluster_id = results.protection_event_clusters - 1;
+    } else {
+      tracker.last_event_time_s = std::max(tracker.last_event_time_s, event_time_s);
+    }
+    results.max_protection_event_cluster_span_s =
+        std::max(results.max_protection_event_cluster_span_s,
+                 tracker.last_event_time_s - tracker.first_event_time_s);
+    results.applied_event_records[i].protection_cluster_id = tracker.cluster_id;
+  }
+}
+
 double event_param(const DynamicEvent& event,
                    const std::string& key,
                    double fallback) {
@@ -195,16 +228,84 @@ double next_discontinuity_time(const DynamicSystem& sys, double t) {
   return next;
 }
 
-bool apply_event_to_network(DynamicSystem& sys, const DynamicEvent& event) {
+struct NetworkEventApplication {
+  bool changed{false};
+  bool target_found{true};
+};
+
+bool load_event_has_dynamic_device_target(const DynamicSystem& sys,
+                                          const DynamicEvent& event) {
+  if (event.type != DynamicEventType::ACLoadScale &&
+      event.type != DynamicEventType::DCLoadScale) {
+    return false;
+  }
+  return std::any_of(sys.devices.begin(), sys.devices.end(), [&](const auto& device) {
+    const auto out = device->output(sys.x, sys.y);
+    const std::string type = out.type;
+    if (type.find("Load") == std::string::npos && type.find("load") == std::string::npos) {
+      return false;
+    }
+    if (event.bus != 0 && out.bus != 0 && event.bus != out.bus) return false;
+    return event.component_index == 0 || event.component_index == out.component_index ||
+           event.bus != 0;
+  });
+}
+
+bool device_event_has_target(const DynamicSystem& sys, const DynamicEvent& event) {
+  if (event.type != DynamicEventType::GeneratorTrip &&
+      event.type != DynamicEventType::VSCTrip &&
+      event.type != DynamicEventType::DCDCTrip) {
+    return true;
+  }
+  return std::any_of(sys.devices.begin(), sys.devices.end(), [&](const auto& device) {
+    const auto out = device->output(sys.x, sys.y);
+    if (event.component_index != 0 && event.component_index != out.component_index) return false;
+    if (event.bus != 0 && out.bus != 0 && event.bus != out.bus) return false;
+    const std::string& semantic_type =
+        !event.target_type.empty() ? event.target_type : event.component_type;
+    if (semantic_type.empty() || semantic_type == "ProtectionRelay") return true;
+    if (semantic_type == "Generator" || semantic_type == "SynchronousMachine") {
+      return out.type == "SynchronousMachine" || out.type == "Generator" ||
+             out.type == "FiveMassShaft" || out.type == "Governor" ||
+             out.type == "Exciter" || out.type == "PowerSystemStabilizer" ||
+             out.source_type.find("generator") != std::string::npos ||
+             out.source_type.find("Generator") != std::string::npos;
+    }
+    if (semantic_type == "VSC") {
+      return out.type.find("Inverter") != std::string::npos ||
+             out.type.find("VSC") != std::string::npos || out.type == "DCVoltageSourceDynamic" ||
+             out.model_name.find("Inverter") != std::string::npos ||
+             out.model_name.find("GFL") != std::string::npos ||
+             out.model_name.find("GFM") != std::string::npos ||
+             out.model_name.find("REGC") != std::string::npos ||
+             out.source_type.find("vsc") != std::string::npos ||
+             out.source_type.find("VSC") != std::string::npos ||
+             (out.type.find("Static") != std::string::npos &&
+              out.model_name.find("Inverter") != std::string::npos);
+    }
+    return out.type == semantic_type;
+  });
+}
+
+NetworkEventApplication apply_event_to_network(DynamicSystem& sys,
+                                               const DynamicEvent& event) {
+  NetworkEventApplication result;
   bool rebuild = false;
+  bool found = true;
   switch (event.type) {
     case DynamicEventType::ACBranchTrip:
     case DynamicEventType::ACBranchClose:
       for (auto& branch : sys.network.ac_branches) {
         if (branch.index == event.component_index) {
+          found = true;
           branch.in_service = event.type == DynamicEventType::ACBranchClose;
           rebuild = true;
         }
+      }
+      if (event.component_index != 0 &&
+          std::none_of(sys.network.ac_branches.begin(), sys.network.ac_branches.end(),
+                       [&](const auto& b) { return b.index == event.component_index; })) {
+        found = false;
       }
       break;
     case DynamicEventType::ACBranchImpedanceScale: {
@@ -222,6 +323,11 @@ bool apply_event_to_network(DynamicSystem& sys, const DynamicEvent& event) {
           rebuild = true;
         }
       }
+      if (event.component_index != 0 &&
+          std::none_of(sys.network.ac_branches.begin(), sys.network.ac_branches.end(),
+                       [&](const auto& b) { return b.index == event.component_index; })) {
+        found = false;
+      }
       break;
     }
     case DynamicEventType::DCBranchTrip:
@@ -231,6 +337,11 @@ bool apply_event_to_network(DynamicSystem& sys, const DynamicEvent& event) {
           branch.in_service = event.type == DynamicEventType::DCBranchClose;
           rebuild = true;
         }
+      }
+      if (event.component_index != 0 &&
+          std::none_of(sys.network.dc_branches.begin(), sys.network.dc_branches.end(),
+                       [&](const auto& b) { return b.index == event.component_index; })) {
+        found = false;
       }
       break;
     case DynamicEventType::FaultShunt: {
@@ -263,6 +374,7 @@ bool apply_event_to_network(DynamicSystem& sys, const DynamicEvent& event) {
         fault.b_pu = event_param(event, "b_pu", 0.0);
       }
       fault.active = fault.bus_pos >= 0;
+      found = fault.active;
       const double duration = event_param(event, "duration_s", event.duration_s);
       fault.clear_time_s = duration > 0.0 ? event.time_s + duration : 0.0;
       if (fault.active) {
@@ -290,6 +402,11 @@ bool apply_event_to_network(DynamicSystem& sys, const DynamicEvent& event) {
         load.scale = std::max(0.0, event_param(event, "scale", event.value));
         rebuild = true;
       }
+      if (event_bus != 0 &&
+          std::none_of(sys.network.ac_bus_loads.begin(), sys.network.ac_bus_loads.end(),
+                       [&](const auto& load) { return load.bus == event_bus; })) {
+        found = false;
+      }
       break;
     }
     case DynamicEventType::DCLoadScale: {
@@ -301,12 +418,19 @@ bool apply_event_to_network(DynamicSystem& sys, const DynamicEvent& event) {
         load.scale = std::max(0.0, event_param(event, "scale", event.value));
         rebuild = true;
       }
+      if (event_bus != 0 &&
+          std::none_of(sys.network.dc_bus_loads.begin(), sys.network.dc_bus_loads.end(),
+                       [&](const auto& load) { return load.bus == event_bus; })) {
+        found = false;
+      }
       break;
     }
     default:
       break;
   }
-  return rebuild;
+  result.changed = rebuild;
+  result.target_found = found;
+  return result;
 }
 
 bool apply_events(DynamicSystem& sys, double t, DynamicResults& results) {
@@ -314,7 +438,18 @@ bool apply_events(DynamicSystem& sys, double t, DynamicResults& results) {
   bool changed = rebuild;
   for (auto& event : sys.events) {
     if (event.applied || event.time_s > t + 1e-12) continue;
-    rebuild = apply_event_to_network(sys, event) || rebuild;
+    const NetworkEventApplication application = apply_event_to_network(sys, event);
+    if (!application.target_found && !load_event_has_dynamic_device_target(sys, event)) {
+      results.success = false;
+      results.message = "Dynamic event target not found: " + event_label(event);
+      return false;
+    }
+    if (!device_event_has_target(sys, event)) {
+      results.success = false;
+      results.message = "Dynamic event device target not found: " + event_label(event);
+      return false;
+    }
+    rebuild = application.changed || rebuild;
     for (auto& device : sys.devices) {
       device->handleEvent(event, sys.x, sys.y);
     }
@@ -331,13 +466,12 @@ bool apply_events(DynamicSystem& sys, double t, DynamicResults& results) {
   return changed;
 }
 
-// Evaluates device-level DER protection (IEEE 1547 ride-through / trip /
-// reconnect, design doc §11.7) after an accepted step of length `dt` ending at
-// `t`. Each device advances its protection state machine on measured (filtered)
-// terminal quantities (§7 role 4) and may trip or reconnect itself; a status
-// change rebuilds the network admittance and is logged into the results event
-// record (§17). Returns true when the network was rebuilt. No-op unless the
-// `enable_der_protection` option is set.
+// Evaluates dynamic-device protection (IEEE 1547 ride-through and directly
+// attached definite-time relays) after an accepted step of length `dt` ending
+// at `t`. Each device advances its protection state machine and may emit a
+// network event; emitted actions pass through the same network reset and device
+// dispatch path as authored events. Returns true when the network was rebuilt.
+// No-op unless the legacy-named `enable_der_protection` option is set.
 bool apply_protection(DynamicSystem& sys, double t, double dt,
                       DynamicResults& results) {
   if (!sys.options.enable_der_protection) return false;
@@ -346,9 +480,28 @@ bool apply_protection(DynamicSystem& sys, double t, double dt,
   for (auto& device : sys.devices) {
     if (device->updateProtection(t, dt, sys.x, sys.y, emitted)) rebuild = true;
   }
-  for (const auto& ev : emitted) {
+  std::stable_sort(emitted.begin(), emitted.end(), [](const auto& lhs, const auto& rhs) {
+    return lhs.time_s < rhs.time_s;
+  });
+  for (auto& ev : emitted) {
+    const NetworkEventApplication application = apply_event_to_network(sys, ev);
+    if (!application.target_found && !load_event_has_dynamic_device_target(sys, ev)) {
+      results.success = false;
+      results.message = "Protection event target not found: " + event_label(ev);
+      return false;
+    }
+    if (!device_event_has_target(sys, ev)) {
+      results.success = false;
+      results.message = "Protection event device target not found: " + event_label(ev);
+      return false;
+    }
+    rebuild = application.changed || rebuild;
+    for (auto& device : sys.devices) {
+      device->handleEvent(ev, sys.x, sys.y);
+    }
+    ev.applied = true;
     results.applied_events.push_back(event_label(ev));
-    results.applied_event_records.push_back(event_record(ev, t));
+    results.applied_event_records.push_back(event_record(ev, ev.time_s));
   }
   if (rebuild) {
     sys.network.rebuildBaseMatrices(sys.options.singular_regularization_pu);
@@ -356,6 +509,19 @@ bool apply_protection(DynamicSystem& sys, double t, double dt,
     sys.dae_admittance_valid = false;
   }
   return rebuild;
+}
+
+DynamicProtectionEventPreview preview_protection(const DynamicSystem& sys, double t, double dt) {
+  if (!sys.options.enable_der_protection) return {};
+  DynamicProtectionEventPreview earliest;
+  for (const auto& device : sys.devices) {
+    const DynamicProtectionEventPreview candidate = device->previewProtection(t, dt, sys.y);
+    if (!candidate.has_event) continue;
+    if (!earliest.has_event || candidate.time_s < earliest.time_s) {
+      earliest = candidate;
+    }
+  }
+  return earliest;
 }
 
 // Advances device smart-inverter controls (IEEE 1547 volt-var / frequency-watt,
@@ -1507,6 +1673,71 @@ void dae_finalize(DynamicSystem& sys, const DaeLayout& L, double t) {
   for (auto& device : sys.devices) device->updateAlgebraicOutputs(sys.x, sys.y);
 }
 
+// Henningsson, Olsson & Vanfretti (2019), DOI:10.3384/ecp19157491:
+// after a discrete mode/topology change, keep the post-reset differential state
+// fixed and solve the algebraic constraint before restarting the one-step DAE
+// method. A successful nonlinear solve is not accepted without a residual
+// audit.
+bool dae_reinitialize_after_event(DynamicSystem& sys, const DaeLayout& layout, double t,
+                                  DynamicResults& results, std::string& error) {
+  const Eigen::VectorXd frozen_x = sys.x.x;
+  sys.network_cache.reset();
+  sys.dae_admittance_valid = false;
+  if (!sys.solveNetwork(t, error)) return false;
+  if (!sys.x.x.isApprox(frozen_x, 0.0)) {
+    error = "Post-event algebraic reinitialization changed differential states";
+    return false;
+  }
+  dae_finalize(sys, layout, t);
+
+  Eigen::VectorXd r_f;
+  Eigen::VectorXd r_g;
+  const Eigen::VectorXd zero_derivative = Eigen::VectorXd::Zero(sys.x.x.size());
+  if (!sys.evaluateDaeResidual(t, sys.x.x, sys.y, zero_derivative, r_f, r_g, error)) {
+    return false;
+  }
+  const double residual_inf = r_g.size() > 0 ? r_g.cwiseAbs().maxCoeff() : 0.0;
+  results.max_post_event_algebraic_residual =
+      std::max(results.max_post_event_algebraic_residual, residual_inf);
+  if (!std::isfinite(residual_inf) ||
+      residual_inf > sys.options.post_event_algebraic_residual_tol) {
+    std::ostringstream os;
+    os << "Post-event algebraic residual at t=" << t << "s is " << std::scientific << residual_inf
+       << " > " << sys.options.post_event_algebraic_residual_tol;
+    error = os.str();
+    return false;
+  }
+  return true;
+}
+
+// A topology-changing action can make another relay pick up at the same
+// physical timestamp. Resolve that zero-time cascade to a fixed point before
+// advancing controls or the integrator. The cap is an explicit anti-Zeno guard.
+bool close_protection_at_time(DynamicSystem& sys, double t, DynamicResults& results,
+                              DaeLayout& layout, DaeNewtonCache& dae_cache,
+                              DaeNewtonCache& predictor_cache,
+                              ProtectionEventClusterTracker& cluster_tracker,
+                              std::string& error) {
+  constexpr int kMaxClosureIterations = 32;
+  for (int iter = 0; iter < kMaxClosureIterations; ++iter) {
+    const std::size_t before = results.applied_event_records.size();
+    const bool changed = apply_protection(sys, t, 0.0, results);
+    if (!results.success && !results.message.empty()) return false;
+    if (!changed && results.applied_event_records.size() == before) return true;
+    register_protection_events(results, before,
+                               sys.options.protection_event_cluster_window_s,
+                               cluster_tracker);
+    layout = make_dae_layout(sys);
+    dae_cache.invalidate();
+    predictor_cache.invalidate();
+    sys.dae_admittance_valid = false;
+    if (!dae_reinitialize_after_event(sys, layout, t, results, error)) return false;
+  }
+  results.success = false;
+  results.message = "Protection closure exceeded 32 same-time iterations (possible Zeno cascade)";
+  return false;
+}
+
 // One theta-method DAE step with a modified-Newton sparse Jacobian/LU cache.
 // Advances sys.x / sys.y to t+dt on success.
 StepOutcome dae_theta_step(DynamicSystem& sys,
@@ -1672,11 +1903,28 @@ StepOutcome dae_trapezoidal_step(DynamicSystem& sys,
   return outcome;
 }
 
+StepOutcome dae_configured_step(DynamicSystem& sys, const DaeLayout& layout, double t, double dt,
+                                const Eigen::VectorXd& x_before, DaeNewtonCache& dae_cache,
+                                DaeNewtonCache& predictor_cache, bool estimate_error,
+                                std::string& error) {
+  if (sys.options.dae_step_method == DynamicDaeStepMethod::Trapezoidal) {
+    return dae_trapezoidal_step(sys, layout, t, dt, x_before, dae_cache, predictor_cache,
+                                estimate_error, error);
+  }
+  return dae_backward_euler_step(sys, layout, t, dt, x_before, dae_cache, error);
+}
+
 DynamicResults solve_mass_matrix_dae(DynamicSystem& system) {
   DynamicResults results;
   results.initialization = system.initialization;
   results.warnings.insert(results.warnings.end(), system.warnings.begin(),
                           system.warnings.end());
+  if (system.options.enable_der_protection && system.options.localize_der_protection_events) {
+    results.warnings.push_back(
+        "Endogenous event localization covers only devices implementing "
+        "DynamicDevice::previewProtection; other relay paths retain their "
+        "declared external chronology semantics.");
+  }
 
   std::sort(system.events.begin(), system.events.end(),
             [](const DynamicEvent& a, const DynamicEvent& b) {
@@ -1685,6 +1933,9 @@ DynamicResults solve_mass_matrix_dae(DynamicSystem& system) {
 
   system.x.time_s = system.options.t_start_s;
   std::string error;
+  DaeNewtonCache dae_cache;
+  DaeNewtonCache dae_predictor_cache;
+  ProtectionEventClusterTracker cluster_tracker;
   apply_events(system, system.x.time_s, results);
   DaeLayout layout = make_dae_layout(system);
   const bool coupled_network_startup =
@@ -1703,12 +1954,37 @@ DynamicResults solve_mass_matrix_dae(DynamicSystem& system) {
     results.failed_step = 0;
     return results;
   }
+  const std::size_t initial_event_records = results.applied_event_records.size();
+  if (apply_protection(system, system.x.time_s, 0.0, results)) {
+    layout = make_dae_layout(system);
+    if (!dae_reinitialize_after_event(system, layout, system.x.time_s, results, error)) {
+      results.success = false;
+      results.message = error;
+      results.failed_step = 0;
+      return results;
+    }
+  }
+  if (!results.success && !results.message.empty()) {
+    results.failed_step = 0;
+    return results;
+  }
+  if (results.applied_event_records.size() > initial_event_records) {
+    register_protection_events(results, initial_event_records,
+                               system.options.protection_event_cluster_window_s,
+                               cluster_tracker);
+    if (!close_protection_at_time(system, system.x.time_s, results, layout,
+                                  dae_cache, dae_predictor_cache, cluster_tracker,
+                                  error)) {
+      results.success = false;
+      if (results.message.empty()) results.message = error;
+      results.failed_step = 0;
+      return results;
+    }
+  }
   record_snapshot_if_needed(system, results, 0);
 
   const double t_end = system.options.t_end_s;
   const double base_dt = system.options.dt_s;
-  DaeNewtonCache dae_cache;
-  DaeNewtonCache dae_predictor_cache;
   int step = 0;
 
   while (system.x.time_s < t_end - 1e-12) {
@@ -1718,9 +1994,7 @@ DynamicResults solve_mass_matrix_dae(DynamicSystem& system) {
       dae_cache.invalidate();
       dae_predictor_cache.invalidate();
       system.dae_admittance_valid = false;
-      if (coupled_network_startup) {
-        dae_finalize(system, layout, t);
-      } else if (!system.solveNetwork(t, error)) {
+      if (!dae_reinitialize_after_event(system, layout, t, results, error)) {
         results.success = false;
         results.message = error;
         results.failed_step = step;
@@ -1728,9 +2002,23 @@ DynamicResults solve_mass_matrix_dae(DynamicSystem& system) {
         return results;
       }
     }
+    if (!results.success && !results.message.empty()) {
+      results.failed_step = step;
+      results.steps = step;
+      return results;
+    }
     const double next_discontinuity = next_discontinuity_time(system, t);
     double next_t = std::min(t + base_dt, t_end);
     if (std::isfinite(next_discontinuity)) next_t = std::min(next_t, next_discontinuity);
+    // Complete an open forward cluster window at an explicit accepted DAE
+    // endpoint. This guarantees every protection preview in [t_e,t_e+tau_c]
+    // is evaluated before the cluster is closed, even when base_dt > tau_c.
+    // Henningsson et al. (2019), event iteration and consistent restart.
+    if (cluster_tracker.open && t < cluster_tracker.deadline_s - 1e-12) {
+      next_t = std::min(next_t, cluster_tracker.deadline_s);
+    } else if (cluster_tracker.open && t >= cluster_tracker.deadline_s - 1e-12) {
+      cluster_tracker.open = false;
+    }
     if (next_t <= t + 1e-12) next_t = std::min(t + base_dt, t_end);
     const double dt = next_t - t;
 
@@ -1745,20 +2033,8 @@ DynamicResults solve_mass_matrix_dae(DynamicSystem& system) {
       system.x.x = x_before;
       system.y = y_before;
       error.clear();
-      if (system.options.dae_step_method == DynamicDaeStepMethod::Trapezoidal) {
-        outcome = dae_trapezoidal_step(system,
-                                       layout,
-                                       t,
-                                       attempted_dt,
-                                       x_before,
-                                       dae_cache,
-                                       dae_predictor_cache,
-                                       system.options.use_adaptive_step,
-                                       error);
-      } else {
-        outcome = dae_backward_euler_step(system, layout, t, attempted_dt,
-                                          x_before, dae_cache, error);
-      }
+      outcome = dae_configured_step(system, layout, t, attempted_dt, x_before, dae_cache,
+                                    dae_predictor_cache, system.options.use_adaptive_step, error);
       bool accepted = outcome.ok;
       if (accepted && system.options.use_adaptive_step &&
           outcome.error_estimated && outcome.error_norm > 1.0) {
@@ -1794,20 +2070,118 @@ DynamicResults solve_mass_matrix_dae(DynamicSystem& system) {
     }
 
     ++step;
+    StepOutcome computational_work = outcome;
     system.x.time_s = step_accepted ? accepted_next_t : t + dt;
-    results.newton_iterations += outcome.iterations;
-    results.jacobian_evaluations += outcome.jacobian_evaluations;
-    results.jacobian_residual_evaluations += outcome.jacobian_residual_evaluations;
-    results.jacobian_fd_columns += outcome.jacobian_fd_columns;
-    results.jacobian_colored_groups += outcome.jacobian_colored_groups;
-    results.linear_factorizations += outcome.linear_factorizations;
     if (!step_accepted) {
+      results.newton_iterations += computational_work.iterations;
+      results.jacobian_evaluations += computational_work.jacobian_evaluations;
+      results.jacobian_residual_evaluations += computational_work.jacobian_residual_evaluations;
+      results.jacobian_fd_columns += computational_work.jacobian_fd_columns;
+      results.jacobian_colored_groups += computational_work.jacobian_colored_groups;
+      results.linear_factorizations += computational_work.linear_factorizations;
       results.success = false;
       results.message = !last_rejection.empty() ? last_rejection : error;
       results.failed_step = step;
       results.steps = step;
       return results;
     }
+    dae_finalize(system, layout, system.x.time_s);
+
+    // State-event localization follows the rollback/bracketing pattern used by
+    // Zhao--Hu (2008) and Henningsson et al. (2019). The protection preview is
+    // side-effect free, so every trial starts from the same accepted left
+    // state.
+    if (system.options.enable_der_protection && system.options.localize_der_protection_events) {
+      const DynamicProtectionEventPreview full_preview =
+          preview_protection(system, system.x.time_s, attempted_dt);
+      if (full_preview.has_event) {
+        const double tolerance = std::max(1e-12, system.options.protection_event_time_tol_s);
+        double low_dt = 0.0;
+        double high_dt = attempted_dt;
+        Eigen::VectorXd high_x = system.x.x;
+        NetworkState high_y = system.y;
+        StepOutcome high_outcome = outcome;
+        int localization_iters = 0;
+
+        while (high_dt - low_dt > tolerance &&
+               localization_iters < system.options.protection_event_max_localization_iters) {
+          const double trial_dt = 0.5 * (low_dt + high_dt);
+          system.x.x = x_before;
+          system.y = y_before;
+          system.x.time_s = t;
+          system.dae_admittance_valid = false;
+          DaeNewtonCache localization_cache;
+          DaeNewtonCache localization_predictor_cache;
+          error.clear();
+          StepOutcome trial =
+              dae_configured_step(system, layout, t, trial_dt, x_before, localization_cache,
+                                  localization_predictor_cache, false, error);
+          add_step_counters(computational_work, trial);
+          ++localization_iters;
+          if (!trial.ok) {
+            last_rejection = "Protection event localization DAE trial failed: " + error;
+            step_accepted = false;
+            break;
+          }
+          system.x.time_s = t + trial_dt;
+          dae_finalize(system, layout, system.x.time_s);
+          const DynamicProtectionEventPreview trial_preview =
+              preview_protection(system, system.x.time_s, trial_dt);
+          if (trial_preview.has_event) {
+            high_dt = trial_dt;
+            high_x = system.x.x;
+            high_y = system.y;
+            high_outcome = trial;
+          } else {
+            low_dt = trial_dt;
+          }
+        }
+
+        results.protection_event_localization_used = true;
+        results.protection_event_localization_trials += localization_iters;
+        results.max_protection_event_bracket_s =
+            std::max(results.max_protection_event_bracket_s, high_dt - low_dt);
+        if (step_accepted && high_dt - low_dt > tolerance) {
+          std::ostringstream os;
+          os << "Protection event localization did not reach tolerance: "
+                "bracket="
+             << std::scientific << (high_dt - low_dt) << "s > " << tolerance << "s after "
+             << localization_iters << " trials";
+          last_rejection = os.str();
+          step_accepted = false;
+        }
+        if (!step_accepted) {
+          results.newton_iterations += computational_work.iterations;
+          results.jacobian_evaluations += computational_work.jacobian_evaluations;
+          results.jacobian_residual_evaluations += computational_work.jacobian_residual_evaluations;
+          results.jacobian_fd_columns += computational_work.jacobian_fd_columns;
+          results.jacobian_colored_groups += computational_work.jacobian_colored_groups;
+          results.linear_factorizations += computational_work.linear_factorizations;
+          results.success = false;
+          results.message = last_rejection;
+          results.failed_step = step;
+          results.steps = step;
+          return results;
+        }
+
+        attempted_dt = high_dt;
+        accepted_next_t = t + high_dt;
+        outcome = high_outcome;
+        system.x.x = std::move(high_x);
+        system.y = std::move(high_y);
+        system.x.time_s = accepted_next_t;
+        dae_cache.invalidate();
+        dae_predictor_cache.invalidate();
+        dae_finalize(system, layout, system.x.time_s);
+      }
+    }
+
+    results.newton_iterations += computational_work.iterations;
+    results.jacobian_evaluations += computational_work.jacobian_evaluations;
+    results.jacobian_residual_evaluations += computational_work.jacobian_residual_evaluations;
+    results.jacobian_fd_columns += computational_work.jacobian_fd_columns;
+    results.jacobian_colored_groups += computational_work.jacobian_colored_groups;
+    results.linear_factorizations += computational_work.linear_factorizations;
     results.max_local_error_norm =
         std::max(results.max_local_error_norm, outcome.error_norm);
     results.min_accepted_step_s =
@@ -1816,36 +2190,75 @@ DynamicResults solve_mass_matrix_dae(DynamicSystem& system) {
             : std::min(results.min_accepted_step_s, attempted_dt);
     results.max_accepted_step_s =
         std::max(results.max_accepted_step_s, attempted_dt);
-    dae_finalize(system, layout, system.x.time_s);
     if (dae_cache.valid) ++dae_cache.accepted_steps_since_rebuild;
     if (dae_predictor_cache.valid) ++dae_predictor_cache.accepted_steps_since_rebuild;
-    if (apply_events(system, system.x.time_s, results)) {
+
+    // Commit protection on the event-free left topology before applying any
+    // authored discontinuity at the same endpoint. This prevents post-fault
+    // measurements from being charged to the entire pre-fault step.
+    const std::size_t records_before_protection = results.applied_event_records.size();
+    const bool protection_changed =
+        apply_protection(system, system.x.time_s, attempted_dt, results);
+    if (!results.success && !results.message.empty()) {
+      results.success = false;
+      results.failed_step = step;
+      results.steps = step;
+      return results;
+    }
+    if (results.applied_event_records.size() > records_before_protection) {
+      register_protection_events(results, records_before_protection,
+                                 system.options.protection_event_cluster_window_s,
+                                 cluster_tracker);
+    }
+    if (protection_changed) {
       layout = make_dae_layout(system);
       dae_cache.invalidate();
       dae_predictor_cache.invalidate();
       system.dae_admittance_valid = false;
-      if (coupled_network_startup) {
-        dae_finalize(system, layout, system.x.time_s);
-      } else if (!system.solveNetwork(system.x.time_s, error)) {
+      if (!dae_reinitialize_after_event(system, layout, system.x.time_s, results, error)) {
         results.success = false;
         results.message = error;
+        results.failed_step = step;
+        results.steps = step;
+        return results;
+      }
+      if (!close_protection_at_time(system, system.x.time_s, results, layout,
+                                    dae_cache, dae_predictor_cache, cluster_tracker,
+                                    error)) {
+        results.success = false;
+        if (results.message.empty()) results.message = error;
         results.failed_step = step;
         results.steps = step;
         return results;
       }
     }
-    if (apply_protection(system, system.x.time_s, attempted_dt, results)) {
+    if (apply_events(system, system.x.time_s, results)) {
+      layout = make_dae_layout(system);
       dae_cache.invalidate();
       dae_predictor_cache.invalidate();
-      if (coupled_network_startup) {
-        dae_finalize(system, layout, system.x.time_s);
-      } else if (!system.solveNetwork(system.x.time_s, error)) {
+      system.dae_admittance_valid = false;
+      if (!dae_reinitialize_after_event(system, layout, system.x.time_s, results, error)) {
         results.success = false;
         results.message = error;
         results.failed_step = step;
         results.steps = step;
         return results;
       }
+      if (!close_protection_at_time(system, system.x.time_s, results, layout,
+                                    dae_cache, dae_predictor_cache, cluster_tracker,
+                                    error)) {
+        results.success = false;
+        if (results.message.empty()) results.message = error;
+        results.failed_step = step;
+        results.steps = step;
+        return results;
+      }
+    }
+    if (!results.success && !results.message.empty()) {
+      results.success = false;
+      results.failed_step = step;
+      results.steps = step;
+      return results;
     }
     apply_smart_controls(system, attempted_dt);
     if (!check_numerical_health(system, system.x.time_s, error)) {
@@ -1894,11 +2307,91 @@ DynamicResults DynamicSolver::solve(DynamicSystem& system) const {
     results.message = "DynamicSolverOptions::t_end_s is before t_start_s";
     return results;
   }
+  if (system.options.localize_der_protection_events &&
+      (!std::isfinite(system.options.protection_event_time_tol_s) ||
+       system.options.protection_event_time_tol_s <= 0.0 ||
+       system.options.protection_event_max_localization_iters <= 0)) {
+    results.success = false;
+    results.message =
+        "Protection event localization requires a positive "
+        "finite time tolerance "
+        "and a positive iteration limit";
+    return results;
+  }
+  if (!std::isfinite(system.options.protection_event_cluster_window_s) ||
+      system.options.protection_event_cluster_window_s < 0.0) {
+    results.success = false;
+    results.message =
+        "DynamicSolverOptions::protection_event_cluster_window_s must be "
+        "finite and non-negative";
+    return results;
+  }
+  if (!std::isfinite(system.options.post_event_algebraic_residual_tol) ||
+      system.options.post_event_algebraic_residual_tol <= 0.0) {
+    results.success = false;
+    results.message =
+        "DynamicSolverOptions::post_event_algebraic_residual_tol "
+        "must be positive "
+        "and finite";
+    return results;
+  }
+  // Hairer & Wanner, Solving ODEs II, Ch. VII.1: a DAE trajectory is
+  // admissible only from consistent initial values. A requested but failed
+  // load-flow seed or an unavailable/non-converged fast-state residual cannot
+  // be converted into a successful time-domain result.
+  if (system.options.run_power_flow_initialization &&
+      (!system.initialization.power_flow_requested ||
+       !system.initialization.power_flow_converged)) {
+    results.success = false;
+    results.failed_step = 0;
+    results.message =
+        "Transient initialization failed before time stepping: requested power "
+        "flow did not converge";
+    return results;
+  }
+  if (system.options.trim_dynamic_initial_conditions &&
+      system.options.use_consistent_dynamic_initialization &&
+      (!system.initialization.initialization_attempted ||
+       !system.initialization.dynamic_residual_evaluated ||
+       !system.initialization.dynamic_trim_converged)) {
+    results.success = false;
+    results.failed_step = 0;
+    std::ostringstream os;
+    os << "Transient initialization failed before time stepping: consistent "
+          "dynamic initial state was not established (residual_evaluated="
+       << (system.initialization.dynamic_residual_evaluated ? "true" : "false")
+       << ", ||dx/dt||_fast,inf="
+       << system.initialization.dynamic_fast_dxdt_inf_norm
+       << ", tolerance=" << system.options.dynamic_trim_tol << ')';
+    if (!system.initialization.dynamic_residual_diagnostics.empty()) {
+      const auto worst = std::max_element(
+          system.initialization.dynamic_residual_diagnostics.begin(),
+          system.initialization.dynamic_residual_diagnostics.end(),
+          [](const auto& lhs, const auto& rhs) {
+            return std::abs(lhs.residual) < std::abs(rhs.residual);
+          });
+      os << "; worst state=" << worst->device_type << '#'
+         << worst->component_index << "[global=" << worst->state_index;
+      if (worst->local_state_index >= 0) {
+        os << ", local=" << worst->local_state_index;
+      }
+      os << "], residual=" << worst->residual;
+    }
+    results.message = os.str();
+    return results;
+  }
 
   append_temporary_restoration_events(system);
 
   if (system.options.solver_type == DynamicSolverType::MassMatrixDae) {
     return solve_mass_matrix_dae(system);
+  }
+
+  if (system.options.enable_der_protection && system.options.localize_der_protection_events) {
+    results.warnings.push_back(
+        "Protection event localization is unavailable for partitioned "
+        "integrators; "
+        "DER protection actions use accepted-step endpoint semantics.");
   }
 
   std::sort(system.events.begin(), system.events.end(),
@@ -2053,7 +2546,15 @@ DynamicResults DynamicSolver::solve(DynamicSystem& system) const {
       results.steps = step;
       return results;
     }
-    if (apply_protection(system, system.x.time_s, attempted_dt, results) &&
+    const bool protection_changed =
+        apply_protection(system, system.x.time_s, attempted_dt, results);
+    if (!results.success && !results.message.empty()) {
+      results.success = false;
+      results.failed_step = step;
+      results.steps = step;
+      return results;
+    }
+    if (protection_changed &&
         !system.solveNetwork(system.x.time_s, error)) {
       results.success = false;
       results.message = error;
