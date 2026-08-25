@@ -26,8 +26,33 @@ SCUC warm start/结构提示/分支优先级 & true/true/true & 必须存在\\
 
 \subsection{交叉校核层级}
 测试同时检查向量长度、备用平衡、LMP 有限性、结算记录和性能剖面；这些是源码结果
-与契约的同实现一致性校核。当前没有独立 LP/MILP 重建、MATPOWER 市场 oracle 或跨引擎
-LMP 比较，因此不能把 24/24 写成市场经济最优性证明。
+与契约的同实现一致性校核。第~\ref{sec:market-xref}~节的独立方程 oracle 现已在铜板银定价
+范围内提供独立重算的 LMP 与结算恒等式校核；含网阻塞 LMP、MATPOWER 市场 oracle 与跨引擎
+全网 LMP 比较仍未覆盖，故除铜板切片外不能把 24/24 写成市场经济最优性证明。
+
+\subsection{独立方程 oracle：铜板 SCED/LMP 与结算恒等式}\label{sec:market-xref}
+注册测试 \srcpath{market\_sced\_cross\_validation} 以两个确定性单母线铜板算例把生产日前市场
+\srcpath{src/market/market\_simulation.cpp:run\_day\_ahead\_market} 的定价与结算结果与一个不链接
+hacdcpf 的独立 Python oracle 对照。证据生成器
+\srcpath{tools/market\_validation/validate\_market\_xref.cpp:emit\_case} 用线性成本机组（边际
+20 与 40 currency/MWh，各 100 MW）在负荷 60 与 140 MW 下清算；oracle
+\srcpath{tools/market\_validation/run\_cross\_validation.py} 仅凭机组报价与负荷独立重算优先级调度栈
+与边际（定价）机组，得到无损单母线上均一的 LMP，并逐项核对收益充分性恒等式：
+资源电量收益 $=\sum_g \mathrm{LMP}_{bus(g)}p_g$、用户电量支付 $=\mathrm{LMP}\cdot D$、单母线阻塞租金为零、
+现金流残差为零。
+
+复现命令为
+\begin{verbatim}
+ctest --test-dir build/macos-release \
+  -R '^market_sced_cross_validation$' --output-on-failure
+\end{verbatim}
+
+两个算例的解析期望为：负荷 60 MW 时仅廉价机组边际，$\mathrm{LMP}=20$、出力 $(60,0)$、用户
+支付与资源收益均为 $1200$；负荷 140 MW 时廉价机组满发、调峰机组边际，$\mathrm{LMP}=40$、出力
+$(100,40)$、用户支付与资源收益均为 $5600$；两例阻塞租金与现金流残差均为 $0$。准入阈值为 $10^{-6}$；
+本轮九类检查最大误差为 $0$，负控制（人为改写一个 LMP）如期触发失败。该 oracle 校核铜板经济
+调度的边际定价与结算恒等式；有网络阻塞的 LMP、损耗、备用协优和 N-1 仍由市场 Catch2 套件验证，
+本节不以铜板一致性冒充含网市场的外部准确度。
 
 \subsection{失败与准入}
 SCUC 达到相对 gap 但未证明最优时，结果必须保留 \fld{scuc\_optimality\_proven=false}；

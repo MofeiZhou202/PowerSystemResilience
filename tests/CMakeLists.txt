@@ -243,6 +243,28 @@ if(Python3_EXECUTABLE AND
     LABELS "reliability;cross_validation;python_oracle"
     TIMEOUT 120)
 endif()
+
+# Market SCED/LMP + settlement independent equation oracle: validate_market_xref
+# emits the production day-ahead-market clearing for deterministic single-bus
+# copper-plate cases, and the numpy-free Python oracle re-derives the merit-order
+# LMP and the revenue-adequacy settlement identities.
+# See market/chapters/numerical_cross_validation.tex.
+if(Python3_EXECUTABLE AND
+   EXISTS "${CMAKE_SOURCE_DIR}/tools/market_validation/validate_market_xref.cpp" AND
+   EXISTS "${CMAKE_SOURCE_DIR}/tools/market_validation/run_cross_validation.py")
+  add_executable(market_sced_xref
+    "${CMAKE_SOURCE_DIR}/tools/market_validation/validate_market_xref.cpp")
+  target_link_libraries(market_sced_xref PRIVATE hacdcpf::hacdcpf)
+  add_test(NAME market_sced_cross_validation
+    COMMAND "${Python3_EXECUTABLE}"
+            "${CMAKE_SOURCE_DIR}/tools/market_validation/run_cross_validation.py"
+            --executable "$<TARGET_FILE:market_sced_xref>"
+            --out "${CMAKE_CURRENT_BINARY_DIR}/market_sced_cross_validation.json"
+            --markdown "${CMAKE_CURRENT_BINARY_DIR}/market_sced_cross_validation.md")
+  set_tests_properties(market_sced_cross_validation PROPERTIES
+    LABELS "market;cross_validation;python_oracle"
+    TIMEOUT 180)
+endif()
 hacdcpf_add_test(test_sppt_fault_campaign  test_sppt_fault_campaign.cpp)
 hacdcpf_add_test(test_sppt_agent           test_sppt_agent.cpp)
 

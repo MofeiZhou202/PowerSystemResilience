@@ -6,6 +6,33 @@ This is the living handoff for verified build state and active engineering work.
 Update it in place; do not create dated copies. Source, registered tests, and
 the current Git worktrees remain authoritative.
 
+## market SCED/LMP independent oracle (2026-08-24)
+
+`market` gained the same independent-oracle cross-check (logged as AUD-087). The
+deterministic slice is the fixed-commitment SCED price and settlement on a
+single-bus copper plate, where the locational marginal price and revenue
+identities have exact closed forms:
+
+- `tools/market_validation/validate_market_xref.cpp` — runs the production
+  `run_day_ahead_market` on two copper-plate cases (linear-cost units, marginal
+  20 and 40 currency/MWh, 100 MW each, at demand 60 and 140 MW) and dumps the
+  offers, demand, LMP, dispatch and settlement ledger.
+- `tools/market_validation/run_cross_validation.py` — a numpy-free oracle that
+  does **not** link hacdcpf; from the offers and demand alone it re-derives the
+  merit-order dispatch and the marginal (price-setting) offer — the uniform LMP
+  on a lossless bus — and independently checks the revenue-adequacy identities
+  (resource energy revenue = sum_g LMP_bus(g) * dispatch_g, customer energy
+  payment = LMP * demand, zero single-bus congestion rent, zero cash-flow
+  residual).
+
+Registered as the CTest test `market_sced_cross_validation`. The production
+clearing matched the analytic merit order exactly (demand 60 -> LMP 20, dispatch
+(60,0), payment 1200; demand 140 -> LMP 40, dispatch (100,40), payment 5600);
+the oracle passes with a worst error of `0` across nine checks at a `1e-6` gate,
+a negative control (rewriting one LMP) fails as expected, and the market manual
+recompiles with XeLaTeX. Verified in the Debug ASan build, with the Release run
+pending a clean `../MIPSolvers` worktree.
+
 ## reliability parameter-resolver independent oracle (2026-08-24)
 
 `reliability` gained the same independent-oracle cross-check as `carbon_analysis`
