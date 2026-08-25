@@ -150,10 +150,10 @@ MinCurtailment/\allowbreak MinLoss/\allowbreak Weighted）\\
   \item 开启 \fld{enable\_dc\_network\_constraints} 时\textbf{不追加显式 DC 支路热限}，
         仅经各换流器功率变量界隐式约束；
   \item MILP 受 \fld{mip\_gap}/时限约束（以 \fld{optimality\_proven}/\fld{mip\_gap\_target\_met} 标注）；
-  \item 按日并行对无 MILP 的 \texttt{DynamicOPF} 模式、Native 与 SCIP（可用且支持 MILP 时）无锁分派
-        （每日一工作线程），\texttt{Auto} 在该路径下优先解析为 SCIP；显式选择共享进程全局调度状态的
-        外部 MILP 后端退化为顺序日循环；按日独立性依赖循环终端 SOC
-        （\fld{enforce\_terminal\_soc\_cyclic}/\fld{enforce\_daily\_cyclic\_soc}）。依据：
+  \item 年度按日并行当前只准入无 MILP 的 \texttt{DynamicOPF}。固定式 AC/DC 储能要求
+        \fld{enforce\_daily\_cyclic\_soc=true}，并逐日核验终端 SOC；这允许日内调度，但排除跨日/季节
+        能量搬移。移动储能的旅行/SOC 状态及 UC/爬坡状态仍须走耦合顺序路径。底层保留的 Native、
+        SCIP 与外部 MILP 后端并发守卫不代表年度 SCUC/SCED 已准入。依据：
         \srcpath{src/time\_series/time\_series\_pf.cpp:resolve\_parallel\_daily\_uc\_solver}、
         \srcpath{src/time\_series/annual\_production\_sim.cpp:solve\_parallel\_daily}；
   \item 生命周期 C++ 核心不消费 \fld{LifecycleSimOptions.step\_duration\_hr}；真实分辨率来自

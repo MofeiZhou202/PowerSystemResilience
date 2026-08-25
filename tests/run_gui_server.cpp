@@ -24549,6 +24549,8 @@ int main(int argc, char** argv) {
             {"reserve_fraction", std::max(0.0, reserve_frac)},
             {"economic_dispatch_opf", opts.ts_pf_options.run_opf},
             {"cyclic_soc", opts.enforce_cyclic_soc},
+            {"daily_cyclic_soc", opts.enforce_daily_cyclic_soc},
+            {"inter_day_storage_energy_transfer", !opts.enable_parallel_daily},
             {"generator_energy_budget_mwh", opts.generator_energy_budget_mwh},
             {"fuel_budget_mwh", opts.fuel_budget_mwh},
             {"iterative_feedback", opts.iterative_feedback}};

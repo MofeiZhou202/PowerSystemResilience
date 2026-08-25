@@ -10,6 +10,20 @@ Git 工作树仍为准绳。
 
 ## Windows Release 与分发基线（2026-08-25）
 
+年度与普通时序求解的按日并行准入现已允许在役的固定式 AC、legacy DC 和
+扩展 DC 储能。每个独立日窗都强制终端 SOC 回到 authored 初值，年度结果以
+`1e-8` 为最大边界残差门限；轨迹缺失或残差超限均判为不可行。结果范围明确
+排除跨日和季节储能能量搬移。年度 SCUC/DynamicSCED 及启用的移动储能仍走
+耦合顺序路径，因为启停/爬坡和旅行/SOC 边界状态尚未在日窗间传递。
+
+已在 `windows-msvc-release` 核实：受影响的 `test_nighttime_opf`、
+`test_multiscale_comprehensive` 和 `run_gui_server` 目标重建成功。
+`test_multiscale_comprehensive "[integration][time_series]"` 的 6 个用例、
+64 条断言全部通过，包含新增的年度两日循环 SOC 准入/拒绝回归；
+`test_nighttime_opf "[time_series]"` 的 1 个用例、28 条断言全部通过，包含
+48 小时扩展 DC 储能按日并行，并核验两个日边界终端 SOC 均等于 authored 值。
+更新后的时序手册也已通过 XeLaTeX 编译（52 页）。
+
 HySim `windows` 分支钉定干净的兄弟仓库 `../MIPSolvers` 的
 `windows-hysim` 分支提交 `a39812aa5941691b44e8379a8e0b7d42ccdde955`。
 `cmake --preset windows-msvc-release` 后接

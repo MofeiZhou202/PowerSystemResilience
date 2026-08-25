@@ -5,6 +5,7 @@
 #include <cctype>
 #include <cmath>
 #include <future>
+#include <limits>
 #include <numeric>
 #include <sstream>
 #include <stdexcept>
@@ -31,6 +32,18 @@ static double checked_step_duration_hr(const TimeSeriesData& ts_data) {
         "TimeSeriesData.step_duration_hr must be positive and finite");
   }
   return ts_data.step_duration_hr;
+}
+
+template <typename StorageRange>
+static bool has_in_service_storage(const StorageRange& storage) {
+  return std::any_of(storage.begin(), storage.end(),
+                     [](const auto& item) { return item.in_service; });
+}
+
+static bool has_stationary_storage(const HybridPowerSystem& sys) {
+  return has_in_service_storage(sys.ac.storage) ||
+         has_in_service_storage(sys.dc.storage) ||
+         has_in_service_storage(sys.dc.dc_storage);
 }
 
 static void validate_annual_options(const AnnualProductionSimOptions& opts) {
@@ -1294,8 +1307,12 @@ static AnnualProductionSimResult solve_parallel_daily(
   result.step_duration_hr = dt;
   result.schedule_only = opts.skip_replay;
   result.model_scope = opts.skip_replay
-      ? "parallel-daily-uc-schedule-only; no AC OPF/PF certification"
-      : "parallel-daily-uc-opf-pf-replay";
+      ? "parallel-daily-dynamic-opf-schedule-only; no AC OPF/PF certification"
+      : "parallel-daily-dynamic-opf-pf-replay";
+  if (has_stationary_storage(sys)) {
+    result.model_scope +=
+        "; per-day-cyclic-soc; no inter-day storage energy transfer";
+  }
   if (T_yr <= 0) return result;
   result.step_results.resize(static_cast<size_t>(T_yr));
 
@@ -1437,6 +1454,35 @@ static AnnualProductionSimResult solve_parallel_daily(
     for (auto& s : v) result.pf_snapshots.push_back(std::move(s));
   }
 
+  // Each schedule row stores end-of-period SOC. Certify every independent
+  // day's terminal value against the authored initial SOC; rows are ordered as
+  // active AC storage, then active legacy/rich DC storage respectively.
+  const auto update_soc_residual = [&](const auto& storage,
+                                       const auto& rows,
+                                       size_t& active_pos) {
+    for (const auto& item : storage) {
+      if (!item.in_service) continue;
+      if (active_pos >= rows.size() || rows[active_pos].empty()) {
+        result.max_soc_boundary_residual =
+            std::numeric_limits<double>::infinity();
+      } else {
+        const double target =
+            std::clamp(item.soc_init, item.soc_min, item.soc_max);
+        result.max_soc_boundary_residual = std::max(
+            result.max_soc_boundary_residual,
+            std::abs(rows[active_pos].back() - target));
+      }
+      ++active_pos;
+    }
+  };
+  for (const auto& day : result.weekly_schedules) {
+    size_t ac_pos = 0;
+    update_soc_residual(sys.ac.storage, day.uc.ess_soc, ac_pos);
+    size_t dc_pos = 0;
+    update_soc_residual(sys.dc.storage, day.uc.dc_ess_soc, dc_pos);
+    update_soc_residual(sys.dc.dc_storage, day.uc.dc_ess_soc, dc_pos);
+  }
+
   // Monthly summaries + component statistics (reuse the sequential helpers).
   auto block_ranges = build_block_ranges(T_yr, dt, AnnualBlockType::Monthly);
   result.monthly_summaries.reserve(block_ranges.size());
@@ -1480,7 +1526,9 @@ static AnnualProductionSimResult solve_parallel_daily(
   result.ens_complete = std::all_of(
       result.monthly_summaries.begin(), result.monthly_summaries.end(),
       [](const BlockSummary& b) { return b.ens_complete; });
-  result.feasible = uc_feasible && (opts.skip_replay || replay_complete);
+  result.feasible = uc_feasible &&
+      result.max_soc_boundary_residual <= 1e-8 &&
+      (opts.skip_replay || replay_complete);
   const char* mode_tag = (opts.daily_mode == DailySimMode::SCUC) ? "SCUC"
                          : (opts.daily_mode == DailySimMode::DynamicSCED)
                              ? "dyn-SCED"
@@ -1559,17 +1607,28 @@ AnnualProductionSimResult solve_annual_production_simulation(
     return result;
   }
 
-  // Parallel daily decomposition path: independent, energy-neutral calendar days
-  // solved concurrently. It is not a valid annual UC/SOC formulation because
-  // day boundaries would reset commitment and storage state; reject that
-  // combination instead of returning an uncertified approximation.
+  // Parallel daily decomposition path: independent, energy-neutral calendar
+  // days solved concurrently. DynamicOPF has no commitment/ramp state. Its
+  // stationary storage trajectories are admissible only when every day is
+  // cyclic, which removes the inter-day SOC dependency. Seasonal/inter-day
+  // energy transfer and UC state still require the coupled sequential path.
   if (opts.enable_parallel_daily) {
-    if (opts.daily_mode != DailySimMode::DynamicOPF ||
-        !sys.ac.storage.empty() || !sys.dc.storage.empty() ||
-        !sys.dc.dc_storage.empty()) {
+    if (opts.daily_mode != DailySimMode::DynamicOPF) {
       throw std::invalid_argument(
-          "enable_parallel_daily requires DynamicOPF with no storage; "
-          "annual UC/SOC continuity requires the coupled sequential path");
+          "enable_parallel_daily requires DynamicOPF; annual commitment and "
+          "ramp continuity require the coupled sequential path");
+    }
+    if (has_stationary_storage(sys) && !opts.enforce_daily_cyclic_soc) {
+      throw std::invalid_argument(
+          "enable_parallel_daily with storage requires "
+          "enforce_daily_cyclic_soc=true; inter-day energy transfer requires "
+          "the coupled sequential path");
+    }
+    if (opts.ts_pf_options.enable_mobile_storage &&
+        has_in_service_storage(sys.mobile_storage)) {
+      throw std::invalid_argument(
+          "enable_parallel_daily does not support mobile-storage travel/SOC "
+          "state; use the coupled sequential path");
     }
     return solve_parallel_daily(sys, ts_data, opts);
   }

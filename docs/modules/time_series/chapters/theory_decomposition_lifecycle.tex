@@ -153,7 +153,7 @@ w_t&=W_t/e_t\quad(e_t>0)
 滚动状态传递，式~\eqref{eq:ts-rolling} &
 \implfull{顺序年度采用单一全年度 UC；周对象是切片，SOC/爬坡/commitment 跨周连续}\\
 日独立分解等价条件，定理~\ref{thm:ts-day-separable} &
-\implpart{顺序年度状态连续；带 UC 或储能的并行日组合被入口拒绝，仅保留无状态 DynamicOPF 快照}\\
+\implpart{顺序年度状态连续；并行日仅准入 DynamicOPF，固定式 AC/DC 储能以逐日循环 SOC 解耦，UC/移动储能仍拒绝}\\
 代表日聚类/转移矩阵/极端日尾部加权 & \implnone\\
 分层抽样与 Neyman 权重，式~\eqref{eq:ts-stratified} &
 \implpart{估计器使用确定性固定层内样本，并对样本小时执行独立 OPF/PF correction；仍不是随机抽样覆盖率证明}\\

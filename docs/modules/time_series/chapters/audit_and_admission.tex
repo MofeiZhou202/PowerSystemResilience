@@ -14,7 +14,7 @@ L0 年度计划 & 块预算映射到全年度 UC 积分不等式；块成本仍�
 年度公共选项 & cyclic SOC/penalty、budget 和 bottom-up feedback 已接线 & hard budget 违约保持 infeasible；feedback 无物理 replay 时显式拒绝 & 已闭环/范围声明\\
 周窗连续性 & 全年度 UC 后按周切片，SOC/开停/爬坡/预算跨周连续 & 会重置状态的并行日 UC 组合被入口拒绝 & 已闭环/显式拒绝\\
 日 replay 字段 & 当前 UCSchedule 全部二维轨迹、方向和 solver certificate 均切片 & 只有没有 schedule row 的扩展状态仍不在此契约内 & 部分闭环\\
-日并行 & 仅允许无 UC、无储能的 DynamicOPF；其余组合显式拒绝 & 不再返回未认证的独立日年度结果 & 已闭环\\
+日并行 & 仅允许 DynamicOPF；固定式 AC/DC 储能须逐日循环 SOC，移动储能及 UC 模式显式拒绝 & 无跨日储能搬移；缺失/超差的日末 SOC 证书使结果不可行 & 已闭环/范围声明\\
 年度 accounting & 经典机组/储能/可再生/外部电网闭环 & VPP/微网/移动储能/路由器/DR 归因不完整 & 开放边界\\
 年度弃电/ENS & 逐步可用-调度差、OPF dpd 和 schedule ENS proxy 均带 provenance & 物理失败不再隐式写零；未知值需查 known flag & 部分闭环\\
 年度可行性 & 顺序/并行均聚合 UC 与必需 OPF/PF 证书 & schedule-only 仍不是全年 AC 认证 & 已闭环/范围声明\\

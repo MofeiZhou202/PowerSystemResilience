@@ -8,6 +8,24 @@ the current Git worktrees remain authoritative.
 
 ## Windows Release and distribution baseline (2026-08-25)
 
+The annual and plain time-series daily-parallel admission contract now permits
+in-service stationary AC, legacy DC, and rich DC storage. Every independent day
+forces terminal SOC back to the authored initial SOC, and the annual result
+certifies a maximum boundary residual of `1e-8`; missing trajectories or larger
+residuals are infeasible. The result scope explicitly excludes inter-day and
+seasonal storage energy transfer. Annual SCUC/DynamicSCED and enabled mobile
+storage remain on the coupled sequential path because commitment/ramp and
+travel/SOC boundary states are not yet exchanged between days.
+
+Verified on `windows-msvc-release`: the affected `test_nighttime_opf`,
+`test_multiscale_comprehensive`, and `run_gui_server` targets rebuilt
+successfully. `test_multiscale_comprehensive "[integration][time_series]"`
+passed 6 test cases / 64 assertions, including the new annual two-day cyclic
+SOC admission/rejection test. `test_nighttime_opf "[time_series]"` passed 1
+test case / 28 assertions, including a 48-hour rich-DC-storage parallel run
+whose terminal SOC matches the authored value at both day boundaries. The
+updated time-series manual also compiles successfully with XeLaTeX (52 pages).
+
 The `windows` HySim branch pins the clean sibling `../MIPSolvers`
 `windows-hysim` branch at `a39812aa5941691b44e8379a8e0b7d42ccdde955`.
 `cmake --preset windows-msvc-release` followed by

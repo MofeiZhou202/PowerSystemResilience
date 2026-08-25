@@ -5,8 +5,8 @@
 \srcpath{include/hacdcpf/time\_series/annual\_production\_sim.hpp} 与
 \srcpath{src/time\_series/annual\_production\_sim.cpp} 的现行行为。它不是年度生产模拟的理想化
 路线图；凡公共字段已声明但实现没有读取，均明确标为 ``未消费''。年度入口的顺序层级路径执行
-L0--L2--L3；\fld{enable\_parallel\_daily=true} 仅对无 UC、无储能的 DynamicOPF 日快照开放，
-任何会重置年度状态的组合在入口显式拒绝。
+L0--L2--L3；\fld{enable\_parallel\_daily=true} 仅对 DynamicOPF 日快照开放。
+固定式 AC/DC 储能以逐日循环 SOC 解耦；UC/爬坡、移动储能状态和跨日/季节能量搬移仍在入口显式拒绝。
 
 \subsection{时间网格、块边界与 profile 切片}
 令输入步数为 $T$、步长为 $\Delta t$ h。\srcpath{checked\_step\_duration\_hr} 的前置条件是
@@ -41,8 +41,8 @@ $(31,28,31,30,31,30,31,31,30,31,30,31)$ 和 $N(24)$；第 12 月直接吸收全�
 \fld{block\_type} & 已消费 & 仅顺序路径决定 L0 块；并行路径的汇总始终按月。\\
 \fld{weekly\_lookahead\_hours} & 已消费 & 转换为 $N(H)$ 后追加到周 UC 求解窗；$\le0$ 表示零前瞻。\\
 \fld{daily\_window\_hours} & 已消费 & 顺序路径的 replay 窗和并行路径的 ``日'' 长度；名称虽为 hour，类型为整数。\\
-\fld{enable\_parallel\_daily} & 已消费 & 仅选择无 UC、无储能的 DynamicOPF 日快照；其余组合显式拒绝。\\
-\fld{daily\_mode} & 已消费 & 选择 SCUC、DynamicSCED 或 DynamicOPF。\\
+\fld{enable\_parallel\_daily} & 已消费 & 仅选择 DynamicOPF 日快照；固定式储能还要求逐日循环 SOC。\\
+\fld{daily\_mode} & 已消费 & 年度并行入口当前仅准入 DynamicOPF；SCUC/DynamicSCED 的内部配置映射仍保留但不可达。\\
 \fld{parallel\_threads} & 已消费 & $0$ 交给 worker 解析器；结果记录请求数、解析数和实际并行数。\\
 \fld{enforce\_daily\_cyclic\_soc} & 已消费 & 映射到日问题的 \fld{enforce\_terminal\_soc\_cyclic}。\\
 \fld{sced\_reuse\_scuc\_commitment} & 已消费 & DynamicSCED 可先解一个代表峰日 SCUC 并复用 commitment。\\
@@ -120,9 +120,11 @@ EnergyRouter 和 DC 支路流等扩展轨迹。
 缺失行回退。报告中 ``replay'' 只对实际保留下来的预计算字段保持周 UC 一致，不能推广到被遗漏的扩展块。
 
 \subsection{并行日路径的准入边界}
-并行日只对无 UC、无储能的 DynamicOPF 快照开放。SCUC、DynamicSCED 或含 AC/DC/扩展储能时，
-入口返回参数错误并要求使用全年度耦合路径；这避免日边界重置启停、爬坡和 SOC 状态。\\
-\srcpath{make\_daily\_pf\_options} 的精确覆写如下（仅描述单日快照内部配置；年度并行准入仍受上文守卫约束）。
+并行日只对 DynamicOPF 快照开放。固定式 AC、legacy DC 和扩展 DC 储能在
+\fld{enforce\_daily\_cyclic\_soc=true} 时准入：每日日末 SOC 必须回到 authored 初值，缺少轨迹或
+残差超过 $10^{-8}$ 会令年度结果不可行。该模式没有跨日/季节能量搬移。SCUC、DynamicSCED，以及
+启用的移动储能仍返回参数错误并要求使用全年度耦合路径。\\
+\srcpath{make\_daily\_pf\_options} 的精确覆写如下（仅描述内部保留配置；年度并行准入仍受上文守卫约束）。
 \begin{center}\footnotesize
 \begin{tabular}{@{}L{3.0cm}cccL{5.6cm}@{}}
 \toprule
@@ -133,7 +135,8 @@ DynamicOPF & true & true & false & 跳过 UC，仅做逐步 OPF/PF。\\
 \bottomrule
 \end{tabular}
 \end{center}
-三种模式都关闭系统快照、清空预计算日程指针，并将日循环开关传给核心 SOC 约束。
+三种内部配置都关闭系统快照、清空预计算日程指针，并将日循环开关传给核心 SOC 约束；当前只有
+DynamicOPF 能通过年度入口。
 请求并行时 AC OPF 后端强制为 \texttt{ParityIPM}。
 
 DynamicSCED 启用代表日复用时，只搜索 \fld{id=0} 的 profile，以该 profile 日内最大值最大的日为
@@ -146,8 +149,8 @@ DynamicSCED 启用代表日复用时，只搜索 \fld{id=0} 的 profile，以该
 \fld{parallel\_daily\_effective}、\fld{parallel\_execution.actual\_parallel\_evaluations} 和
 \fld{guard\_reason} 才是是否真正并行的证据。
 
-独立日问题没有跨日 commitment、爬坡、最小开停机或 SOC 连续性；开启日循环 SOC 只是令每个日窗
-能量中性。并行路径还不生成 \fld{annual\_plan}，却把每日结果存入名为
+独立日问题没有跨日 commitment、爬坡、最小开停机或 SOC 连续性；固定式储能通过日循环 SOC 令
+每个日窗能量中性，因此允许日内充放电，但不能表达跨日套利。并行路径还不生成 \fld{annual\_plan}，却把每日结果存入名为
 \fld{weekly\_schedules} 的容器（此时 \fld{week\_id} 实际是 day id）。
 
 \subsection{逐步功率、损耗、外部电网与成本会计}

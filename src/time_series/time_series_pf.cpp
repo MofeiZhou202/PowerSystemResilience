@@ -3812,11 +3812,10 @@ TimeSeriesPFResult solve_time_series_pf(const HybridPowerSystem& sys_in,
     const int day_len = std::max(1, static_cast<int>(std::lround(24.0 / dt)));
     const int num_days = (T + day_len - 1) / day_len;
     if (num_days > 1) {
-      if (!opts.skip_uc || !sys_in.ac.storage.empty() ||
-          !sys_in.dc.storage.empty() || !sys_in.dc.dc_storage.empty()) {
+      if (!opts.skip_uc) {
         throw std::invalid_argument(
-            "parallel_daily cannot reset UC/SOC state; use a coupled "
-            "horizon or provide an explicit precomputed schedule");
+            "parallel_daily cannot reset UC state; use a coupled horizon or "
+            "provide an explicit precomputed schedule");
       }
       TimeSeriesPFOptions day_opts = opts;
       day_opts.parallel_daily = false;              // each day is a plain solve
@@ -4227,9 +4226,15 @@ TimeSeriesPFResult solve_time_series_pf(const HybridPowerSystem& sys_in,
               row[ti] = need_charge ? original - lo : original + lo;
             }
           }
-          (void)simulate(true);
+          const auto [final_soc, final_valid] = simulate(true);
+          if (!final_valid || std::abs(final_soc - target_soc) > 1e-8) {
+            schedule.feasible = false;
+            if (!schedule.solver_status.empty()) schedule.solver_status += "; ";
+            schedule.solver_status +=
+                "cyclic SOC fallback could not satisfy the terminal boundary";
+          }
         }
-          ++sidx;
+        ++sidx;
         }
       };
 

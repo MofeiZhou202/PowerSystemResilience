@@ -9,7 +9,7 @@ L0 & \srcpath{solve\_annual\_plan} 按月（31/28/31/... 日）或 52 周切块�
 机组能量预算为 $P^{max}|B|\Delta t$，燃料预算 $10^{30}$，SOC 目标等于初值 & 是 heuristic seed，不是 L0 优化；块成本是负荷能量乘平均 $c_1$\\
 L2 & 每个块中按 168 h binding window 求 UC，可附加 48 h lookahead & lookahead 只给 UC 终端上下文；周与周之间没有真实 SOC 链接\\
 L3 & 将周 UC 的 dispatch/commit/SOC 行切成日窗，传入 \fld{precomputed\_uc\_schedule}，再做 OPF/PF replay & 物理校核在日窗执行；前级失败不会被“PF fallback”伪装成成功\\
-并行日 & 仅用于无 UC、无储能的 DynamicOPF 日快照；带 UC 或储能时入口拒绝 & 不产生跨日状态断裂的年度证书\\
+并行日 & 仅用于 DynamicOPF 日快照；固定式 AC/DC 储能要求每日日末 SOC 回到 authored 初值 & 日内储能可调度，但不产生跨日/季节能量搬移证书；移动储能仍拒绝\\
 \bottomrule
 \end{longtable}
 
@@ -18,14 +18,14 @@ L3 & 将周 UC 的 dispatch/commit/SOC 行切成日窗，传入 \fld{precomputed
 \begin{tabular}{@{}L{3.0cm}L{3.0cm}L{3.0cm}L{5.1cm}@{}}
 \toprule
 模式 & UC & OPF/PF & 适用口径\\ \midrule
-SCUC & 每日二进制 UC & 逐步 OPF + PF & 运行约束和启停都进入日窗；最完整的并行生产模式\\
-DynamicSCED & commitment 固定（代表峰日 SCUC 或全 ON） & 不运行逐步 OPF & LP/存储模式约束为主，适合快速生产成本\\
+SCUC & 每日二进制 UC & 逐步 OPF + PF & 配置映射保留，但年度并行入口拒绝，避免重置启停/爬坡状态\\
+DynamicSCED & commitment 固定（代表峰日 SCUC 或全 ON） & 不运行逐步 OPF & 配置映射保留，但年度并行入口拒绝跨日爬坡状态\\
 DynamicOPF & \fld{skip\_uc=true} & 逐步 AC-OPF + PF & 不产生 UC commitment，不应报告启停/启动成本\\
 \bottomrule
 \end{tabular}
 \end{center}
-并行时 OPF 强制使用 ParityIPM；Native B\&C/SCIP 可并行，HiGHS/Gurobi 等共享全局调度状态
-退化为 serial-guarded。\fld{parallel\_execution.mode}、\fld{parallel\_daily\_effective}、
+当前年度并行准入只使用无 MILP 的 DynamicOPF，并强制 OPF 使用 ParityIPM。代码中保留的
+Native B\&C/SCIP 与外部 MILP 后端守卫只服务尚未准入的 UC 日模式。\fld{parallel\_execution.mode}、\fld{parallel\_daily\_effective}、
 \fld{parallel\_workers} 和 \fld{parallel\_execution.guard\_reason} 是并行声明的唯一依据。
 
 \subsection{年度累计公式}

@@ -100,7 +100,7 @@ ctest --preset macos-release
 - 结果必须明确验证层级、索引空间、单位、数据来源、求解器状态、容差、近似、fallback、time-limit、schedule-only 和未覆盖组件；未执行的交叉验证不得写成已完成。
 - 不得夸大能力、验证范围或精度。OpenDSS、GridLAB-D 等外部程序只能作为其实际覆盖范围内的 oracle，不能替代 UC、生命周期、控制器或未建模物理的证据。
 - 不能闭环的选项必须显式拒绝、返回错误或标记为 unsupported/model limitation；不得保留“看似可用但不生效”的字段，也不得用零值把未知量伪装成已验证结果。
-- 年度时序的 `enable_parallel_daily` 只允许无 UC、无储能的 `DynamicOPF` 快照；任何会重置跨日启停、爬坡或 SOC 的组合必须在入口拒绝，不能以独立日拼接冒充全年耦合结果。生命周期储能碳必须按时间顺序递推库存，不能把 `soc_carbon_intensity_tco2_mwh` 当作永久常数。
+- 年度时序的 `enable_parallel_daily` 只允许 `DynamicOPF`；固定式 AC/DC 储能仅在 `enforce_daily_cyclic_soc=true`、每个日窗末端 SOC 回到 authored 初值时准入，且结果必须声明不支持跨日/季节能量搬移。UC/爬坡状态和移动储能旅行/SOC 仍只能走耦合顺序路径。生命周期储能碳必须按时间顺序递推库存，不能把 `soc_carbon_intensity_tco2_mwh` 当作永久常数。
 - 修改代码、接口、数学模型或测试后，必须同步更新对应模块手册、审计记录和开发状态；在公式—源码—测试—数值证据未齐全前，不得宣称完成。
 
 - 文档导航唯一入口 `docs/README.md`；区分**实现契约**（可更新）与**理论参考**（不承诺全部投产）。

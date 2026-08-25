@@ -160,6 +160,30 @@ TEST_CASE("Canvas power_system time-series production paths converge",
     CHECK(result.num_opf_converged == 4);
     CHECK(result.num_converged == 4);
   }
+
+  SECTION("parallel days keep rich DC storage cyclic") {
+    REQUIRE(sys.dc.storage.empty());
+    REQUIRE(sys.dc.dc_storage.size() == 1);
+
+    hacdcpf::TimeSeriesPFOptions opts;
+    opts.skip_uc = true;
+    opts.run_opf = false;
+    opts.parallel_daily = true;
+    opts.parallel_threads = 2;
+    const auto result = hacdcpf::solve_time_series_pf(
+        sys, canvas_daily_profiles(48), opts);
+
+    INFO(result.uc_schedule.solver_status);
+    REQUIRE(result.parallel_daily_effective);
+    REQUIRE(result.uc_schedule.feasible);
+    REQUIRE(result.uc_schedule.dc_ess_soc.size() == 1);
+    REQUIRE(result.uc_schedule.dc_ess_soc[0].size() == 48);
+    const double initial_soc = sys.dc.dc_storage[0].soc_init;
+    CHECK_THAT(result.uc_schedule.dc_ess_soc[0][23],
+               Catch::Matchers::WithinAbs(initial_soc, 1e-8));
+    CHECK_THAT(result.uc_schedule.dc_ess_soc[0][47],
+               Catch::Matchers::WithinAbs(initial_soc, 1e-8));
+  }
 }
 
 TEST_CASE("Nansha OPF: nighttime (no generators) converges via external grid cost",

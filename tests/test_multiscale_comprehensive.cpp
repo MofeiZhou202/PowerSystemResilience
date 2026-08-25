@@ -436,6 +436,89 @@ TEST_CASE("Annual budgets, coupled SOC and lifecycle sampled PF are evidenced",
       std::invalid_argument);
 }
 
+TEST_CASE("Parallel annual days admit stationary storage with cyclic SOC",
+          "[integration][time_series][parallel_daily][storage]") {
+  HybridPowerSystem sys;
+  sys.base_mva = 100.0;
+
+  ACBus bus;
+  bus.index = 1;
+  bus.bus_type = BusType::SLACK;
+  bus.base_kv = 110.0;
+  sys.ac.buses.push_back(bus);
+
+  Load load;
+  load.index = 1;
+  load.bus = 1;
+  load.p_mw = 20.0;
+  load.profile_id = 0;
+  sys.ac.loads.push_back(load);
+
+  Generator gen;
+  gen.index = 1;
+  gen.bus = 1;
+  gen.is_slack = true;
+  gen.pmax_mw = 100.0;
+  gen.qmin_mvar = -100.0;
+  gen.qmax_mvar = 100.0;
+  gen.cost_c1 = 30.0;
+  sys.ac.generators.push_back(gen);
+
+  Storage storage;
+  storage.index = 1;
+  storage.bus = 1;
+  storage.pmin_mw = -5.0;
+  storage.pmax_mw = 5.0;
+  storage.p_rated_mw = 5.0;
+  storage.e_rated_mwh = 20.0;
+  storage.soc_init = 0.55;
+  storage.soc_min = 0.1;
+  storage.soc_max = 0.9;
+  storage.eta_charge = 0.95;
+  storage.eta_discharge = 0.95;
+  sys.ac.storage.push_back(storage);
+
+  TimeSeriesData ts;
+  ts.num_steps = 48;
+  ts.step_duration_hr = 1.0;
+  ts.profiles = {{0, "load", {}}};
+  ts.profiles[0].values.reserve(48);
+  for (int t = 0; t < 48; ++t) {
+    const int hour = t % 24;
+    ts.profiles[0].values.push_back(
+        hour < 7 ? 0.7 : (hour < 18 ? 1.0 : 1.2));
+  }
+
+  analysis::AnnualProductionSimOptions opts;
+  opts.enable_parallel_daily = true;
+  opts.daily_mode = analysis::DailySimMode::DynamicOPF;
+  opts.enforce_daily_cyclic_soc = true;
+  opts.parallel_threads = 2;
+  opts.skip_replay = true;
+  opts.ts_pf_options.run_opf = false;
+  opts.pf_snapshot_interval = 0;
+
+  const auto result = analysis::solve_annual_production_simulation(sys, ts, opts);
+  INFO(result.summary());
+  REQUIRE(result.feasible);
+  REQUIRE(result.parallel_daily_effective);
+  REQUIRE(result.weekly_schedules.size() == 2);
+  for (const auto& day : result.weekly_schedules) {
+    REQUIRE(day.uc.ess_soc.size() == 1);
+    REQUIRE_FALSE(day.uc.ess_soc[0].empty());
+    CHECK(day.uc.ess_soc[0].back() == Approx(storage.soc_init).margin(1e-8));
+  }
+  CHECK(result.max_soc_boundary_residual <= 1e-8);
+  CHECK(result.model_scope.find("per-day-cyclic-soc") != std::string::npos);
+  CHECK(result.model_scope.find("no inter-day storage energy transfer") !=
+        std::string::npos);
+
+  opts.enforce_daily_cyclic_soc = false;
+  REQUIRE_THROWS_AS(
+      analysis::solve_annual_production_simulation(sys, ts, opts),
+      std::invalid_argument);
+}
+
 TEST_CASE("Lifecycle storage: duplicate names and repeated replacement stay index-keyed",
           "[integration][time_series][lifecycle][closure]") {
   // AUD-070 regression: two storages that SHARE a name but have distinct

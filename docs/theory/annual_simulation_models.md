@@ -112,16 +112,25 @@ partitioned into $D = \lceil T_{yr}/\tau \rceil$ calendar days
 ($\tau = $ `daily_window_hours`$/\Delta t$), each solved as an independent
 `solve_time_series_pf` horizon with **per-day cyclic SOC**
 ($e_{k,\tau-1} = e^{init}_k$, imposed as a variable bound), then stitched.
+The production admission gate currently accepts only `DynamicOPF`. In-service
+stationary AC, legacy DC, and rich DC storage are admitted only when
+`enforce_daily_cyclic_soc=true`; missing or out-of-tolerance terminal SOC
+trajectories make the annual result infeasible. This is a bank of independent
+energy-neutral days, not a model of inter-day or seasonal storage transfer.
+SCUC/DynamicSCED state and enabled mobile-storage travel/SOC remain on the
+coupled sequential path.
 
-### 3.1 The three daily modes
+### 3.1 Daily-mode mappings and current admission
 
 | Mode | UC MILP | Per-step OPF | Commitment | Problem class / day |
 |---|---|---|---|---|
-| `SCUC` | yes | yes | optimised (binary) | MILP + $\tau$ NLPs |
-| `DynamicSCED` | yes (binaries pinned) | no | from a representative day, else all-ON | **LP** (+ storage-mode binaries if lossy) |
-| `DynamicOPF` | no | yes | n/a (`skip_uc`) | $\tau$ NLPs + ESS fallback rule |
+| `SCUC` | yes | yes | optimised (binary) | Mapping retained; annual parallel gate rejects it |
+| `DynamicSCED` | yes (binaries pinned) | no | from a representative day, else all-ON | Mapping retained; annual parallel gate rejects it |
+| `DynamicOPF` | no | yes | n/a (`skip_uc`) | **Admitted**; $\tau$ NLPs + cyclic ESS fallback rule |
 
-`DynamicSCED` commitment source (`:1095–1134`): when
+The following `DynamicSCED` commitment source remains implemented behind the
+mode mapping but is not reachable through the current annual parallel
+admission gate. When
 `sced_reuse_scuc_commitment=true`, the **peak-load day** (max of profile 0
 within each day) is solved once as a full SCUC and its binary schedule
 $u^\ast_{g,t}$ is replayed on every other day via
@@ -134,9 +143,11 @@ over-committed on low-load days (extra no-load cost, less startup cycling).
 
 ### 3.2 Concurrency model
 
-Identical guard architecture to the TSPF layer: SCIP or single-thread native
-B&C per day (parallel-safe), HiGHS/Gurobi guarded to a serial loop; OPF forced
-to the thread-safe parity IPM; each worker writes only its own indexed slots
+The admitted DynamicOPF path uses no MILP and forces OPF to the thread-safe
+parity IPM. The retained TSPF guard architecture classifies SCIP or
+single-thread native B&C as per-day parallel-safe and HiGHS/Gurobi as a guarded
+serial loop, but this does not imply that annual SCUC/SCED is admitted. Each
+worker writes only its own indexed slots
 (`day_scheds[d]`, `day_snaps[d]`, `result.step_results[g0..g1)`) so the region
 is lock-free except one `std::atomic<int>` feasibility counter. Wall-clock
 $\approx \lceil D/W \rceil \cdot t_{day}$, $W = \min(\text{cores}, D)$;
@@ -373,17 +384,17 @@ $t_{OPF}$, $t_{PF}$ per-step solve times.
 | Path | Cost model | Notes |
 |---|---|---|
 | Hierarchical | $\sum_{w=1}^{52} t_{UC}(168{+}48) + T_{yr}(t_{OPF}+t_{PF})$ | serial; weekly MILP (168·G binaries) is the pacing item |
-| Parallel SCUC | $\lceil 365/W\rceil\,[\,t_{UC}(24) + \tau(t_{OPF}{+}t_{PF})]$ | near-linear speedup to $W=\min(\text{cores},365)$ |
-| Parallel DynamicSCED | $t_{UC}^{SCUC}(24) + \lceil 365/W\rceil\, t_{LP}(24)$ | one MILP total; days are LPs |
-| Parallel DynamicOPF | $\lceil 365/W\rceil\,\tau\, t_{OPF}$ | no MILP; ESS by fallback rule |
+| Parallel SCUC | structural mapping only | current annual admission gate rejects UC state resets |
+| Parallel DynamicSCED | structural mapping only | current annual admission gate rejects ramp/commitment state resets |
+| Parallel DynamicOPF | $\lceil 365/W\rceil\,\tau\, t_{OPF}$ | admitted; no MILP; stationary ESS is cyclic within every day |
 | Lifecycle (per scenario) | $Y \times$ hierarchical-with-`skip_replay` | weekly UC only, no OPF/PF |
 
-The decisive effect is **structural, not just parallel**: a coupled 8760-step
-SCUC has $8760G$ binaries and is out of reach for any backend here, while 365
-24-step SCUCs each carry $24G$ binaries and solve in near-constant time —
-day decomposition converts superlinear (worst-case exponential) growth in $T$
-into linear growth, and threads then divide the constant. `DynamicSCED`
-removes even that: one representative MILP, then LPs.
+For the currently admitted DynamicOPF mode, daily decomposition changes the
+wall-clock multiplier from roughly 365 serial day solves to
+$\lceil365/W\rceil$. The SCUC and DynamicSCED decompositions describe retained
+code structure and possible future approximation modes, not current
+production behaviour; admitting them would require an explicit boundary-state
+contract rather than silently resetting commitment and ramps.
 
 **Memory.** `step_results` is $O(T_{yr})$ small structs; PF snapshots are
 sampled every `pf_snapshot_interval` steps (default 24 → 365 snapshots/yr,
@@ -403,11 +414,11 @@ sequential results are directly comparable.
 
 ### 7.1 Engineering value
 
-1. **The right tool per question, one data model.** SCUC days for operational
-   fidelity, DynamicSCED for fast annual production costing, DynamicOPF for
-   network-limit screening, `skip_replay` for lifecycle sweeps — all driven by
-   the same system/profile inputs and returning the same result schema, so a
-   planner can escalate fidelity only where a cheap pass shows stress.
+1. **One data model with explicit admission.** The parallel annual path uses
+   DynamicOPF for independent-day network screening, while coupled sequential
+   simulation owns UC/ramp continuity and inter-day storage transfer. The
+   SCUC/DynamicSCED mappings remain internal structure rather than advertised
+   production modes.
 2. **Planning-grade outputs**: monthly energy balances that close by
    construction, per-unit capacity factors and startup counts (maintenance and
    cycling wear inputs), storage equivalent cycles (degradation input),

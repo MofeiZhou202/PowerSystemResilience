@@ -32,14 +32,15 @@ ID 也使用不同域映射。
 \toprule
 路径 & 实际执行 & 主要假设\\ \midrule
 层级 sequential & L0 heuristic $\rightarrow$ 周 UC（168 h + lookahead）$\rightarrow$ 日 replay & 周间 SOC 重新锚定；L0 预算/维护目前是默认占位值\\
-按日 parallel & 每个日窗独立调用时序求解，末端 SOC 可固定为初始 SOC & 日与日之间没有能量套利；并行安全取决于 UC 后端\\
+按日 parallel & DynamicOPF 日窗独立求解；固定式 AC/DC 储能末端 SOC 强制回到初值 & 日与日之间没有能量套利；UC/移动储能状态不准入\\
 \bottomrule
 \end{tabular}
 \end{center}
 
 \begin{gapnote}
-\textbf{已实现：}日窗划分、SCUC/DynamicSCED/DynamicOPF 三模式、结果按全局步拼接、
-并行后端守卫和 provenance 字段。\textbf{仅结构存在：}L0 维护、燃料预算和
+\textbf{已实现：}日窗划分、DynamicOPF 年度准入、固定储能逐日循环 SOC、结果按全局步拼接、
+并行后端守卫和 provenance 字段。SCUC/DynamicSCED 的日配置只保留为内部结构，年度入口不准入。
+\textbf{仅结构存在：}L0 维护、燃料预算和
 \fld{iterative\_feedback} 参数；当前 \srcpath{solve\_annual\_plan} 不求解 L0 MILP，
 \fld{max\_feedback\_iterations} 与 \fld{budget\_violation\_tol\_mwh} 也未参与控制流。
 \end{gapnote}
