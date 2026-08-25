@@ -38,6 +38,28 @@
         断路器失灵、重合器/熔断器/分段器和 DER-FRT 闭环；其网络为正序、单相故障输入，不认证三相 EMT 或行波保护。
 \end{itemize}
 
+\subsection{独立方程 oracle：参数解析器交叉验证}\label{sec:rel-resolver-xref}
+注册测试 \srcpath{reliability\_resolver\_cross\_validation} 把生产可靠性参数解析器
+\srcpath{src/reliability/reliability\_assessment.cpp:resolve\_reliability\_params} 的规范化输出与一个
+不链接 hacdcpf 的独立 Python oracle 对照。证据生成器
+\srcpath{tools/reliability\_validation/validate\_reliability\_xref.cpp:emit\_case} 在覆盖全部转换分支的
+八个确定性故障模式输入上运行解析器（$\lambda$+MTTR 的运行/日历口径、传统 MTBF 的两种约定、显式 MTTF、
+含与不含修复时间的 FOR、以及主动按需），oracle \srcpath{tools/reliability\_validation/run\_cross\_validation.py}
+依据 Billinton \& Allan 交替更新闭式独立重算 $U=\lambda/(\lambda+\mu)$（$\mu=H/r$）、MTBF/MTTF$\to\lambda$、
+$\lambda=f/((1-f)r)\,H$、日历基改正 $\lambda=f_{cal}/(1-f_{cal}r/H)$ 与主动等效 $\lambda_{act}=\nu_d p_d$，
+并逐字段核对解析器输出。
+
+复现命令为
+\begin{verbatim}
+ctest --test-dir build/macos-release \
+  -R '^reliability_resolver_cross_validation$' --output-on-failure
+\end{verbatim}
+
+准入阈值为 $10^{-9}$；本轮八个算例六类参数（$\lambda$、修复时间、不可用度、MTTF、日历频率、主动等效频率）
+的最大误差为 $0$（独立重算与生产解析器在同一 IEEE~754 双精度下逐位一致），负控制（人为扰动 FOR 分支
+$\lambda$ 的 $1\%$）如期触发失败。该 oracle 校核确定性参数解析闭式；系统级 EENS/SAIDI 的 MC 与 FMEA
+引擎仍由各自套件验证，本节不以参数解析器一致性冒充系统级外部准确度。
+
 \subsection{证据维护}
 本手册为对照 2026-08-17 检出的实现修订；行号引用如与后续代码变更不符，以
 \srcpath{include/hacdcpf/reliability/}、\srcpath{include/hacdcpf/analysis/three\_stage\_reliability.hpp}

@@ -221,6 +221,28 @@ if(Python3_EXECUTABLE AND
     LABELS "carbon_analysis;cross_validation;python_oracle"
     TIMEOUT 120)
 endif()
+
+# Reliability parameter-resolver independent equation oracle: validate_reliability_xref
+# emits the resolved canonical failure-mode parameters for every conversion
+# branch, and the numpy-free Python oracle re-derives the Billinton & Allan
+# alternating-renewal closed forms (lambda/repair/unavailability/MTTF/frequency).
+# See reliability/chapters/numerical_cross_validation.tex.
+if(Python3_EXECUTABLE AND
+   EXISTS "${CMAKE_SOURCE_DIR}/tools/reliability_validation/validate_reliability_xref.cpp" AND
+   EXISTS "${CMAKE_SOURCE_DIR}/tools/reliability_validation/run_cross_validation.py")
+  add_executable(reliability_resolver_xref
+    "${CMAKE_SOURCE_DIR}/tools/reliability_validation/validate_reliability_xref.cpp")
+  target_link_libraries(reliability_resolver_xref PRIVATE hacdcpf::hacdcpf)
+  add_test(NAME reliability_resolver_cross_validation
+    COMMAND "${Python3_EXECUTABLE}"
+            "${CMAKE_SOURCE_DIR}/tools/reliability_validation/run_cross_validation.py"
+            --executable "$<TARGET_FILE:reliability_resolver_xref>"
+            --out "${CMAKE_CURRENT_BINARY_DIR}/reliability_resolver_cross_validation.json"
+            --markdown "${CMAKE_CURRENT_BINARY_DIR}/reliability_resolver_cross_validation.md")
+  set_tests_properties(reliability_resolver_cross_validation PROPERTIES
+    LABELS "reliability;cross_validation;python_oracle"
+    TIMEOUT 120)
+endif()
 hacdcpf_add_test(test_sppt_fault_campaign  test_sppt_fault_campaign.cpp)
 hacdcpf_add_test(test_sppt_agent           test_sppt_agent.cpp)
 

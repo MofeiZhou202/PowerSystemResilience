@@ -6,6 +6,33 @@ This is the living handoff for verified build state and active engineering work.
 Update it in place; do not create dated copies. Source, registered tests, and
 the current Git worktrees remain authoritative.
 
+## reliability parameter-resolver independent oracle (2026-08-24)
+
+`reliability` gained the same independent-oracle cross-check as `carbon_analysis`
+(logged as AUD-086), targeting the deterministic core that every method (NSQ/SEQ
+Monte Carlo, FMEA, three-stage) shares — `resolve_reliability_params`:
+
+- `tools/reliability_validation/validate_reliability_xref.cpp` — a C++ emitter
+  that runs the production resolver on eight deterministic failure-mode inputs
+  covering every conversion branch (lambda+MTTR on an operating or calendar
+  basis, legacy MTBF with either convention, explicit MTTF, forced-outage-rate
+  with and without repair time, and active-on-demand) and dumps the raw inputs,
+  data policy and resolved canonical parameters.
+- `tools/reliability_validation/run_cross_validation.py` — a numpy-free oracle
+  that does **not** link hacdcpf; it re-derives the Billinton & Allan
+  alternating-renewal closed forms (`U = lambda/(lambda+mu)`, `mu = H/r`;
+  `lambda = f/((1-f) r) H`; the calendar-basis correction; `lambda_active = nu
+  p_d`) and checks lambda, repair time, unavailability, MTTF and the
+  calendar/active-equivalent frequencies.
+
+Registered as the CTest test `reliability_resolver_cross_validation`. It passes
+with a worst error of `0` across all six parameters on the eight cases (the
+independent re-derivation is bit-identical to the production resolver in IEEE 754
+double) at a `1e-9` gate; a negative control (perturbing the FOR-branch lambda by
+1%) fails as expected; the reliability manual recompiles with XeLaTeX. Like the
+carbon oracle it was verified in the Debug ASan build, with the Release run
+pending a clean `../MIPSolvers` worktree.
+
 ## carbon_analysis independent equation oracle (2026-08-24)
 
 `carbon_analysis` was internal-regression-only (its `test_carbonflow_*` suites
