@@ -6,6 +6,19 @@ This is the living handoff for verified build state and active engineering work.
 Update it in place; do not create dated copies. Source, registered tests, and
 the current Git worktrees remain authoritative.
 
+## Authoritative Release baseline confirmed (2026-08-24)
+
+The sibling `../MIPSolvers` benchmark worktree that had blocked the strict
+reproducibility guard is clean again (HEAD `a5d614b`), so `build/macos-release`
+was reconfigured and rebuilt, and the full Release CTest sweep passed
+**1698/1698 in 54.3 s**. This supersedes the "Release run pending" notes in the
+oracle sections below — all five session additions now pass in Release:
+`doc_anchor_check` (#1666), `carbon_analysis_cross_validation` (#1670),
+`reliability_resolver_cross_validation` (#1671), `market_sced_cross_validation`
+(#1672) and `hosting_capacity_cross_validation` (#1673). The registered count
+rose from 1690 → 1698 across the session (+3 time_series fixtures via
+`catch_discover_tests`, +1 `doc_anchor_check`, +4 module oracle tests).
+
 ## analysis hosting-capacity independent oracle (2026-08-24)
 
 `analysis` (hosting capacity) gained the same independent-oracle cross-check
