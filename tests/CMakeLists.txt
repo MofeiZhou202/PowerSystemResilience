@@ -199,6 +199,28 @@ if(TARGET power_models_xref AND Python3_EXECUTABLE AND
     LABELS "power_models;cross_validation;python_oracle"
     TIMEOUT 120)
 endif()
+
+# Carbon-flow analysis independent equation oracle: validate_carbon_xref emits
+# the production nodal-intensity solution for deterministic AC cases, and the
+# numpy-free Python oracle re-derives and re-solves the Kang carbon-emission-flow
+# linear system, checking analytic closed forms, nodal conservation and the
+# loss-allocation rule.  See carbon_analysis/chapters/numerical_cross_validation.tex.
+if(Python3_EXECUTABLE AND
+   EXISTS "${CMAKE_SOURCE_DIR}/tools/carbon_analysis_validation/validate_carbon_xref.cpp" AND
+   EXISTS "${CMAKE_SOURCE_DIR}/tools/carbon_analysis_validation/run_cross_validation.py")
+  add_executable(carbon_analysis_xref
+    "${CMAKE_SOURCE_DIR}/tools/carbon_analysis_validation/validate_carbon_xref.cpp")
+  target_link_libraries(carbon_analysis_xref PRIVATE hacdcpf::hacdcpf)
+  add_test(NAME carbon_analysis_cross_validation
+    COMMAND "${Python3_EXECUTABLE}"
+            "${CMAKE_SOURCE_DIR}/tools/carbon_analysis_validation/run_cross_validation.py"
+            --executable "$<TARGET_FILE:carbon_analysis_xref>"
+            --out "${CMAKE_CURRENT_BINARY_DIR}/carbon_analysis_cross_validation.json"
+            --markdown "${CMAKE_CURRENT_BINARY_DIR}/carbon_analysis_cross_validation.md")
+  set_tests_properties(carbon_analysis_cross_validation PROPERTIES
+    LABELS "carbon_analysis;cross_validation;python_oracle"
+    TIMEOUT 120)
+endif()
 hacdcpf_add_test(test_sppt_fault_campaign  test_sppt_fault_campaign.cpp)
 hacdcpf_add_test(test_sppt_agent           test_sppt_agent.cpp)
 

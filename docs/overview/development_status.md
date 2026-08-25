@@ -6,6 +6,37 @@ This is the living handoff for verified build state and active engineering work.
 Update it in place; do not create dated copies. Source, registered tests, and
 the current Git worktrees remain authoritative.
 
+## carbon_analysis independent equation oracle (2026-08-24)
+
+`carbon_analysis` was internal-regression-only (its `test_carbonflow_*` suites
+are self-consistency checks, and the module chapter admitted "no independent
+linear-algebra oracle"). It now has the same independent-oracle cross-check that
+raised `integrated_energy`/`model`/`power_models` to a higher evidence tier
+(logged as AUD-085):
+
+- `tools/carbon_analysis_validation/validate_carbon_xref.cpp` — a C++ evidence
+  emitter that runs the production `compute_carbon_analysis` on three
+  deterministic AC cases with analytically known nodal carbon intensities and
+  dumps the inputs (generator emission factors + dispatch, load demand, directed
+  branch flows) plus the solved intensity vector.
+- `tools/carbon_analysis_validation/run_cross_validation.py` — a numpy-free
+  oracle that does **not** link hacdcpf; it re-derives and re-solves the Kang
+  carbon-emission-flow system `A w = b` (mirroring `solve_carbon_matrix`) by
+  independent Gaussian elimination and checks analytic closed forms, the
+  independent re-solve, nodal conservation `||A w - b||`, the branch
+  loss-allocation rule, and the system emission balance.
+
+Registered as the CTest test `carbon_analysis_cross_validation`. It passes with a
+worst error of `3.553e-15` across all seven checks (single-source propagation
+`w=0.5`; lossless dispatch-weighted mixing `w=0.3`; lossy mixing `w=57.5/95` with
+the emission balance closing to 60 tCO2) at a `1e-7` gate, a negative control
+(perturbing one emitted intensity) fails as expected, and the carbon manual
+recompiles with XeLaTeX. Verified via the pre-existing Debug ASan build
+(`build/macos-asan-ubsan`, which permits the local dirty-dependency skip); the
+strict-reproducibility `build/macos-release` configure is currently blocked by
+unrelated uncommitted changes in the sibling `../MIPSolvers` benchmark tree, so
+the Release CTest run of this new test is pending a clean dependency worktree.
+
 ## Documentation source-anchor CI validator + drift closure (2026-08-24)
 
 The manuals reference the code through ~1800 `file:symbol` anchors and ~700

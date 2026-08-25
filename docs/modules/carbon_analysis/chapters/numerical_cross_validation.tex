@@ -18,8 +18,35 @@
 “bus has load but no in-service connection”只是构造案例的拓扑 warning，测试仍以结构化
 结果和 126 条断言通过；它不能被解释成一般孤岛系统均可验证。
 
+\subsection{独立方程 oracle 交叉验证}\label{sec:carbon-xref}
+注册测试 \srcpath{carbon\_analysis\_cross\_validation} 以确定性算例把生产碳流结果与一个
+不链接 hacdcpf 的独立 Python oracle 对照。证据生成器
+\srcpath{tools/carbon\_analysis\_validation/validate\_carbon\_xref.cpp:emit\_case} 在三个
+手工构造、解析可知的交流算例上运行
+\srcpath{src/carbon\_analysis/carbon\_analysis.cpp:compute\_carbon\_analysis}，导出比例碳
+排放流的输入（机组排放因子与出力、负荷、定向支路潮流）与求解得到的节点
+碳强度向量；oracle \srcpath{tools/carbon\_analysis\_validation/run\_cross\_validation.py} 依据
+Kang 碳排放流方程独立重建线性系统 $Aw=b$（实现见
+\srcpath{src/carbon\_analysis/carbon\_analysis.cpp:solve\_carbon\_matrix}），用独立高斯消元
+重解，并三重校核：解析闭式、独立重解 $|w_{oracle}-w_{cpp}|$，以及节点守恒
+$\|Aw_{cpp}-b\|$、支路损耗归属 $\rho=\alpha w_{from}+(1-\alpha)w_{to}$ 与系统排放平衡。
+
+复现命令为
+\begin{verbatim}
+ctest --test-dir build/macos-release \
+  -R '^carbon_analysis_cross_validation$' --output-on-failure
+\end{verbatim}
+
+三个算例与解析期望为：单源串馈（全节点碳强度等于唯一机组排放因子 $0.5$）、
+无损双源混合（负荷母线为出力加权平均 $(30\times1.0+70\times0.0)/100=0.3$）、有损双源
+混合（$\alpha=0.5$ 时负荷母线为 $57.5/95$，两条支路损耗强度分别为 $0.5\,w_{from}+0.5\,w_{to}$，
+系统排放平衡闭合到 $60$ tCO$_2$）。准入阈值为 $10^{-7}$；本轮全部七类检查的最大
+误差为 $3.553\times10^{-15}$，负控制（人为扰动一个导出节点强度）如期触发失败。
+
 \subsection{数值边界}
 矩阵秩亏、潮流不收敛、非有限输入和缺少逐时系统快照会使结果进入未验证路径；报告必须
-同时保留 \fld{matrix\_solved}、\fld{power\_balance\_verified} 和错误列表。当前没有独立
-稀疏线性代数 oracle 的机器可读结果，故本节只声明实现—方程一致性，不声明碳流估计的
+同时保留 \fld{matrix\_solved}、\fld{power\_balance\_verified} 和错误列表。第~\ref{sec:carbon-xref}~节
+的独立方程 oracle 现以机器可读结果证明交流比例碳流矩阵解与已发布方程一致，但它重解同一线性
+系统，属独立实现校核而非第二套物理模型；VSC/DC-DC/储能/外送碳路径以及与第三方碳流
+软件的跨引擎比较仍未覆盖，故除该 oracle 声明的交流范围外，本节不声明碳流估计的
 外部准确度。
