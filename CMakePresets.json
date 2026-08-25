@@ -50,6 +50,7 @@
       "architecture": "x64",
       "cacheVariables": {
         "HACDCPF_ENABLE_IPOPT": "ON",
+        "HACDCPF_USE_GUROBI": "OFF",
         "MIPSOLVERS_IPOPT_LINEAR_SOLVER": "pardisomkl",
         "MIPSOLVERS_USE_PREBUILT_THIRD_PARTY": "ON",
         "MIPSOLVERS_PREBUILT_THIRD_PARTY_PREFIX": "${sourceDir}/../MIPSolvers/third_party/install",

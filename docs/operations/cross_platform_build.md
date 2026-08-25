@@ -112,9 +112,38 @@ ctest --preset windows-msvc-release
 
 The preset uses the dynamic MSVC runtime (`/MD` in Release), requires the
 compatible MIPSolvers prebuilt package, and enables embedded Ipopt with the
-sequential static PardisoMKL backend. `windows-vcpkg-release` remains a
+sequential static PardisoMKL backend. It disables Gurobi discovery so the
+resulting executable does not acquire a non-redistributable `gurobi*.dll`
+startup dependency; packaged HiGHS and SCIP remain available. The packaging
+script copies the redistributable VC++/OpenMP runtime DLLs discovered from the
+active Visual Studio installation. `windows-vcpkg-release` remains a
 compatibility profile for sites that deliberately supply additional packages;
 it inherits the same Ipopt/prebuilt contract.
+
+The raw top-level CMake default is also `HACDCPF_ENABLE_IPOPT=ON` on Windows.
+MIPSolvers selects `MIPSOLVERS_IPOPT_LINEAR_SOLVER=pardisomkl` there by default;
+the supported Windows contract fails configuration when the packaged oneMKL
+surface is incomplete instead of silently disabling Ipopt or MKL.
+
+### Windows binary package
+
+Create the full Windows x64 package only from clean HySim and MIPSolvers
+checkouts whose dependency commit matches the CMake pin:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File tools/package_windows.ps1
+```
+
+The script configures and builds `windows-msvc-release`, runs the solver
+capability package gate, audits `run_gui_server.exe` with
+`dumpbin /DEPENDENTS`, and stages `bin/`, `web/`, `data/`, `external_data/`,
+documentation, third-party notices, launch scripts, and `BUILD_INFO.txt`. It
+then starts the staged binary from the package directory, verifies the full
+edition API and `/xjtu/` frontend, writes a per-file SHA-256 manifest, and
+creates `dist/HySim-Windows-x64.zip` plus its SHA-256 sidecar. Extract the ZIP
+and run `Start-HySim.cmd`; no source checkout is required at runtime. The
+package gate is deliberately narrower than the full CTest sweep; consult the
+living development status for current numerical and external-fixture failures.
 
 ## Hermetic Verification
 
@@ -137,12 +166,14 @@ HiGHS, SCIP, PaPILO, MUMPS/Ipopt when enabled, and SuiteSparse as vendored
 sources. A missing required source tree must fail at configure time instead of
 triggering a download.
 
-Gurobi detection is enabled by default but remains optional and is never
-bundled. Set `GUROBI_HOME` before configuring when it is installed outside the
-standard Gurobi locations. At runtime an unavailable/expired licence, failed
-environment initialization, or failed solve falls back to packaged HiGHS and
-native solvers. The reported solver name and DC OPF `solver_chain` identify the
-backend that actually produced the result.
+Gurobi detection is enabled by the raw top-level default but remains optional
+and is never bundled. The distributable Windows preset explicitly disables it
+to avoid a loader-time dependency on a site-local DLL. Custom source builds may
+set `GUROBI_HOME` and enable it; once linked, the corresponding Gurobi runtime
+must be installed under its own licence. Solver-level initialization or solve
+failure can fall back to packaged HiGHS and native solvers, but a missing DLL
+cannot be handled after Windows loader failure. The reported solver name and DC
+OPF `solver_chain` identify the backend that actually produced the result.
 
 External comparison tools such as GridLAB-D, Julia, OpenDSS, Chromium, and
 Playwright are runtime test integrations rather than C++ build dependencies.
@@ -168,11 +199,11 @@ for diagnostics, not as a stable application API.
 |---|---:|---|
 | `HACDCPF_DEPENDENCY_PROFILE` | `portable` | Builds the solver subset needed by the application; `full` also builds MIPSolvers developer targets. |
 | `HACDCPF_USE_SUITESPARSE` | `ON` | Uses vendored UMFPACK/KLU; `OFF` selects Eigen SparseLU fallback. |
-| `HACDCPF_ENABLE_IPOPT` | macOS/Windows presets `ON`, Linux preset `OFF` | Enables embedded Ipopt; Windows consumes the local oneMKL prebuilt package. |
+| `HACDCPF_ENABLE_IPOPT` | macOS/Windows default and presets `ON`, Linux preset `OFF` | Enables embedded Ipopt; Windows requires the local sequential oneMKL/PardisoMKL prebuilt package. |
 | `HACDCPF_ENABLE_ETAP` | `ON` | Builds against vendored OpenXLSX. |
 | `HACDCPF_ENABLE_OPENDSS` | `OFF` | Requires a separately supplied local DSS C-API. |
 | `HACDCPF_ENABLE_NATIVE_ARCH` | `OFF` | Enables host-specific CPU instructions; keep `OFF` for portable binaries. |
-| `HACDCPF_USE_GUROBI` | `ON` | Detect and prefer an installed/licensed Gurobi; absence is nonfatal. |
+| `HACDCPF_USE_GUROBI` | raw default `ON`; Windows distribution preset `OFF` | Detect and prefer an installed/licensed Gurobi in custom builds; the distributable preset excludes its runtime DLL dependency. |
 | `HACDCPF_USE_PAPILO` | `ON` | Use MIPSolvers' bundled header-only PaPILO; `minimal` profile or `OFF` uses native presolve. |
 
 Native builds on all three target operating systems remain required before a

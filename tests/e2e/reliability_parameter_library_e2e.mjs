@@ -5,8 +5,9 @@ import { readFileSync } from 'node:fs';
 import path from 'node:path';
 import process from 'node:process';
 import { runInNewContext } from 'node:vm';
+import { fileURLToPath } from 'node:url';
 
-const ROOT = path.resolve(path.dirname(new URL(import.meta.url).pathname), '..', '..');
+const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', '..');
 const TEST_XML = path.join(ROOT, 'data', 'test.xml');
 
 function arg(name, fallback) {

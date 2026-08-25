@@ -111,6 +111,18 @@ cmake --build --preset windows-msvc-release
 ctest --preset windows-msvc-release
 ```
 
+正式 Windows x64 分发包在完整构建后生成，并自动执行运行时依赖审计、
+解压目录独立启动检查、逐文件清单和 ZIP SHA-256：
+
+```powershell
+powershell -ExecutionPolicy Bypass -File tools/package_windows.ps1
+```
+
+产物位于 `dist/HySim-Windows-x64.zip`。解压后运行
+`Start-HySim.cmd`；正式 Windows preset 固定使用 MIPSolvers 自带的
+HiGHS/SCIP、Ipopt、sequential oneMKL/PardisoMKL 和 SuiteSparse，不链接
+开发机上的 Gurobi DLL。
+
 Trial Windows 包使用独立 preset，并在打包前强制运行 Trial 验收测试：
 
 ```powershell
@@ -157,7 +169,7 @@ powershell -ExecutionPolicy Bypass -File tools/package_trial_windows.ps1
 | OpenDSS bridge `HACDCPF_ENABLE_OPENDSS` | `OFF` | 需显式开启并提供 DSS C-API。 |
 | OpenDSS compare `HACDCPF_ENABLE_OPENDSS_COMPARE` | `OFF` | 依赖 OpenDSS bridge。 |
 | SuiteSparse `HACDCPF_USE_SUITESPARSE` | `ON` | 默认复用 MIPSolvers vendored UMFPACK/KLU；关闭时回退到 vendored Eigen SparseLU。MIPSolvers 提供 MUMPS（LDLᵀ）时其为默认后端（可用 `HACDCPF_OPF_LINEAR_SOLVER=mumps/umfpack/klu/eigen` 指定）；Parity IPM 默认采用增广 Newton 形式（`HACDCPF_OPF_KKT_FORM=condensed` 可切回）。 |
-| IPOPT `HACDCPF_ENABLE_IPOPT` | macOS/Windows preset `ON`，Linux preset `OFF` | Windows 使用 MIPSolvers 导出的本地 oneMKL 静态 prebuilt 包；常规配置阶段不联网。 |
+| IPOPT `HACDCPF_ENABLE_IPOPT` | macOS/Windows 默认及 preset `ON`，Linux preset `OFF` | Windows 使用 MIPSolvers 导出的本地 sequential oneMKL 静态 prebuilt 包与 PardisoMKL；包不完整时配置失败，不静默关闭。 |
 | PaPILO `HACDCPF_USE_PAPILO` | `ON` | 默认使用 MIPSolvers 包内 PaPILO 与 Boost 头；关闭或 minimal profile 时回退到原生 presolve。 |
 | Gurobi `HACDCPF_USE_GUROBI` | `ON` | 默认探测并优先使用本机 Gurobi；未安装、许可证不可用或求解失败时自动回退到包内 HiGHS/原生求解器。 |
 

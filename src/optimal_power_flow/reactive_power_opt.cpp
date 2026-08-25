@@ -34,6 +34,7 @@
 #include <cstdlib>
 #include <limits>
 #include <map>
+#include <mutex>
 #include <numeric>
 #include <thread>
 #include <vector>

@@ -1,5 +1,12 @@
 cmake_minimum_required(VERSION 3.20)
 
+# Keep Python test bytecode out of the source tree on every platform.
+if(WIN32)
+  file(TO_CMAKE_PATH "$ENV{TEMP}/hacdcpf_pycache" HACDCPF_PYTHON_CACHE_DIR)
+else()
+  set(HACDCPF_PYTHON_CACHE_DIR "/tmp/hacdcpf_pycache")
+endif()
+
 function(hacdcpf_add_test target)
   add_executable(${target} ${ARGN})
   target_link_libraries(${target} PRIVATE hacdcpf::hacdcpf Catch2::Catch2WithMain)
@@ -369,7 +376,7 @@ if(EXISTS "${_HACDCPF_SHORT_CIRCUIT_VALIDATION_PY}" AND
   set_tests_properties(short_circuit_cross_engine_matrix PROPERTIES
     LABELS "short_circuit;validation;opendss;gridlabd"
     TIMEOUT 120
-    ENVIRONMENT "PYTHONPYCACHEPREFIX=/tmp/hacdcpf_pycache")
+    ENVIRONMENT "PYTHONPYCACHEPREFIX=${HACDCPF_PYTHON_CACHE_DIR}")
 endif()
 if(EXISTS "${_HACDCPF_SHORT_CIRCUIT_VALIDATION_PY}" AND
    EXISTS "${CMAKE_SOURCE_DIR}/tools/short_circuit_validation/run_ieee_feeder_faultstudy.py" AND
@@ -382,7 +389,7 @@ if(EXISTS "${_HACDCPF_SHORT_CIRCUIT_VALIDATION_PY}" AND
   set_tests_properties(short_circuit_ieee_feeder_thevenin PROPERTIES
     LABELS "short_circuit;validation;opendss;ieee_feeder"
     TIMEOUT 120
-    ENVIRONMENT "PYTHONPYCACHEPREFIX=/tmp/hacdcpf_pycache")
+    ENVIRONMENT "PYTHONPYCACHEPREFIX=${HACDCPF_PYTHON_CACHE_DIR}")
 endif()
 
 # Harmonic power flow (hybrid AC/DC): frequency-domain harmonic penetration with
@@ -468,7 +475,7 @@ if(EXISTS "${CMAKE_SOURCE_DIR}/tools/scenario_generation_review_case.cpp")
               "${CMAKE_CURRENT_BINARY_DIR}/scenario_generation_validation")
     set_tests_properties(scenario_generation_cross_validation PROPERTIES
       LABELS "scenario_generation;cross_validation;python_oracle"
-      TIMEOUT 120 ENVIRONMENT "PYTHONPYCACHEPREFIX=/tmp/hacdcpf_pycache")
+      TIMEOUT 120 ENVIRONMENT "PYTHONPYCACHEPREFIX=${HACDCPF_PYTHON_CACHE_DIR}")
   endif()
 endif()
 
@@ -862,7 +869,7 @@ if(EXISTS "${CMAKE_SOURCE_DIR}/tools/time_series_validation/validate_time_series
               --markdown "${CMAKE_CURRENT_BINARY_DIR}/time_series_cross_engine_matrix.md")
     set_tests_properties(time_series_cross_engine_matrix PROPERTIES
       LABELS "time_series;validation;scipy;highs;opendss;gridlabd"
-      TIMEOUT 300 ENVIRONMENT "PYTHONPYCACHEPREFIX=/tmp/hacdcpf_pycache")
+      TIMEOUT 300 ENVIRONMENT "PYTHONPYCACHEPREFIX=${HACDCPF_PYTHON_CACHE_DIR}")
   endif()
 endif()
 
@@ -899,7 +906,7 @@ endif()
               --tolerance 2e-3)
     set_tests_properties(harmonics_ieee13_opendss PROPERTIES
       LABELS "harmonics;validation;opendss;ieee13" TIMEOUT 180
-      ENVIRONMENT "PYTHONPYCACHEPREFIX=/tmp/hacdcpf_pycache")
+      ENVIRONMENT "PYTHONPYCACHEPREFIX=${HACDCPF_PYTHON_CACHE_DIR}")
   endif()
   if(EXISTS "${_HACDCPF_HARMONICS_VALIDATION_PY}" AND
      EXISTS "${CMAKE_SOURCE_DIR}/tools/harmonics_validation/compare_device_opendss.py")
@@ -929,6 +936,6 @@ endif()
               --require-gridlabd --min-gridlabd-slices 20)
     set_tests_properties(harmonics_cross_engine_matrix PROPERTIES
       LABELS "harmonics;validation;opendss;gridlabd" TIMEOUT 300
-      ENVIRONMENT "PYTHONPYCACHEPREFIX=/tmp/hacdcpf_pycache")
+      ENVIRONMENT "PYTHONPYCACHEPREFIX=${HACDCPF_PYTHON_CACHE_DIR}")
   endif()
 endif()

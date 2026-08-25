@@ -67,7 +67,7 @@ set(HACDCPF_DEPENDENCY_PROFILE "portable" CACHE STRING
     "Dependency profile: portable, full, or minimal.")
 set_property(CACHE HACDCPF_DEPENDENCY_PROFILE PROPERTY STRINGS
   portable full minimal)
-if(APPLE)
+if(APPLE OR WIN32)
   set(_HACDCPF_ENABLE_IPOPT_DEFAULT ON)
 else()
   set(_HACDCPF_ENABLE_IPOPT_DEFAULT OFF)

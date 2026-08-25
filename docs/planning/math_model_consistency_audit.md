@@ -49,7 +49,7 @@ theory md 的 VSC 无序 droop 对与 κ 上限两处改正且 .zh.md 译文同�
 
 - **newton.tex PV 迟滞口径** ✅ FIXED：进入侧各调用点 `entry_margin_pu=0.0`（无边距）；`pv_q_hysteresis_pu` 仅作用于恢复侧"钉限判定"容差 `limit_tol=max(1e-10, q_hys×1e-6)`，散文已按此改写（`newton_solver.cpp:check_q_limits_and_switch（lambda）`）。
 - **options_results.tex bad_condition_threshold / tiny_pivot_threshold** ✅ 核实声明属实：两字段仅在 GUI 服务器层读写（`run_gui_server.cpp` 选项进出），求解核无消费者，"当前未接线"表述准确，文档不改。
-- **parity_ipm.tex IPOPT 平台口径** ✅ FIXED：`HACDCPF_ENABLE_IPOPT` 为 Apple 默认 ON 的普通选项（任何平台可显式开启，无 FATAL_ERROR），强制透传 `MIPSOLVERS_BUILD_LOCAL_IPOPT`；Ipopt 缺失的 FATAL_ERROR 在 `MIPSolvers/cmake/Dependencies.cmake`（语义为"必须用仓库内 Ipopt 源码"）。"嵌入式 Ipopt 仅 macOS 可构建"改为"取决于 MIPSolvers 检出内嵌 ipopt/ 源码，默认仅 Apple 开启"。章首"全章行号均指…（共 2250 行）"改为符号锚点表述并删除失真行数。
+- **parity_ipm.tex IPOPT 平台口径** ✅ FIXED：`HACDCPF_ENABLE_IPOPT` 为 Apple/Windows 默认 ON 的普通选项（任何平台可显式开启），强制透传 `MIPSOLVERS_BUILD_LOCAL_IPOPT`；Windows 默认使用 MIPSolvers 内置的静态 sequential oneMKL/PardisoMKL，依赖不完整时配置失败。章首"全章行号均指…（共 2250 行）"改为符号锚点表述并删除失真行数。
 - **parity_formulation.tex:44** ✅ FIXED：引用的 "the reference formulation stores dg as n x neq" 注释已不存在，散文改为"也曾留有…对照痕迹；当前检出处这些注释均已删除"。
 - **validation.tex workspace** ✅ FIXED：删除不存在的 `reset_iteration`（头文件仅有 prepare_state/prepare_equations）。
 - **component_models_math_audit.tex A2** ✅ FIXED（代码侧早已修复）：charger-only 投影现于 `project_in_place` fail-close 抛 `std::invalid_argument`，条目改写为"修复前行为/现已不可复现"口径，锚点更新；同文件 B9 的 `connect（lambda）` 误植锚点改为 `add_equivalent_branch_from_switch`（现存唯一 connect lambda 属 `detect_dc_dead_buses` 并查集，与语义无关）。

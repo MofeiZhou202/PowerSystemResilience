@@ -612,9 +612,11 @@ IPM 求解核的公共契约是 \fld{IPMOptions}/\fld{IPMResult} 与
 
 \begin{enumerate}
   \item \textbf{编译期门控}。CMake 选项 \srcpath{HACDCPF\_ENABLE\_IPOPT}
-        仅 macOS 默认 ON、其余平台默认 OFF
+        在 macOS 与 Windows 默认 ON、其余平台默认 OFF
         （\srcpath{CMakeLists.txt}:HACDCPF\_ENABLE\_IPOPT，帮助串为
-        ``when supported by that checkout''）。非 Apple 平台显式开启
+        ``when supported by that checkout''）。Windows 默认选择
+        \fld{MIPSOLVERS\_IPOPT\_LINEAR\_SOLVER=pardisomkl} 并消费本地静态
+        sequential oneMKL 包；依赖包不完整时配置失败。其他平台显式开启
         \textbf{不再}触发 \fld{FATAL\_ERROR}：选项仅经
         \srcpath{MIPSOLVERS\_BUILD\_LOCAL\_IPOPT} 转发给 MIPSolvers
         子项目（同文件:MIPSOLVERS\_BUILD\_LOCAL\_IPOPT），能否真正构建

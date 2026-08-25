@@ -585,8 +585,10 @@ Parity 问题同时可交由嵌入式 Ipopt 求解（适配器
 （src/optimal\_power\_flow/ac\_opf.cpp:build\_parity\_nlp\_input 注释）。门控分两层：
 \begin{itemize}
   \item 编译期 \srcpath{HACDCPF\_HAVE\_IPOPT}（src/optimal\_power\_flow/ac\_opf.cpp:solve\_parity\_with\_ipopt）：
-        平台选项 \srcpath{HACDCPF\_ENABLE\_IPOPT} 仅 Apple 默认 ON、其余平台默认
-        OFF（\srcpath{CMakeLists.txt:HACDCPF\_ENABLE\_IPOPT}，任何平台均可显式开启），
+        平台选项 \srcpath{HACDCPF\_ENABLE\_IPOPT} 在 Apple 与 Windows 默认 ON、
+        其余平台默认 OFF（\srcpath{CMakeLists.txt:HACDCPF\_ENABLE\_IPOPT}，任何平台均可显式开启）；
+        Windows 默认选择 MIPSolvers 的 \fld{pardisomkl} 后端并要求本地静态
+        sequential oneMKL 包完整，
         并强制透传为 \fld{MIPSOLVERS\_BUILD\_LOCAL\_IPOPT}；MIPSolvers 侧仅在以内嵌
         Ipopt 源码构建出 \fld{ipopt\_local} 时置 \fld{MIPSOLVERS\_HAVE\_IPOPT} 并透传
         \srcpath{HACDCPF\_HAVE\_IPOPT=1}（\srcpath{MIPSolvers/cmake/Dependencies.cmake:MIPSOLVERS\_HAVE\_IPOPT}、

@@ -540,7 +540,10 @@ TEST_CASE("try_from_json: empty string returns Error", "[io][json][safe_io]") {
 }
 
 TEST_CASE("try_load_json: non-existent file returns FileNotFound", "[io][json][safe_io]") {
-    auto result = try_load_json("/tmp/hacdcpf_definitely_does_not_exist_12345.json");
+    const auto path = fs::temp_directory_path() /
+                      "hacdcpf_definitely_does_not_exist_12345.json";
+    fs::remove(path);
+    auto result = try_load_json(path.string());
     CHECK_FALSE(static_cast<bool>(result));
     CHECK(result.error().code == ErrorCode::FileNotFound);
 }
@@ -548,15 +551,15 @@ TEST_CASE("try_load_json: non-existent file returns FileNotFound", "[io][json][s
 TEST_CASE("try_load_json: valid file returns success Result", "[io][json][safe_io]") {
     // Write the 2-bus system to a temp file, then reload it.
     auto sys = make_2bus();
-    const std::string path = "/tmp/hacdcpf_test_2bus_io.json";
-    save_json(sys, path);
+    const auto path = fs::temp_directory_path() / "hacdcpf_test_2bus_io.json";
+    save_json(sys, path.string());
 
-    auto result = try_load_json(path);
+    auto result = try_load_json(path.string());
     REQUIRE(static_cast<bool>(result));
     CHECK(result->ac.buses.size() == 2);
     CHECK(result->name == "json_test_2bus");
 
-    std::filesystem::remove(path);
+    fs::remove(path);
 }
 
 TEST_CASE("try_from_json: ImportMode::Permissive still parses valid JSON", "[io][json][safe_io]") {
@@ -573,22 +576,24 @@ TEST_CASE("try_from_json: ImportMode::Permissive still parses valid JSON", "[io]
 
 TEST_CASE("save_json/load_json: file round-trip for IEEE-24 system", "[io][json][file]") {
     auto orig = build_ieee24_3area_acdc();
-    const std::string path = "/tmp/hacdcpf_test_ieee24.json";
+    const auto path = fs::temp_directory_path() / "hacdcpf_test_ieee24.json";
 
-    REQUIRE_NOTHROW(save_json(orig, path));
+    REQUIRE_NOTHROW(save_json(orig, path.string()));
     HybridPowerSystem restored;
-    REQUIRE_NOTHROW(restored = load_json(path));
+    REQUIRE_NOTHROW(restored = load_json(path.string()));
 
     CHECK(restored.ac.buses.size()       == orig.ac.buses.size());
     CHECK(restored.ac.branches.size()    == orig.ac.branches.size());
     CHECK(restored.dc.buses.size()       == orig.dc.buses.size());
     CHECK(restored.vsc_converters.size() == orig.vsc_converters.size());
 
-    std::filesystem::remove(path);
+    fs::remove(path);
 }
 
 TEST_CASE("load_json: throws on missing file", "[io][json][file]") {
-    CHECK_THROWS(load_json("/tmp/hacdcpf_missing_file_xyz.json"));
+    const auto path = fs::temp_directory_path() / "hacdcpf_missing_file_xyz.json";
+    fs::remove(path);
+    CHECK_THROWS(load_json(path.string()));
 }
 
 // ═════════════════════════════════════════════════════════════════════════════

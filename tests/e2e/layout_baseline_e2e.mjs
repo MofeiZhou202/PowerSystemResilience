@@ -5,8 +5,9 @@ import { chromium } from 'playwright';
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
 import process from 'node:process';
+import { fileURLToPath } from 'node:url';
 
-const ROOT = path.resolve(path.dirname(new URL(import.meta.url).pathname), '..', '..');
+const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', '..');
 const OUTPUT = path.join(ROOT, 'tests', 'e2e', 'baselines', 'layout');
 const CASES = [
   { name: 'case33bw_acdc', slug: 'ieee33' },

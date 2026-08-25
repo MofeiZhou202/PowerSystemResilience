@@ -2,11 +2,32 @@
 
 # 开发状态
 
-更新日期：2026-08-18
+更新日期：2026-08-25
 
 本文档是经核实的构建状态与在研工程工作的活交接文档。
 请就地更新；不要创建带日期的副本。源码、已注册测试和当前
 Git 工作树仍为准绳。
+
+## Windows Release 与分发基线（2026-08-25）
+
+HySim `windows` 分支钉定干净的兄弟仓库 `../MIPSolvers` 的
+`windows-hysim` 分支提交 `a39812aa5941691b44e8379a8e0b7d42ccdde955`。
+`cmake --preset windows-msvc-release` 后接
+`cmake --build --preset windows-msvc-release --clean-first` 已在 MSVC 19.44
+下完成。正式版 `run_gui_server.exe` 启用了嵌入式 Ipopt、静态 sequential
+oneMKL/PardisoMKL、CHOLMOD/UMFPACK/KLU 与随包 HiGHS/SCIP；Windows 分发
+preset 关闭 Gurobi。`dumpbin` 只报告 Windows 系统 DLL 与可再分发的
+VC++/OpenMP 运行库依赖。
+
+修复 Node 的不安全 `import.meta.url.pathname` 转换后，受影响的 7 个已注册
+浏览器 E2E 全部通过。完整 `windows-msvc-release` CTest 共注册 1694 项，
+317.52 秒内得到：**1656 通过、5 跳过、33 失败**。失败仍被显式保留：
+4 项来自同一严格 PardisoMKL/Ipopt 混合 OPF 收敛差异；20 项依赖当前检出
+中不存在、被忽略或未跟踪的外部夹具；7 项要求可工作的 GridLAB-D 外部
+对比；`case16am` PF 不收敛；图约简 Native Full OPF 在未改动的严格
+accepted-step 门限停止（`p=8.008e-07`、`d=0.289586`、`c=0.1`）。没有为
+改善统计而关闭后端、放宽 OPF 断言或残差门限。因此 Windows 打包准入验证
+求解器能力和独立的正式版 API/前端启动冒烟，不宣称完整 CTest 全绿。
 
 ## 技术委托要求文档
 

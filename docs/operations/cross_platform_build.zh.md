@@ -111,8 +111,34 @@ ctest --preset windows-msvc-release
 
 该配置档使用 MSVC 动态运行时（Release 下为 `/MD`），要求使用与之兼容的
 MIPSolvers 预构建包，并启用嵌入式 Ipopt 以及顺序执行的静态 PardisoMKL
-后端。`windows-vcpkg-release` 仍是面向刻意提供额外软件包的站点的兼容
+后端。它会关闭 Gurobi 探测，避免可执行文件获得不可随包分发的
+`gurobi*.dll` 启动依赖；随包的 HiGHS 与 SCIP 仍然可用。打包脚本会从当前
+Visual Studio 安装中复制可再分发的 VC++/OpenMP 运行库 DLL。
+`windows-vcpkg-release` 仍是面向刻意提供额外软件包的站点的兼容
 配置档；它继承相同的 Ipopt/预构建包契约。
+
+顶层 CMake 的 Windows 裸配置也默认 `HACDCPF_ENABLE_IPOPT=ON`。
+MIPSolvers 在 Windows 上默认选择
+`MIPSOLVERS_IPOPT_LINEAR_SOLVER=pardisomkl`；若本地 oneMKL 打包界面不完整，
+受支持的 Windows 配置会直接失败，而不会静默关闭 Ipopt 或 MKL。
+
+### Windows 二进制分发包
+
+只允许从干净的 HySim 与 MIPSolvers 检出创建正式 Windows x64 包，且
+MIPSolvers 提交必须与 CMake pin 一致：
+
+```powershell
+powershell -ExecutionPolicy Bypass -File tools/package_windows.ps1
+```
+
+脚本会配置并构建 `windows-msvc-release`，运行求解器能力打包准入测试，
+使用 `dumpbin /DEPENDENTS` 审计 `run_gui_server.exe`，并暂存
+`bin/`、`web/`、`data/`、`external_data/`、文档、第三方许可、启动脚本与
+`BUILD_INFO.txt`。随后它会从暂存目录启动可执行文件，验证正式版 API 与
+`/xjtu/` 前端，生成逐文件 SHA-256 清单，最后创建
+`dist/HySim-Windows-x64.zip` 及其 SHA-256 文件。解压后运行
+`Start-HySim.cmd`，运行时不需要源码仓库。打包准入有意小于完整 CTest
+范围；当前数值失败和外部夹具缺口以持续更新的开发状态文档为准。
 
 ## 封闭环境验证（Hermetic Verification）
 
@@ -134,11 +160,12 @@ SCIP、PaPILO、启用时的 MUMPS/Ipopt 以及 SuiteSparse 标识为 vendored�
 内置）源码。缺少任何必需的源码树时，必须在 configure 阶段直接失败，而
 不得触发下载。
 
-Gurobi 检测默认启用，但始终保持可选，且从不随包捆绑。当 Gurobi 安装在
-非标准位置时，请在配置前设置 `GUROBI_HOME`。运行时若许可证不可用/过期、
-环境初始化失败或求解失败，将回退到随包内置的 HiGHS 与原生求解器。实际
-产生结果的后端由所报告的求解器名称与直流最优潮流（DC OPF）的
-`solver_chain` 字段标识。
+顶层裸配置默认探测 Gurobi，但它始终可选且不会随包捆绑。正式 Windows
+分发 preset 显式关闭它，避免 Windows 加载器依赖站点本地 DLL。自定义源码
+构建可以设置 `GUROBI_HOME` 并启用 Gurobi；一旦链接，目标机器必须按其许可
+安装相应运行库。求解器环境初始化或求解失败可以回退到随包 HiGHS 与原生
+求解器，但 DLL 缺失导致的 Windows 加载失败发生在程序启动前，无法回退。
+实际产生结果的后端由求解器名称与 DC OPF 的 `solver_chain` 字段标识。
 
 GridLAB-D、Julia、OpenDSS、Chromium 与 Playwright 等外部对比工具属于运行
 时测试集成，而非 C++ 构建依赖。当对应可执行文件缺失时，相关测试会自动
@@ -164,11 +191,11 @@ HACDCPF_OPF_LINEAR_SOLVER=auto|dense|mumps|umfpack|klu|eigen
 |---|---:|---|
 | `HACDCPF_DEPENDENCY_PROFILE` | `portable` | 构建应用所需的求解器子集；`full` 还会构建 MIPSolvers 的开发者目标。 |
 | `HACDCPF_USE_SUITESPARSE` | `ON` | 使用随包内置的 UMFPACK/KLU；`OFF` 选择 Eigen SparseLU 回退方案。 |
-| `HACDCPF_ENABLE_IPOPT` | macOS/Windows 配置档 `ON`，Linux 配置档 `OFF` | 启用嵌入式 Ipopt；Windows 消费本地的 oneMKL 预构建包。 |
+| `HACDCPF_ENABLE_IPOPT` | macOS/Windows 默认及配置档 `ON`，Linux 配置档 `OFF` | 启用嵌入式 Ipopt；Windows 要求本地 sequential oneMKL/PardisoMKL 预构建包。 |
 | `HACDCPF_ENABLE_ETAP` | `ON` | 基于随包内置的 OpenXLSX 构建。 |
 | `HACDCPF_ENABLE_OPENDSS` | `OFF` | 需要另行提供的本地 DSS C-API。 |
 | `HACDCPF_ENABLE_NATIVE_ARCH` | `OFF` | 启用针对宿主机的 CPU 指令；要产出可移植二进制请保持 `OFF`。 |
-| `HACDCPF_USE_GUROBI` | `ON` | 检测并优先使用已安装/已授权的 Gurobi；缺失时不视为错误。 |
+| `HACDCPF_USE_GUROBI` | 裸配置默认 `ON`；Windows 分发 preset `OFF` | 自定义构建可探测并优先使用已授权的 Gurobi；分发 preset 排除其运行库 DLL 依赖。 |
 | `HACDCPF_USE_PAPILO` | `ON` | 使用 MIPSolvers 捆绑的 header-only PaPILO；`minimal` 配置档或 `OFF` 时使用原生预处理（presolve）。 |
 
 发布前仍必须在全部三个目标操作系统上执行原生构建：在 macOS 上配置

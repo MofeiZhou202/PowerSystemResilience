@@ -1,7 +1,7 @@
 # AGENTS.md — HySim-XJTU-HRPES 项目记忆
 
 > 供 AI 代理与新加入开发者快速建立全局认识。与代码冲突时，以 `src/`、`include/`、`tests/`、`CMakeLists.txt` 为准。
-> 最后核实：2026-08-09。当前验证基线与未闭环调试见 `docs/development_status.md`。
+> 最后核实：2026-08-25。当前验证基线与未闭环调试见 `docs/overview/development_status.md`。
 
 ## 项目速览
 
@@ -79,7 +79,7 @@ cmake --build --preset macos-release
 ctest --preset macos-release
 ```
 
-- CMake 选项：`HACDCPF_DEPENDENCY_PROFILE`（portable/full/minimal）、`HACDCPF_ENABLE_ETAP`（**默认 ON**，需 OpenXLSX，找不到则 FATAL_ERROR）、`HACDCPF_ENABLE_OPENDSS(_COMPARE)`（OFF）、`HACDCPF_ENABLE_IPOPT`（仅 macOS 默认 ON）、`HACDCPF_USE_SUITESPARSE`（ON，缺失回退 Eigen SparseLU）。
+- CMake 选项：`HACDCPF_DEPENDENCY_PROFILE`（portable/full/minimal）、`HACDCPF_ENABLE_ETAP`（**默认 ON**，需 OpenXLSX，找不到则 FATAL_ERROR）、`HACDCPF_ENABLE_OPENDSS(_COMPARE)`（OFF）、`HACDCPF_ENABLE_IPOPT`（macOS/Windows 默认 ON；Windows 默认使用 MIPSolvers 自带的静态 sequential oneMKL/PardisoMKL）、`HACDCPF_USE_SUITESPARSE`（ON，缺失回退 Eigen SparseLU）。
 - 测试：100+ C++ 目标（约 1250 个 Catch2 用例）+ Node/Playwright/Python E2E。外部依赖（gridlabd、Julia、OpenDSS、chromium）缺失时自动 skip。浏览器 E2E 需 `npm i -D playwright && npx playwright install chromium`。
 - GUI E2E：`ctest -R gui_api_e2e`（Python 全链路冒烟）。
 

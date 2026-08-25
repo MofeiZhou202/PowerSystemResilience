@@ -1,10 +1,35 @@
 # Development Status
 
-Updated: 2026-08-24
+Updated: 2026-08-25
 
 This is the living handoff for verified build state and active engineering work.
 Update it in place; do not create dated copies. Source, registered tests, and
 the current Git worktrees remain authoritative.
+
+## Windows Release and distribution baseline (2026-08-25)
+
+The `windows` HySim branch pins the clean sibling `../MIPSolvers`
+`windows-hysim` branch at `a39812aa5941691b44e8379a8e0b7d42ccdde955`.
+`cmake --preset windows-msvc-release` followed by
+`cmake --build --preset windows-msvc-release --clean-first` completed with
+MSVC 19.44. The full-edition `run_gui_server.exe` is built with embedded Ipopt,
+static sequential oneMKL/PardisoMKL, CHOLMOD/UMFPACK/KLU and packaged
+HiGHS/SCIP; Gurobi is disabled for the distributable preset. `dumpbin` reports
+only Windows system DLLs and redistributable VC++/OpenMP runtime dependencies.
+
+After replacing unsafe Node `import.meta.url.pathname` conversions, the seven
+affected registered browser E2E tests pass 7/7. The full
+`windows-msvc-release` CTest sweep registered 1694 tests and completed in
+317.52 s: **1656 passed, 5 skipped, 33 failed**. The failures remain explicit:
+four tests expose the same strict PardisoMKL/Ipopt hybrid-OPF convergence
+mismatch; twenty require ignored/untracked external fixtures absent from this
+checkout; seven require working GridLAB-D external comparisons; `case16am` PF
+does not converge; and graph-reduced Native Full OPF stops at its unchanged
+strict accepted-step gate (`p=8.008e-07`, `d=0.289586`, `c=0.1`). No backend
+was disabled and no OPF assertion or residual gate was relaxed to improve the
+count. The Windows package gate therefore verifies solver capabilities plus a
+standalone full-edition API/frontend startup smoke; it does not claim that the
+full CTest sweep is green.
 
 ## Authoritative Release baseline confirmed (2026-08-24)
 

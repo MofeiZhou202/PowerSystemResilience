@@ -26,7 +26,11 @@
 #include <unordered_map>
 #include <vector>
 
+#ifdef _WIN32
+#include <io.h>
+#else
 #include <unistd.h>
+#endif
 
 #include "hacdcpf/network_reconfiguration/topology_analysis.hpp"
 #include "hacdcpf/network_reconfiguration/topology_reconfiguration.hpp"
@@ -106,6 +110,26 @@ static bool contains_ref(const std::vector<hacdcpf::analysis::BranchRef>& refs,
   });
 }
 
+namespace {
+
+#ifdef _WIN32
+constexpr int kStdoutFd = 1;
+constexpr int kStderrFd = 2;
+int duplicate_fd(int fd) { return ::_dup(fd); }
+int redirect_fd(int source, int target) { return ::_dup2(source, target); }
+int stream_fd(std::FILE* stream) { return ::_fileno(stream); }
+int close_fd(int fd) { return ::_close(fd); }
+#else
+constexpr int kStdoutFd = STDOUT_FILENO;
+constexpr int kStderrFd = STDERR_FILENO;
+int duplicate_fd(int fd) { return ::dup(fd); }
+int redirect_fd(int source, int target) { return ::dup2(source, target); }
+int stream_fd(std::FILE* stream) { return ::fileno(stream); }
+int close_fd(int fd) { return ::close(fd); }
+#endif
+
+}  // namespace
+
 class ScopedStdStreamCapture {
 public:
   ScopedStdStreamCapture()
@@ -114,13 +138,13 @@ public:
       throw std::runtime_error("failed to create temporary stream capture files");
     }
     flush_all();
-    stdout_saved_ = ::dup(STDOUT_FILENO);
-    stderr_saved_ = ::dup(STDERR_FILENO);
+    stdout_saved_ = duplicate_fd(kStdoutFd);
+    stderr_saved_ = duplicate_fd(kStderrFd);
     if (stdout_saved_ < 0 || stderr_saved_ < 0) {
       throw std::runtime_error("failed to duplicate stdout/stderr");
     }
-    if (::dup2(::fileno(stdout_file_), STDOUT_FILENO) < 0 ||
-        ::dup2(::fileno(stderr_file_), STDERR_FILENO) < 0) {
+    if (redirect_fd(stream_fd(stdout_file_), kStdoutFd) < 0 ||
+        redirect_fd(stream_fd(stderr_file_), kStderrFd) < 0) {
       throw std::runtime_error("failed to redirect stdout/stderr");
     }
     active_ = true;
@@ -138,10 +162,10 @@ public:
   void restore() {
     if (!active_) return;
     flush_all();
-    ::dup2(stdout_saved_, STDOUT_FILENO);
-    ::dup2(stderr_saved_, STDERR_FILENO);
-    ::close(stdout_saved_);
-    ::close(stderr_saved_);
+    redirect_fd(stdout_saved_, kStdoutFd);
+    redirect_fd(stderr_saved_, kStderrFd);
+    close_fd(stdout_saved_);
+    close_fd(stderr_saved_);
     stdout_saved_ = -1;
     stderr_saved_ = -1;
     active_ = false;

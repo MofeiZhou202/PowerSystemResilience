@@ -511,8 +511,8 @@ bool factor_kkt_sparse(SparseKKTCache& cache,
 // and augmented forms; the caller fills cache.nn/meq/niq to its block sizes.
 bool factor_assembled_kkt(SparseKKTCache& cache,
                           std::vector<Eigen::Triplet<double>>& trips) {
-  IpmProfTimer _asm(ipm_prof().t_assembly, ipm_prof().n_assembly,
-                    ipm_prof().enabled);
+  IpmProfTimer assembly_timer(ipm_prof().t_assembly, ipm_prof().n_assembly,
+                              ipm_prof().enabled);
   const int dim = cache.nn + cache.meq + cache.niq;
   cache.kkt.resize(dim, dim);
   cache.kkt.setFromTriplets(trips.begin(), trips.end());
@@ -541,7 +541,7 @@ bool factor_assembled_kkt(SparseKKTCache& cache,
     }
   }
   cache.kkt_orig = cache.kkt;
-  _asm.stop();  // assembly + equilibration ends here; factorization follows
+  assembly_timer.stop();  // assembly + equilibration ends here
 
   const int nnz = static_cast<int>(cache.kkt.nonZeros());
   const std::uint64_t pattern_signature =

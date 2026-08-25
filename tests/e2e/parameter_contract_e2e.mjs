@@ -4,8 +4,9 @@ import { createServer } from 'node:net';
 import path from 'node:path';
 import process from 'node:process';
 import { existsSync } from 'node:fs';
+import { fileURLToPath } from 'node:url';
 
-const ROOT = path.resolve(path.dirname(new URL(import.meta.url).pathname), '..', '..');
+const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', '..');
 
 function arg(name, fallback = null) {
   const i = process.argv.indexOf(`--${name}`);
