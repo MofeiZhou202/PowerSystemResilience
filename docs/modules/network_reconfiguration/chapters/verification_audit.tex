@@ -62,59 +62,62 @@ E2E；逐项数值和依赖提交见第~\ref{sec:nr-numerical-crossval} 节。
 
 \subsection{动态覆盖缺口}
 
-下列高风险契约尚无直接、专门的断言：
+本轮新增回归已锁定 solver 后端分派（NR-03）、核心 \fld{base\_loss\_mw}/reduction 代理与 HTTP
+\texttt{estimated\_loss\_mw} 口径（NR-04/NR-01）、\fld{ValidityFlags} 的 DC mesh 与空系统口径（NR-02）、
+以及 ONR 回退可观察标志 \fld{fallback\_used}（NR-05）。下列高风险契约仍无直接、专门的断言：
 \begin{itemize}
-  \item \texttt{solver=auto/highs/scip/native} 的完整分派、fallback 与状态/gap 规范化；
+  \item \texttt{scip} 后端在可用时的求解路径与状态/gap 规范化（native 已知在该 MILP 上偏弱，仅测分派）；
   \item 图启发式成功路径的 \fld{proven\_optimal=false} 和无限 gap；
   \item 后端返回成功但后验等式/不等式/整数性/变量界失败的拒绝分支；
   \item 负权重、$v_{min}>v_{max}$、非正容量、未知 solver、未匹配故障 ID 的输入拒绝；
   \item 切负荷不超过节点需求、P/Q 同比例削减和纯无功/负负荷边界；
   \item CircuitBreaker 的锁定/操作能力与 Switch 规则的一致性；
-  \item 核心 \fld{base\_loss\_mw} 等默认字段、HTTP \texttt{estimated\_loss\_mw} 口径；
-  \item ONR 核心失败后“原拓扑 PF 可行”回退的可观察标志；
   \item HTTP \fld{executable} 的注册生产路由专项 E2E；现有参数库脚本未注册到 CMake。
 \end{itemize}
 
-\subsection{开放审计发现}
+\subsection{已关闭审计发现}
 
-\subsubsection{NR-01：HTTP estimated loss 量纲错误（高）}
+以下 NR-01--NR-06 已在本轮实现修复并回归，登记为 AUD-018--023；全套回归及完整 1690/1690 见
+第~\ref{sec:nr-numerical-crossval} 节口径。
 
-证据：\srcpath{run\_gui\_server.cpp} 的 \texttt{POST /api/session/run\_reconfig} 把
-\fld{milp\_objective}$\times S_B$ 写入 \texttt{estimated\_loss\_mw}。目标含多种权重和省略常数，
-不能转换为 MW。影响是 GUI/API 客户端可能发布错误损耗值。修复应删除该字段、改名为目标缩放诊断，
-或映射到明确的核心代理；真实损耗只在 PF 收敛后报告。需加 HTTP 回归区分切负荷/开关成本与损耗。
+\subsubsection{NR-01：HTTP estimated loss 口径（已修复）}
 
-\subsubsection{NR-02：ValidityFlags 在求解前宣称约束已执行（中）}
+\srcpath{run\_gui\_server.cpp} 的 \texttt{estimated\_loss\_mw} 不再写 \fld{milp\_objective}$\times S_B$，
+改为核心显式定义的名义电流损耗代理 \fld{reconf\_loss\_mw}（MW）；真实损耗仍是独立的 PF 后验证
+\texttt{base\_loss\_mw}/\texttt{reconfig\_loss\_mw}（仅 \texttt{reconfig\_pf\_converged=true} 时有效）。
 
-证据：核心在空系统/无源/后端失败之前即把 radial/device/protection 标志设为 true；
-\fld{allow\_dc\_mesh=true} 时仍标 radial=true。影响是不可行结果或 DC mesh 可能被误读为全域已认证。
-修复应把“requested/modelled/enforced/validated”拆开，至少在不可行返回时不声明 validated，并增加
-AC/DC 分域字段。
+\subsubsection{NR-02：ValidityFlags 口径（已修复）}
 
-\subsubsection{NR-03：solver 公共注释与实际 fallback 漂移（中）}
+\fld{radial\_topology\_enforced} 现为 $\lnot(\texttt{split\_domain\_trees}\lor\texttt{allow\_dc\_mesh})$，
+空系统提前返回时清空全部 \fld{ValidityFlags}。头注释区分：\fld{*\_enforced}/\fld{*\_modelled} 为本次求解的
+formulation 属性，\fld{*\_validated}/\fld{executable} 为后验证结果，对直接核心求解恒为 false（表示“核心未
+验证”，非被掩盖的失败）。回归 \srcpath{test\_reconfig\_options} NR-02。
 
-证据：\texttt{TopoReconfOptions::solver} 注释声称 auto 为 HiGHS$\to$Native，实际为
-HiGHS$\to$SCIP；显式 highs 也会 fallback SCIP。\texttt{topology\_analysis.hpp} 仍声称现行 ONR
-直接调用自有 B\&C/MIR，而包装在旧模型前已返回。影响是部署方可能错误估计依赖、可复现性和证书来源。
-修复应同步头注释，决定是否恢复 Native fallback，并对四种字符串注册分派测试。
+\subsubsection{NR-03：solver 注释与实际口径（已修复）}
 
-\subsubsection{NR-04：核心结果存在永不赋值的公共字段（中）}
+\texttt{TopoReconfOptions::solver} 与 \texttt{topology\_analysis.hpp} 注释已与运行一致：\texttt{auto}
+与 \texttt{highs} 均为 HiGHS$\to$SCIP，\texttt{native}/\texttt{scip} 为单后端；native B\&C 在该
+LinDistFlow MILP 上弱于 HiGHS，为 opt-in 而非自动 fallback，行为未变。ONR 包装头注释已改为“经
+\srcpath{run\_topology\_reconfiguration}（solver=highs）”。回归 \srcpath{test\_reconfig\_options} NR-03 校验分派后端。
 
-\fld{base\_loss\_mw}、\fld{loss\_reduction\_mw}、\fld{loss\_reduction\_pct} 和四个后验证/
-可执行性字段在核心无赋值路径。HTTP 在局部副本/局部变量上补值，但直接 C++ 调用只见默认值且无法
-区分“未评估”与“评估失败”。修复应移除字段、改为 optional/availability，或把后验证作为显式 API。
+\subsubsection{NR-04：核心字段赋值（已修复）}
 
-\subsubsection{NR-05：历史 ONR 回退隐藏 MILP 失败（中）}
+\fld{base\_loss\_mw}、\fld{loss\_reduction\_mw}、\fld{loss\_reduction\_pct} 现于核心按与 \fld{reconf\_loss\_mw}
+相同的名义电流代理赋值（base 对初始在运支路求和），直接 C++ 调用得到已定义值而非静默 0；头文件标注其为
+代理，区别于 HTTP 的 PF 字段。后验证/可执行标志对核心求解保持 false（“核心未验证”）。回归
+\srcpath{test\_reconfig\_options} NR-04。
 
-核心不可行但原 AC 拓扑 PF 收敛时，兼容包装返回 \fld{feasible=true}、目标 0、原拓扑支路集，且没有
-fallback/limitation/status 字段。调用方可能把它当作 ONR incumbent。修复应保留核心失败原因并新增
-\texttt{fallback\_used/model\_scope}，或不改变 \fld{feasible} 的优化语义。
+\subsubsection{NR-05：历史 ONR 回退标记（已修复）}
 
-\subsubsection{NR-06：旧 AC MILP 为大段不可达实现（低）}
+新增 \fld{ONRResult::fallback\_used}，核心 MILP 失败但原拓扑 PF 收敛时置真（\fld{feasible} 真、
+\fld{optimal} 假、目标 0）；头注释声明其为连通性回退而非 ONR incumbent。回归 \srcpath{test\_topology\_crossval}
+NR-05（三角固定支路数超过生成树边数使核心不可行，连通网 PF 收敛触发回退）。
 
-\srcpath{topology\_analysis.cpp} 在兼容包装的无条件 return 后仍保留约 600 行旧模型。它增加审计成本，
-且头注释、测试名称容易继续引用旧行为。修复应删除不可达代码并把历史模型移入文档/版本历史，或恢复
-为明确、独立且可测试的入口；不应继续让一份函数体表达两个互斥实现。
+\subsubsection{NR-06：旧 AC MILP 不可达实现（已删除）}
+
+\srcpath{topology\_analysis.cpp} 兼容包装 return 之后的 629 行不可达历史 B\&C 已删除，
+\texttt{solve\_optimal\_reconfiguration(ACSystem)} 现只有一个可达模型（混合包装），头注释不再声称直接
+native B\&C。回归 reconfig 全套（91+54 assertions）绿，库重建无不可达代码错误。
 
 \subsection{已知模型边界}
 

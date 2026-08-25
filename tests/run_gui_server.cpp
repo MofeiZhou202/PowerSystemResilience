@@ -23962,7 +23962,11 @@ int main(int argc, char** argv) {
         out["total_shed_mw"] = recon.total_shed_mw;
         out["total_shed_mvar"] = recon.total_shed_mvar;
         out["milp_objective"] = sched.total_objective;
-        out["estimated_loss_mw"] = sched.total_objective * sys_tr.base_mva;
+        // Explicitly-defined nominal-current loss proxy [MW] from the core
+        // (Σ r_pu × base_mva for closed branches), NOT objective×base_mva
+        // (which mixes weighted switching/shed/island terms). Physical loss is
+        // reconfig_loss_mw below, valid only when reconfig_pf_converged.
+        out["estimated_loss_mw"] = recon.reconf_loss_mw;
         out["solver_name"] = sched.solver_name;
         out["solver_status"] = recon.solver_status;
         out["model_scope"] = recon.model_scope;

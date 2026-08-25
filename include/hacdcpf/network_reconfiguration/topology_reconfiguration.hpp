@@ -101,7 +101,11 @@ struct TopoReconfOptions {
   bool verbose{false};
   /// 是否跳过图启发式（强制 MILP 求解）
   bool skip_heuristic{false};
-  /// MILP backend: "auto" (HiGHS→native), "native", "highs", "scip".
+  /// MILP backend, used only when the graph heuristic does not already return
+  /// an incumbent. "auto" and "highs" both run HiGHS with a SCIP fallback (SCIP
+  /// must be built for the fallback to fire). "native": native branch-and-cut
+  /// only. "scip": SCIP only. There is no automatic native fallback: native
+  /// branch-and-cut is weaker than HiGHS on this LinDistFlow MILP and is opt-in.
   std::string solver{"auto"};
 };
 
@@ -172,6 +176,12 @@ struct TopoReconfResult {
   /// only — it is NOT the actual solved power loss.  For accurate loss values
   /// run a full power flow on the reconfigured topology.
   double reconf_loss_mw{0.0};
+  /// `base_loss_mw`, `loss_reduction_mw`, and `loss_reduction_pct` use the same
+  /// nominal-current proxy as `reconf_loss_mw`: `base_loss_mw` sums the initial
+  /// in-service branches, and the reductions are `base − reconf`. They are
+  /// topology-comparison proxies, not measured power. The HTTP route reports
+  /// separate power-flow-based `base_loss_mw`/`reconfig_loss_mw` fields that are
+  /// physical only when `reconfig_pf_converged` is true.
   double loss_reduction_mw{0.0};
   double loss_reduction_pct{0.0};
   double milp_objective{0.0};
@@ -193,6 +203,14 @@ struct TopoReconfResult {
   std::string model_scope;
 
   struct ValidityFlags {
+    // `*_enforced`/`*_modelled` describe what the core MILP formulation put in
+    // the model for THIS solve; they are cleared when no model is built (empty
+    // system) and `radial_topology_enforced` is false when a DC mesh / split
+    // domain relaxes the single radial tree. `*_validated`/`executable` describe
+    // POST-solve checks and are populated only by the post-validation pipeline
+    // (the production HTTP route or a future post-validation API); they stay
+    // false for a direct core solve, which does not run power flow / OPF, so a
+    // false value means "not validated by the core", never a masked failure.
     bool radial_topology_enforced{false};
     bool device_capability_constraints_enforced{false};
     bool protection_interlocks_enforced{false};

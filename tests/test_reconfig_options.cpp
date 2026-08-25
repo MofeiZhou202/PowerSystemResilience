@@ -1,6 +1,7 @@
 // ONR option tests: split-domain radiality (AC/DC trees, converters as free
 // bridges) and individual G4 (voltage) / G5 (thermal) constraint toggles.
 #include <catch2/catch_test_macros.hpp>
+#include <catch2/catch_approx.hpp>
 
 #include <algorithm>
 
@@ -53,6 +54,92 @@ TEST_CASE("Multiscale hybrid case has a feasible split-domain topology",
 
   INFO("solver=" << result.solver_backend << " status=" << result.solver_status);
   REQUIRE(result.feasible);
+}
+
+TEST_CASE("NR-02: validity flags reflect DC mesh and empty model",
+          "[reconfig_opts][validity][regression]") {
+  // A DC mesh relaxes the single radial tree, so radial is not enforced.
+  auto meshed = make_loop_case();
+  meshed.dc.buses[0].bus_type = DCBusType::DC_V;
+  DCBranch dl2; dl2.index = 2; dl2.from_bus = 1; dl2.to_bus = 2;
+  dl2.r_pu = 0.02; dl2.rate_a_mva = 50; dl2.in_service = true;
+  meshed.dc.branches.push_back(dl2);
+  TopoReconfOptions mesh_opt;
+  mesh_opt.enable_pf = false; mesh_opt.allow_dc_mesh = true; mesh_opt.skip_heuristic = true;
+  const auto r_mesh = run_topology_reconfiguration(meshed, mesh_opt);
+  CHECK(r_mesh.feasible);
+  CHECK_FALSE(r_mesh.validity.radial_topology_enforced);
+
+  // A plain radial request (no split-domain, no DC mesh) enforces radial (a
+  // formulation property, independent of feasibility).
+  TopoReconfOptions radial_opt;
+  radial_opt.enable_pf = false; radial_opt.skip_heuristic = true;
+  const auto r_radial = run_topology_reconfiguration(make_loop_case(), radial_opt);
+  CHECK(r_radial.validity.radial_topology_enforced);
+
+  // An empty system builds no model, so nothing is enforced and it is infeasible.
+  HybridPowerSystem empty; empty.base_mva = 100.0;
+  const auto r_empty = run_topology_reconfiguration(empty, radial_opt);
+  CHECK_FALSE(r_empty.feasible);
+  CHECK_FALSE(r_empty.validity.radial_topology_enforced);
+  CHECK_FALSE(r_empty.validity.device_capability_constraints_enforced);
+  CHECK_FALSE(r_empty.validity.protection_interlocks_enforced);
+}
+
+TEST_CASE("NR-03: solver strings dispatch to the declared backend",
+          "[reconfig_opts][solver][regression]") {
+  // A simple 3-bus AC feeder with a normally-open tie — an ONR every backend
+  // can solve, so the dispatch (not solver robustness) is what is under test.
+  HybridPowerSystem s; s.base_mva = 100.0;
+  ACBus b1; b1.index = 1; b1.bus_type = BusType::SLACK; b1.base_kv = 10; b1.vmax_pu = 1.1; b1.vmin_pu = 0.9;
+  ACBus b2; b2.index = 2; b2.bus_type = BusType::PQ; b2.base_kv = 10; b2.vmax_pu = 1.1; b2.vmin_pu = 0.9; b2.pd_mw = 1.0; b2.qd_mvar = 0.3;
+  ACBus b3; b3.index = 3; b3.bus_type = BusType::PQ; b3.base_kv = 10; b3.vmax_pu = 1.1; b3.vmin_pu = 0.9; b3.pd_mw = 1.0; b3.qd_mvar = 0.3;
+  s.ac.buses = {b1, b2, b3};
+  ExternalGrid eg; eg.index = 1; eg.bus = 1; eg.in_service = true; eg.s_sc_max_mva = 100;
+  s.ac.external_grids = {eg};
+  ACBranch e1; e1.index = 1; e1.from_bus = 1; e1.to_bus = 2; e1.r_pu = 0.02; e1.x_pu = 0.04; e1.rate_a_mva = 50; e1.in_service = true;
+  ACBranch e2; e2.index = 2; e2.from_bus = 2; e2.to_bus = 3; e2.r_pu = 0.02; e2.x_pu = 0.04; e2.rate_a_mva = 50; e2.in_service = true;
+  ACBranch e3; e3.index = 3; e3.from_bus = 1; e3.to_bus = 3; e3.r_pu = 0.03; e3.x_pu = 0.06; e3.rate_a_mva = 50; e3.in_service = false;
+  s.ac.branches = {e1, e2, e3};
+
+  auto solve = [&](const char* solver) {
+    TopoReconfOptions opt;
+    opt.enable_pf = true; opt.skip_heuristic = true; opt.solver = solver;
+    return run_topology_reconfiguration(s, opt);
+  };
+
+  // native → native B&C; highs → HiGHS (SCIP only on HiGHS failure); auto →
+  // the same HiGHS→SCIP external chain. No path silently routes to SCIP first.
+  // native B&C is opt-in and weaker than HiGHS on this MILP, so only its
+  // dispatch (backend), not a solve, is asserted.
+  const auto r_native = solve("native");
+  CHECK(r_native.solver_backend.rfind("NativeB&C", 0) == 0);
+
+  const auto r_highs = solve("highs");
+  CHECK(r_highs.solver_backend.find("HiGHS") != std::string::npos);
+  CHECK(r_highs.feasible);
+
+  const auto r_auto = solve("auto");
+  CHECK(r_auto.solver_backend.find("HiGHS") != std::string::npos);
+  CHECK(r_auto.feasible);
+}
+
+TEST_CASE("NR-04: core reports a defined loss-proxy base and reduction",
+          "[reconfig_opts][loss][regression]") {
+  TopoReconfOptions opt;
+  opt.enable_pf = false; opt.split_domain_trees = true; opt.skip_heuristic = true;
+  const auto r = run_topology_reconfiguration(make_loop_case(), opt);
+  REQUIRE(r.feasible);
+  // base = Σ r_pu × base_mva over the initially in-service branches (AC 0.05 +
+  // DC 0.01) × 100 = 6.0 MW; the fields are defined, not silently zero.
+  CHECK(r.base_loss_mw == Catch::Approx(6.0).margin(1e-9));
+  CHECK(r.reconf_loss_mw >= 0.0);
+  CHECK(r.loss_reduction_mw ==
+        Catch::Approx(r.base_loss_mw - r.reconf_loss_mw).margin(1e-9));
+  if (r.base_loss_mw > 1e-9) {
+    CHECK(r.loss_reduction_pct ==
+          Catch::Approx(r.loss_reduction_mw / r.base_loss_mw * 100.0).margin(1e-6));
+  }
 }
 
 TEST_CASE("Split-domain radiality keeps both converters as bridges", "[reconfig_opts]") {

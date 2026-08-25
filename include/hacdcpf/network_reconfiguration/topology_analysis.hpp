@@ -4,10 +4,15 @@
 // reconfiguration (ONR) via a specialised branch-and-cut MILP.
 // Equivalent to DistributionPowerFlow.jl TopologyAnalysis module.
 //
-// The ONR solver (solve_optimal_reconfiguration) builds a LinDistFlow MILP
-// formulation with spanning-tree connectivity constraints (single-commodity
-// flow, Dantzig–Johnson style) and calls the native B&C engine
-// (hacdcpf::solver::solve_milp_bc) directly — this is the module's own B&C.
+// The ONR entry point (solve_optimal_reconfiguration) is a compatibility
+// wrapper: it routes the historical AC-only ONR API through the maintained
+// hybrid-aware reconfiguration solver (run_topology_reconfiguration, invoked
+// with solver="highs" → HiGHS with a SCIP fallback) and projects the result
+// back into the legacy ONRResult shape. It is no longer a separate inline
+// branch-and-cut. When the core MILP is infeasible but the unchanged connected
+// topology still solves a power flow, the wrapper reports that base topology
+// with ONRResult::fallback_used=true so callers do not mistake it for a proven
+// ONR incumbent.
 //
 // Cross-validated by:
 //   1. Connectivity / radiality checks on known networks.
@@ -84,6 +89,14 @@ struct ONRResult {
 
   bool feasible{false};
   bool optimal{false};
+
+  /// True when the core reconfiguration MILP did not produce a feasible
+  /// solution and this result instead reports the unchanged base topology
+  /// (which still solved a verification power flow). `feasible` is true and
+  /// `optimal` is false in that case, `milp_objective` is 0, and the branch
+  /// sets echo the input topology — it is a connectivity fallback, not an ONR
+  /// incumbent.
+  bool fallback_used{false};
 
   // B&C diagnostics
   solver::BCStats bc_stats;

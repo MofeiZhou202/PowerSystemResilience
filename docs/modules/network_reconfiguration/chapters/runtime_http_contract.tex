@@ -82,17 +82,14 @@ AC 兼容表 & open/closed AC ID 与 \srcpath{branch\_details} & 只列 AC\\
 因此核心候选切负荷为零但后验证失败时，该字段仍为 false。这是比单看
 \fld{total\_shed\_mw} 更严格的 GUI 结论。
 
-\subsection{已审计的损耗响应缺陷}
+\subsection{损耗响应口径}
 
-当前路由写入
-\begin{equation}
-\texttt{estimated\_loss\_mw}
-=\fld{milp\_objective}\times\fld{base\_mva}.
-\end{equation}
-该式量纲不成立：\fld{milp\_objective} 可能同时含加权开关、切负荷、孤岛和损耗项，且开关项省略
-常数。它既不同于核心 \fld{reconf\_loss\_mw}，也不同于 HTTP 的 PF
-\texttt{reconfig\_loss\_mw}。在代码修复前，客户端必须忽略 \texttt{estimated\_loss\_mw}，
-只在 \texttt{reconfig\_pf\_converged=true} 时使用 \texttt{reconfig\_loss\_mw}。
+路由把核心的名义电流损耗代理 \fld{reconf\_loss\_mw}（$\sum r_{pu}\times S_B$，对闭合支路求和，
+单位 MW）写入 \texttt{estimated\_loss\_mw}。这是一个显式定义的拓扑比较代理，替代了此前量纲不成立的
+\fld{milp\_objective}$\times\fld{base\_mva}$（后者混合加权开关、切负荷、孤岛项且省略开关常数）。
+真实物理损耗仍是独立的 PF 后验证字段 \texttt{base\_loss\_mw}/\texttt{reconfig\_loss\_mw}，仅在
+\texttt{reconfig\_pf\_converged=true} 时有物理意义。该修复登记为 AUD-018，回归见
+\srcpath{gui\_api\_e2e} 与 reconfig 消费点。
 
 \subsection{失败与 HTTP 状态}
 

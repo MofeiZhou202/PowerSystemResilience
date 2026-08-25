@@ -83,8 +83,10 @@ no MW unit.
 - HTTP `reconfig_loss_mw`: post-power-flow branch loss, meaningful only when
   `reconfig_pf_converged=true`.
 
-The current HTTP field `estimated_loss_mw = milp_objective * base_mva` is
-dimensionally invalid and is tracked as AUD-018. Clients must ignore it.
+The HTTP field `estimated_loss_mw` now returns the core proxy `reconf_loss_mw`
+(a defined nominal-current MW proxy), not the old dimensionally invalid
+`milp_objective * base_mva` (AUD-018, fixed). For physical loss use
+`reconfig_loss_mw` when `reconfig_pf_converged=true`.
 
 ## 6. Solver and certificate boundary
 

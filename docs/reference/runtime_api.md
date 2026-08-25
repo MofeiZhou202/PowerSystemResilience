@@ -227,18 +227,18 @@ success flag. Hybrid branches are domain-qualified in `dc_branch_details`,
 `vsc_details`, and `switch_operations`; the bare `open_branch_ids` and
 `closed_branch_ids` arrays are AC-only compatibility output.
 
-The current `estimated_loss_mw` response is not a physical loss: the route
-computes `milp_objective * base_mva`, although the objective mixes weighted
-switching, shedding, island, and loss terms and omits switching constants.
-This is tracked as AUD-018. Ignore the field until the runtime is corrected;
-use `reconfig_loss_mw` only when `reconfig_pf_converged=true`. The complete
+The `estimated_loss_mw` response is the core's explicitly-defined
+nominal-current loss proxy (`reconf_loss_mw`, MW), not the old dimensionally
+invalid `milp_objective * base_mva` (AUD-018, fixed). It is a topology
+comparison proxy, not a measured loss: for physical loss use
+`reconfig_loss_mw` only when `reconfig_pf_converged=true`. The complete
 request/result and validity contract is in the
 [network-reconfiguration manual](../modules/network_reconfiguration/network_reconfiguration_manual.tex).
 
 6-bus 穷举、IEEE 33-bus 独立 BFS、Newton PF/DC-OPF/碳流流水线的原始数值和验收门槛见
 [网络重构数值章节](../modules/network_reconfiguration/chapters/numerical_cross_validation.tex)。
-其中 BFS 与 Newton PF 是两套不同模型输出，MILP objective 和错误的 HTTP
-`estimated_loss_mw` 均不得作为物理损耗交叉替代。
+其中 BFS 与 Newton PF 是两套不同模型输出，MILP objective 和 HTTP
+`estimated_loss_mw`（名义电流代理）均不得作为物理损耗交叉替代。
 
 Power-flow numerical overrides are sparse intent. In particular, omitting
 `options.robust_nonlinear.enable_auto_fallback_scheduling` preserves the C++

@@ -6,6 +6,26 @@ This is the living handoff for verified build state and active engineering work.
 Update it in place; do not create dated copies. Source, registered tests, and
 the current Git worktrees remain authoritative.
 
+## network_reconfiguration audit closure (2026-08-24)
+
+The six open network_reconfiguration code-audit findings (AUD-018–023, manual
+NR-01–NR-06) are fixed and regression-locked. `estimated_loss_mw` on
+`POST /api/session/run_reconfig` now returns the core's defined nominal-current
+loss proxy (`reconf_loss_mw`) instead of the dimensionally invalid
+`milp_objective × base_mva`; `radial_topology_enforced` is
+`!(split_domain_trees ∨ allow_dc_mesh)` and the empty-system return clears all
+`ValidityFlags`; the `solver` comments now match the runtime HiGHS→SCIP
+dispatch, with native branch-and-cut documented as opt-in (weaker than HiGHS on
+this LinDistFlow MILP, not an automatic fallback); the core assigns
+`base_loss_mw`/`loss_reduction_mw`/`loss_reduction_pct` as defined proxies
+instead of leaving them zero; `ONRResult::fallback_used` marks the legacy
+base-topology connectivity fallback; and the 629-line unreachable historical AC
+branch-and-cut body was removed so `solve_optimal_reconfiguration(ACSystem)` has
+one reachable model. New regressions `test_reconfig_options` NR-02/03/04 and
+`test_topology_crossval` NR-05 lock the behavior, and the network_reconfiguration
+manual recompiled with XeLaTeX. A full Release CTest sweep passed 1690/1690 in
+48.3 s (the four added test cases raised the registered count from 1686).
+
 ## Repository-baseline test-failure closure (2026-08-24)
 
 The six repository-baseline test failures previously carried in this file were

@@ -60,8 +60,9 @@ AC 母线需求与 `Load` 行相加，DC 母线需求与 `DCLoad` 行相加。�
 - 核心 `reconf_loss_mw`：$base\_mva\sum_{closed\ AC/DC}r_e$，是假设 1 pu 电流的拓扑代理；
 - HTTP `reconfig_loss_mw`：后验证 PF 支路损耗，仅在 `reconfig_pf_converged=true` 时有意义。
 
-当前 HTTP 的 `estimated_loss_mw = milp_objective * base_mva` 量纲错误，已登记为 AUD-018；客户端
-必须忽略该字段。
+HTTP 的 `estimated_loss_mw` 现返回核心代理 `reconf_loss_mw`（已定义的名义电流 MW
+代理），不再是量纲错误的 `milp_objective * base_mva`（AUD-018，已修复）；物理损耗用
+`reconfig_loss_mw`（仅 `reconfig_pf_converged=true` 时）。
 
 ## 5. 求解与证书边界
 

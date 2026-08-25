@@ -211,7 +211,9 @@ TopoReconfResult run_topology_reconfiguration(
   TopoReconfResult result;
   result.model_scope = opt.enable_pf ? "hybrid-acdc-topology-lindistflow"
                                      : "hybrid-acdc-topology-connectivity";
-  result.validity.radial_topology_enforced = true;
+  // A DC mesh / split-domain relaxation drops the single radial-tree
+  // constraint, so radial is only truly enforced when neither is requested.
+  result.validity.radial_topology_enforced = !split_topology;
   result.validity.device_capability_constraints_enforced = true;
   result.validity.protection_interlocks_enforced = true;
   result.validity.ac_lindistflow_enforced = opt.enable_pf;
@@ -222,6 +224,8 @@ TopoReconfResult run_topology_reconfiguration(
     if (opt.verbose) {
       spdlog::warn("[拓扑重构] 系统为空 (nb={}, nl={})", nb, nl);
     }
+    // No MILP was built, so no constraint was enforced or modelled.
+    result.validity = TopoReconfResult::ValidityFlags{};
     return result;
   }
 
@@ -1658,7 +1662,7 @@ TopoReconfResult run_topology_reconfiguration(
         solved_ok = try_external(scip, "SCIP", scip.available());
         if (!solved_ok) external_failure = highs_failure + "; " + external_failure;
       }
-    } else {  // auto: HiGHS -> SCIP
+    } else {  // auto: HiGHS -> SCIP (same external chain as "highs")
       engine::StrictHighsBranchAndCutAdapter highs(bc_opt);
       solved_ok = try_external(highs, "HiGHS", true);
       const std::string highs_failure = external_failure;
@@ -1910,6 +1914,18 @@ TopoReconfResult run_topology_reconfiguration(
     if (x_sol[idx.beta(i)] > 0.5)
       loss_proxy += edge_r[i];
   result.reconf_loss_mw = loss_proxy * base_mva;  // nominal-current proxy [MW]
+  // Same nominal-current proxy for the INITIAL topology, so a direct library
+  // caller sees a defined base/reduction instead of a silent 0. Physical loss
+  // still requires a post-reconfiguration power flow (the HTTP route's separate
+  // PF-based base_loss_mw/reconfig_loss_mw fields).
+  double base_loss_proxy = 0.0;
+  for (int i = 0; i < nl; ++i)
+    if (edge_status[i]) base_loss_proxy += edge_r[i];
+  result.base_loss_mw = base_loss_proxy * base_mva;
+  result.loss_reduction_mw = result.base_loss_mw - result.reconf_loss_mw;
+  result.loss_reduction_pct = result.base_loss_mw > 1e-9
+      ? result.loss_reduction_mw / result.base_loss_mw * 100.0
+      : 0.0;
   result.milp_objective = c.dot(x_sol);
 
   // Decompose the objective into interpretable terms.

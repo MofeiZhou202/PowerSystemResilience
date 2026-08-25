@@ -659,6 +659,45 @@ TEST_CASE("Topology reconfiguration honors structured DC fault references",
   CHECK(contains_ref(result.closed_branches, graph::EdgeCategory::AC_Line, 1));
 }
 
+TEST_CASE("NR-05: legacy ONR fallback to base topology is marked",
+          "[topology][onr][fallback][regression]") {
+  using namespace hacdcpf;
+  ACSystem ac;
+  ac.base_mva = 10.0;
+  ac.buses = {
+      make_bus(1, BusType::SLACK, 0.0, 0.0),
+      make_bus(2, BusType::PQ, 0.5, 0.2),
+      make_bus(3, BusType::PQ, 0.5, 0.2),
+  };
+  // A triangle (three fixed, in-service branches on three buses) plus one
+  // switchable parallel branch. The spanning-tree equality Σα = n-1 = 2 cannot
+  // hold with three non-switchable branches forced closed, so the core MILP is
+  // infeasible — yet the mesh is connected and its Newton power flow converges,
+  // triggering the base-topology fallback.
+  ac.branches = {
+      make_branch(1, 1, 2, 0.05, 0.02, true),
+      make_branch(2, 2, 3, 0.05, 0.02, true),
+      make_branch(3, 1, 3, 0.05, 0.02, true),
+      make_branch(4, 1, 2, 0.06, 0.03, true),
+  };
+  Generator gen; gen.index = 1; gen.bus = 1; gen.in_service = true; gen.is_slack = true;
+  gen.pmax_mw = 20.0; gen.pmin_mw = 0.0; gen.qmax_mvar = 20.0; gen.qmin_mvar = -20.0;
+  ac.generators = {gen};
+
+  analysis::ONROptions fallback_opt;
+  fallback_opt.switchable_branch_ids = {4};  // branches 1-3 fixed closed → Σα ≥ 3 > 2
+  fallback_opt.max_time_s = 20;
+  fallback_opt.verbose = false;
+
+  const auto fallback_result =
+      analysis::solve_optimal_reconfiguration(ac, fallback_opt);
+  CHECK(fallback_result.fallback_used);
+  CHECK(fallback_result.feasible);
+  CHECK_FALSE(fallback_result.optimal);
+  CHECK(std::abs(fallback_result.milp_objective) < 1e-9);
+  CHECK(fallback_result.verification_pf.converged);
+}
+
   TEST_CASE("Legacy ONR fixes non-switchable branch states",
         "[topology][onr][regression]") {
     using namespace hacdcpf;
