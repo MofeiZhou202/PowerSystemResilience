@@ -785,6 +785,7 @@ endif()
   set(_HACDCPF_IEEE13_DSS
       "${CMAKE_SOURCE_DIR}/external_data/opendss_ieee_pes/opendss_reference/13_node/official_full/IEEE13Nodeckt.dss")
   if(TARGET validate_harmonics_ieee13 AND
+     HACDCPF_HAVE_OPENDSS AND
      EXISTS "${_HACDCPF_HARMONICS_VALIDATION_PY}" AND
      EXISTS "${CMAKE_SOURCE_DIR}/tools/harmonics_validation/compare_ieee13_opendss.py" AND
      EXISTS "${_HACDCPF_IEEE13_DSS}")

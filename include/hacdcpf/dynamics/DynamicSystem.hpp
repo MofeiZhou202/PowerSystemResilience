@@ -91,6 +91,14 @@ class DynamicNetwork {
   std::unordered_map<int, int> ac_bus_pos_by_id;
   std::unordered_map<int, int> dc_bus_pos_by_id;
 
+  // Authored (pre-projection) bus id -> canonical bus id. Canonical projection
+  // renumbers non-contiguous DC bus ids (canonicalize_dc_bus_indices) and may
+  // merge AC buses, so events authored in the caller's bus-id space must be
+  // translated before they can match canonical devices/positions. Empty entries
+  // mean the identity (already canonical).
+  std::unordered_map<int, int> authored_to_canonical_ac_bus;
+  std::unordered_map<int, int> authored_to_canonical_dc_bus;
+
   Eigen::SparseMatrix<Complex> Yac_base;
   Eigen::SparseMatrix<double> Gdc_base;
 

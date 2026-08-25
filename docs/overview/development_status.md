@@ -6,6 +6,67 @@ This is the living handoff for verified build state and active engineering work.
 Update it in place; do not create dated copies. Source, registered tests, and
 the current Git worktrees remain authoritative.
 
+## Repository-baseline test-failure closure (2026-08-24)
+
+The six repository-baseline test failures previously carried in this file were
+confirmed reproducible at HEAD on freshly rebuilt Release binaries and fixed;
+they are logged as AUD-082 in the module code audit. The earlier
+"1675 passed, zero failed" note did not hold for the current tree — the six
+tests genuinely failed until this pass. The numbering had also drifted (+11
+above ~#1514), so the failures were matched by name, not by number. The fixes:
+
+- `analyze_topology` classified any load-bearing singleton with no *in-service*
+  neighbor as `IsolatedLoad`. A single bus carrying a load plus a slack
+  generator/external grid was therefore rejected by the AC OPF island pre-check
+  ("no island with slack bus"), and a load bus islanded only by an
+  out-of-service branch was reported as an orphan. `IsolatedLoad` now requires a
+  topological orphan (`has_load && !has_generator && g.adj.empty()`); a
+  source-hosting or out-of-service-branch-islanded load falls through to
+  `NoSlack`/`Valid`. Fixes `#812`, `#925`, `#1528`, `#1531`.
+- `NewtonSolver::solve` flattened every exception to `std::runtime_error`;
+  input-contract `std::invalid_argument` (unanchored island, converter
+  reference-row requirements) is now re-thrown with its type preserved. Part of
+  `#812`.
+- `run_three_stage_reliability[_from_string]` swallowed the
+  `apparent_power_polygon_sides` `std::invalid_argument` into a soft
+  `result.error`; the option is now validated before the soft catch. Fixes
+  `#1525`.
+- `harmonics_ieee13_opendss` was registered without the `HACDCPF_HAVE_OPENDSS`
+  gate; with OpenDSS off the C++ importer returns zero buses and the test failed
+  instead of skipping. It is now gated like the sibling OpenDSS tests.
+
+After rebuilding the affected targets, the twelve focused regression suites
+`test_graph`, `test_graph_kron`, `test_validation`, `test_reliability_resolver`,
+`test_three_stage_reliability`, `test_vsc_limit_ncp`, `test_nighttime_opf`,
+`test_advanced_pf`, `test_opf_solver_backends`, `test_distribution_pipeline`,
+`test_component_models_math_audit` and `test_topology_crossval` all passed, and
+`test_graph`'s AUD-029 orphan-isolated-load case remains green. A first complete
+parallel Release CTest sweep processed 1686 registered tests in 52.4 s with one
+pre-existing dynamics failure, `transient_native_disturbance_matrix` (#1658),
+which was then fixed as described below. The final sweep is 1686/1686 in 59.1 s.
+
+`#1658` was a real, production-relevant dynamics defect surfaced (not caused) by
+this pass. Commit `99dfae18` correctly added strict transient event-target
+validation; before it, an event whose target could not be found silently did
+nothing. That exposed that DC-domain disturbance events authored in the caller's
+bus-id space never resolved: canonical projection renumbers non-contiguous DC
+bus ids (`canonicalize_dc_bus_indices` maps {10,11,12}→{1,2,3}), while the
+driver authored events against DC buses 11/12 and never set `canonical_bus`.
+AC worked only because its ids were already contiguous. The GUI
+`/api/session/run_transient` route validated DC load events by
+`component_index` (passing) while the solver applied them by bus (failing), so a
+real user with non-contiguous DC buses would hit the same wall. The fix stores
+authored→canonical AC/DC bus maps on the built `DynamicNetwork`
+(`DynamicModelBuilder::build`, mirroring resilience `canonical_bus_ids`) and
+auto-populates each author-space event's `canonical_bus` in `apply_events`;
+`FaultShunt`/`ClearFault` and the device-target helpers now resolve through it.
+An explicit `canonical_bus` (as the resilience DAE path sets) still wins.
+The driver disturbance matrix is now 18/18. `test_transient_dynamics`
+(116774 assertions / 115 cases), `test_dynamic_model_catalog` (4034 / 8),
+`test_intelligent_cyber_physical_reliability` (60 / 7) and
+`test_resilience_assessment` (364 / 39) all pass unchanged, and the full
+registered suite is 1686/1686.
+
 ## Electromechanical phasor DAE closure (2026-08-24)
 
 The declared electromechanical transient envelope is now closed for the

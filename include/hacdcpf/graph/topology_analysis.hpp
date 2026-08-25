@@ -62,7 +62,8 @@ enum class IslandStatus {
   Valid,             ///< Has voltage reference, in-service
   NoSlack,           ///< AC island with no slack / external grid
   NoDCVoltageRef,    ///< DC island with no V-reference bus
-  IsolatedLoad,      ///< Load node with no path to any source
+  IsolatedLoad,      ///< Load bus with no incident edge at all (orphan); a load
+                     ///  islanded only by out-of-service branches is NoSlack
   Empty,             ///< No in-service buses
 };
 

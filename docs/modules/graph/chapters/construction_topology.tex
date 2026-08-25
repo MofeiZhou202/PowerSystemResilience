@@ -91,15 +91,19 @@ component id，停运节点为 $-1$。于是
 节点的岛数”。有效性规则为：
 \begin{equation}
 status(C)=\begin{cases}
-\text{IsolatedLoad},&C\text{ 是带负荷且无在运邻边的单点岛},\\
+\text{IsolatedLoad},&C\text{ 带负荷、无本地源且无任何关联边（拓扑孤点）},\\
 \text{NoSlack},&C\text{ 含 AC 且无 AC slack},\\
 \text{NoDCVoltageRef},&C\text{ 为纯 DC 且无 DC\_V},\\
 \text{Valid},&\text{其他。}
 \end{cases}
 \end{equation}
 混合岛即使含 DC\_V，只要没有 AC slack 仍为 NoSlack；反之含 AC slack 时不再单独要求 DC\_V。
-IsolatedLoad 优先于 NoSlack/NoDCVoltageRef，并只生成匹配的 GraphIsolatedLoad diagnostic；
-validation 消费同一 status 产生 connectivity warning。
+此处 IsolatedLoad 仅指拓扑孤点：\srcpath{topology\_analysis.cpp:analyze\_topology} 要求该负荷节点
+无 \fld{has\_generator} 源且 \fld{adj} 为空（\srcpath{power\_system\_graph.cpp:add\_edge} 会把在运与
+停运边一并登记，故 \fld{adj} 空等价于完全无关联边）。仅因支路停运而失去\emph{在运}邻边、但仍带
+关联边的负荷母线保留网络结构，归 NoSlack 而非 IsolatedLoad。IsolatedLoad 优先于
+NoSlack/NoDCVoltageRef，并只生成匹配的 GraphIsolatedLoad diagnostic；validation 消费同一 status
+产生 connectivity warning。
 
 \subsection{圈复杂度与径向性}
 

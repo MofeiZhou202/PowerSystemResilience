@@ -2813,6 +2813,12 @@ PowerFlowResult NewtonSolver::solve(const SolverData& input_data,
 
   finish_core_profiling();
   return out;
+  } catch (const std::invalid_argument& error) {
+    // Input-contract violations (unanchored island, converter reference-row
+    // requirements, unknown bus) must keep their invalid_argument type so
+    // callers can distinguish a rejected precondition from a numerical fault.
+    throw std::invalid_argument("NewtonSolver failed during " + solve_stage +
+                                ": " + error.what());
   } catch (const std::exception& error) {
     throw std::runtime_error("NewtonSolver failed during " + solve_stage +
                              ": " + error.what());

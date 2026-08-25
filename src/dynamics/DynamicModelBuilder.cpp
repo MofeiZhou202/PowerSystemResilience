@@ -1733,6 +1733,30 @@ DynamicSystem DynamicModelBuilder::build(const HybridPowerSystem& sys,
       options.project_to_canonical
           ? projection::RichToCanonicalOperator::apply(sys).canonical
           : sys;
+  // Authored -> canonical bus maps so transient events authored in the caller's
+  // bus-id space resolve after canonical projection renumbers non-contiguous DC
+  // bus ids and may merge AC buses. Mirrors resilience_dynamic_certification's
+  // canonical_bus_ids: AC prefers the bus_merge_map, both domains fall back to
+  // positional correspondence (DC canonicalization preserves bus order/count).
+  {
+    auto& ac_map = dyn.network.authored_to_canonical_ac_bus;
+    auto& dc_map = dyn.network.authored_to_canonical_dc_bus;
+    if (dyn.canonical_system.bus_merge_map) {
+      for (const auto& [external, internal] :
+           dyn.canonical_system.bus_merge_map->ext_to_int) {
+        ac_map[external] = internal + 1;
+      }
+    } else {
+      const std::size_t n =
+          std::min(sys.ac.buses.size(), dyn.canonical_system.ac.buses.size());
+      for (std::size_t i = 0; i < n; ++i)
+        ac_map[sys.ac.buses[i].index] = dyn.canonical_system.ac.buses[i].index;
+    }
+    const std::size_t ndc =
+        std::min(sys.dc.buses.size(), dyn.canonical_system.dc.buses.size());
+    for (std::size_t i = 0; i < ndc; ++i)
+      dc_map[sys.dc.buses[i].index] = dyn.canonical_system.dc.buses[i].index;
+  }
   build_stage = "nominal power-flow initialization";
   dyn.initial_power_flow = nominal_power_flow(
       options.project_to_canonical ? sys : dyn.canonical_system, options);

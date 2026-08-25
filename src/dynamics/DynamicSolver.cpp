@@ -239,15 +239,17 @@ bool load_event_has_dynamic_device_target(const DynamicSystem& sys,
       event.type != DynamicEventType::DCLoadScale) {
     return false;
   }
+  const int event_bus = static_cast<int>(std::llround(
+      event_param(event, "canonical_bus", event.bus)));
   return std::any_of(sys.devices.begin(), sys.devices.end(), [&](const auto& device) {
     const auto out = device->output(sys.x, sys.y);
     const std::string type = out.type;
     if (type.find("Load") == std::string::npos && type.find("load") == std::string::npos) {
       return false;
     }
-    if (event.bus != 0 && out.bus != 0 && event.bus != out.bus) return false;
+    if (event_bus != 0 && out.bus != 0 && event_bus != out.bus) return false;
     return event.component_index == 0 || event.component_index == out.component_index ||
-           event.bus != 0;
+           event_bus != 0;
   });
 }
 
@@ -257,10 +259,12 @@ bool device_event_has_target(const DynamicSystem& sys, const DynamicEvent& event
       event.type != DynamicEventType::DCDCTrip) {
     return true;
   }
+  const int event_bus = static_cast<int>(std::llround(
+      event_param(event, "canonical_bus", event.bus)));
   return std::any_of(sys.devices.begin(), sys.devices.end(), [&](const auto& device) {
     const auto out = device->output(sys.x, sys.y);
     if (event.component_index != 0 && event.component_index != out.component_index) return false;
-    if (event.bus != 0 && out.bus != 0 && event.bus != out.bus) return false;
+    if (event_bus != 0 && out.bus != 0 && event_bus != out.bus) return false;
     const std::string& semantic_type =
         !event.target_type.empty() ? event.target_type : event.component_type;
     if (semantic_type.empty() || semantic_type == "ProtectionRelay") return true;
@@ -348,8 +352,12 @@ NetworkEventApplication apply_event_to_network(DynamicSystem& sys,
       const bool is_dc = event.component_type == "DC" || event.component_type == "dc";
       DynamicFaultShunt fault;
       fault.is_ac = !is_dc;
-      fault.bus = event.bus != 0 ? event.bus : (event.target_id != 0 ? event.target_id
-                                                                       : event.component_index);
+      const int authored_fault_bus =
+          event.bus != 0 ? event.bus
+                         : (event.target_id != 0 ? event.target_id
+                                                 : event.component_index);
+      fault.bus = static_cast<int>(std::llround(
+          event_param(event, "canonical_bus", authored_fault_bus)));
       fault.bus_pos = is_dc ? sys.network.dcBusPosition(fault.bus)
                             : sys.network.acBusPosition(fault.bus);
       fault.phase = event.phase;
@@ -384,7 +392,10 @@ NetworkEventApplication apply_event_to_network(DynamicSystem& sys,
       break;
     }
     case DynamicEventType::ClearFault: {
-      const int bus = event.bus != 0 ? event.bus : event.component_index;
+      const int authored_clear_bus =
+          event.bus != 0 ? event.bus : event.component_index;
+      const int bus = static_cast<int>(std::llround(
+          event_param(event, "canonical_bus", authored_clear_bus)));
       for (auto& fault : sys.network.fault_shunts) {
         if (bus == 0 || fault.bus == bus) {
           fault.active = false;
@@ -433,11 +444,49 @@ NetworkEventApplication apply_event_to_network(DynamicSystem& sys,
   return result;
 }
 
+// Whether an event's `bus` field addresses a DC-domain bus (so it must be
+// translated through the DC authored->canonical map rather than the AC one).
+bool event_targets_dc_bus(const DynamicEvent& event) {
+  switch (event.type) {
+    case DynamicEventType::DCLoadScale:
+    case DynamicEventType::DCStoragePowerStep:
+    case DynamicEventType::DCBranchTrip:
+    case DynamicEventType::DCBranchClose:
+    case DynamicEventType::DCDCTrip:
+      return true;
+    case DynamicEventType::FaultShunt:
+    case DynamicEventType::ClearFault:
+      return event.component_type == "DC" || event.component_type == "dc";
+    default:
+      return false;
+  }
+}
+
+// Resolves an authored (caller-space) event bus to the canonical bus id the
+// dynamic devices/network use after projection. Identity when the bus is
+// already canonical or absent from the map.
+int canonical_bus_for_event(const DynamicSystem& sys, const DynamicEvent& event) {
+  if (event.bus == 0) return 0;
+  const auto& map = event_targets_dc_bus(event)
+                        ? sys.network.authored_to_canonical_dc_bus
+                        : sys.network.authored_to_canonical_ac_bus;
+  const auto it = map.find(event.bus);
+  return it != map.end() ? it->second : event.bus;
+}
+
 bool apply_events(DynamicSystem& sys, double t, DynamicResults& results) {
   bool rebuild = clear_expired_faults(sys, t);
   bool changed = rebuild;
   for (auto& event : sys.events) {
     if (event.applied || event.time_s > t + 1e-12) continue;
+    // Author-space events (as opposed to canonical protection-emitted events)
+    // are translated once into canonical bus space so DC-renumbered or merged
+    // targets resolve. An explicit canonical_bus (e.g. from resilience) wins.
+    if (event.bus != 0 &&
+        event.params.find("canonical_bus") == event.params.end()) {
+      event.params["canonical_bus"] =
+          static_cast<double>(canonical_bus_for_event(sys, event));
+    }
     const NetworkEventApplication application = apply_event_to_network(sys, event);
     if (!application.target_found && !load_event_has_dynamic_device_target(sys, event)) {
       results.success = false;

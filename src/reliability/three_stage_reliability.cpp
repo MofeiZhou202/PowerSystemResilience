@@ -617,6 +617,17 @@ double vpp_available_generation_mw(const VirtualPowerPlant& vpp) {
   return std::isfinite(capacity) ? capacity : 0.0;
 }
 
+// Options that violate the solver's input contract (as opposed to case-data
+// problems discovered during evaluation) must be rejected loudly with
+// std::invalid_argument so a caller cannot silently receive a soft error
+// result for a malformed request.
+void validate_three_stage_options(const ThreeStageReliabilityOptions& options) {
+  if (options.apparent_power_polygon_sides < 4 ||
+      options.apparent_power_polygon_sides % 2 != 0)
+    throw std::invalid_argument(
+        "apparent_power_polygon_sides must be an even integer >= 4");
+}
+
 NativeCase build_native_case(const HybridPowerSystem& input,
                              const ThreeStageReliabilityOptions& options = {}) {
   NativeCase c;
@@ -632,10 +643,7 @@ NativeCase build_native_case(const HybridPowerSystem& input,
   c.include_converter_faults = options.include_converter_faults;
   c.include_switch_faults = options.include_switch_faults;
   c.include_dc_power_flow = options.include_dc_power_flow;
-  if (options.apparent_power_polygon_sides < 4 ||
-      options.apparent_power_polygon_sides % 2 != 0)
-    throw std::invalid_argument(
-        "apparent_power_polygon_sides must be an even integer >= 4");
+  validate_three_stage_options(options);
   c.apparent_power_polygon_sides = options.apparent_power_polygon_sides;
 
   for (const auto& b : sys.ac.buses) {
@@ -4080,6 +4088,7 @@ ThreeStageReliabilityResult run_three_stage_reliability(
     result.error = "case JSON is empty or unreadable: " + case_json.string();
     return result;
   }
+  validate_three_stage_options(options);
   try {
     HybridPowerSystem sys = io::from_json(text);
     ThreeStageReliabilityOptions effective_options = options;
@@ -4123,6 +4132,7 @@ ThreeStageReliabilityResult run_three_stage_reliability_from_string(
     result.error = "case JSON text is empty";
     return result;
   }
+  validate_three_stage_options(options);
   try {
     HybridPowerSystem sys = io::from_json(case_json_text);
     ThreeStageReliabilityOptions effective_options = options;

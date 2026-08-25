@@ -39,8 +39,9 @@ HTTP 400。返回 200 只表示路由完成，不是 PF/OPF 或语义等价证�
 \bottomrule
 \end{longtable}
 
-岛状态字符串为 \texttt{Valid/NoSlack/NoDCVoltageRef/IsolatedLoad/Empty}。带负荷且无在运邻边的
-单点岛赋 \texttt{IsolatedLoad}，优先于缺参考状态，并同步产生 GraphIsolatedLoad diagnostic 与
+岛状态字符串为 \texttt{Valid/NoSlack/NoDCVoltageRef/IsolatedLoad/Empty}。带负荷、无本地源且
+无任何关联边的单点孤点赋 \texttt{IsolatedLoad}（仅因支路停运而孤立、但仍带关联边的负荷母线归
+\texttt{NoSlack}），优先于缺参考状态，并同步产生 GraphIsolatedLoad diagnostic 与
 \fld{all\_islands\_valid=false}；\texttt{Empty} 仅是防御性分支。桥列表不暴露 graph edge position
 或源组件 index，而是为 GUI
 重建端点和类别；VSC 桥可有不同的 \fld{from\_domain/to\_domain}，legacy \fld{domain} 仅当两端均

@@ -336,26 +336,26 @@ TopologyReport analyze_topology(const PowerSystemGraph& g) {
     else                              ++rep.n_dc_islands;
   }
 
-  // A load with no in-service neighbour forms a singleton island. Record this
-  // before reference checks so the status and diagnostic use one precedence:
-  // IsolatedLoad is more specific than NoSlack/NoDCVoltageRef.
+  // A load bus with no incident edge at all is a topological orphan and forms a
+  // singleton IsolatedLoad island. Record this before the reference checks so
+  // status and diagnostics use one precedence: IsolatedLoad is more specific
+  // than NoSlack/NoDCVoltageRef. Two cases deliberately fall through to the
+  // reference check instead of being reported as isolated loads: a bus that
+  // also hosts an in-service source (has_generator) is self-supplied, and a bus
+  // whose only connections are out of service is operationally islanded (a
+  // NoSlack island that lost its source), not an orphan.
   std::vector<bool> isolated_load_island(
       static_cast<std::size_t>(n_components), false);
   for (int ni = 0; ni < g.node_count(); ++ni) {
-    if (!g.nodes[ni].in_service || !g.nodes[ni].has_load) continue;
-    bool has_neighbour = false;
-    for (auto [edge_pos, neighbor] : g.adj[ni]) {
-      if (g.edges[edge_pos].in_service && g.nodes[neighbor].in_service) {
-        has_neighbour = true;
-        break;
-      }
-    }
-    if (has_neighbour || comp[ni] < 0) continue;
+    if (!g.nodes[ni].in_service || !g.nodes[ni].has_load ||
+        g.nodes[ni].has_generator)
+      continue;
+    if (!g.adj[ni].empty() || comp[ni] < 0) continue;
     isolated_load_island[static_cast<std::size_t>(comp[ni])] = true;
     Diagnostic diagnostic;
     diagnostic.code = DiagCode::GraphIsolatedLoad;
     diagnostic.message = "Bus " + std::to_string(g.nodes[ni].bus_id) +
-                         " has load but no in-service connection.";
+                         " has load but no network connection.";
     diagnostic.related_buses = {g.nodes[ni].bus_id};
     rep.diagnostics.push_back(std::move(diagnostic));
   }

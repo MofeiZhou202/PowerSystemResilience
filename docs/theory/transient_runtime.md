@@ -161,7 +161,14 @@ cannot precompile (`LinearVerbosity`/extension method-overwrite conflict).
 Protection actions are target-qualified by semantic `component_type` plus index
 and (when supplied) bus. Thus a PV, VSC, and synchronous generator may reuse an
 index without cross-tripping. Missing branch, bus-load, or fault targets fail
-the run and are not appended to `applied_event_records`. After a topology action,
+the run and are not appended to `applied_event_records`. Scheduled events are
+authored in the caller's bus-id space; because canonical projection renumbers
+non-contiguous DC bus ids and may merge AC buses, `apply_events` translates each
+author-space event's `bus` into the canonical id (via the authored→canonical
+maps the builder records on the network) before matching, so a DC event on a
+non-contiguous authored bus resolves. An explicit `canonical_bus` param — as the
+resilience DAE path supplies — takes precedence, and canonical protection-emitted
+events are left unmapped. After a topology action,
 MassMatrixDae resolves same-timestamp protection closure (maximum 32 iterations)
 and re-solves the algebraic constraints after each action; exceeding the cap is
 an explicit chronology failure. Protection clusters use a separately configured

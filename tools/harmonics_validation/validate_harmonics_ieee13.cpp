@@ -58,6 +58,9 @@ int main(int argc, char** argv) {
     }
     if (src_index < 0) {
       std::cerr << "source bus not found: " << src_name << "\n";
+      std::cerr << "available buses (" << sys.buses.size() << "):";
+      for (const auto& b : sys.buses) std::cerr << ' ' << b.name;
+      std::cerr << "\n";
       return 1;
     }
     const double i_base_amps =
