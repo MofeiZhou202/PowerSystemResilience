@@ -6,6 +6,36 @@ This is the living handoff for verified build state and active engineering work.
 Update it in place; do not create dated copies. Source, registered tests, and
 the current Git worktrees remain authoritative.
 
+## analysis hosting-capacity independent oracle (2026-08-24)
+
+`analysis` (hosting capacity) gained the same independent-oracle cross-check
+(logged as AUD-088), completing the internal-only quantitative modules. The
+DL/T 2041-2025 equipment-level hosting capacity is a clean algebraic closed form:
+
+- `tools/analysis_validation/validate_hosting_xref.cpp` — runs the production
+  `assess_hosting_capacity` on four deterministic single-transformer supply areas
+  and dumps the supply-area aggregates, transformer parameters and the
+  hosting/accessible-capacity figures.
+- `tools/analysis_validation/run_cross_validation.py` — a numpy-free oracle that
+  does **not** link hacdcpf; it re-derives `S_d = max(0, (P - P_G + beta*n*S*cos
+  + P_ESS + dP_ESS)/tau)` and the accessible-capacity subtractions
+  (`C_grid = S_d - existing_DR`, `C_reg = C_grid - registered_DR`), with case 1
+  the hand-verified analytic anchor from `test_hosting_capacity` (S_d in
+  [10.5, 12.5], accessible 9.5 / 7.5).
+
+Registered as the CTest test `hosting_capacity_cross_validation`. It passes with
+a worst error of `0` across all figures on four cases (auto-beta single 18.2,
+parallel auto-beta 10.4, storage interval clamped to [0, 3]) at a `1e-9` gate; a
+negative control (rewriting one S_d,max) fails as expected; the analysis manual
+recompiles with XeLaTeX. Verified in the Debug ASan build, with the Release run
+pending a clean `../MIPSolvers` worktree.
+
+This completes independent equation oracles for all four internal-only
+quantitative modules this session — `carbon_analysis` (AUD-085),
+`reliability` (AUD-086), `market` (AUD-087) and `analysis` (AUD-088) — each
+following the emitter + numpy-free oracle + CTest pattern of
+`integrated_energy`/`model`/`power_models`.
+
 ## market SCED/LMP independent oracle (2026-08-24)
 
 `market` gained the same independent-oracle cross-check (logged as AUD-087). The

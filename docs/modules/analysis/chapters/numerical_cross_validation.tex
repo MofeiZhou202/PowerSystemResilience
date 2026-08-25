@@ -16,6 +16,31 @@ EENS=1.00 MWh/yr、LOLE=0.50 hr/yr、LOLF=1.00 occ/yr 的构造基准；该数�
 复制系统、措施施加和指标单位，不表示所有措施都无收益。测试还验证措施失败不会污染
 其他候选、双措施协同字段和 \fld{evaluated\_systems}/\fld{failed\_systems} 计数。
 
+\subsection{独立方程 oracle：承载力闭式}\label{sec:analysis-hc-xref}
+注册测试 \srcpath{hosting\_capacity\_cross\_validation} 把生产
+\srcpath{src/analysis/hosting\_capacity.cpp:assess\_hosting\_capacity} 的设备级承载力结果与一个
+不链接 hacdcpf 的独立 Python oracle 对照。证据生成器
+\srcpath{tools/analysis\_validation/validate\_hosting\_xref.cpp:emit\_case} 在四个确定性单变压器供电区
+上运行评估，导出供电区聚合量与变压器参数及承载力/可接入结果；oracle
+\srcpath{tools/analysis\_validation/run\_cross\_validation.py} 依据 DL/T 2041-2025 设备级闭式
+$S_d=\max(0,(P-P_G+\beta\, n\, S\cos\theta+P_{ESS}+\Delta P_{ESS})/\tau)$ 与可接入容量减法
+$C_{grid}=S_d-S_{d,con}$、$C_{reg}=C_{grid}-S_{d,reg}$ 独立重算并逐项核对。
+
+复现命令为
+\begin{verbatim}
+ctest --test-dir build/macos-release \
+  -R '^hosting_capacity_cross_validation$' --output-on-failure
+\end{verbatim}
+
+四个算例覆盖：手工核验锚点（$P{=}2$、$S_{d,con}{=}1$、$P_{ESS}{=}0.5$、$\beta{=}0.8$、$\cos\theta{=}1$、
+$S{=}10$、$\tau{=}1$、$\Delta P_{ESS}\in[0,2]$ $\Rightarrow$ $S_d\in[10.5,12.5]$、可接入下限 $9.5/7.5$）、
+单变压器自动 $\beta{=}0.80$、双并列自动 $\beta{=}0.5$ 加自定义 $\cos\theta/\tau$、以及储能区间负下界导致
+$S_{d,min}$ 被 $0$ 钳制。准入阈值为 $10^{-9}$；本轮全部检查最大误差为 $0$，负控制（人为改写一个 $S_{d,max}$）
+如期触发失败。该 oracle 校核 DL/T 2041 设备级闭式与可接入代数；供电区拓扑聚合与工程校验（潮流、
+短路、谐波）阶段仍由 Catch2 套件验证。
+
 \subsection{验证边界}
-没有运行独立 DL/T 2041 计算器、商业规划软件或 8760 小时外部规划 oracle，因此本章不
-声称承载力等级的现场准确率、薄弱环节 Top-$k$ 命中率或反事实收益的因果有效性。
+第~\ref{sec:analysis-hc-xref}~节的独立方程 oracle 现以机器可读结果证明设备级承载力闭式与
+已发布 DL/T 2041-2025 公式一致，但它重算同一闭式，属独立实现校核而非现场准确度验证；
+未运行商业规划软件或 8760 小时外部规划 oracle，故本章仍不声称承载力等级的现场准确率、
+薄弱环节 Top-$k$ 命中率或反事实收益的因果有效性。

@@ -265,6 +265,27 @@ if(Python3_EXECUTABLE AND
     LABELS "market;cross_validation;python_oracle"
     TIMEOUT 180)
 endif()
+
+# Hosting-capacity independent equation oracle: validate_hosting_xref emits the
+# production DL/T 2041-2025 equipment-level assessment for deterministic supply
+# areas, and the numpy-free Python oracle re-derives the S_d closed form and the
+# accessible-capacity algebra.  See analysis/chapters/numerical_cross_validation.tex.
+if(Python3_EXECUTABLE AND
+   EXISTS "${CMAKE_SOURCE_DIR}/tools/analysis_validation/validate_hosting_xref.cpp" AND
+   EXISTS "${CMAKE_SOURCE_DIR}/tools/analysis_validation/run_cross_validation.py")
+  add_executable(hosting_capacity_xref
+    "${CMAKE_SOURCE_DIR}/tools/analysis_validation/validate_hosting_xref.cpp")
+  target_link_libraries(hosting_capacity_xref PRIVATE hacdcpf::hacdcpf)
+  add_test(NAME hosting_capacity_cross_validation
+    COMMAND "${Python3_EXECUTABLE}"
+            "${CMAKE_SOURCE_DIR}/tools/analysis_validation/run_cross_validation.py"
+            --executable "$<TARGET_FILE:hosting_capacity_xref>"
+            --out "${CMAKE_CURRENT_BINARY_DIR}/hosting_capacity_cross_validation.json"
+            --markdown "${CMAKE_CURRENT_BINARY_DIR}/hosting_capacity_cross_validation.md")
+  set_tests_properties(hosting_capacity_cross_validation PROPERTIES
+    LABELS "analysis;hosting_capacity;cross_validation;python_oracle"
+    TIMEOUT 120)
+endif()
 hacdcpf_add_test(test_sppt_fault_campaign  test_sppt_fault_campaign.cpp)
 hacdcpf_add_test(test_sppt_agent           test_sppt_agent.cpp)
 
