@@ -6,6 +6,47 @@ This is the living handoff for verified build state and active engineering work.
 Update it in place; do not create dated copies. Source, registered tests, and
 the current Git worktrees remain authoritative.
 
+## Documentation source-anchor CI validator + drift closure (2026-08-24)
+
+The manuals reference the code through ~1800 `file:symbol` anchors and ~700
+structured path anchors, but nothing verified they still resolved. A new
+checker, [doc_anchor_check.py](../../tools/doc_anchor_check.py), now validates
+every anchor against the `src/include/tests/tools` tree and is registered as the
+tracked CTest test `doc_anchor_check` (pure Python, no build or private
+dependency, so it runs on every `ctest` sweep and in the build-test CI job). The
+same one-line command is also added to the always-on `lint` job in
+`.github/workflows/ci.yml`; that workflow file is git-ignored in this checkout
+(`.gitignore` ignores `.github/*` except two skills), so the canonical CI must
+mirror the step. The checker resolves
+`file:symbol` anchors from both the structured macros (`\srcpath`, `\implfull`,
+`\compmeta`'s path argument) and Markdown prose by whole-word symbol presence,
+validates structured path anchors rooted at tracked source trees, understands
+the `symbol_*` wildcard-family and `foo.cpp/.hpp` dual-extension conventions,
+and skips the external `../MIPSolvers` sibling repo.
+
+Running it surfaced eight drifted anchors, now corrected against the verified
+symbols (logged as AUD-084). Each dead reference is written below as
+`symbol` in `file` form rather than the live `file:symbol` anchor syntax, so the
+checker does not re-flag this changelog:
+
+- `ResultAttributionLayer::apply` (×2, cited against `result_attribution.cpp`) →
+  the real device-attribution entry `CanonicalToRichOperator::apply`; the named
+  class exists in no source file.
+- `stage_topology` (cited against `three_stage_reliability.cpp`) →
+  `solve_stage_milp`, the F7 "faulted branch is out in every stage" logic.
+- `CyberPhysicalFMEAOptions` (×2, cited against `failure_mode.hpp`) → the header
+  `reliability_assessment.hpp`, where the struct is actually defined.
+- `apply_typhoon_impact` (cited against `scenario_generation.cpp`) →
+  `wind_generation_from_track`, and `traffic_node_locations` (cited against
+  `typhoon_traffic_impact.cpp`) → `georeference_nodes`; both named phantoms.
+- the test path with a non-existent `model/` subdirectory →
+  `tests/test_component_models_math_audit.cpp`.
+
+The checker reports `file:symbol ok=1828 path ok=699 bare=1481 failures=0`
+(exit 0) on the corrected tree, detects an injected fake anchor as a negative
+control, and the model/reliability/scenario_generation manuals recompile with
+XeLaTeX.
+
 ## time_series regression closure AUD-066/069/070 (2026-08-24)
 
 The three "closed in code, regression pending" annual/lifecycle findings now

@@ -12,7 +12,7 @@ S_{checked}\xrightarrow{\Pi}
 \end{equation}
 其中 $M$ 是母线/支路/组件映射，$C$ 是 \texttt{ProjectionCertificate}，$A$ 是下游分析。
 \srcpath{src/model/network\_utils.cpp:project\_to\_canonical\_models} 承担投影实现，
-\srcpath{src/model/result\_attribution.cpp:ResultAttributionLayer::apply} 承担设备级归因。
+\srcpath{src/model/result\_attribution.cpp:CanonicalToRichOperator::apply} 承担设备级归因。
 
 \subsection{三类索引空间}
 

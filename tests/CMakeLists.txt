@@ -147,6 +147,20 @@ hacdcpf_add_test(test_sppt_ablation        test_sppt_ablation.cpp)
 hacdcpf_add_test(test_sppt_benchmark       test_sppt_benchmark.cpp)
 
 find_package(Python3 COMPONENTS Interpreter QUIET)
+# Documentation source-anchor drift guard: every file:symbol anchor in the
+# manuals / design docs must still resolve against the source tree.  Pure
+# Python, no build artifacts required, so it runs on every ctest sweep and in
+# CI.  The script resolves the repository root from its own location.
+if(Python3_EXECUTABLE AND
+   EXISTS "${CMAKE_SOURCE_DIR}/tools/doc_anchor_check.py")
+  add_test(NAME doc_anchor_check
+    COMMAND "${Python3_EXECUTABLE}"
+            "${CMAKE_SOURCE_DIR}/tools/doc_anchor_check.py")
+  set_tests_properties(doc_anchor_check PROPERTIES
+    LABELS "docs;anchors;drift"
+    TIMEOUT 120)
+endif()
+
 if(TARGET integrated_energy_xref AND Python3_EXECUTABLE AND
    EXISTS "${CMAKE_SOURCE_DIR}/tools/integrated_energy_validation/run_cross_validation.py")
   add_test(NAME integrated_energy_cross_validation

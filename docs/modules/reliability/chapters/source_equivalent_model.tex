@@ -237,7 +237,7 @@ FMEA 一阶 $\sum\lambda\tau S$ & 近似 & 稀有、非重叠一阶期望，无 
  \item \textbf{三阶段修复窗（曾最严重）}：故障元件现于\emph{每一阶段}均停运，阶段 2 的重构方案
  保持至阶段 3（\fld{held\_stage2\_plan}），修复时长 $\tau^{rep}$ 乘的是\emph{真正不可恢复}的切负荷，
  而非已修复网络的近零切负荷。源码注释即 “faulted branch is out in every stage”。依据
- \srcpath{src/reliability/three\_stage\_reliability.cpp:stage\_topology}。
+ \srcpath{src/reliability/three\_stage\_reliability.cpp:solve\_stage\_milp}。
  \item \textbf{非序贯尾部风险}：以\emph{合成年}自助抽样（$\min(\max(200,n),2000)$ 年，每年 8760 个
  增量切负荷样本）聚合后再算 VaR/CVaR，取代此前逐状态 $S\times8760$ 的过离散分布。依据
  \srcpath{src/reliability/reliability\_assessment.cpp:eval\_missing（lambda）}。

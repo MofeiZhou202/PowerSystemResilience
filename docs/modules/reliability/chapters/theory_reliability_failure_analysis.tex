@@ -207,7 +207,7 @@ $E_{k,a}\le E_k^{dur}\le E_{k,m}$。若较慢开关反而启用更优拓扑、�
 保护成功的联合类；此时不再相乘，并置 \fld{joint\_class\_probability\_modelled=true}。两种模式均把失败功能
 路由到既有退化/人工后果代理，仍不从电流轨迹推导后备区或 DER 穿越。轨迹驱动的 L1 保护--FRT 类生成与指标
 聚合由 \srcpath{protection\_frt.hpp} 独立提供（\S\ref{sec:rel-pf}），并不自动接管通用 FMEA 路由。依据：
-\srcpath{src/reliability/reliability\_assessment.cpp:run\_distribution\_fmea}、\srcpath{failure\_mode.hpp:CyberPhysicalFMEAOptions}。
+\srcpath{src/reliability/reliability\_assessment.cpp:run\_distribution\_fmea}、\srcpath{reliability\_assessment.hpp:CyberPhysicalFMEAOptions}。
 
 \subsection{元件类型专属失效模式目录}\label{sec:rel-fa-catalog}
 上述框架的\emph{具体实例}由目录构建器 \srcpath{src/reliability/failure\_mode.cpp:build\_failure\_mode\_catalog}
@@ -339,7 +339,7 @@ $\mathrm{PFD}_{avg}\approx\lambda_{DU}T_I/2$、验证试验模型 &
 Level-1 信息物理双类全期望~\eqref{eq:rel-fa-cyber}、归因、$\eta_A$ &
   \implfull{src/reliability/reliability\_assessment.cpp:run\_distribution\_fmea}（\srcpath{CyberPhysicalFMEAOptions}）\\
 三维因子化筛选~\eqref{eq:rel-fa-factor} &
-  \implfull{failure\_mode.hpp:CyberPhysicalFMEAOptions::IntelligentFunctionOptions}\\
+  \implfull{reliability\_assessment.hpp:CyberPhysicalFMEAOptions::IntelligentFunctionOptions}\\
 联合类生成 / 保护逻辑 / FRT 耦合 &
   \textbf{完整实现}：显式互斥 \fld{joint\_states}、L1 轨迹类、Level-2 保护信息事件树、自动拓扑后果、序贯事件队列与在线 DAE 年度耦合均有独立可执行入口\\
 \end{longtable}

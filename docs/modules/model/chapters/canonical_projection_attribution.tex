@@ -57,7 +57,7 @@ participation factor。稳定 ID 是字符串化来源；映射不是依赖名�
 
 \subsection{设备终端流与符号}
 
-\srcpath{src/model/result\_attribution.cpp:ResultAttributionLayer::apply} 以 authored system、projected system、
+\srcpath{src/model/result\_attribution.cpp:CanonicalToRichOperator::apply} 以 authored system、projected system、
 PF/OPF 结果和 mapping 构建设备级结果。网络端子功率常采用“母线流向设备”符号，源荷署名常采用
 “注入母线为正”符号；调用者必须读取结果类型的 terminal/sign contract，不能跨族直接相加。
 停运组件统一归零；同母线多个理想开关/断路器不可辨识时按约定分配并降级恢复等级。
