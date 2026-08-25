@@ -139,15 +139,22 @@ foreach ($relative in $dependencyLicenseSources) {
 $vcRedistCandidates = @()
 if ($env:VCToolsRedistDir) { $vcRedistCandidates += $env:VCToolsRedistDir }
 $vsRoot = Join-Path ${env:ProgramFiles} "Microsoft Visual Studio/2022"
+$vsInstallRoots = @()
 if (Test-Path $vsRoot) {
-  Get-ChildItem -LiteralPath $vsRoot -Directory | ForEach-Object {
-    $msvcRedist = Join-Path $_.FullName "VC/Redist/MSVC"
-    if (Test-Path $msvcRedist) {
-      $latest = Get-ChildItem -LiteralPath $msvcRedist -Directory |
-        Sort-Object Name -Descending | Select-Object -First 1
-      if ($latest) { $vcRedistCandidates += (Join-Path $latest.FullName "x64") }
-    }
-  }
+  $vsInstallRoots += Get-ChildItem -LiteralPath $vsRoot -Directory |
+    Select-Object -ExpandProperty FullName
+}
+$vswhere = Join-Path ${env:ProgramFiles(x86)} "Microsoft Visual Studio/Installer/vswhere.exe"
+if (Test-Path $vswhere) {
+  $vsInstallRoots += & $vswhere -all -products * -property installationPath
+}
+foreach ($vsInstallRoot in ($vsInstallRoots | Sort-Object -Unique)) {
+  $msvcRedist = Join-Path $vsInstallRoot "VC/Redist/MSVC"
+  if (-not (Test-Path $msvcRedist)) { continue }
+  $vcRedistCandidates += Get-ChildItem -LiteralPath $msvcRedist -Directory |
+    ForEach-Object { Join-Path $_.FullName "x64" } |
+    Where-Object { Test-Path (Join-Path $_ "Microsoft.VC143.CRT") } |
+    Sort-Object -Descending
 }
 $vcRedistRoot = $vcRedistCandidates | Where-Object {
   Test-Path (Join-Path $_ "Microsoft.VC143.CRT")
