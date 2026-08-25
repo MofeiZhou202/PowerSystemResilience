@@ -75,20 +75,23 @@ AC PV 使用
 每个 PV 生成 \texttt{RenewableYearState}，记录 authored ID、名称、原容量、降额容量和因子；
 这里的 ``renewable'' 结构并不覆盖 \fld{renewable\_gens} 或 DC PV。
 
-\subsection{AC 储能 SOH、整数循环与更换事件}
-对 authored AC storage $s$，保存初始额定能量 $E_{s,0}$。每年运行年度子问题之前计算
+\subsection{AC 储能 SOH、循环累计与更换事件}
+对 authored AC storage $s$（全程按 stable component index 索引，不用 \fld{name}），保存初始额定
+能量 $E_{s,0}$。每年运行年度子问题之前计算
 \begin{align}
- SOH^{cal}_{s,y}&=\max(0,1-a(y-1)),\\
- SOH^{cyc}_{s,y}&=\max(0,1-bN^{int}_{s,y}),\\
- SOH_{s,y}&=\min(SOH^{cal}_{s,y},SOH^{cyc}_{s,y}).
+ SOH^{cal}_{s,y}&=\max(0,1-a\,\tau_{s,y}),\\
+ SOH^{cyc}_{s,y}&=\max(0,1-b\,N^{cum}_{s,y}),\\
+ SOH_{s,y}&=\min(SOH^{cal}_{s,y},SOH^{cyc}_{s,y}),
 \end{align}
-\fld{current\_cycles} 在组件模型中是整数。年度统计给出的实数 full-discharge equivalent cycles
-$n_{s,y}$ 在年末通过
+其中 $\tau_{s,y}$ 是\emph{距上次更换}的年数（更换年重置为 0），$N^{cum}_{s,y}$ 是按 index 维护的
+\emph{实数}累计等效满放循环。年度统计给出的实数循环 $n_{s,y}$ 在年末按
 \begin{equation}
- N^{int}_{s,y+1}=N^{int}_{s,y}+\operatorname{trunc}(n_{s,y})
+ N^{cum}_{s,y+1}=N^{cum}_{s,y}+n_{s,y}
 \end{equation}
-更新；不足 1 的年度循环被永久丢弃。匹配年度统计时使用 \fld{name}，不是 stable index；同名储能
-可能归因到错误资产。
+累加到内部 double 累加器，不做截断，因此不足 1 的年度循环被保留而非丢弃；组件模型的整数
+\fld{current\_cycles} 仅由 $\lfloor N^{cum}_{s,y}\rfloor$ 提供给旧接口，不参与退化计算。匹配年度
+统计使用 stable index，同名储能不会互相归因（回归见 \srcpath{test\_multiscale\_comprehensive}
+“duplicate names and repeated replacement stay index-keyed”）。
 
 EOL 输入若大于 1，按百分数除以 100，否则按 pu；随后截断到 $[0,1]$。当
 \begin{equation}
@@ -98,15 +101,17 @@ EOL 输入若大于 1，按百分数除以 100，否则按 pu；随后截断到 
 \begin{equation}
  C^{rep}_{s,y}=c_s^{rep}\,E_{s,0}^{rated}\,1000.
 \end{equation}
-实现把 $SOH$、两个分量和当前循环数重置为 1/1/1/0，再设置
+实现把 $SOH$、两个分量和当前循环数重置为 1/1/1/0，同时把该 index 的 $\tau_s$ 与 $N^{cum}_s$
+清零，再设置
 \begin{equation}
  E_{s,y}^{rated}=E_{s,0}^{rated}SOH_{s,y},\qquad
  E_{s,y}=E_{s,y}^{rated}SOC_s^{init}.
 \end{equation}
 
-日历公式使用全局 $y-1$，没有 ``距上次更换年数'' 状态。因而更换后的下一年会重新按项目绝对年龄
-计算 $SOH^{cal}=1-a y$，并非新电池的年龄 1；在长规划期可能触发过早、连续更换。更换费用的
-\fld{replacement\_cost} 被解释为 USD/kWh（乘 MWh 再乘 1000），头文件本身没有单位类型约束。
+日历公式使用\emph{距上次更换}的年数 $\tau_{s,y}$（在更换年被重置为 0），而非全局 $y-1$：更换后的
+下一年按新电池年龄重新计 $SOH^{cal}=1-a\tau$，不会用项目绝对年龄触发过早、连续更换。同名储能
+可被更换多次而互不干扰（回归见 AUD-070 fixture）。更换费用的 \fld{replacement\_cost} 被解释为
+USD/kWh（乘 MWh 再乘 1000），头文件本身没有单位类型约束。
 
 \subsection{年度子问题的强制配置}
 每一年都新建 \texttt{AnnualProductionSimOptions}，覆写

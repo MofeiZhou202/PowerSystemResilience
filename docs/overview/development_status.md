@@ -6,6 +6,31 @@ This is the living handoff for verified build state and active engineering work.
 Update it in place; do not create dated copies. Source, registered tests, and
 the current Git worktrees remain authoritative.
 
+## time_series regression closure AUD-066/069/070 (2026-08-24)
+
+The three "closed in code, regression pending" annual/lifecycle findings now
+have dedicated fixtures in `test_multiscale_comprehensive`, so they are
+regression-closed rather than code-only:
+
+- AUD-066 — "Annual replay failure is reported rather than masked as feasible":
+  a step whose OPF cannot serve `500 MW` on a single `10 MW` unit leaves
+  `physical_replay_complete=false` and `feasible=false`, with the replay
+  `model_scope` string, instead of copying the optimistic L0 default (4
+  assertions).
+- AUD-069 — "Daily replay preserves the frozen UC schedule field by field": on
+  `io::build_ieee14_acdc()` the sliced weekly schedule keeps every dispatch and
+  VSC/DC-DC/market-storage/DR 2-D field at the window width, and the PF-only
+  frozen-schedule replay completes (20 assertions).
+- AUD-070 — "Lifecycle storage: duplicate names and repeated replacement stay
+  index-keyed": two same-name storages with distinct stable indices are each
+  replaced at least twice over a 20-year horizon with per-index cost attribution
+  rather than name-collision aliasing (9 assertions). The lifecycle manual
+  chapter was corrected from its stale name-match/cycle-truncation description to
+  the shipped index-keyed fractional-FDE accumulator with age-since-replacement.
+
+The full `test_multiscale_comprehensive` binary is green (113 assertions across 7
+test cases, up from 4), and the time_series manual recompiled with XeLaTeX.
+
 ## network_reconfiguration audit closure (2026-08-24)
 
 The six open network_reconfiguration code-audit findings (AUD-018–023, manual

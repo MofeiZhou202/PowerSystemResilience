@@ -435,3 +435,147 @@ TEST_CASE("Annual budgets, coupled SOC and lifecycle sampled PF are evidenced",
       analysis::solve_annual_production_simulation(sys, ts, parallel_opts),
       std::invalid_argument);
 }
+
+TEST_CASE("Lifecycle storage: duplicate names and repeated replacement stay index-keyed",
+          "[integration][time_series][lifecycle][closure]") {
+  // AUD-070 regression: two storages that SHARE a name but have distinct
+  // component indices, plus a load-following slack generator. Calendar
+  // degradation with a high EOL threshold forces each battery to be replaced
+  // several times over the horizon; state and replacement attribution must stay
+  // keyed by stable index (not name), the age/cycle clocks reset per index on
+  // replacement, and cumulative cycles are retained as a fractional double.
+  HybridPowerSystem sys; sys.base_mva = 100.0;
+  ACBus bus; bus.index = 1; bus.bus_type = BusType::SLACK; bus.base_kv = 110.0;
+  sys.ac.buses.push_back(bus);
+  Load ld; ld.index = 1; ld.bus = 1; ld.p_mw = 20.0; ld.in_service = true;
+  sys.ac.loads.push_back(ld);
+  Generator g; g.index = 1; g.bus = 1; g.pmax_mw = 200.0; g.cost_c1 = 30.0;
+  g.is_slack = true; sys.ac.generators.push_back(g);
+  for (int i = 1; i <= 2; ++i) {
+    Storage s; s.index = i; s.bus = 1; s.name = "BESS";  // shared name, distinct index
+    s.pmax_mw = 10.0; s.pmin_mw = -10.0;
+    s.e_rated_mwh = (i == 1 ? 40.0 : 25.0);  // distinct size → distinct replacement cost
+    s.soc_init = 0.5; s.soc_min = 0.1; s.soc_max = 0.9;
+    s.replacement_cost = 200.0;  // USD/kWh
+    s.eol_percent = 0.9;         // replace at 10% SOH loss
+    s.in_service = true;
+    sys.ac.storage.push_back(s);
+  }
+  TimeSeriesData ts; ts.num_steps = 4; ts.step_duration_hr = 6.0;
+  ts.profiles = {{0, "load", {0.8, 1.0, 0.9, 0.7}}};
+  bind_profiles(sys);
+
+  analysis::LifecycleSimOptions lopts;
+  lopts.num_years = 20;
+  lopts.calendar_degradation_per_year = 0.03;  // EOL(0.9) reached at ~4 yr age
+  lopts.run_physical_replay = false;           // schedule-only: fast + deterministic
+  lopts.run_sampled_pf_correction = false;
+  const auto life = analysis::run_lifecycle_simulation(sys, ts, lopts);
+
+  REQUIRE(life.year_results.size() == 20);
+  // Both distinct indices are tracked every year (not collapsed by shared name).
+  const auto& first = life.year_results.front();
+  int idx1 = 0, idx2 = 0;
+  for (const auto& ss : first.storage_states) {
+    if (ss.storage_index == 1) ++idx1;
+    if (ss.storage_index == 2) ++idx2;
+  }
+  CHECK(idx1 == 1);
+  CHECK(idx2 == 1);
+  // Each battery is replaced more than once (multi-replacement, per-index reset).
+  int repl_idx1 = 0, repl_idx2 = 0;
+  for (const auto& re : life.all_replacements) {
+    if (re.storage_index == 1) ++repl_idx1;
+    if (re.storage_index == 2) ++repl_idx2;
+  }
+  CHECK(repl_idx1 >= 2);
+  CHECK(repl_idx2 >= 2);
+  CHECK(life.total_replacements == repl_idx1 + repl_idx2);
+  // Distinct replacement costs prove same-name storages are never cross-attributed
+  // (index 1 has 40 MWh, index 2 has 25 MWh → different USD via e_rated × cost × 1000).
+  double cost1 = 0.0, cost2 = 0.0;
+  for (const auto& re : life.all_replacements) {
+    if (re.storage_index == 1) cost1 = re.replacement_cost_usd;
+    if (re.storage_index == 2) cost2 = re.replacement_cost_usd;
+  }
+  CHECK(cost1 == Approx(200.0 * 40.0 * 1000.0));
+  CHECK(cost2 == Approx(200.0 * 25.0 * 1000.0));
+  CHECK(cost1 != cost2);
+}
+
+TEST_CASE("Annual replay failure is reported rather than masked as feasible",
+          "[integration][time_series][closure]") {
+  // AUD-066 regression: with replay requested, a step whose physical OPF cannot
+  // serve the load must leave physical_replay_complete=false and feasible=false.
+  // The certificate must aggregate the failed replay, not copy an L0/UC pass.
+  HybridPowerSystem sys; sys.base_mva = 100.0;
+  ACBus bus; bus.index = 1; bus.bus_type = BusType::SLACK; bus.base_kv = 110.0;
+  sys.ac.buses.push_back(bus);
+  Load ld; ld.index = 1; ld.bus = 1; ld.p_mw = 500.0; ld.in_service = true;
+  sys.ac.loads.push_back(ld);
+  Generator g; g.index = 1; g.bus = 1; g.pmax_mw = 10.0; g.pmin_mw = 0.0;
+  g.cost_c1 = 30.0; g.is_slack = true; sys.ac.generators.push_back(g);
+  TimeSeriesData ts; ts.num_steps = 2; ts.step_duration_hr = 1.0;
+  ts.profiles = {{0, "load", {1.0, 1.0}}};
+  bind_profiles(sys);
+
+  analysis::AnnualProductionSimOptions opts;
+  opts.skip_replay = false;
+  opts.ts_pf_options.run_opf = true;
+  opts.ts_pf_options.uc_solver = UCSolverChoice::SCIP;
+  const auto annual = analysis::solve_annual_production_simulation(sys, ts, opts);
+
+  CHECK_FALSE(annual.schedule_only);
+  CHECK(annual.model_scope.find("replay") != std::string::npos);
+  CHECK_FALSE(annual.physical_replay_complete);
+  CHECK_FALSE(annual.feasible);
+}
+
+TEST_CASE("Daily replay preserves the frozen UC schedule field by field",
+          "[integration][time_series][closure]") {
+  // AUD-069 regression: the daily replay slices the coupled UC schedule's 2-D
+  // arrays column-by-column. On a hybrid AC/DC case the sliced weekly schedule
+  // must keep the diverse dispatch/direction fields at the window width, and a
+  // PF-only replay of that frozen schedule must complete for every step.
+  HybridPowerSystem sys = io::build_ieee14_acdc();
+  TimeSeriesData ts = daily_profiles();
+  bind_profiles(sys);
+
+  analysis::AnnualProductionSimOptions opts;
+  opts.skip_replay = false;
+  opts.ts_pf_options.run_opf = false;  // PF-only frozen-schedule replay
+  opts.ts_pf_options.uc_solver = UCSolverChoice::HiGHS;
+  opts.pf_snapshot_interval = 0;
+  const auto annual = analysis::solve_annual_production_simulation(sys, ts, opts);
+
+  CHECK_FALSE(annual.schedule_only);
+  CHECK(annual.model_scope.find("replay") != std::string::npos);
+  REQUIRE_FALSE(annual.weekly_schedules.empty());
+  const auto& uc = annual.weekly_schedules.front().uc;
+  const int cols = annual.weekly_schedules.front().num_steps;
+  // Every present 2-D field is sliced to the weekly window width, so the daily
+  // replay sees a shape-consistent frozen schedule (field-by-field).
+  auto width_ok = [&](const auto& rows) {
+    for (const auto& r : rows)
+      if (static_cast<int>(r.size()) != cols) return false;
+    return true;
+  };
+  CHECK(width_ok(uc.gen_dispatch));
+  CHECK(width_ok(uc.gen_commit));
+  CHECK(width_ok(uc.ess_dispatch));
+  CHECK(width_ok(uc.ess_soc));
+  CHECK(width_ok(uc.renewable_dispatch));
+  CHECK(width_ok(uc.external_grid_dispatch));
+  CHECK(width_ok(uc.flexible_load_up));
+  CHECK(width_ok(uc.flexible_load_down));
+  CHECK(width_ok(uc.vsc_dispatch));
+  CHECK(width_ok(uc.dcdc_dispatch));
+  CHECK(width_ok(uc.vsc_direction_ac_to_dc));
+  CHECK(width_ok(uc.dcdc_direction_forward));
+  CHECK(width_ok(uc.dc_ess_dispatch));
+  CHECK(width_ok(uc.dc_ess_soc));
+  CHECK(width_ok(uc.market_dc_storage_dispatch_mw));
+  CHECK(width_ok(uc.market_dc_storage_direction_charging));
+  // The frozen schedule replayed successfully across every step.
+  CHECK(annual.physical_replay_complete);
+}
