@@ -65,8 +65,11 @@ namespace eng = mipsolvers::engine;
 
 namespace {
 
+// Gleixner et al. (2021), MIPLIB 2017, Sec. 3; metric derivation and audit
+// contract: docs/miplib2017_benchmark_protocol_2026-08-25.md.
 constexpr double kAuditTolerance = 1e-5;
 constexpr double kSummaryShiftMs = 1000.0;
+constexpr double kSummaryNodeShift = 100.0;
 
 struct Config {
   fs::path data_dir{"tests/data/miplib2017/benchmark"};
@@ -81,6 +84,7 @@ struct Config {
   int sample{0};
   int max_nodes{50000};
   int seed{0};
+  std::vector<int> seeds;
   double time_limit_sec{60.0};
   double hard_timeout_grace_sec{5.0};
   double gap{1e-4};
@@ -156,6 +160,7 @@ struct Result {
   std::string solver;
   std::string collection_scope{"unavailable"};
   int repeat{0};
+  int seed{0};
   int execution_index{-1};
   int block_order_position{-1};
   int rows{0};
@@ -322,8 +327,18 @@ struct Summary {
   int audited{0};
   int reference_matches{0};
   int timeouts{0};
+  int benchmark_solved{0};
+  int node_count_runs{0};
+  int solved_node_runs{0};
+  int incumbent_audit_failures{0};
   double median_solved_ms{std::numeric_limits<double>::quiet_NaN()};
   double shifted_geomean_par10_ms{std::numeric_limits<double>::quiet_NaN()};
+  double shifted_geomean_solved_nodes{
+      std::numeric_limits<double>::quiet_NaN()};
+  double max_row_violation{0.0};
+  double max_bound_violation{0.0};
+  double max_integrality_violation{0.0};
+  double max_objective_disagreement{0.0};
   int primal_dual_integrals{0};
   double mean_primal_dual_integral_sec{
       std::numeric_limits<double>::quiet_NaN()};
@@ -435,6 +450,8 @@ bool matches_case(const std::string& name,
 }
 
 bool parse_args(int argc, char** argv, Config& cfg) {
+  bool saw_seed = false;
+  bool saw_seeds = false;
   for (int i = 1; i < argc; ++i) {
     const std::string arg = argv[i];
     auto value = [&](const char* flag) -> const char* {
@@ -473,6 +490,31 @@ bool parse_args(int argc, char** argv, Config& cfg) {
     } else if (arg == "--seed") {
       const char* v = value("--seed"); if (!v) return false;
       cfg.seed = std::max(0, std::atoi(v));
+      saw_seed = true;
+    } else if (arg == "--seeds") {
+      const char* v = value("--seeds"); if (!v) return false;
+      cfg.seeds.clear();
+      std::set<int> unique_seeds;
+      for (const std::string& item : split(v, ',')) {
+        errno = 0;
+        char* end = nullptr;
+        const long parsed = std::strtol(item.c_str(), &end, 10);
+        if (errno != 0 || end == item.c_str() || *end != '\0' || parsed < 0 ||
+            parsed > std::numeric_limits<int>::max()) {
+          std::cerr << "Invalid nonnegative seed: " << item << "\n";
+          return false;
+        }
+        if (!unique_seeds.insert(static_cast<int>(parsed)).second) {
+          std::cerr << "Duplicate seed: " << item << "\n";
+          return false;
+        }
+        cfg.seeds.push_back(static_cast<int>(parsed));
+      }
+      if (cfg.seeds.empty()) {
+        std::cerr << "--seeds requires at least one value\n";
+        return false;
+      }
+      saw_seeds = true;
     } else if (arg == "--time-limit") {
       const char* v = value("--time-limit"); if (!v) return false;
       cfg.time_limit_sec = std::max(0.01, std::atof(v));
@@ -578,6 +620,7 @@ bool parse_args(int argc, char** argv, Config& cfg) {
           << "  --gap VALUE          relative MIP gap (default 1e-4)\n"
           << "  --max-nodes N        native B&C node limit\n"
           << "  --seed N             deterministic backend seed\n"
+          << "  --seeds A,B,C        explicit distinct backend seeds\n"
           << "  --csv FILE           raw result CSV\n"
           << "  --json FILE          raw result and summary JSON\n";
       return false;
@@ -586,6 +629,11 @@ bool parse_args(int argc, char** argv, Config& cfg) {
       return false;
     }
   }
+  if (saw_seed && saw_seeds) {
+    std::cerr << "Use either --seed or --seeds, not both\n";
+    return false;
+  }
+  if (cfg.seeds.empty()) cfg.seeds.push_back(cfg.seed);
   return true;
 }
 
@@ -1332,8 +1380,14 @@ Result run_scip(const Instance& instance, const Config& cfg) {
   const SCIP_STATUS status = SCIPgetStatus(scip);
   result.status = scip_status_string(status);
   result.optimal = status == SCIP_STATUS_OPTIMAL;
-  result.proven = result.optimal || status == SCIP_STATUS_INFEASIBLE ||
-                  status == SCIP_STATUS_UNBOUNDED || status == SCIP_STATUS_INFORUNBD;
+  // SCIP's GAPLIMIT and HiGHS' kOptimal both certify the configured relative
+  // MIP gap. Normalize backend status vocabularies as derived in
+  // docs/miplib2017_benchmark_protocol_2026-08-25.md,
+  // "Pilot mismatch: gap-certificate normalization".
+  result.proven = result.optimal || status == SCIP_STATUS_GAPLIMIT ||
+                  status == SCIP_STATUS_INFEASIBLE ||
+                  status == SCIP_STATUS_UNBOUNDED ||
+                  status == SCIP_STATUS_INFORUNBD;
   result.timed_out = status == SCIP_STATUS_TIMELIMIT;
   result.node_count_available = true;
   result.lp_solve_count_available = true;
@@ -1903,12 +1957,17 @@ void attach_validation(const Instance& instance, const Reference* reference,
   if (reference == nullptr) return;
   result.reference_status = reference->status;
   result.reference_objective = reference->objective;
-  if (result.optimal && reference->status.find("opt") != std::string::npos &&
+  if (result.proven && result.has_solution &&
+      reference->status.find("opt") != std::string::npos &&
       std::isfinite(reference->objective) &&
       std::isfinite(result.objective)) {
     const double rel_error = std::abs(result.objective - reference->objective) /
                              std::max(1.0, std::abs(reference->objective));
-    result.reference_match = rel_error <= kAuditTolerance;
+    // The known optimum validates a solve to the experiment's requested gap;
+    // feasibility and reported-objective consistency retain the stricter
+    // original-space audit. See the protocol's gap-certificate derivation.
+    const double reference_tolerance = std::max(kAuditTolerance, cfg.gap);
+    result.reference_match = rel_error <= reference_tolerance;
     if (!result.reference_match) {
       result.status = "Reference audit rejected optimal claim: " + result.status;
       result.optimal = false;
@@ -1946,7 +2005,7 @@ void write_csv(const fs::path& path, const std::vector<Result>& results) {
   if (!path.parent_path().empty()) fs::create_directories(path.parent_path());
   std::ofstream out(path);
   if (!out) throw std::runtime_error("cannot write " + path.string());
-  out << "instance,solver,repeat,execution_index,block_order_position,rows,columns,"
+  out << "instance,solver,seed,repeat,execution_index,block_order_position,rows,columns,"
          "nonzeros,integers,binaries,semicontinuous,semiinteger,available,"
          "has_solution,optimal,proven,timed_out,hard_timeout,audit_passed,reference_match,read_ms,"
          "shared_decompress_ms,solve_ms,objective,best_bound,gap,"
@@ -2016,7 +2075,8 @@ void write_csv(const fs::path& path, const std::vector<Result>& results) {
          "reference_objective,status\n";
   out << std::setprecision(17);
   for (const Result& r : results) {
-    out << csv_escape(r.instance) << ',' << csv_escape(r.solver) << ',' << r.repeat << ','
+    out << csv_escape(r.instance) << ',' << csv_escape(r.solver) << ',' << r.seed
+        << ',' << r.repeat << ','
         << r.execution_index << ',' << r.block_order_position << ','
         << r.rows << ',' << r.columns << ',' << r.nonzeros << ',' << r.integers << ','
         << r.binaries << ',' << r.semicontinuous << ',' << r.semiinteger << ','
@@ -2244,7 +2304,8 @@ json bound_events_json(const Result& result, bool include_solutions) {
 
 json result_json(const Result& r) {
   return {
-      {"instance", r.instance}, {"solver", r.solver}, {"repeat", r.repeat},
+      {"instance", r.instance}, {"solver", r.solver}, {"seed", r.seed},
+      {"repeat", r.repeat},
       {"execution_index", r.execution_index},
       {"block_order_position", r.block_order_position},
       {"collection_scope", r.collection_scope},
@@ -2489,6 +2550,7 @@ Result worker_result_from_json(const json& input) {
   Result result;
   result.instance = input.value("instance", "");
   result.solver = input.value("solver", "");
+  result.seed = input.value("seed", 0);
   result.collection_scope = input.value("collection_scope", "unavailable");
   result.execution_index = input.value("execution_index", -1);
   result.block_order_position = input.value("block_order_position", -1);
@@ -3006,6 +3068,7 @@ std::vector<Summary> summarize(const Config& cfg,
     Summary summary;
     summary.solver = solver;
     std::vector<double> solved_times;
+    std::vector<double> solved_nodes;
     std::vector<double> penalized_times;
     double pdi_sum_sec = 0.0;
     for (const Result& result : results) {
@@ -3028,10 +3091,39 @@ std::vector<Summary> summarize(const Config& cfg,
            (result.reference_status.empty() || result.reference_match)) ||
           (result.proven && !result.has_solution && result.reference_match);
       if (benchmark_solved) {
+        ++summary.benchmark_solved;
         solved_times.push_back(result.solve_ms);
         penalized_times.push_back(result.solve_ms);
       } else {
         penalized_times.push_back(par10_ms);
+      }
+      if (result.node_count_available && result.nodes >= 0) {
+        ++summary.node_count_runs;
+        if (benchmark_solved) {
+          ++summary.solved_node_runs;
+          solved_nodes.push_back(static_cast<double>(result.nodes));
+        }
+      }
+      if (result.has_solution) {
+        if (!result.audit.passed) ++summary.incumbent_audit_failures;
+        if (std::isfinite(result.audit.max_row_violation)) {
+          summary.max_row_violation = std::max(
+              summary.max_row_violation, result.audit.max_row_violation);
+        }
+        if (std::isfinite(result.audit.max_bound_violation)) {
+          summary.max_bound_violation = std::max(
+              summary.max_bound_violation, result.audit.max_bound_violation);
+        }
+        if (std::isfinite(result.audit.max_integrality_violation)) {
+          summary.max_integrality_violation = std::max(
+              summary.max_integrality_violation,
+              result.audit.max_integrality_violation);
+        }
+        if (std::isfinite(result.audit.objective_disagreement)) {
+          summary.max_objective_disagreement = std::max(
+              summary.max_objective_disagreement,
+              result.audit.objective_disagreement);
+        }
       }
     }
     if (!solved_times.empty()) {
@@ -3046,6 +3138,15 @@ std::vector<Summary> summarize(const Config& cfg,
       for (double value : penalized_times) log_sum += std::log(value + kSummaryShiftMs);
       summary.shifted_geomean_par10_ms =
           std::exp(log_sum / static_cast<double>(penalized_times.size())) - kSummaryShiftMs;
+    }
+    if (!solved_nodes.empty()) {
+      double log_sum = 0.0;
+      for (double value : solved_nodes) {
+        log_sum += std::log(value + kSummaryNodeShift);
+      }
+      summary.shifted_geomean_solved_nodes =
+          std::exp(log_sum / static_cast<double>(solved_nodes.size())) -
+          kSummaryNodeShift;
     }
     if (summary.primal_dual_integrals > 0) {
       summary.mean_primal_dual_integral_sec =
@@ -3062,6 +3163,16 @@ json summary_json(const Summary& s) {
           {"optimal", s.optimal}, {"proven", s.proven},
           {"audited", s.audited}, {"reference_matches", s.reference_matches},
           {"timeouts", s.timeouts},
+          {"benchmark_solved", s.benchmark_solved},
+          {"node_count_runs", s.node_count_runs},
+          {"solved_node_runs", s.solved_node_runs},
+          {"shifted_geomean_solved_nodes",
+           json_number(s.shifted_geomean_solved_nodes)},
+          {"incumbent_audit_failures", s.incumbent_audit_failures},
+          {"max_row_violation", s.max_row_violation},
+          {"max_bound_violation", s.max_bound_violation},
+          {"max_integrality_violation", s.max_integrality_violation},
+          {"max_objective_disagreement", s.max_objective_disagreement},
           {"primal_dual_integrals", s.primal_dual_integrals},
           {"mean_primal_dual_integral_sec",
            json_number(s.mean_primal_dual_integral_sec)},
@@ -3086,9 +3197,14 @@ void write_json(const fs::path& path, const Config& cfg,
   out["hard_deadline_enforced"] = true;
 #endif
   out["gap"] = cfg.gap;
+  out["audit_tolerance"] = kAuditTolerance;
+  out["reference_objective_tolerance"] =
+      std::max(kAuditTolerance, cfg.gap);
   out["threads"] = 1;
-  out["seed"] = cfg.seed;
+  out["seed"] = cfg.seeds.size() == 1 ? json(cfg.seeds.front()) : json(nullptr);
+  out["seeds"] = cfg.seeds;
   out["repeats"] = cfg.repeats;
+  out["repeats_per_seed"] = cfg.repeats;
   out["solvers"] = cfg.solvers;
   out["case_filters"] = cfg.case_filters;
   out["highs_verbose"] = cfg.highs_verbose;
@@ -3102,9 +3218,15 @@ void write_json(const fs::path& path, const Config& cfg,
       {"min_remaining_time_sec",
        cfg.native_tree_restart_min_remaining_sec}};
   out["execution_order"] = {
-      {"policy", "seeded_base_permutation_with_block_rotation"},
-      {"base_order", base_solver_order(cfg)},
-      {"balance_unit", "instance_repeat_block"}};
+      {"policy", "per_seed_base_permutation_with_block_rotation"},
+      {"balance_unit", "instance_seed_repeat_block"},
+      {"base_orders", json::array()}};
+  for (int seed : cfg.seeds) {
+    Config seeded_cfg = cfg;
+    seeded_cfg.seed = seed;
+    out["execution_order"]["base_orders"].push_back(
+        {{"seed", seed}, {"order", base_solver_order(seeded_cfg)}});
+  }
   Highs version_probe;
   out["solver_versions"] = {{"highs", version_probe.version()}};
 #ifdef MIPSOLVERS_HAVE_SCIP_LIB
@@ -3147,6 +3269,8 @@ void write_json(const fs::path& path, const Config& cfg,
   out["summary_policy"] = {
       {"solved", "proven and independently audited incumbent"},
       {"timeout_penalty", "PAR-10"}, {"shift_ms", kSummaryShiftMs},
+      {"solved_node_shift", kSummaryNodeShift},
+      {"node_scope", "solved runs with backend node count available"},
       {"primal_dual_integral",
        "piecewise-constant normalized gap over the fixed backend time limit; "
        "gap=1 before both bounds are available; every primal event is "
@@ -3169,16 +3293,17 @@ void print_result(const Result& result) {
 }
 
 void print_summary(const std::vector<Summary>& summaries) {
-  std::printf("\n%-20s %8s %8s %8s %8s %10s %14s %10s %10s\n",
-              "Solver", "Runs", "Feas", "Optimal", "Audit", "Timeouts",
-              "PAR10-shift ms", "PDI rows", "Mean PDI s");
-  std::printf("%s\n", std::string(116, '-').c_str());
+  std::printf("\n%-20s %7s %7s %7s %8s %10s %14s %14s %10s\n",
+              "Solver", "Runs", "Solved", "Feas", "AuditFail", "Timeouts",
+              "PAR10-shift ms", "Solved-node sg", "Node runs");
+  std::printf("%s\n", std::string(119, '-').c_str());
   for (const Summary& s : summaries) {
-    std::printf("%-20s %8d %8d %8d %8d %10d %14.1f %10d %10.4f\n",
+    std::printf("%-20s %7d %7d %7d %8d %10d %14.1f %14.1f %10d\n",
                 s.solver.c_str(),
-                s.attempts, s.feasible, s.optimal, s.audited, s.timeouts,
-                s.shifted_geomean_par10_ms, s.primal_dual_integrals,
-                s.mean_primal_dual_integral_sec);
+                s.attempts, s.benchmark_solved, s.feasible,
+                s.incumbent_audit_failures, s.timeouts,
+                s.shifted_geomean_par10_ms,
+                s.shifted_geomean_solved_nodes, s.solved_node_runs);
   }
 }
 
@@ -3260,8 +3385,9 @@ int main(int argc, char** argv) {
     return 2;
   }
 
-  std::printf("MIPLIB 2017: %zu instances, %zu solvers, %d repeat(s), %.3g s, gap %.3g\n",
-              paths.size(), cfg.solvers.size(), cfg.repeats,
+  std::printf("MIPLIB 2017: %zu instances, %zu solvers, %zu seed(s), "
+              "%d repeat(s)/seed, %.3g s, gap %.3g\n",
+              paths.size(), cfg.solvers.size(), cfg.seeds.size(), cfg.repeats,
               cfg.time_limit_sec, cfg.gap);
   std::printf("%-24s %-20s %9s %9s %10s %5s %5s %9s %s\n",
               "Instance", "Solver", "Solve ms", "Nodes", "Gap", "Opt", "Audit",
@@ -3276,28 +3402,35 @@ int main(int argc, char** argv) {
   }
 
   std::vector<Result> results;
-  const std::vector<std::string> solver_order_base = base_solver_order(cfg);
   int execution_index = 0;
   for (std::size_t path_index = 0; path_index < paths.size(); ++path_index) {
     const fs::path& path = paths[path_index];
     Instance instance = load_instance(path);
     if (!instance.error.empty()) {
       std::fprintf(stderr, "%s: %s\n", instance.name.c_str(), instance.error.c_str());
-      for (int repeat = 0; repeat < cfg.repeats; ++repeat) {
-        const auto order = blocked_solver_order(solver_order_base, path_index, repeat);
-        for (std::size_t position = 0; position < order.size(); ++position) {
-          const std::string& solver = order[position];
-          Result result;
-          set_dimensions(instance, result);
-          result.instance = instance.name;
-          result.solver = solver;
-          result.repeat = repeat;
-          result.execution_index = execution_index++;
-          result.block_order_position = static_cast<int>(position);
-          result.available = false;
-          result.status = "model load: " + instance.error;
-          print_result(result);
-          results.push_back(std::move(result));
+      for (std::size_t seed_index = 0; seed_index < cfg.seeds.size();
+           ++seed_index) {
+        Config seeded_cfg = cfg;
+        seeded_cfg.seed = cfg.seeds[seed_index];
+        const auto base_order = base_solver_order(seeded_cfg);
+        for (int repeat = 0; repeat < cfg.repeats; ++repeat) {
+          const int block = static_cast<int>(seed_index) * cfg.repeats + repeat;
+          const auto order = blocked_solver_order(base_order, path_index, block);
+          for (std::size_t position = 0; position < order.size(); ++position) {
+            const std::string& solver = order[position];
+            Result result;
+            set_dimensions(instance, result);
+            result.instance = instance.name;
+            result.solver = solver;
+            result.seed = seeded_cfg.seed;
+            result.repeat = repeat;
+            result.execution_index = execution_index++;
+            result.block_order_position = static_cast<int>(position);
+            result.available = false;
+            result.status = "model load: " + instance.error;
+            print_result(result);
+            results.push_back(std::move(result));
+          }
         }
       }
       if (instance.solver_path_is_temporary) {
@@ -3308,17 +3441,26 @@ int main(int argc, char** argv) {
     }
     const auto ref_it = references.find(instance.name);
     const Reference* reference = ref_it == references.end() ? nullptr : &ref_it->second;
-    for (int repeat = 0; repeat < cfg.repeats; ++repeat) {
-      const auto order = blocked_solver_order(solver_order_base, path_index, repeat);
-      for (std::size_t position = 0; position < order.size(); ++position) {
-        const std::string& solver = order[position];
-        Result result = run_solver_isolated(instance, cfg, solver, executable);
-        result.repeat = repeat;
-        result.execution_index = execution_index++;
-        result.block_order_position = static_cast<int>(position);
-        attach_validation(instance, reference, cfg, result);
-        print_result(result);
-        results.push_back(std::move(result));
+    for (std::size_t seed_index = 0; seed_index < cfg.seeds.size();
+         ++seed_index) {
+      Config seeded_cfg = cfg;
+      seeded_cfg.seed = cfg.seeds[seed_index];
+      const auto base_order = base_solver_order(seeded_cfg);
+      for (int repeat = 0; repeat < cfg.repeats; ++repeat) {
+        const int block = static_cast<int>(seed_index) * cfg.repeats + repeat;
+        const auto order = blocked_solver_order(base_order, path_index, block);
+        for (std::size_t position = 0; position < order.size(); ++position) {
+          const std::string& solver = order[position];
+          Result result = run_solver_isolated(
+              instance, seeded_cfg, solver, executable);
+          result.seed = seeded_cfg.seed;
+          result.repeat = repeat;
+          result.execution_index = execution_index++;
+          result.block_order_position = static_cast<int>(position);
+          attach_validation(instance, reference, seeded_cfg, result);
+          print_result(result);
+          results.push_back(std::move(result));
+        }
       }
     }
     if (instance.solver_path_is_temporary) {

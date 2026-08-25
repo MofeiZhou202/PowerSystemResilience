@@ -5,6 +5,16 @@
           root_relax = std::move(incremental_relax);
           root.x_relax = clamp_to_bounds(root_relax.primal.x, root.lb, root.ub);
           root.basis_hint = root_relax.basis_hint;
+          // A committed live append changes the basis dimension; publish the
+          // matching owner before any tableau query. See
+          // docs/miplib2017_benchmark_protocol_2026-08-25.md,
+          // "Stability-gate mismatch and re-derivation".
+          if (root_relax.simplex &&
+              root_relax.simplex->basis.cached_sparse_basis) {
+            root_sbasis = root_relax.simplex->basis.cached_sparse_basis;
+          } else {
+            root_sbasis.reset();
+          }
           root.bound = root_relax.dual_bound;
           refresh_root_redcost_lurking_bounds("root_cut_round_incremental");
           persistent_cut_resolved = true;

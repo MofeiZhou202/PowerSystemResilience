@@ -85,8 +85,8 @@ def git_manifest(repo: pathlib.Path) -> dict[str, Any]:
     }
 
 
-def cmake_manifest(repo: pathlib.Path) -> dict[str, Any]:
-    cache_path = repo / "CMakeCache.txt"
+def cmake_manifest(build_dir: pathlib.Path) -> dict[str, Any]:
+    cache_path = build_dir / "CMakeCache.txt"
     values: dict[str, str] = {}
     if cache_path.is_file():
         for line in cache_path.read_text(errors="replace").splitlines():
@@ -105,8 +105,9 @@ def cmake_manifest(repo: pathlib.Path) -> dict[str, Any]:
     compiler = values.get("CMAKE_CXX_COMPILER")
     compiler_version = None
     if compiler:
-        compiler_version = command_output([compiler, "--version"], repo)
+        compiler_version = command_output([compiler, "--version"], build_dir)
     return {
+        "build_directory": str(build_dir),
         "cache_sha256": sha256_file(cache_path) if cache_path.is_file() else None,
         "values": values,
         "compiler_version_output": compiler_version,
@@ -215,13 +216,56 @@ def percentile(values: list[float], probability: float) -> float:
     return ordered[lower] * (1.0 - weight) + ordered[upper] * weight
 
 
+def shifted_geomean(values: list[float], shift: float) -> Optional[float]:
+    if not values:
+        return None
+    return math.exp(sum(math.log(value + shift) for value in values) / len(values)) - shift
+
+
+def row_run(row: dict[str, Any], default_seed: int) -> tuple[int, int]:
+    return int(row.get("seed", default_seed)), int(row.get("repeat", 0))
+
+
+def validate_report_matrix(report: dict[str, Any], expected_names: set[str]) -> None:
+    solvers = list(report.get("solvers", []))
+    seeds = [int(seed) for seed in report.get("seeds", [])]
+    repeats = int(report.get("repeats_per_seed", report.get("repeats", 0)))
+    if not solvers or not seeds or repeats < 1:
+        raise RuntimeError("report is missing solvers, seeds, or repeats_per_seed")
+
+    expected = {
+        (instance, solver, seed, repeat)
+        for instance in expected_names
+        for solver in solvers
+        for seed in seeds
+        for repeat in range(repeats)
+    }
+    rows = report.get("results", [])
+    observed = [
+        (row["instance"], row["solver"], *row_run(row, seeds[0]))
+        for row in rows
+    ]
+    observed_set = set(observed)
+    if len(observed) != len(observed_set):
+        raise RuntimeError("report contains duplicate instance/solver/seed/repeat rows")
+    if observed_set != expected:
+        missing = sorted(expected - observed_set)[:20]
+        extra = sorted(observed_set - expected)[:20]
+        raise RuntimeError(
+            "benchmark run matrix is incomplete; "
+            f"missing(first 20)={missing}, extra(first 20)={extra}"
+        )
+
+
 def paired_analysis(report: dict[str, Any]) -> dict[str, Any]:
     solvers = list(report.get("solvers", []))
     rows = report.get("results", [])
     penalty_ms = 10.0 * float(report["time_limit_sec"]) * 1000.0
-    by_key: dict[tuple[str, int, str], dict[str, Any]] = {}
+    default_seed = int(report.get("seed") or 0)
+    by_key: dict[tuple[str, int, int, str], dict[str, Any]] = {}
     for row in rows:
-        by_key[(row["instance"], int(row["repeat"]), row["solver"])] = row
+        seed, repeat = row_run(row, default_seed)
+        by_key[(row["instance"], seed, repeat, row["solver"])] = row
 
     comparisons: list[dict[str, Any]] = []
     for solver_a, solver_b in itertools.combinations(solvers, 2):
@@ -229,10 +273,11 @@ def paired_analysis(report: dict[str, Any]) -> dict[str, Any]:
         paired_repetitions = 0
         for instance in sorted({row["instance"] for row in rows}):
             repeated_log_ratios: list[float] = []
-            repeats = sorted({int(row["repeat"]) for row in rows if row["instance"] == instance})
-            for repeat in repeats:
-                row_a = by_key.get((instance, repeat, solver_a))
-                row_b = by_key.get((instance, repeat, solver_b))
+            runs = sorted({row_run(row, default_seed) for row in rows
+                           if row["instance"] == instance})
+            for seed, repeat in runs:
+                row_a = by_key.get((instance, seed, repeat, solver_a))
+                row_b = by_key.get((instance, seed, repeat, solver_b))
                 if row_a is None or row_b is None:
                     continue
                 time_a = float(row_a["solve_ms"]) if benchmark_solved(row_a) else penalty_ms
@@ -253,7 +298,9 @@ def paired_analysis(report: dict[str, Any]) -> dict[str, Any]:
         interval = None
         if len(instance_log_ratios) >= 2:
             pair_seed = int.from_bytes(
-                hashlib.sha256(f"{report['seed']}:{solver_a}:{solver_b}".encode()).digest()[:8],
+                hashlib.sha256(
+                    f"{report.get('seeds', [default_seed])}:{solver_a}:{solver_b}".encode()
+                ).digest()[:8],
                 "big",
             )
             rng = random.Random(pair_seed)
@@ -302,12 +349,11 @@ def paired_analysis(report: dict[str, Any]) -> dict[str, Any]:
         paired_repetitions = 0
         for instance in sorted({row["instance"] for row in rows}):
             repeated_log_ratios: list[float] = []
-            repeats = sorted(
-                {int(row["repeat"]) for row in rows if row["instance"] == instance}
-            )
-            for repeat in repeats:
-                row_a = by_key.get((instance, repeat, solver_a))
-                row_b = by_key.get((instance, repeat, solver_b))
+            runs = sorted({row_run(row, default_seed) for row in rows
+                           if row["instance"] == instance})
+            for seed, repeat in runs:
+                row_a = by_key.get((instance, seed, repeat, solver_a))
+                row_b = by_key.get((instance, seed, repeat, solver_b))
                 if row_a is None or row_b is None:
                     continue
                 pdi_a = audited_pdi(row_a)
@@ -331,7 +377,8 @@ def paired_analysis(report: dict[str, Any]) -> dict[str, Any]:
         if len(instance_log_ratios) >= 2:
             pair_seed = int.from_bytes(
                 hashlib.sha256(
-                    f"pdi:{report['seed']}:{solver_a}:{solver_b}".encode()
+                    f"pdi:{report.get('seeds', [default_seed])}:"
+                    f"{solver_a}:{solver_b}".encode()
                 ).digest()[:8],
                 "big",
             )
@@ -359,8 +406,114 @@ def paired_analysis(report: dict[str, Any]) -> dict[str, Any]:
         )
 
     pdi_available_runs = sum(item["available_runs"] for item in pdi_summaries)
+    node_summaries: list[dict[str, Any]] = []
+    audit_summaries: list[dict[str, Any]] = []
+    audit_fields = (
+        "max_row_violation",
+        "max_bound_violation",
+        "max_integrality_violation",
+        "objective_disagreement",
+    )
+    for solver in solvers:
+        solver_rows = [row for row in rows if row.get("solver") == solver]
+        available_nodes = [
+            float(row["nodes"])
+            for row in solver_rows
+            if row.get("statistics_available", {}).get("nodes", False)
+            and isinstance(row.get("nodes"), int) and row["nodes"] >= 0
+        ]
+        solved_nodes = [
+            float(row["nodes"])
+            for row in solver_rows
+            if benchmark_solved(row)
+            and row.get("statistics_available", {}).get("nodes", False)
+            and isinstance(row.get("nodes"), int) and row["nodes"] >= 0
+        ]
+        node_summaries.append(
+            {
+                "solver": solver,
+                "available_runs": len(available_nodes),
+                "solved_runs": len(solved_nodes),
+                "total_all_available": sum(available_nodes),
+                "median_solved": percentile(solved_nodes, 0.5) if solved_nodes else None,
+                "shifted_geomean_solved": shifted_geomean(solved_nodes, 100.0),
+            }
+        )
+
+        incumbent_rows = [row for row in solver_rows if row.get("has_solution")]
+        maxima: dict[str, Optional[float]] = {}
+        for field in audit_fields:
+            values = [
+                value
+                for row in incumbent_rows
+                for value in [finite_number(row.get("audit", {}).get(field))]
+                if value is not None
+            ]
+            maxima[field] = max(values) if values else None
+        audit_summaries.append(
+            {
+                "solver": solver,
+                "incumbent_runs": len(incumbent_rows),
+                "passed": sum(row.get("audit", {}).get("passed", False)
+                              for row in incumbent_rows),
+                "failed": sum(not row.get("audit", {}).get("passed", False)
+                              for row in incumbent_rows),
+                "maxima": maxima,
+            }
+        )
+
+    node_comparisons: list[dict[str, Any]] = []
+    for solver_a, solver_b in itertools.combinations(solvers, 2):
+        instance_log_ratios: list[float] = []
+        paired_runs = 0
+        for instance in sorted({row["instance"] for row in rows}):
+            run_log_ratios: list[float] = []
+            runs = sorted({row_run(row, default_seed) for row in rows
+                           if row["instance"] == instance})
+            for seed, repeat in runs:
+                row_a = by_key.get((instance, seed, repeat, solver_a))
+                row_b = by_key.get((instance, seed, repeat, solver_b))
+                if row_a is None or row_b is None:
+                    continue
+                if not benchmark_solved(row_a) or not benchmark_solved(row_b):
+                    continue
+                nodes_a = row_a.get("nodes")
+                nodes_b = row_b.get("nodes")
+                if not isinstance(nodes_a, int) or not isinstance(nodes_b, int):
+                    continue
+                if nodes_a < 0 or nodes_b < 0:
+                    continue
+                run_log_ratios.append(
+                    math.log((float(nodes_a) + 100.0) / (float(nodes_b) + 100.0))
+                )
+            if run_log_ratios:
+                paired_runs += len(run_log_ratios)
+                instance_log_ratios.append(sum(run_log_ratios) / len(run_log_ratios))
+        node_comparisons.append(
+            {
+                "solver_a": solver_a,
+                "solver_b": solver_b,
+                "paired_instances": len(instance_log_ratios),
+                "paired_runs": paired_runs,
+                "metric": "shifted node ratio a_over_b on jointly solved runs",
+                "shift": 100.0,
+                "geometric_mean_ratio": math.exp(
+                    sum(instance_log_ratios) / len(instance_log_ratios)
+                ) if instance_log_ratios else None,
+            }
+        )
     return {
         "paired_par10_comparisons": comparisons,
+        "node_counts": {
+            "scope": "Backend-reported nodes; shifted summaries use solved runs only.",
+            "solver_summaries": node_summaries,
+            "paired_comparisons": node_comparisons,
+        },
+        "numerical_audit": {
+            "tolerance": finite_number(report.get("audit_tolerance")),
+            "original_model": True,
+            "solver_summaries": audit_summaries,
+        },
         "primal_dual_integral": {
             "unit": "seconds",
             "horizon_sec": float(report["time_limit_sec"]),
@@ -377,7 +530,9 @@ def paired_analysis(report: dict[str, Any]) -> dict[str, Any]:
 
 def build_manifest(
     repo: pathlib.Path,
+    build_dir: pathlib.Path,
     executable: pathlib.Path,
+    instance_list: pathlib.Path,
     command: list[str],
     report: dict[str, Any],
     source: dict[str, Any],
@@ -435,7 +590,7 @@ def build_manifest(
             "size": executable.stat().st_size,
         },
         "source": source,
-        "build": cmake_manifest(repo),
+        "build": cmake_manifest(build_dir),
         "host": cpu_manifest(repo),
         "solver_versions": report.get("solver_versions", {}),
         "compiler_id_from_binary": report.get("compiler_id"),
@@ -445,6 +600,11 @@ def build_manifest(
             "sha256": sha256_file(solution_file) if solution_file.is_file() else None,
             "size": solution_file.stat().st_size if solution_file.is_file() else None,
         },
+        "instance_list": {
+            "path": str(instance_list),
+            "sha256": sha256_file(instance_list),
+            "size": instance_list.stat().st_size,
+        },
         "instances": instances,
         "experiment": {
             "solvers": report.get("solvers"),
@@ -452,6 +612,7 @@ def build_manifest(
             "execution_order": report.get("execution_order"),
             "threads": report.get("threads"),
             "seed": report.get("seed"),
+            "seeds": report.get("seeds"),
             "time_limit_sec": report.get("time_limit_sec"),
             "hard_timeout_grace_sec": report.get("hard_timeout_grace_sec"),
             "gap": report.get("gap"),
@@ -467,6 +628,10 @@ def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--benchmark", default="./tests/miplib2017_benchmark")
     parser.add_argument("--repo-root", default=".")
+    parser.add_argument("--build-dir", default="build/macos-release")
+    parser.add_argument(
+        "--instance-list", default="tests/data/miplib2017/benchmark-v2.test"
+    )
     parser.add_argument("--json", required=True, dest="json_path")
     parser.add_argument("--csv", required=True, dest="csv_path")
     parser.add_argument("benchmark_args", nargs=argparse.REMAINDER)
@@ -478,6 +643,16 @@ def main() -> int:
         executable = (repo / executable).resolve()
     if not executable.is_file():
         parser.error(f"benchmark executable does not exist: {executable}")
+    build_dir = pathlib.Path(args.build_dir)
+    if not build_dir.is_absolute():
+        build_dir = (repo / build_dir).resolve()
+    if not (build_dir / "CMakeCache.txt").is_file():
+        parser.error(f"configured build directory does not exist: {build_dir}")
+    instance_list = pathlib.Path(args.instance_list)
+    if not instance_list.is_absolute():
+        instance_list = (repo / instance_list).resolve()
+    if not instance_list.is_file():
+        parser.error(f"instance list does not exist: {instance_list}")
 
     benchmark_args = list(args.benchmark_args)
     if benchmark_args and benchmark_args[0] == "--":
@@ -492,9 +667,15 @@ def main() -> int:
         except (ValueError, IndexError):
             return None
 
-    repeat_text = option_value("--repeat")
-    if repeat_text is None or int(repeat_text) < 3:
-        parser.error("audit experiments require --repeat 3 or greater")
+    seeds_text = option_value("--seeds")
+    if seeds_text is None:
+        parser.error("audit experiments require --seeds with at least 3 distinct seeds")
+    try:
+        seeds = [int(value) for value in seeds_text.split(",")]
+    except ValueError:
+        parser.error("--seeds must be a comma-separated list of integers")
+    if len(seeds) < 3 or len(set(seeds)) != len(seeds) or min(seeds) < 0:
+        parser.error("audit experiments require at least 3 distinct nonnegative seeds")
 
     source = git_manifest(repo)
     json_path = pathlib.Path(args.json_path)
@@ -519,8 +700,28 @@ def main() -> int:
             return completed.returncode
 
         report = json.loads(raw_json.read_text())
+        expected_entries = [
+            instance_name(pathlib.Path(line.strip()))
+            for line in instance_list.read_text(encoding="utf-8").splitlines()
+            if line.strip() and not line.lstrip().startswith("#")
+        ]
+        expected_names = set(expected_entries)
+        if len(expected_entries) != 240 or len(expected_names) != 240:
+            raise RuntimeError(
+                "official benchmark list must contain 240 unique instances; "
+                f"rows={len(expected_entries)}, unique={len(expected_names)}"
+            )
+        actual_names = {row["instance"] for row in report.get("results", [])}
+        if actual_names != expected_names:
+            missing = sorted(expected_names - actual_names)
+            extra = sorted(actual_names - expected_names)
+            raise RuntimeError(
+                "benchmark instance set does not match the official list; "
+                f"missing={missing}, extra={extra}"
+            )
+        validate_report_matrix(report, expected_names)
         report["immutable_manifest"] = build_manifest(
-            repo, executable, command, report, source
+            repo, build_dir, executable, instance_list, command, report, source
         )
         report["statistical_analysis"] = paired_analysis(report)
 
