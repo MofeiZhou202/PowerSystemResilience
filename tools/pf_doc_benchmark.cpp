@@ -36,6 +36,7 @@
 #include "hacdcpf/dynamics/DynamicSystem.hpp"
 #include "hacdcpf/dynamics/DynamicEvent.hpp"
 #include "hacdcpf/reliability/reliability_assessment.hpp"
+#include "hacdcpf/reliability/failure_mode.hpp"
 
 namespace {
 
@@ -724,6 +725,103 @@ int mode_relfmea(const std::vector<std::string>& cases) {
   return 0;
 }
 
+// Small hybrid AC/DC feeder with deliberate redundancy so component importance
+// (Birnbaum / Fussell-Vesely) and second-order interaction are non-trivial:
+//  - AC bus 1 (slack, reliable G1); buses 2,3 carry load.
+//  - Two PARALLEL branches 1->2 (B12a,B12b): each alone sheds nothing, both
+//    down islands bus 2 -> a super-additive pair.
+//  - Branch 2->3 and a local backup generator G2 at bus 3 -> (B23,G2) interact.
+//  - VSC 1->DC101 feeds a 5 MW DC load; DC branch 101->102 feeds a 2 MW DC load.
+hacdcpf::HybridPowerSystem make_hybrid_importance_feeder() {
+  using namespace hacdcpf;
+  HybridPowerSystem sys;
+  ACBus b1; b1.index = 1; b1.bus_type = BusType::SLACK; b1.in_service = true; b1.pd_mw = 0.0;
+  ACBus b2; b2.index = 2; b2.bus_type = BusType::PQ; b2.in_service = true; b2.pd_mw = 4.0;
+  ACBus b3; b3.index = 3; b3.bus_type = BusType::PQ; b3.in_service = true; b3.pd_mw = 3.0;
+  sys.ac.buses = {b1, b2, b3};
+  Generator g1; g1.index = 1; g1.bus = 1; g1.in_service = true; g1.pmax_mw = 30.0;
+  g1.pmin_mw = 0.0; g1.is_slack = true; g1.forced_outage_rate = 0.0;   // reliable slack
+  Generator g2; g2.index = 2; g2.bus = 3; g2.in_service = true; g2.pmax_mw = 3.0;
+  g2.pmin_mw = 0.0; g2.is_slack = false; g2.forced_outage_rate = 0.05; g2.mttr_hr = 50.0;
+  sys.ac.generators = {g1, g2};
+  auto mk_branch = [](int idx, int f, int t, double rate, double lam, double r) {
+    ACBranch br; br.index = idx; br.from_bus = f; br.to_bus = t; br.in_service = true;
+    br.r_pu = 0.01; br.x_pu = 0.05; br.rate_a_mva = rate; br.failure_rate = lam; br.mttr_hr = r;
+    return br;
+  };
+  sys.ac.branches = {mk_branch(1, 1, 2, 5.0, 4.0, 100.0),   // B12a (parallel)
+                     mk_branch(2, 1, 2, 5.0, 4.0, 100.0),   // B12b (parallel)
+                     mk_branch(3, 2, 3, 6.0, 3.0, 100.0)};  // B23
+  DCBus d101; d101.index = 101; d101.in_service = true; d101.pd_mw = 0.0;
+  DCBus d102; d102.index = 102; d102.in_service = true; d102.pd_mw = 0.0;
+  sys.dc.buses = {d101, d102};
+  DCLoad dl1; dl1.index = 1; dl1.bus = 101; dl1.in_service = true; dl1.p_mw = 5.0; dl1.n_customers = 50;
+  DCLoad dl2; dl2.index = 2; dl2.bus = 102; dl2.in_service = true; dl2.p_mw = 2.0; dl2.n_customers = 20;
+  sys.dc.loads = {dl1, dl2};
+  DCBranch db; db.index = 1; db.from_bus = 101; db.to_bus = 102; db.in_service = true;
+  db.r_pu = 0.01; db.rate_a_mva = 6.0; db.mtbf_hours = 2920.0; db.mttr_hours = 100.0;  // lambda=3/yr
+  sys.dc.branches = {db};
+  VSCConverter v; v.index = 1; v.bus_ac = 1; v.bus_dc = 101; v.in_service = true;
+  v.pmax_mw = 8.0; v.pmin_mw = -8.0; v.p_rated_mw = 8.0; v.controllable = true;
+  v.forced_outage_rate = 0.1; v.mttr_hr = 24.0;
+  sys.vsc_converters = {v};
+  return sys;
+}
+
+// Reliability-importance benchmark: exact Birnbaum / Fussell-Vesely / EENS
+// derivative (multilinear enumeration) and the first/second-order Hoeffding
+// interaction decomposition on the small hybrid AC/DC feeder above.
+int mode_relimp() {
+  using namespace hacdcpf;
+  auto sys = make_hybrid_importance_feeder();
+  analysis::ReliabilityOptions opt;
+  opt.compute_tail_risk = false;
+  opt.data_policy.default_policy = analysis::ReliabilityDefaultPolicy::StrictCaseDataOnly;
+  const auto sens = analysis::compute_exact_reliability_sensitivity(sys, opt);
+
+  std::cout << std::fixed << std::setprecision(4);
+  std::cout << "# Hybrid AC/DC importance benchmark (exact multilinear enumeration)\n";
+  std::cout << "states_evaluated=" << sens.states_evaluated
+            << " baseline_eens=" << sens.baseline_eens_mwh_yr
+            << " expected_incremental_eens=" << sens.expected_incremental_eens_mwh_yr
+            << " scope=" << sens.model_scope << '\n';
+  std::cout << "# component type U EENS_up EENS_down Birnbaum FV\n";
+  for (const auto& it : sens.components) {
+    std::cout << "IMP " << it.component_name << ' ' << it.component_type << ' '
+              << it.unavailability << ' ' << it.eens_if_forced_up_mwh_yr << ' '
+              << it.eens_if_forced_down_mwh_yr << ' '
+              << it.birnbaum_mwh_yr_per_unit_unavailability << ' '
+              << it.fussell_vesely << '\n';
+  }
+
+  analysis::FailureModeFMEAOptions fopt;
+  fopt.data_policy.default_policy = analysis::ReliabilityDefaultPolicy::StrictCaseDataOnly;
+  fopt.max_order = 2;
+  const auto fm = analysis::run_failure_mode_fmea(sys, fopt);
+  std::cout << "# Hoeffding interaction decomposition of EENS\n";
+  std::cout << "FMEA eens=" << fm.eens_mwh_yr
+            << " first_order=" << fm.first_order_eens_mwh_yr
+            << " second_order_interaction=" << fm.second_order_interaction_eens_mwh_yr
+            << " baseline=" << fm.baseline_eens_mwh_yr
+            << " pairs_evaluated=" << fm.n_pairs_evaluated
+            << " complete=" << (fm.second_order_expansion_complete ? "Y" : "N")
+            << " scope=" << fm.model_scope << '\n';
+  std::vector<const analysis::FailureModeCoContingency*> pairs;
+  for (const auto& co : fm.co_contingencies) pairs.push_back(&co);
+  std::sort(pairs.begin(), pairs.end(), [](auto* a, auto* b) {
+    return std::abs(a->interaction_eens_correction) > std::abs(b->interaction_eens_correction);
+  });
+  std::cout << "# top interacting mode pairs: mode_a mode_b U_ij S_ij interaction_correction\n";
+  for (size_t i = 0; i < pairs.size() && i < 8; ++i) {
+    const auto* co = pairs[i];
+    if (std::abs(co->interaction_eens_correction) < 1e-9) break;
+    std::cout << "PAIR " << co->mode_a.mode_id << ' ' << co->mode_b.mode_id << ' '
+              << co->joint_unavailability << ' ' << co->total_shed_mw << ' '
+              << co->interaction_eens_correction << '\n';
+  }
+  return 0;
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
@@ -734,7 +832,7 @@ int main(int argc, char** argv) {
     if (i == 1 && (a == "nr" || a == "fdpf" || a == "dc" || a == "bfs" ||
                    a == "robust" || a == "stress" || a == "cpf" ||
                    a == "opf" || a == "dyn" || a == "dyn2" || a == "rel" ||
-                   a == "relscan" || a == "relfmea")) {
+                   a == "relscan" || a == "relfmea" || a == "relimp")) {
       mode = a;
       continue;
     }
@@ -763,6 +861,7 @@ int main(int argc, char** argv) {
   if (mode == "relscan") return mode_relscan();
   if (mode == "rel") return mode_rel();
   if (mode == "relfmea") return mode_relfmea(cases);
+  if (mode == "relimp") return mode_relimp();
   std::cerr << "unknown mode: " << mode << "\n";
   return 2;
 }
