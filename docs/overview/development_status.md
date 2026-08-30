@@ -1,10 +1,561 @@
 # Development Status
 
-Updated: 2026-08-25
+Updated: 2026-08-30
 
 This is the living handoff for verified build state and active engineering work.
 Update it in place; do not create dated copies. Source, registered tests, and
 the current Git worktrees remain authoritative.
+
+## N-k DAE restoration-entry compression pilot (2026-08-30)
+
+The manuscript directory now contains a source-backed code audit bundle under
+`docs/latex/paper/Progressive Class-Conditioned Frequency–Duration/code/`. Its
+declared extraction scope expands to 137 files (5.1 MiB) while preserving
+repository-relative paths. The manifest records a SHA-256 hash and audit role
+for every implementation, test, input, and formal-result file; provenance
+records both repository revisions and the dirty HySim worktree. The read-only
+source-to-snapshot verification passes for all 137 files. The copied independent
+oracle also passes the copied case33 report (552 conditions, 92 classes,
+`2.220446049250313e-16` MWh/yr aggregation error, 100% covered leave-one-out
+accuracy) and case123 report (1050 conditions, 173 classes,
+`4.440892098500626e-16` MWh/yr aggregation error, 100% covered leave-one-out
+accuracy). This is an audit snapshot, not an independently buildable fork or a
+replacement for the production sources; common HySim infrastructure and
+MIPSolvers remain external to the extraction boundary.
+
+The manuscript theory now separates high-order event construction from
+trajectory partitioning. Authored joint events form a canonical ordered subset tree;
+for each fixed event, the nonempty inverse images of the complete DAE-to-MILP
+interface form the unique coarsest lossless partition. The complete interface
+retains initiating outages, DAE-derived VSC availability, and repair-stage
+data, so equal VSC labels from different events are not merged. The manuscript
+now states the exact event/class counts, the combinatorial boundary, the lack
+of monotone parent-to-child class inheritance, and an EENS remainder bound for
+future certified order truncation. The current code already uses the matching
+`(event_index, class_label)` key and canonical combination recursion, but only
+complete authored N-1/N-2/N-3 catalogs are numerically validated; the
+higher-order stopping certificate is theory-only. Fig. 2 now has a canonical
+MATLAB R2025b source showing these three distinct operations.
+The registered `nk_acdc_reliability_study_smoke` and
+`nk_acdc_reliability_oracle` tests pass 2/2 in 2.29 s. The oracle now also
+checks the complete per-order combination counts, uniqueness of event subsets,
+and preservation of event identity when two events share an unavailable-VSC
+label. These tests cover the current authored N-1/N-2/N-3 path, not automatic
+termination by the theoretical remainder bound.
+
+The research driver `nk_acdc_reliability_study` now defines a trajectory class
+only by the DAE-derived unavailable-VSC set actually supplied to the existing
+hybrid AC/DC restoration MILP for a fixed initiating event. AC/DC load scales
+remain condition-specific MILP inputs. The MILP's native `sP/sQ` active and
+reactive load-shedding variables are retained and every projected future state
+still incurs a restoration solve. The corrected cost model is
+`N*(DAE+restoration)` versus `DAE library + N*(lookup+restoration)`.
+
+A production defect, not a missing load-shedding feature, caused 150 false
+case33 restoration infeasibilities. With `split_domain_trees=true`, tie
+preprocessing used unified AC+DC+VSC connectivity and could prune a required AC
+tie because a VSC-DC-VSC path joined its endpoints, although that path is absent
+from the AC fictitious-flow and forest equations. Unified component pruning is
+now skipped in split mode; per-domain forest cardinality removes cycles. The
+focused regression passes 1 case / 2 assertions and the full
+`test_reconfig_options` target passes 14 cases / 56 assertions.
+
+The corrected formal case33 N-1/N-2/N-3 run has 92 explicit joint-entry events,
+6 operating states and 552/552 resolved DAE-plus-restoration conditions, with
+zero unresolved frequency. Static and DAE-entry EENS are
+`0.0905561618570` and `0.260830925306 MWh/year`, a 65.2817% relative
+difference. The 92 restoration-entry classes give a class/state ratio of
+`0.166667`. Leave-one-operating-state-out nearest-state prediction has 100%
+entry-class accuracy; re-solving the held-out state's load-shedding MILP gives
+zero aggregate and weighted-absolute EENS error. At 100,000 projected samples,
+two formal reruns give 5.76x and 5.99x end-to-end speedup and a 99.448% DAE
+solve reduction after library construction. This demonstrates net saving, but
+the pre-registered 20x gate fails; the earlier approximately 150x figure
+omitted state-specific restoration and is invalid.
+
+Registered smoke and Python-oracle CTests pass 2/2 in 2.64 s. `--audit-only`
+changes only the process exit code so structural CTest execution can pass while
+`validation_passed=false` remains in JSON. The Python oracle independently
+recomputes frequencies, EENS, class grouping, leave-one-out outcomes and all
+DAE/restoration timing identities from conditional records.
+
+The formal case123 run completed in about 11 minutes. Its 175 N-1/N-2/N-3
+events and 6 states form 1050 conditions; 892 reached and completed the existing
+load-shedding restoration MILP, while 158 failed in the DAE or event-time
+algebraic network solve. Unresolved frequency is `0.0319160406627/year`.
+Static/DAE-entry EENS over only the resolved submeasure is
+`0.0578626786707/0.235781116183 MWh/year`. Entry-class prediction is 100% where
+a resolved neighbor exists, but `0.000761065845/year` has no leave-one-out
+coverage, so class accuracy is not admitted. Two formal reruns give 8.81x and
+8.91x timing projections, which are
+diagnostic only because failed-library tails and resolved-only direct means are
+not a common measure; the report now rejects timing/net-saving admission when
+unresolved frequency is nonzero. This is a DAE closure failure, not a missing
+restoration load-shedding capability. The formal case33 and case123 JSON files
+both pass independent raw-record oracle recomputation.
+
+The manuscript abstract, Introduction, Sections II--V, and conclusion now use
+the same N-1/N-2/N-3 trajectory-class/restoration-entry-state story and follow
+the structure and
+writing pattern of the author's `TSG-01621-2022` paper. The Case Studies examine
+transient necessity, restoration-entry-state identification, computational
+performance, and large-feeder numerical closure. A four-panel mechanism figure
+uses the actual case33bw AC-fault DAE trace to show the 0.36558-s VSC2 trip and
+the resulting change from an initial-fault-only restoration input to the
+initial fault plus VSC2; this representative trace is explicitly excluded from
+the EENS sum. The case33 result is the admitted positive validation; case123 is
+reported only as a DAE-closure diagnostic. Sections III--IV now formally define
+the complete event-reset DAE trajectory, terminal unavailable-VSC map,
+device-wise progressive partition, finite mutually exclusive classes, class
+frequency conservation, state-specific EENS conservation, covered-range class
+identification error, and break-even cost. The number of partition levels is
+the number of retained VSC statuses rather than a fixed three. XeLaTeX produces
+a 12-page PDF with five Python-generated figures, no overfull boxes, and no undefined
+citations/references. All pages have been rendered for visual inspection; the
+figures are legible and unclipped. The two propagation CTests and both formal
+N-k report oracles pass. Auxiliary highlights and response-letter files still
+contain historical TCERM wording but are not included by `main.tex`.
+
+The manuscript formulation now expands the generic trajectory equation into
+controller-state, AC-current-balance, and DC-current-balance blocks. It locates
+configured GFL/GFM control states, FRT/current limitation, protection timers,
+and the optional DC-link state explicitly; defines the VSC AC/DC power and
+DC-link energy coupling; and states that DC-to-AC propagation requires an
+authored DC-voltage-feedback, derating, or blocking path. Section IV records the
+actual Backward-Euler, simultaneous damped-Newton, event-localization, reset,
+and algebraic-reinitialization procedure. The restoration MILP remains outside
+the DAE and is executed once after the pre-restoration interval. This
+manuscript-only clarification does not change the formal numerical records.
+
+The three Section V figures now have a single canonical MATLAB R2025b renderer,
+`figures/generate_case_study_figures.m`. The script reads the audited figure
+source CSVs and the formal case33 event record and exports vector PDF/SVG and
+600-dpi PNG/TIFF files. The transient figure uses waveform evidence before the
+restoration-entry comparison; the case33 figure uses paired point comparisons
+instead of grouped bars; and the case123 figure separates condition closure,
+unresolved frequency mass, and DAE-to-MILP attrition. The former Python plotting
+scripts remain historical and are not the Section V canonical renderer.
+The strengthened partition theory increases the final XeLaTeX build to 13
+pages. The new Fig. 2 and its surrounding theory were rechecked on rendered
+pages 4--7 at 180 dpi; Figs. 3--5 retain their previously verified MATLAB
+rendering. Titles, legends, annotations, formulas, and captions are legible and
+unclipped. The build has no overfull boxes or
+undefined citations/references. The remaining warnings are IEEE-template font
+substitutions and underfull spacing diagnostics.
+
+The current clean sibling
+MIPSolvers checkout is `a5d614b725b44e43d07c5fce0050b93a09f6d4d1`, not the
+recorded `a39812aa5941691b44e8379a8e0b7d42ccdde955` pin, so these are dirty-main
+research results rather than a pinned release baseline.
+
+## Modified case33bw AC/DC propagation capability audit (2026-08-30)
+
+The registered `case33bw_acdc_propagation_study` derives a dynamic study case
+from `hacdcpf::io::build_case33bw_acdc()` without replacing its 33-AC-bus,
+2-DC-bus, 37-AC-branch, 1-DC-branch and 2-VSC topology. It adds a 1 MW DC load,
+explicit VSC schedules/ratings/current limits, and IEEE 1547 Category II
+AC-terminal protection on the remote VSC. The driver compares a no-fault
+trajectory, an AC-bus-18 shunt fault and a DC-bus-2 shunt fault at identical
+initial conditions. Cross-domain propagation is accepted only from the maximum
+deviation against the time-aligned no-fault trajectory, with fixed gates of
+`1e-4 pu` voltage or `1e-3 MW` converter AC power.
+
+The original GFL path was retained as a negative control: the DC fault changed
+AC-bus-18 voltage by only `2.1082e-10 pu` and VSC2 AC power by
+`1.2604e-10 MW`, below the predeclared gates. An opt-in average-value DC-link
+fault control now maps measured DC voltage into a piecewise active-power
+derating envelope and a definite-time latched undervoltage block. With authored
+study settings `v_derate=0.95 pu`, `v_block=0.75 pu` and `delay=20 ms`, the same
+DC fault changes AC voltage by `0.0880741146 pu` and VSC2 AC power by
+`1.04999999994 MW`. The block times at 1/2/5 ms are `0.238/0.238/0.240 s`;
+all three steps give the same propagation classification, the block-time spread
+is `2 ms`, and the 1-vs-2-ms peak-power difference is zero. The AC fault still
+changes DC voltage by `7.790176e-4 pu` and the binary-versus-DAE restoration
+entry mismatch remains demonstrated. Maximum post-event algebraic residual is
+`4.62e-14`.
+
+The focused C++ test passes 49 assertions, including profile mapping/rejection, the analytical
+first-order current derivative and 1/0.5-ms protection timing. An independent
+Julia/Base oracle reruns the study and reconstructs the envelope, timer,
+legacy identity and propagation gates from CSV without calling the C++ control
+law; it passes with zero scale error and a `2 ms` block-time spread. Registered
+CTest names are `case33bw_acdc_propagation_study_smoke` and
+`case33bw_acdc_dc_fault_julia_oracle`. Full artifacts are
+`build/macos-release/case33bw_acdc_propagation_report.json` and
+`build/macos-release/case33bw_acdc_propagation_trajectories.csv`.
+
+The admitted capability is bidirectional propagation only at the balanced-
+phasor reliability-entry level: DC fault -> DC-link voltage collapse -> active-
+power/current change -> optional latched block. IEEE Access 2022, IEEE TIA
+2024, IEEE TPWRD 2024/2025 and IEEE TII 2025 evidence is compared in the
+dynamics/reliability manuals. Those papers validate the physical mechanisms,
+not this case's numerical values. In particular, the RTDS/CHIL diode-fed
+uncontrolled-rectifier path reported by Pandey et al. is not represented.
+MMC arm/submodule dynamics, converter saturation, switching ripple, DC
+overcurrent protection, DCCB arcs and vendor deblocking/precharge remain
+explicitly unsupported. These focused tests do not imply a full regression.
+The updated dynamics and reliability manuals also compile successfully with
+TeX Live 2026/XeLaTeX (88 and 115 pages, respectively); pre-existing manual-wide
+box/font warnings remain and are not claimed as resolved by this focused work.
+
+## Superseded transition-aware manuscript baseline (2026-08-30)
+
+The Section V results below are retained as historical evidence only. They were
+replaced in the current Case Studies by the formal N-1/N-2/N-3
+restoration-entry studies described above and must not be cited as the current
+manuscript validation.
+
+Sections II--IV now use one explicit controller-to-trajectory contract. Local
+converter outputs enter the continuous DAE flow; protection and IBR logic
+create guards and physical resets; the distribution-level controller consumes
+only delivered observations and applies its accepted switching/DER action
+through a supervisory reset before the next DAE flow. Section IV was reduced
+from roughly four pages to pages 7--8 and no longer duplicates a device-model
+manual. Local converter control advances continuously, whereas system-level
+restoration is solved only at finite decision epochs triggered by delivered
+relay/IBR status, breaker feedback, communication recovery, or a restoration
+timer. It may execute zero, one, or several times per contingency, never at
+every DAE integration step. The generic mixed-detail DAE/restoration sequence
+remains a method specification, not a claimed production implementation.
+
+Section V was reorganized by validation question. Q1 uses the admitted
+60-condition production DAE grid and shows that static restoration
+underestimates mean 3-s event energy by 44.680% at a 0.25-s restoration delay.
+Q2 performs 2000 seeded independent replay replications at
+$N=60,600,6000$; observed-to-predicted MC RMSE ratios are 1.018, 0.988, and
+1.006, while exhaustive TCERM conditional means reconstruct the direct
+trajectory average to displayed zero. Replay is statistically equivalent to
+rerunning identical deterministic inputs, but only DAE solve counts are
+compared; no replay wall-clock speedup is claimed. Q3 now uses a modified IEEE
+33-bus hybrid AC/DC feeder with 33 AC buses, two DC buses, 32 closed AC lines,
+five normally open ties, one DC line, and two VSCs. Its 32 N-1 line outages and
+18 operating states give 576 direct calculations and 84 equivalent states.
+Static/direct/equivalent EENS values are `1.4382093024`, `1.4953717429`, and
+`1.4953717429 MWh/year`; the static calculation underestimates the
+transition-aware result by `3.822624%`. This is a disclosed reduced consequence
+study, not feeder-wide DAE validation or a utility forecast.
+
+`generate_case_study_validation.py` is the canonical generator for the CSV and
+table evidence and the three-panel Python Fig. 3. Panel (a) tests transient
+necessity, panel (b) compares MC sampling error and required DAE solve count,
+and panel (c) reports the IEEE 33-bus static/transition-aware EENS comparison
+and equivalent-state closure. The standalone C++ project independently reads
+the Baran--Wu MATPOWER AC network and reproduces the same 576/84 dimensions and
+EENS values; its direct/equivalent difference is `4.4408920985e-16 MWh/year`.
+The predeclared numerical acceptance gates passed. The standalone Release
+project rebuilt and `pccfd_tests` passed 1/1 in 1.67 s. The final TeX Live 2026
+build is 12 pages with no overfull boxes,
+undefined citations/references, duplicate labels, package warnings, or fatal
+errors. All 12 rendered pages were visually checked: Section IV occupies pages
+7--9, Section V starts on page 9, and Figs. 1--3, Algorithm 1, and Tables I--II
+are legible and unclipped. The final PDF is stored beside the manuscript sources;
+the full HySim regression was not run and is not implied.
+
+The theory-first prediction was 32 contingencies, 576 direct calculations, 84
+equivalent states, and less than 2 s for the IEEE 33 calculation. The measured
+values are exactly 32/576/84 with a `5.2e-05 s` core aggregation time in the
+formal 500,000-year reproduction run; no re-derivation trigger occurred. A
+fresh AppleClang Debug build with AddressSanitizer and UndefinedBehaviorSanitizer
+also passes `pccfd_tests` 1/1 in 2.43 s.
+
+## Converter and protection deterministic failure models (2026-08-28)
+
+The phasor-domain dynamic devices now separate failure occurrence from failure
+consequence. GFL/GFM converters and their VSC wrapper accept the deterministic
+`None`/`ForcedBlock` control state; a block freezes control states, removes AC
+and DC stamps, suppresses protection reconnect, and reports the failure mode,
+control availability, block state and actual terminal-current injection. The
+rich VSC dynamic profile admits the explicit numeric parameter
+`converter_forced_block` (exactly 0 or 1). Its healthy default follows the
+pre-existing control path without an added DAE state.
+
+`ProtectionRelay` now accepts `None`, `FailToTrip` and `SpuriousTrip`. A
+fail-to-trip retains local CT/PT measurement, pickup margin and timer but
+records that its output command was suppressed; a spurious trip bypasses the
+guard and emits exactly one event carrying the failure mode. Static nonnegative
+`pt_ratio_gain` and `ct_ratio_gain` act before the existing exact ZOH phasor
+filters. These inputs represent deterministic IEC 61869 ratio/channel
+consequences, not calibrated failure rates, CT saturation, EMT waveforms,
+breaker mechanics, communication delay or backup-relay coordination.
+
+Verified on the existing `macos-release` build: `test_transient_dynamics`
+rebuilt successfully. The three new focused cases pass 3 cases / 77 assertions:
+healthy converter identity is exact, forced GFL/GFM AC/DC injections and
+derivatives satisfy the `1e-12` gate, fail-to-trip emits zero actions, and
+spurious-trip emits exactly one. The PT-gain DAE case has no healthy action,
+while `g_PT=0.8` acts at 0.025 s for both 10 ms and 1 ms nominal steps with a
+localized bracket no larger than `1e-6` s and post-event algebraic residual no
+larger than `1e-8`. Four affected pre-existing cases also pass 4 cases / 183
+assertions (COSMIC relay equations, relay DAE localization, IEEE 1547
+trip/reconnect, and VSC limiter mapping). A full CTest regression and external
+EMT/field validation were not run and are not implied.
+
+## Hybrid AC/DC terminal-state reliability pilot (2026-08-27)
+
+The production mass-matrix DAE now has a registered research driver,
+`terminal_state_boundary_study`, for the networked-microgrid AC-bus-6 fault.
+The driver reports IEEE-1547 trip, terminal blocked state, reconnect and
+return-to-full-power times separately; unresolved reliability consequences are
+serialized as null rather than zero. It also records that design-grid fractions
+are not calibrated field probabilities and that the present `VSCTrip` model
+does not cover MMC valve blocking, DC overcurrent blocking, precharge, or
+vendor unlock logic. `terminal_state_boundary_study_smoke` is registered in
+CTest.
+
+The pilot exposed and corrected a production mapping omission: GFL VSC dynamic
+assembly now preserves `VSCConverter::current_limit_priority` as magnitude,
+active-power-priority, or reactive-power-priority limiter geometry, matching
+the existing GFM branch. The focused regression `GFL VSC builder preserves
+authored current-limit priority` passes 1 case / 9 assertions.
+
+The admitted numerical result is limited to the 3 s near-fault window. The
+0.625 and 0.3125 ms full 4x5x3 grids both complete 60/60 cases, agree on every
+terminal class, and differ in trip time by at most 2.976 ms (mean 0.600 ms over
+21 trip cases). The uniform-grid protective-trip and terminal-blocked fractions
+are both 0.35; mutually exclusive counts are 24 ride-through without cessation,
+15 ride-through with momentary-cessation diagnostic, 12 undervoltage trips and
+9 overfrequency trips. Each limiter priority produces 7/20 trips, so this case
+does not show a reliability-class effect from priority choice.
+
+The admitted 3 s window now includes an explicit nested static/transient ENS
+comparison for network-restoration delays 0.25, 0.5, 1.0, 1.5 and 2.0 s. At
+0.3125 ms the uniform-grid mean static underestimates are 44.680%, 26.677%,
+11.539%, 4.459% and 0%; the maximum difference from 0.625 ms is 0.0093
+percentage points. Every one of the 39 ride-through cases has zero incremental
+ENS, every scenario satisfies transient ENS greater than or equal to static
+ENS, and the static model meets the conditional 5% gate only at 1.5 and 2.0 s.
+These are per-event consequences inside the finite observation window, not
+annual EENS estimates.
+
+The driver also reports the executable analytical reduction
+`mean_static_ens + p_trip * L_dc * conditional_trip_unavailable_time / 3600`.
+It reconstructs direct trajectory averaging to the fixed `1e-12 MWh` gate.
+This establishes the training-grid identity and the static model's nested
+limit; it does not validate interpolation to unseen fault/operating points or
+replace the need for calibrated scenario probabilities.
+
+Long-horizon reconnect evidence is explicitly rejected. For the representative
+0.01 pu, 0.30 s fault, 5 ms backward Euler reports reconnect/full power at
+18.56568/20.56568 s, 2.5 and 1.25 ms do not reconnect by 25 s, and 0.625 ms
+fails the AC-voltage health gate at 5.488125 s. The corresponding 5 ms static
+EENS boundary candidate is retained only as a rejected diagnostic; no actual
+reconnect time or static-reliability applicability boundary is claimed. The
+MATLAB source `make_terminal_state_boundary_figure.m` renders the admitted and
+rejected evidence separately.
+
+This work used HySim base `8712048e58d2a0dd3edd139a73be9435038a6ea9` plus the
+documented dirty-worktree pilot changes and clean MIPSolvers
+`a5d614b725b44e43d07c5fce0050b93a09f6d4d1`. Configure succeeds with the
+existing warning that the recorded dependency pin is still `a39812a`.
+
+Verified on `macos-release`: `terminal_state_boundary_study` rebuilds, its
+registered smoke passes in 1.48 s, the GFL priority mapping regression passes
+1 case / 9 assertions, the existing networked-microgrid outage transient passes
+1 case / 3207 assertions, and the online-protection DAE regression passes 1
+case / 31 assertions. The dynamics manual compiles with XeLaTeX to 86 pages;
+the initial generic TeX Live attempt selected pdfLaTeX and failed on the CTeX
+font engine, after which the explicit XeLaTeX run succeeded. MATLAB R2025b
+regenerated the three-panel diagnostic and the admitted two-panel finite-window
+comparison PDF/PNG; both were visually inspected for legibility and clipping.
+`git diff --check`, the untracked-source whitespace
+check, and the forbidden-marker scan are clean. `clang-format` is not
+installed on this host, so no formatter command was run.
+
+## Transition-aware reliability manuscript (2026-08-28)
+
+The IEEEtran manuscript under
+`docs/latex/paper/Progressive Class-Conditioned Frequency–Duration/` is now
+titled *Transition Aware Reliability Assessment of Hybrid AC/DC Distribution
+Systems with Inverter Based Resources*. The paper now follows the complete
+detailed-generator--equivalent--analytical-embedding logic of Omri et al.,
+*IEEE Transactions on Power Systems* 39(5), 6319--6331 (2024), DOI
+`10.1109/TPWRS.2024.3354299`, after reading its full IEEE Xplore interactive
+HTML. Omri et al. use sequential Monte Carlo, day-ahead scheduling, an islanded
+resource-management MILP, apportioning, and fictitious multi-state DGs to
+compress microgrid export capacity. The present paper instead defines a
+transition-conditioned equivalent reliability model (TCERM) for the earlier
+joint protection--IBR--restoration path. Singh and Billinton,
+*IEEE Transactions on Reliability* R-24(1), 31--36 (1975), is retained only as
+the classical frequency--duration foundation.
+
+The TCERM is formulated as a semi-Markov renewal--reward kernel retaining entry
+frequency, holding time, loss-set boundaries, duration-weighted load shed, and
+customer interruption rewards. The initiating-contingency frequency is allocated
+among mutually exclusive paths and is not reused as an IBR failure rate. Exact
+conditional means preserve linear frequency--duration rewards. A
+frequency-weighted within-class energy range bounds terminated refinement, and
+an adaptive allocation rule prioritizes classes by removable bound and event-
+solve cost. The manuscript additionally derives a total fast-assessment error
+decomposition, decision-separation certificate, nested static limit, signed
+extension, and a conditional stress-hazard interface. The hazard interface is
+disabled in all numerical cases because its baseline hazards and stress
+coefficients are not calibrated.
+
+Section III.B is now titled ``Trajectory-to-Class Mapping and Progressive
+Partitioning'' and is organized into three subsubsections. The first generates
+a certified hybrid fault-to-service trajectory with the coupled mass-matrix DAE
+and measurable guard/reset maps. The second maps only declared finite records
+to disjoint exhaustive preimage classes. The third defines nested parent--child
+refinement, class probability/frequency allocation, the semi-Markov class
+record, and conditional-expectation reward conservation. The previous detailed
+GFL controller expansion, timer equations, information filtrations, auxiliary
+well-posedness/quotient propositions, state-complement discussion, and repeated
+reward-sufficiency text were removed from III.B.
+
+Section III.B now uses one integrated Python-generated 183-by-102-mm Fig. 2
+instead of separate trajectory-mapping and progressive-partition figures. Its
+four panels follow the subsection exactly: coupled DAE/guard/reset trajectory
+generation, finite record-to-exact-preimage mapping, device-indexed nested
+refinement, and initiating-frequency/linear-reward conservation. For one fixed
+initiating event it shows distinct trajectories with equal retained records,
+an explicit unresolved class, unique parent--child relations, and allocation of
+one initiating exposure. Observation, classification, and parent-map arrows are
+explicitly not physical state transitions. The canonical source is
+`figures/generate_trajectory_class_mapping.py`; editable PDF/SVG and 600-dpi
+PNG/TIFF exports are generated exclusively with Python and pass text-collision
+and figure-boundary audits.
+
+The rewritten III.B keeps only the distinctions required by the method:
+$(\mu,x,y)$ is one hybrid DAE state on a flow segment, $\rho_{k,\omega}$ is the
+ordered flow/reset trajectory, $\mathfrak o_{k,\omega}$ is its finite observed
+record, and $C_L(k,\omega)$ is the resulting class label. Failed
+initialization, singular/nonunique DAE continuation, unresolved simultaneous
+events, and failed post-event reinitialization map to $\rho_\bot$. Finiteness
+comes from finite record alphabets and a bounded record schema; a finite time
+horizon alone is not asserted to bound event count. The discrete hybrid mode
+uses $\mu\in\mathcal M$; $q\in\mathcal Q$ remains reserved for an
+information/automation function.
+The implemented Levels 0--2 are causal fidelity tiers, not controller counts.
+Protection, information-function, IBR, event-order, and service-stage outcomes
+are now device-indexed finite power-system state groups. Adding devices
+normally enlarges a group and the reachable equivalent-state set. Level 2 is sufficient
+only for the authored model scope and only when the Section IV residual-
+consequence and decision-separation gates pass; otherwise the equivalent-state variables must be
+enlarged or additional nested levels introduced.
+The paper now defines the initiating-event catalog at its first use in Section
+II.B through an exact physical state entry
+$k=(\Phi_k^-,\Delta\Phi_k)$, with post-entry outage set
+$\Phi_k^+=\Phi_k^-\cup\Delta\Phi_k$. Section III.A is now titled
+``Initial Failure'' and now contains exactly two paragraphs. The first states
+the evaluated $\mathcal K^{N-1}=\{(\varnothing,\{a\}):a\in\mathcal U\}$ scope;
+the second gives the cited stationary two-state conversion from an up-state
+failure intensity to a calendar entry frequency and the hybrid fault jump.
+Directly reported annual outage frequency is not converted a second time.
+Sequential-overlap and simultaneous/common-cause outage
+entries require chronological/multi-state or joint-event models; marginal
+annual rates are not multiplied. The reported numerical campaign remains
+explicitly limited to $\Phi_k^-=\varnothing,|\Delta\Phi_k|=1$. Protection non-operation, breaker
+failure to open, IBR trip, failed islanding and restoration remain downstream
+conditional outcomes and never receive a second initiating frequency.
+Section III.C now states that all annual indices are conditional on the authored
+catalog. Excluded higher-order outages and unmodeled joint-entry mechanisms are reported
+as catalog truncation and are not absorbed into the within-event unresolved
+class.
+The standalone manuscript project removes both its unused failure-on-demand
+helper and the former independent overlapping-outage utility so that the executable
+scope matches the manuscript. `calendar_frequency()` retains the fixed
+two-state N-1 oracle at the declared $10^{-15}$ absolute tolerance. No
+sequential-overlap or simultaneous/common-cause occurrence model is
+implemented or numerically validated. After this scope correction, the
+standalone Release project rebuilt and its registered `pccfd_tests` test passed.
+The current final build and test evidence is recorded at the start of this
+status entry.
+
+Section II and Fig. 1 now state the controller boundary before Section III
+begins. Subsection II.A is titled ``Hybrid AC/DC Distribution Systems with
+Hierarchy Controllers'' and contains exactly four paragraphs: physical network
+boundary, asset-local converter control, protection incidence and authority,
+and information-limited supervisory control. Subsection II.B is titled
+``Reliability Assessment Scheme and Assumptions'' and contains exactly two
+paragraphs: the event-to-index assessment chain and its assumptions/evidence
+boundary. This moves the initiating-event catalog, scenario, execution record,
+TCERM allocation, and reliability outputs out of the controller architecture
+and into the assessment scheme. The first paragraph now follows the visible
+Fig. 1(b)--(c) sequence in short steps: initiating contingency, annual
+frequency, operating scenario, post-contingency simulation, finite
+event-and-service record, consequence class, and reliability indices. The
+second paragraph groups the scope into four explicit assumptions instead of
+interleaving definitions, exclusions, and validation claims.
+
+The manuscript distinguishes the component-level compact GFL converter
+controller, component-level network/interconnection protection, and the
+system-level supervisory isolation/restoration optimization. The first two
+layers share the fault-on DAE voltage/current trajectory; the supervisory layer
+subsequently consumes only the telemetry, status contacts, protection events,
+and source certificates delivered by the authored information state. The new
+formulation defines asset-local converter ownership and protection incidence
+through protected-zone, measurement, and commanded-interrupting-device sets;
+protection is not incorrectly forced into a one-to-one component mapping.
+The supervisory observation map is non-injective, so different physical states
+may be observationally indistinguishable. Missing information removes remote
+action/source credit or enters unresolved mass rather than exposing simulator
+truth. No general state estimator or POMDP is claimed for the paper results.
+The supervisory layer remains explicitly distinct from a differential
+controller or transient optimal-control problem solved simultaneously with the
+DAE. Section IV now interprets switch executability as requiring both the
+necessary status observations and command path, and source qualification as
+reported evidence rather than a hidden-state lookup. The figure is anchored so
+that the IEEE two-column layout places it before Section III, and the Section II
+evidence boundary states that the 60-condition campaign validates compact
+GFL/IEEE 1547 consequences conditional on scheduled clearing rather than
+endogenous relay clearing or a detailed GFM transient model.
+The Python-generated 183-by-88-mm Fig. 1 now mirrors Section II directly.
+Panel (a) contains the $G_0$ physical boundary and the three parallel
+measurement--control--equipment relations for local converter control,
+protection, and distribution-level restoration. Panel (b) now contains the
+contingency occurrence model: exact pre-contingency/new-outage sets, annual
+occurrence frequency, operating scenario, the reported N-1 evidence boundary,
+and the distinction between post-contingency outcomes and independent
+contingencies. Panel (c) continues with the post-contingency trajectory,
+restoration-command requirements, reported protection/IBR/service outcomes, one
+TCERM equivalent reliability state, frequency conservation, and six reliability indices. The
+labels use distribution-system, relay, SCADA/IED, switching, and DER-dispatch
+terminology rather than abstract authority/admission language. Its collision
+audit compares text boxes across
+panel boundaries as well as within a panel. The Section III.A cross-reference
+to the initiating-event catalog now points to II.B rather than the obsolete
+II.A location. The rebuilt `research_object.pdf` and the 12-page IEEEtran manuscript compile
+with TeX Live 2026 without overfull boxes, undefined citations/references,
+duplicate labels, or fatal errors. Rendered pages 3--6 were inspected at
+publication scale: Section II.A introduces the hierarchy on page 2, Fig. 1 is
+at the top of page 3, Section II.B follows beneath it, and the compact N-1
+frequency and fault-reset equations remain inside their columns on pages 3--4.
+The loss-boundary equation was split into three aligned rows, removing
+the previous literal `qquad` rendering defect. The merged Fig. 2 is on page 6;
+there is no longer a separate progressive-partition Fig. 3 or double-column
+figure stacking. Only nonfatal underfull diagnostics from the IEEE layout
+remain. The standalone manuscript Release test passes 1/1; no full HySim
+regression is implied by this paper-focused change.
+
+The 60-condition detailed campaign is now tied to the controller actually
+authored by `terminal_state_boundary_study`: compact phasor-domain GFL PLL,
+algebraic P/Q-to-dq reference conversion, magnitude/active/reactive-priority
+current projection, first-order current states, algebraic AC/DC network, and
+IEEE 1547 event logic. Differential LCL, inner-PI, switching-device and vendor
+firmware states are not activated by that driver and are not validated by its
+terminal-class or finite-window energy results. The driver applies an authored
+scheduled clear event at each selected duration; it does not derive clearance
+from an endogenous relay guard. Its evidence is therefore conditional on
+clearing time and does not validate the closed-loop relay-clearing model.
+
+The evidence layers remain separated. The 60-condition mass-matrix DAE campaign
+supports terminal-class and 3-s finite-window event-energy claims only. Its
+seeded MC replay validates the estimator's sampling error and required solve
+count, not transient wall-clock acceleration. The modified IEEE 33-bus hybrid
+AC/DC case uses the same disclosed reduced protection/FRT/restoration equations
+for direct and equivalent-state aggregation and supports the reported EENS
+comparison, probability closure, and branch ranking. The deterministic detailed grid is not a field probability
+model, `21/60` is not an annual trip probability, and the nonconverged
+long-horizon reconnect tail remains rejected.
+
+The manuscript README, Highlights, cover letter, standalone C++ audit, and
+equation traceability use the same title, TCERM framing, and evidence boundary.
+The former large-feeder generator and audit were replaced by the modified IEEE
+33-bus application. Its Python and standalone C++ calculations reproduce the
+576 direct calculations, 84 equivalent states, and transition-aware EENS of
+`1.4953717429 MWh/year` within the declared `1e-12 MWh/year` aggregation gate.
+Generator root discovery and documented reproduction paths are verified;
+the full production regression is not implied by this manuscript-only rebuild.
 
 ## Windows Release and distribution baseline (2026-08-25)
 

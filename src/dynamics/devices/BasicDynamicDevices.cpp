@@ -735,6 +735,21 @@ int gfl_vdc_local(const GridFollowingInverterParams& params) {
              : -1;
 }
 
+double gfl_dc_link_voltage(const GridFollowingInverterParams& params,
+                           const StateIndexRange& range,
+                           const DynamicState& x,
+                           const NetworkState& y) {
+  const int vdc_local = gfl_vdc_local(params);
+  if (vdc_local >= 0 && !range.empty() &&
+      state_index(range, vdc_local) < x.x.size()) {
+    return finite_value(x.x[state_index(range, vdc_local)], params.vdc_ref_pu);
+  }
+  if (params.dc_bus_pos >= 0 && params.dc_bus_pos < y.Vdc.size()) {
+    return finite_value(y.Vdc[params.dc_bus_pos], params.vdc_ref_pu);
+  }
+  return params.vdc_ref_pu;
+}
+
 bool gfl_uses_lcl_filter(const GridFollowingInverterParams& params) {
   // The 2-state first-order LCL approximation is superseded by the
   // differential LCL block in full-fidelity mode.
@@ -995,6 +1010,46 @@ void add_inverter_block_flags(DynamicDeviceOutput& out,
   out.values["block_outer_control"] = bus.has_outer_control ? 1.0 : 0.0;
   out.values["block_inner_control"] = bus.has_inner_control ? 1.0 : 0.0;
   out.values["inverter_grid_following"] = bus.grid_following ? 1.0 : 0.0;
+}
+
+void add_converter_failure_outputs(DynamicDeviceOutput& out,
+                                   ConverterControlFailureMode failure_mode) {
+  const bool forced_block = failure_mode == ConverterControlFailureMode::ForcedBlock;
+  out.values["control_failure_mode"] =
+      static_cast<double>(static_cast<int>(failure_mode));
+  out.values["control_available"] = forced_block ? 0.0 : 1.0;
+  out.values["forced_block"] = forced_block ? 1.0 : 0.0;
+  out.values["terminal_current_injection_pu"] = 0.0;
+  if (!forced_block) {
+    const auto rms = out.values.find("i_rms_pu");
+    const auto magnitude = out.values.find("i_mag_pu");
+    const auto filter_real = out.values.find("filter_current_re_pu");
+    const auto filter_imag = out.values.find("filter_current_im_pu");
+    if (filter_real != out.values.end() && filter_imag != out.values.end()) {
+      out.values["terminal_current_injection_pu"] =
+          std::hypot(filter_real->second, filter_imag->second);
+    } else if (rms != out.values.end()) {
+      out.values["terminal_current_injection_pu"] = rms->second;
+    } else if (magnitude != out.values.end()) {
+      out.values["terminal_current_injection_pu"] = magnitude->second;
+    }
+    return;
+  }
+
+  // A gate block opens the averaged converter port. Frozen controller/filter
+  // states remain available through inner_* telemetry, while these quantities
+  // report the physical terminal injection after the block; derivation and
+  // scope: docs/modules/dynamics/chapters/device_models_inverters.tex.
+  static constexpr std::array<const char*, 23> kZeroedTerminalValues{
+      "p_mw", "q_mvar", "p_dc_mw", "i_rms_pu", "i_mag_pu",
+      "i_phase_max_pu", "i_positive_sequence_pu", "i_negative_sequence_pu",
+      "i_zero_sequence_pu", "i_a_re_pu", "i_a_im_pu", "i_a_mag_pu",
+      "i_b_re_pu", "i_b_im_pu", "i_b_mag_pu", "i_c_re_pu", "i_c_im_pu",
+      "i_c_mag_pu", "filter_current_re_pu", "filter_current_im_pu",
+      "cnv_current_re_pu", "cnv_current_im_pu", "terminal_current_injection_pu"};
+  for (const char* key : kZeroedTerminalValues) {
+    if (out.values.contains(key)) out.values[key] = 0.0;
+  }
 }
 
 double control_time(double value) {
@@ -2250,6 +2305,24 @@ Eigen::VectorXd salient_initial_guess(const SalientParams& p,
 }
 
 }  // namespace
+
+double dc_link_active_power_scale(const DCLinkFaultControlSettings& settings,
+                                  double dc_link_voltage_pu) {
+  if (!settings.enabled) return 1.0;
+  if (!std::isfinite(dc_link_voltage_pu)) {
+    return std::numeric_limits<double>::quiet_NaN();
+  }
+  // Reduced average-value envelope: a DC fault first curtails active-power
+  // exchange, then the protection block opens the converter port. This retains
+  // the control-to-AC-system mechanism reported by Bandaru et al. (IEEE TIA,
+  // 2024, DOI 10.1109/TIA.2024.3396790) without claiming MMC arm fidelity;
+  // derivation and topology limits are in device_models_inverters.tex.
+  if (dc_link_voltage_pu <= settings.undervoltage_block_pu) return 0.0;
+  if (dc_link_voltage_pu >= settings.active_power_derate_start_pu) return 1.0;
+  return (dc_link_voltage_pu - settings.undervoltage_block_pu) /
+         (settings.active_power_derate_start_pu -
+          settings.undervoltage_block_pu);
+}
 
 DynamicLoad::DynamicLoad(ACLoadDynamicParams params) : params_(std::move(params)) {}
 
@@ -5723,7 +5796,17 @@ DynamicDeviceOutput PowerSystemStabilizer::output(const DynamicState& x,
 }
 
 GridFormingInverter::GridFormingInverter(GridFormingInverterParams params)
-    : params_(std::move(params)) {}
+    : params_(std::move(params)) {
+  switch (params_.control_failure_mode) {
+    case ConverterControlFailureMode::None:
+      break;
+    case ConverterControlFailureMode::ForcedBlock:
+      params_.in_service = false;
+      break;
+    default:
+      throw std::invalid_argument("unsupported grid-forming converter control failure mode");
+  }
+}
 
 void GridFormingInverter::assignStateIndices(int& offset) {
   range_ = {offset,
@@ -6131,6 +6214,11 @@ void GridFormingInverter::handleEvent(const DynamicEvent& event, DynamicState&, 
   } else if (event.type == DynamicEventType::Custom &&
              event.component_type == "VSC" &&
              protection_target_matches(event, "VSC", params_.component_index, params_.bus)) {
+    const auto block_it = event.params.find("converter_forced_block");
+    if (block_it != event.params.end() && block_it->second != 0.0) {
+      params_.control_failure_mode = ConverterControlFailureMode::ForcedBlock;
+      params_.in_service = false;
+    }
     const auto p_it = event.params.find("p_ref_mw");
     if (p_it != event.params.end()) params_.p_ref_mw = p_it->second;
     const auto q_it = event.params.find("q_ref_mvar");
@@ -6146,7 +6234,10 @@ bool GridFormingInverter::updateProtection(double t,
                                            NetworkState& y,
                                            std::vector<DynamicEvent>& events) {
   (void)x;  // grid-forming states freeze while out of service (stamp gates on in_service)
-  if (range_.empty()) return false;
+  if (range_.empty() ||
+      params_.control_failure_mode == ConverterControlFailureMode::ForcedBlock) {
+    return false;
+  }
   const IEEE1547Action action = evaluate_der_protection(
       params_.protection, protection_state_, y, params_.bus_pos, t, dt,
       params_.component_index, params_.bus, name(), "VSC",
@@ -6156,7 +6247,10 @@ bool GridFormingInverter::updateProtection(double t,
 
 DynamicProtectionEventPreview GridFormingInverter::previewProtection(double t, double dt,
                                                                      const NetworkState& y) const {
-  if (range_.empty()) return {};
+  if (range_.empty() ||
+      params_.control_failure_mode == ConverterControlFailureMode::ForcedBlock) {
+    return {};
+  }
   return preview_der_protection(params_.protection, protection_state_, y, params_.bus_pos, t, dt);
 }
 
@@ -6355,12 +6449,37 @@ DynamicDeviceOutput GridFormingInverter::output(const DynamicState& x,
   }
   add_inverter_block_flags(out, inner_vars_);
   add_inverter_inner_outputs(out, inner);
+  add_converter_failure_outputs(out, params_.control_failure_mode);
   add_voltage_metrics(out, y, params_.bus_pos, params_.dc_bus_pos);
   return out;
 }
 
 GridFollowingInverter::GridFollowingInverter(GridFollowingInverterParams params)
-    : params_(std::move(params)) {}
+    : params_(std::move(params)) {
+  switch (params_.control_failure_mode) {
+    case ConverterControlFailureMode::None:
+      break;
+    case ConverterControlFailureMode::ForcedBlock:
+      params_.in_service = false;
+      break;
+    default:
+      throw std::invalid_argument("unsupported grid-following converter control failure mode");
+  }
+  if (params_.dc_fault_control.enabled) {
+    const auto& control = params_.dc_fault_control;
+    if (!std::isfinite(control.active_power_derate_start_pu) ||
+        !std::isfinite(control.undervoltage_block_pu) ||
+        !std::isfinite(control.undervoltage_block_delay_s) ||
+        control.undervoltage_block_pu < 0.0 ||
+        control.active_power_derate_start_pu <=
+            control.undervoltage_block_pu ||
+        control.undervoltage_block_delay_s < 0.0) {
+      throw std::invalid_argument(
+          "DC-link fault control requires finite 0 <= block < derate-start "
+          "thresholds and a nonnegative block delay");
+    }
+  }
+}
 
 void GridFollowingInverter::assignStateIndices(int& offset) {
   range_ = {offset, gfl_state_count(params_)};
@@ -6517,6 +6636,9 @@ bool GridFollowingInverter::trimToNetworkEquilibrium(DynamicState& x, NetworkSta
                    freq_watt_delta_pu(params_.freq_watt,
                                       params_.f_ref_hz * (1.0 + freq_error_pu)),
                    p_ref, q_ref);
+  p_ref *= dc_link_active_power_scale(
+      params_.dc_fault_control,
+      gfl_dc_link_voltage(params_, range_, x, y));
   const double denom = std::max(vd * vd + vq * vq,
                                 params_.v_min_current_pu * params_.v_min_current_pu);
   const double id_ref = (vd * p_ref + vq * q_ref) / denom;
@@ -6726,7 +6848,11 @@ void GridFollowingInverter::computeDerivativesFullFidelity(
   const double p_oc = x.x[state_index(range_, 4)];
   const double q_oc = x.x[state_index(range_, 5)];
 
-  const double p_ref = params_.p_ref_mw / safe_base(params_.base_mva);
+  const double p_ref =
+      dc_link_active_power_scale(
+          params_.dc_fault_control,
+          gfl_dc_link_voltage(params_, range_, x, y)) *
+      params_.p_ref_mw / safe_base(params_.base_mva);
   const double q_ref = params_.q_ref_mvar / safe_base(params_.base_mva);
 
   // Outer PI: P-loop -> Iq_ref, Q-loop -> Id_ref (PSD wiring).
@@ -6868,6 +6994,15 @@ void GridFollowingInverter::computeDerivatives(double,
                                 : freq_watt_delta_pu(params_.freq_watt, f_meas_hz);
   gfl_compose_refs(params_, v_mag, freq_error_pu, p_nom, q_nom, vv_q_delta,
                    fw_p_delta, p_ref, q_ref);
+  // A DC-side voltage collapse must enter the AC current controller through an
+  // explicit control input; otherwise the DC-link energy equation is only
+  // AC->DC coupled. Kaler and Yazdani (IEEE Access, 2022,
+  // DOI 10.1109/ACCESS.2022.3171346) show that DC-side faults change real power
+  // and grid current. The piecewise envelope is the reduced phasor model
+  // documented in device_models_inverters.tex, not an MMC submodule model.
+  p_ref *= dc_link_active_power_scale(
+      params_.dc_fault_control,
+      gfl_dc_link_voltage(params_, range_, x, y));
   const double denom = std::max(vd * vd + vq * vq,
                                 params_.v_min_current_pu * params_.v_min_current_pu);
   const double id_ref = (vd * p_ref + vq * q_ref) / denom;
@@ -7132,6 +7267,11 @@ void GridFollowingInverter::handleEvent(const DynamicEvent& event,
   } else if (event.type == DynamicEventType::Custom &&
              event.component_type == "VSC" &&
              protection_target_matches(event, "VSC", params_.component_index, params_.bus)) {
+    const auto block_it = event.params.find("converter_forced_block");
+    if (block_it != event.params.end() && block_it->second != 0.0) {
+      params_.control_failure_mode = ConverterControlFailureMode::ForcedBlock;
+      params_.in_service = false;
+    }
     const auto p_it = event.params.find("p_ref_mw");
     if (p_it != event.params.end()) params_.p_ref_mw = p_it->second;
     const auto q_it = event.params.find("q_ref_mvar");
@@ -7146,8 +7286,49 @@ bool GridFollowingInverter::updateProtection(double t,
                                              DynamicState& x,
                                              NetworkState& y,
                                              std::vector<DynamicEvent>& events) {
-  (void)x;  // states are frozen while out of service; no re-seeding needed
-  if (range_.empty()) return false;
+  if (range_.empty() ||
+      params_.control_failure_mode == ConverterControlFailureMode::ForcedBlock) {
+    return false;
+  }
+  if (params_.dc_fault_control.enabled && !dc_undervoltage_blocked_) {
+    const double vdc = gfl_dc_link_voltage(params_, range_, x, y);
+    if (vdc <= params_.dc_fault_control.undervoltage_block_pu) {
+      const double interval = std::max(0.0, dt);
+      const double previous_timer = dc_undervoltage_timer_s_;
+      dc_undervoltage_timer_s_ += interval;
+      const double delay = params_.dc_fault_control.undervoltage_block_delay_s;
+      if (delay == 0.0 || dc_undervoltage_timer_s_ + 1e-12 >= delay) {
+        const double action_offset =
+            delay == 0.0 ? 0.0 : std::clamp(delay - previous_timer, 0.0, interval);
+        dc_undervoltage_block_time_s_ = t - interval + action_offset;
+        dc_undervoltage_blocked_ = true;
+        params_.in_service = false;
+
+        // This event is emitted by the measured DC-link trajectory. It is not
+        // an authored VSCTrip. The definite-time guard follows the staged
+        // control/protection response in Yu et al. (IEEE TPWRD, 2024,
+        // DOI 10.1109/TPWRD.2023.3294173); the threshold and delay remain
+        // converter-specific authored data.
+        DynamicEvent event;
+        event.time_s = dc_undervoltage_block_time_s_;
+        event.type = DynamicEventType::VSCTrip;
+        event.component_index = params_.component_index;
+        event.bus = params_.bus;
+        event.component_type = "VSC";
+        event.label = "DC-link undervoltage block: " + name();
+        event.params["dc_link_voltage_pu"] = vdc;
+        event.params["dc_undervoltage_block_pu"] =
+            params_.dc_fault_control.undervoltage_block_pu;
+        event.params["dc_undervoltage_timer_s"] =
+            dc_undervoltage_timer_s_;
+        event.applied = true;
+        events.push_back(std::move(event));
+        return true;
+      }
+    } else {
+      dc_undervoltage_timer_s_ = 0.0;
+    }
+  }
   const IEEE1547Action action = evaluate_der_protection(
       params_.protection, protection_state_, y, params_.bus_pos, t, dt,
       params_.component_index, params_.bus, name(), "VSC",
@@ -7159,7 +7340,10 @@ bool GridFollowingInverter::updateProtection(double t,
 
 DynamicProtectionEventPreview GridFollowingInverter::previewProtection(
     double t, double dt, const NetworkState& y) const {
-  if (range_.empty()) return {};
+  if (range_.empty() ||
+      params_.control_failure_mode == ConverterControlFailureMode::ForcedBlock) {
+    return {};
+  }
   return preview_der_protection(params_.protection, protection_state_, y, params_.bus_pos, t, dt);
 }
 
@@ -7211,6 +7395,25 @@ DynamicDeviceOutput GridFollowingInverter::output(const DynamicState& x,
   out.values["protection_f_meas_hz"] = protection_state_.f_meas_hz;
   out.values["protection_restore_scale"] = protection_state_.restore_scale;
   out.values["phase_domain_control"] = params_.phase_domain_control ? 1.0 : 0.0;
+  const double dc_link_voltage =
+      gfl_dc_link_voltage(params_, range_, x, y);
+  const double dc_power_scale = dc_undervoltage_blocked_
+                                    ? 0.0
+                                    : dc_link_active_power_scale(
+                                          params_.dc_fault_control,
+                                          dc_link_voltage);
+  out.values["dc_fault_control_enabled"] =
+      params_.dc_fault_control.enabled ? 1.0 : 0.0;
+  out.values["dc_active_power_scale"] = dc_power_scale;
+  out.values["dc_effective_active_power_ref_mw"] =
+      dc_power_scale * params_.p_ref_mw;
+  out.values["dc_active_power_derating"] =
+      params_.dc_fault_control.enabled && dc_power_scale < 1.0 ? 1.0 : 0.0;
+  out.values["dc_undervoltage_timer_s"] = dc_undervoltage_timer_s_;
+  out.values["dc_undervoltage_blocked"] =
+      dc_undervoltage_blocked_ ? 1.0 : 0.0;
+  out.values["dc_undervoltage_block_time_s"] =
+      dc_undervoltage_block_time_s_;
   InverterInnerVariableSnapshot inner;
   if (!range_.empty() && state_index(range_, 5) < x.x.size() &&
       params_.full_fidelity && !params_.phase_domain_control) {
@@ -7301,7 +7504,8 @@ DynamicDeviceOutput GridFollowingInverter::output(const DynamicState& x,
             : params_.pll_kp * vq + params_.pll_ki * xi_pll;
     const double denom = std::max(vd * vd + vq * vq,
                                   params_.v_min_current_pu * params_.v_min_current_pu);
-    const double p_nom = params_.p_ref_mw / safe_base(params_.base_mva);
+    const double p_nom =
+        dc_power_scale * params_.p_ref_mw / safe_base(params_.base_mva);
     const double q_nom = params_.q_ref_mvar / safe_base(params_.base_mva);
     const double id_ref = (vd * p_nom + vq * q_nom) / denom;
     const double iq_ref = (vq * p_nom - vd * q_nom) / denom;
@@ -7434,6 +7638,7 @@ DynamicDeviceOutput GridFollowingInverter::output(const DynamicState& x,
   }
   add_inverter_block_flags(out, inner_vars_);
   add_inverter_inner_outputs(out, inner);
+  add_converter_failure_outputs(out, params_.control_failure_mode);
   add_voltage_metrics(out, y, params_.bus_pos, params_.dc_bus_pos);
   return out;
 }
@@ -7502,6 +7707,7 @@ GridFormingInverterParams make_gfm_params(const VSCConverterDynamicParams& param
   gfm.protection = params.protection;
   gfm.volt_var = params.volt_var;
   gfm.freq_watt = params.freq_watt;
+  gfm.control_failure_mode = params.control_failure_mode;
   return gfm;
 }
 
@@ -9631,6 +9837,14 @@ RelayIntervalAdvance advance_relay_interval(double initial_margin, double final_
 
 ProtectionRelay::ProtectionRelay(ProtectionRelayParams params)
     : params_(std::move(params)), pickup_timer_s_(0.0) {
+  switch (params_.failure_mode) {
+    case ProtectionRelayFailureMode::None:
+    case ProtectionRelayFailureMode::FailToTrip:
+    case ProtectionRelayFailureMode::SpuriousTrip:
+      break;
+    default:
+      throw std::invalid_argument("unsupported ProtectionRelay failure mode");
+  }
   if (params_.measurement_domain == ProtectionRelayMeasurementDomain::EmtInstantaneous) {
     throw std::invalid_argument(
         "ProtectionRelay EMT measurement requires an instantaneous-waveform network; "
@@ -9642,7 +9856,9 @@ ProtectionRelay::ProtectionRelay(ProtectionRelayParams params)
       !std::isfinite(params_.frequency_min_voltage_pu) ||
       !std::isfinite(params_.pt_filter_t_s) || params_.pt_filter_t_s < 0.0 ||
       !std::isfinite(params_.ct_filter_t_s) || params_.ct_filter_t_s < 0.0 ||
-      !std::isfinite(params_.frequency_filter_t_s) || params_.frequency_filter_t_s < 0.0) {
+      !std::isfinite(params_.frequency_filter_t_s) || params_.frequency_filter_t_s < 0.0 ||
+      !std::isfinite(params_.pt_ratio_gain) || params_.pt_ratio_gain < 0.0 ||
+      !std::isfinite(params_.ct_ratio_gain) || params_.ct_ratio_gain < 0.0) {
     throw std::invalid_argument("ProtectionRelay local CT/PT measurement parameters are invalid");
   }
   measurement_state_.frequency_hz = params_.nominal_frequency_hz;
@@ -9656,6 +9872,7 @@ void ProtectionRelay::assignStateIndices(int& offset) {
 void ProtectionRelay::initializeFromPowerFlow(const PowerFlowResult&, DynamicState& x,
                                               NetworkState& y) {
   pickup_timer_s_ = 0.0;
+  trip_command_suppressed_ = false;
   measurement_state_ = {};
   measurement_state_.frequency_hz = params_.nominal_frequency_hz;
   const LocalMeasurement measurement = advanceMeasurement(y, 0.0, measurement_state_);
@@ -9688,6 +9905,7 @@ void ProtectionRelay::handleEvent(const DynamicEvent& event, DynamicState& x, Ne
     params_.tripped = event.value != 0.0;
     if (!params_.tripped) {
       pickup_timer_s_ = 0.0;
+      trip_command_suppressed_ = false;
       mirrorTimerToState(x);
     }
   }
@@ -9697,15 +9915,26 @@ ProtectionRelay::LocalMeasurement ProtectionRelay::advanceMeasurement(
     const NetworkState& y, double dt, LocalMeasurementState& state) const {
   dt = std::max(0.0, dt);
   const int from_pos = params_.from_bus_pos >= 0 ? params_.from_bus_pos : params_.bus_pos;
-  const Complex raw_v_from = positive_sequence_voltage(bus_voltage(y, from_pos));
+  // IEC 61869-1 ratio-error abstraction: V_PT=g_PT*V and I_CT=g_CT*I.
+  // The phasor-domain derivation and excluded saturation physics are recorded
+  // in docs/modules/dynamics/chapters/theory_machine_dae.tex.
+  const Complex raw_v_from =
+      params_.pt_ratio_gain * positive_sequence_voltage(bus_voltage(y, from_pos));
   const Complex raw_v_to = params_.to_bus_pos >= 0
-                               ? positive_sequence_voltage(bus_voltage(y, params_.to_bus_pos))
+                               ? params_.pt_ratio_gain *
+                                     positive_sequence_voltage(bus_voltage(y, params_.to_bus_pos))
                                : raw_v_from;
   Complex raw_i_from{0.0, 0.0};
   const Complex z(params_.line_r_pu, params_.line_x_pu);
   if (std::abs(z) > 1e-12 && params_.from_bus_pos >= 0 && params_.to_bus_pos >= 0) {
-    raw_i_from = (raw_v_from - raw_v_to) / z +
-                 Complex(0.0, 0.5 * params_.line_total_b_pu) * raw_v_from;
+    const Complex physical_v_from =
+        positive_sequence_voltage(bus_voltage(y, params_.from_bus_pos));
+    const Complex physical_v_to =
+        positive_sequence_voltage(bus_voltage(y, params_.to_bus_pos));
+    const Complex physical_i_from =
+        (physical_v_from - physical_v_to) / z +
+        Complex(0.0, 0.5 * params_.line_total_b_pu) * physical_v_from;
+    raw_i_from = params_.ct_ratio_gain * physical_i_from;
   }
 
   if (!state.initialized) {
@@ -9803,6 +10032,10 @@ void ProtectionRelay::mirrorTimerToState(DynamicState& x) const {
 DynamicProtectionEventPreview ProtectionRelay::previewProtection(double t, double dt,
                                                                  const NetworkState& y) const {
   if (!params_.in_service || params_.tripped) return {};
+  if (params_.failure_mode == ProtectionRelayFailureMode::FailToTrip) return {};
+  if (params_.failure_mode == ProtectionRelayFailureMode::SpuriousTrip) {
+    return {true, t - std::max(0.0, dt)};
+  }
   const double measured_margin = pickupMargin(y, dt);
   const double final_margin = std::isfinite(measured_margin) ? measured_margin : -1.0;
   const double initial_margin = have_pickup_margin_ ? last_pickup_margin_ : final_margin;
@@ -9812,9 +10045,39 @@ DynamicProtectionEventPreview ProtectionRelay::previewProtection(double t, doubl
   return {true, t - std::max(0.0, dt) + advance.action_offset_s};
 }
 
+void ProtectionRelay::emitTripEvent(double event_time_s, bool spurious,
+                                    std::vector<DynamicEvent>& events) {
+  params_.tripped = true;
+  DynamicEvent event;
+  event.time_s = event_time_s;
+  event.type = params_.action_type;
+  event.component_index = params_.target_component_index != 0 ? params_.target_component_index
+                                                              : params_.component_index;
+  event.target_id = event.component_index;
+  event.bus = params_.target_bus != 0 ? params_.target_bus : params_.bus;
+  event.value = params_.action_value;
+  event.component_type = "ProtectionRelay";
+  event.target_type = params_.target_type;
+  event.label = name() + (spurious ? " spurious operation" : " operated");
+  event.params["relay_component_index"] = params_.component_index;
+  event.params["relay_failure_mode"] =
+      static_cast<double>(static_cast<int>(params_.failure_mode));
+  event.params["spurious_trip"] = spurious ? 1.0 : 0.0;
+  if (event.type == DynamicEventType::ACLoadScale ||
+      event.type == DynamicEventType::DCLoadScale) {
+    event.params["scale"] = params_.action_value;
+  }
+  event.applied = true;
+  events.push_back(std::move(event));
+}
+
 bool ProtectionRelay::updateProtection(double t, double dt, DynamicState& x, NetworkState& y,
                                        std::vector<DynamicEvent>& events) {
   if (!params_.in_service || params_.tripped) return false;
+  if (params_.failure_mode == ProtectionRelayFailureMode::SpuriousTrip) {
+    emitTripEvent(t - std::max(0.0, dt), true, events);
+    return false;
+  }
   const LocalMeasurement measurement = advanceMeasurement(y, dt, measurement_state_);
   const double measured_margin = pickupMargin(measurement);
   const double final_margin = std::isfinite(measured_margin) ? measured_margin : -1.0;
@@ -9826,25 +10089,14 @@ bool ProtectionRelay::updateProtection(double t, double dt, DynamicState& x, Net
   have_pickup_margin_ = true;
   mirrorTimerToState(x);
   if (!advance.has_action) return false;
-
-  params_.tripped = true;
-  DynamicEvent event;
-  event.time_s = t - std::max(0.0, dt) + advance.action_offset_s;
-  event.type = params_.action_type;
-  event.component_index = params_.target_component_index != 0 ? params_.target_component_index
-                                                              : params_.component_index;
-  event.target_id = event.component_index;
-  event.bus = params_.target_bus != 0 ? params_.target_bus : params_.bus;
-  event.value = params_.action_value;
-  event.component_type = "ProtectionRelay";
-  event.target_type = params_.target_type;
-  event.label = name() + " operated";
-  event.params["relay_component_index"] = params_.component_index;
-  if (event.type == DynamicEventType::ACLoadScale || event.type == DynamicEventType::DCLoadScale) {
-    event.params["scale"] = params_.action_value;
+  // IEC 60255 trip-chain separation: the measuring element and timer can pick
+  // up while a failed output contact/channel suppresses the breaker command.
+  // See docs/modules/dynamics/chapters/theory_machine_dae.tex.
+  if (params_.failure_mode == ProtectionRelayFailureMode::FailToTrip) {
+    trip_command_suppressed_ = true;
+    return false;
   }
-  event.applied = true;
-  events.push_back(std::move(event));
+  emitTripEvent(t - std::max(0.0, dt) + advance.action_offset_s, false, events);
   return false;
 }
 
@@ -9861,6 +10113,13 @@ DynamicDeviceOutput ProtectionRelay::output(const DynamicState& x, const Network
                            : pickup_timer_s_;
   out.values["in_service"] = params_.in_service ? 1.0 : 0.0;
   out.values["tripped"] = params_.tripped ? 1.0 : 0.0;
+  out.values["failure_mode"] =
+      static_cast<double>(static_cast<int>(params_.failure_mode));
+  out.values["fail_to_trip"] =
+      params_.failure_mode == ProtectionRelayFailureMode::FailToTrip ? 1.0 : 0.0;
+  out.values["spurious_trip"] =
+      params_.failure_mode == ProtectionRelayFailureMode::SpuriousTrip ? 1.0 : 0.0;
+  out.values["trip_command_suppressed"] = trip_command_suppressed_ ? 1.0 : 0.0;
   out.values["timer_s"] = timer;
   out.values["trip_delay_s"] = params_.trip_delay_s;
   out.values["pickup_active"] = timer >= params_.trip_delay_s ? 1.0 : 0.0;
@@ -9873,6 +10132,8 @@ DynamicDeviceOutput ProtectionRelay::output(const DynamicState& x, const Network
   out.values["measured_frequency_hz"] = measurement.frequency_hz;
   out.values["frequency_measurement_valid"] = measurement.frequency_valid ? 1.0 : 0.0;
   out.values["measured_apparent_admittance_pu"] = measurement.apparent_admittance_pu;
+  out.values["pt_ratio_gain"] = params_.pt_ratio_gain;
+  out.values["ct_ratio_gain"] = params_.ct_ratio_gain;
   out.values["local_ct_pt_measurement"] = 1.0;
   out.values["distance_element"] =
       params_.measurement_kind == ProtectionRelayMeasurementKind::DistanceApparentAdmittance ? 1.0

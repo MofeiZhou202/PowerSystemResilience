@@ -17,6 +17,7 @@
 #include <vector>
 
 #include <catch2/catch_approx.hpp>
+#include <catch2/matchers/catch_matchers_string.hpp>
 #include <catch2/catch_test_macros.hpp>
 #include <nlohmann/json.hpp>
 
@@ -6632,6 +6633,116 @@ TEST_CASE("Updated GFL inverter can use dynamic DC-link voltage state",
   CHECK(it->values.at("dc_link_dynamic") == Catch::Approx(1.0));
 }
 
+TEST_CASE("GFL VSC builder preserves authored current-limit priority",
+          "[dynamics][gfl][current_limit]") {
+  const std::vector<std::pair<VSCCurrentLimitPriority, CurrentLimiterKind>> cases{
+      {VSCCurrentLimitPriority::Magnitude, CurrentLimiterKind::Magnitude},
+      {VSCCurrentLimitPriority::ActivePower, CurrentLimiterKind::ActivePriority},
+      {VSCCurrentLimitPriority::ReactivePower, CurrentLimiterKind::ReactivePriority}};
+
+  for (const auto& [authored, expected] : cases) {
+    auto system = make_hybrid_dc_case();
+    system.vsc_converters.front().current_limit_priority = authored;
+    system.vsc_converters.front().i_ac_max_pu = 0.2;
+    DynamicModelBuilder builder;
+    DynamicSystem dynamic = builder.build(system, fast_options());
+    const auto device = std::find_if(
+        dynamic.devices.begin(), dynamic.devices.end(),
+        [](const std::unique_ptr<DynamicDevice>& item) {
+          return item->type() == "VSCGridFollowing";
+        });
+    REQUIRE(device != dynamic.devices.end());
+    const auto output = (*device)->output(dynamic.x, dynamic.y);
+    REQUIRE(output.values.count("current_limiter_model") == 1);
+    CHECK(output.values.at("current_limiter_model") ==
+          Catch::Approx(static_cast<double>(static_cast<int>(expected))));
+  }
+}
+
+TEST_CASE("Converter control failure preserves the healthy limit and opens the port",
+          "[dynamics][converter][failure]") {
+  auto build_case = [](bool grid_forming, bool author_healthy_mode,
+                       bool forced_block) {
+    auto system = make_hybrid_dc_case();
+    if (grid_forming) {
+      system.vsc_converters.front().ac_grid_forming = true;
+      system.vsc_converters.front().grid_forming = false;
+      system.vsc_converters.front().control_mode = ConverterMode::AC_GRID_FORMING;
+    }
+    if (author_healthy_mode || forced_block) {
+      system.vsc_converters.front().dynamic_model.parameters["converter_forced_block"] =
+          forced_block ? 1.0 : 0.0;
+    }
+    return DynamicModelBuilder{}.build(system, fast_options());
+  };
+
+  DynamicSystem implicit_healthy = build_case(false, false, false);
+  DynamicSystem explicit_healthy = build_case(false, true, false);
+  REQUIRE(implicit_healthy.x.x.size() == explicit_healthy.x.x.size());
+  REQUIRE(implicit_healthy.y.Vac_abc.size() == explicit_healthy.y.Vac_abc.size());
+  CHECK((implicit_healthy.x.x - explicit_healthy.x.x).norm() == 0.0);
+  CHECK((implicit_healthy.y.Vac_abc - explicit_healthy.y.Vac_abc).norm() == 0.0);
+  const auto find_vsc = [](const DynamicSystem& dynamic) {
+    return std::find_if(dynamic.devices.begin(), dynamic.devices.end(),
+                        [](const std::unique_ptr<DynamicDevice>& device) {
+                          return device->type() == "VSCGridFollowing" ||
+                                 device->type() == "VSCGridForming";
+                        });
+  };
+  const auto implicit_device = find_vsc(implicit_healthy);
+  const auto explicit_device = find_vsc(explicit_healthy);
+  REQUIRE(implicit_device != implicit_healthy.devices.end());
+  REQUIRE(explicit_device != explicit_healthy.devices.end());
+  CHECK((*implicit_device)->output(implicit_healthy.x, implicit_healthy.y).values ==
+        (*explicit_device)->output(explicit_healthy.x, explicit_healthy.y).values);
+
+  DynamicStamp pre_event_stamp(static_cast<int>(implicit_healthy.y.Vac_abc.size()),
+                               static_cast<int>(implicit_healthy.y.Vdc.size()));
+  (*implicit_device)->stamp(0.0, implicit_healthy.x, implicit_healthy.y,
+                            pre_event_stamp);
+  CHECK(pre_event_stamp.Iac.norm() > 1e-12);
+  DynamicEvent block_event;
+  block_event.type = DynamicEventType::Custom;
+  block_event.component_index = (*implicit_device)->componentIndex();
+  block_event.component_type = "VSC";
+  block_event.params["converter_forced_block"] = 1.0;
+  (*implicit_device)->handleEvent(block_event, implicit_healthy.x,
+                                  implicit_healthy.y);
+  DynamicStamp post_event_stamp(static_cast<int>(implicit_healthy.y.Vac_abc.size()),
+                                static_cast<int>(implicit_healthy.y.Vdc.size()));
+  (*implicit_device)->stamp(0.0, implicit_healthy.x, implicit_healthy.y,
+                            post_event_stamp);
+  CHECK(post_event_stamp.Iac.norm() <= 1e-12);
+  CHECK(post_event_stamp.Idc.norm() <= 1e-12);
+  CHECK((*implicit_device)
+            ->output(implicit_healthy.x, implicit_healthy.y)
+            .values.at("forced_block") == 1.0);
+
+  for (const bool grid_forming : {false, true}) {
+    DynamicSystem blocked = build_case(grid_forming, false, true);
+    const auto device = find_vsc(blocked);
+    REQUIRE(device != blocked.devices.end());
+    const DynamicDeviceOutput output = (*device)->output(blocked.x, blocked.y);
+    CHECK(output.values.at("control_failure_mode") ==
+          static_cast<double>(static_cast<int>(ConverterControlFailureMode::ForcedBlock)));
+    CHECK(output.values.at("control_available") == 0.0);
+    CHECK(output.values.at("forced_block") == 1.0);
+    CHECK(output.values.at("in_service") == 0.0);
+    CHECK(output.values.at("terminal_current_injection_pu") == 0.0);
+
+    DynamicStamp stamp(static_cast<int>(blocked.y.Vac_abc.size()),
+                       static_cast<int>(blocked.y.Vdc.size()));
+    (*device)->stamp(0.0, blocked.x, blocked.y, stamp);
+    CHECK(stamp.Iac.norm() <= 1e-12);
+    CHECK(stamp.Idc.norm() <= 1e-12);
+    CHECK(stamp.Yac_triplets.empty());
+    CHECK(stamp.Gdc_triplets.empty());
+    Eigen::VectorXd dxdt = Eigen::VectorXd::Zero(blocked.x.size());
+    (*device)->computeDerivatives(0.0, blocked.x, blocked.y, dxdt);
+    CHECK(dxdt.norm() <= 1e-12);
+  }
+}
+
 TEST_CASE("Updated GFM inverter stamps Norton voltage source and droop telemetry",
           "[dynamics][gfm]") {
   auto sys = make_hybrid_dc_case();
@@ -9111,6 +9222,154 @@ TEST_CASE("IEEE 1547 DER protection: undervoltage trip and ramped reconnect",
   CHECK(inverter.output(x, y).values.at("protection_restore_scale") == Catch::Approx(1.0));
 }
 
+TEST_CASE("GFL DC-link fault control maps DC voltage into AC current and protection",
+          "[dynamics][vsc][dc_fault][cross_validation]") {
+  DCLinkFaultControlSettings settings;
+  settings.enabled = true;
+  settings.active_power_derate_start_pu = 0.95;
+  settings.undervoltage_block_pu = 0.75;
+  settings.undervoltage_block_delay_s = 0.02;
+
+  SECTION("piecewise active-power envelope is exact and monotone") {
+    CHECK(dc_link_active_power_scale(settings, 0.70) == Catch::Approx(0.0));
+    CHECK(dc_link_active_power_scale(settings, 0.75) == Catch::Approx(0.0));
+    CHECK(dc_link_active_power_scale(settings, 0.85) == Catch::Approx(0.5));
+    CHECK(dc_link_active_power_scale(settings, 0.95) == Catch::Approx(1.0));
+    CHECK(dc_link_active_power_scale(settings, 1.05) == Catch::Approx(1.0));
+    for (int k = 1; k <= 20; ++k) {
+      const double lower = 0.70 + 0.02 * static_cast<double>(k - 1);
+      const double upper = lower + 0.02;
+      CHECK(dc_link_active_power_scale(settings, upper) + 1e-12 >=
+            dc_link_active_power_scale(settings, lower));
+    }
+    settings.enabled = false;
+    CHECK(dc_link_active_power_scale(settings, 0.0) == Catch::Approx(1.0));
+  }
+
+  SECTION("fixed-voltage small case matches the analytical first-order current law") {
+    GridFollowingInverterParams params;
+    params.component_index = 81;
+    params.bus = 1;
+    params.bus_pos = 0;
+    params.dc_bus_pos = 0;
+    params.base_mva = 100.0;
+    params.p_ref_mw = 10.0;
+    params.q_ref_mvar = 0.0;
+    params.response_t_s = 0.02;
+    params.frequency_estimator = FrequencyEstimatorKind::FixedFrequency;
+    params.dc_link_mode = DCLinkMode::DynamicDCVoltage;
+    params.dc_fault_control = settings;
+    GridFollowingInverter inverter(params);
+
+    int offset = 0;
+    inverter.assignStateIndices(offset);
+    REQUIRE(offset == 7);
+    DynamicState x;
+    x.resize(static_cast<std::size_t>(offset));
+    x.x.setZero();
+    x.x[2] = 0.10;
+    x.x[4] = 0.10;
+    x.x[6] = 0.85;
+    NetworkState y;
+    y.resize(3, 1);
+    set_balanced_voltage(y, 0, std::polar(1.0, 0.0));
+    y.Vdc[0] = 0.85;
+
+    Eigen::VectorXd dxdt = Eigen::VectorXd::Zero(offset);
+    inverter.computeDerivatives(0.0, x, y, dxdt);
+    // alpha(0.85)=0.5, id*=alpha*P*/V=0.05 and
+    // d(id)/dt=(id*-id)/Ti=(0.05-0.10)/0.02=-2.5 pu/s.
+    CHECK(dxdt[2] == Catch::Approx(-2.5).margin(1e-10));
+    CHECK(dxdt[3] == Catch::Approx(0.0).margin(1e-12));
+    const auto output = inverter.output(x, y);
+    CHECK(output.values.at("dc_active_power_scale") ==
+          Catch::Approx(0.5).margin(1e-12));
+    CHECK(output.values.at("dc_effective_active_power_ref_mw") ==
+          Catch::Approx(5.0).margin(1e-12));
+  }
+
+  SECTION("definite-time undervoltage block agrees at 1 and 0.5 ms steps") {
+    auto block_time = [&](double dt) {
+      GridFollowingInverterParams params;
+      params.component_index = 82;
+      params.bus = 1;
+      params.bus_pos = 0;
+      params.dc_bus_pos = 0;
+      params.frequency_estimator = FrequencyEstimatorKind::FixedFrequency;
+      params.dc_link_mode = DCLinkMode::DynamicDCVoltage;
+      params.dc_fault_control = settings;
+      GridFollowingInverter inverter(params);
+      int offset = 0;
+      inverter.assignStateIndices(offset);
+      DynamicState x;
+      x.resize(static_cast<std::size_t>(offset));
+      x.x.setZero();
+      x.x[6] = 0.70;
+      NetworkState y;
+      y.resize(3, 1);
+      set_balanced_voltage(y, 0, std::polar(1.0, 0.0));
+      y.Vdc[0] = 0.70;
+      std::vector<DynamicEvent> events;
+      for (double t = dt; t <= 0.10 + 0.5 * dt; t += dt) {
+        if (inverter.updateProtection(t, dt, x, y, events)) {
+          REQUIRE(events.size() == 1);
+          CHECK(events.front().label.find("DC-link undervoltage block") !=
+                std::string::npos);
+          CHECK(inverter.output(x, y)
+                    .values.at("dc_undervoltage_blocked") > 0.5);
+          return events.front().time_s;
+        }
+      }
+      FAIL("DC-link undervoltage protection did not operate");
+      return std::numeric_limits<double>::quiet_NaN();
+    };
+
+    const double coarse = block_time(0.001);
+    const double fine = block_time(0.0005);
+    CHECK(coarse == Catch::Approx(0.02).margin(1e-12));
+    CHECK(fine == Catch::Approx(0.02).margin(1e-12));
+    CHECK(std::abs(coarse - fine) <= 0.001);
+  }
+
+  SECTION("rich VSC profile maps the envelope and rejects invalid settings") {
+    auto build_with = [](const std::map<std::string, double>& profile) {
+      auto system = make_hybrid_dc_case();
+      system.vsc_converters.front().dynamic_model.parameters = profile;
+      return DynamicModelBuilder{}.build(system, fast_options());
+    };
+    DynamicSystem dynamic = build_with({
+        {"dc_fault_control_enabled", 1.0},
+        {"dc_active_power_derate_start_pu", 0.90},
+        {"dc_undervoltage_block_pu", 0.70},
+        {"dc_undervoltage_block_delay_s", 0.03},
+    });
+    const auto device = std::find_if(
+        dynamic.devices.begin(), dynamic.devices.end(),
+        [](const std::unique_ptr<DynamicDevice>& item) {
+          return item->type() == "VSCGridFollowing";
+        });
+    REQUIRE(device != dynamic.devices.end());
+    dynamic.y.Vdc.setConstant(0.80);
+    const auto output = (*device)->output(dynamic.x, dynamic.y);
+    CHECK(output.values.at("dc_fault_control_enabled") == 1.0);
+    CHECK(output.values.at("dc_active_power_scale") ==
+          Catch::Approx(0.5).margin(1e-12));
+
+    CHECK_THROWS_WITH(build_with({{"dc_fault_control_enabled", 0.5}}),
+                      Catch::Matchers::ContainsSubstring(
+                          "dc_fault_control_enabled must be exactly 0 or 1"));
+    CHECK_THROWS_WITH(
+        build_with({{"dc_fault_control_enabled", 1.0},
+                    {"dc_active_power_derate_start_pu", 0.75},
+                    {"dc_undervoltage_block_pu", 0.75}}),
+        Catch::Matchers::ContainsSubstring("0 <= block < derate-start"));
+    CHECK_THROWS_WITH(
+        build_with({{"dc_fault_control_enabled", 1.0},
+                    {"dc_undervoltage_block_delay_s", -0.01}}),
+        Catch::Matchers::ContainsSubstring("nonnegative block delay"));
+  }
+}
+
 TEST_CASE("External definite-time relay matches COSMIC guard and timer equations",
           "[dynamics][protection][relay][cosmic][event_localization]") {
   NetworkState y;
@@ -9227,6 +9486,74 @@ TEST_CASE("External definite-time relay matches COSMIC guard and timer equations
   }
 }
 
+TEST_CASE("Protection relay failure modes isolate trip-channel consequences",
+          "[dynamics][protection][relay][failure]") {
+  NetworkState y;
+  y.resize(3, 0);
+  set_balanced_voltage(y, 0, std::polar(0.80, 0.0));
+
+  auto make_relay = [&](ProtectionRelayFailureMode failure_mode) {
+    ProtectionRelayParams params;
+    params.component_index = 705;
+    params.bus = 2;
+    params.bus_pos = 0;
+    params.undervoltage_pickup_pu = 0.90;
+    params.overvoltage_pickup_pu = 2.0;
+    params.trip_delay_s = 0.10;
+    params.action_type = DynamicEventType::ACLoadScale;
+    params.target_bus = 2;
+    params.action_value = 0.75;
+    params.target_type = "ACLoad";
+    params.failure_mode = failure_mode;
+    return ProtectionRelay(params);
+  };
+
+  SECTION("fail-to-trip preserves pickup and timer but suppresses the command") {
+    ProtectionRelay relay = make_relay(ProtectionRelayFailureMode::FailToTrip);
+    int offset = 0;
+    relay.assignStateIndices(offset);
+    DynamicState x;
+    x.resize(static_cast<std::size_t>(offset));
+    relay.initializeFromPowerFlow({}, x, y);
+    std::vector<DynamicEvent> events;
+
+    CHECK_FALSE(relay.previewProtection(0.10, 0.10, y).has_event);
+    CHECK_FALSE(relay.updateProtection(0.10, 0.10, x, y, events));
+    CHECK(events.empty());
+    const DynamicDeviceOutput output = relay.output(x, y);
+    CHECK(output.values.at("timer_s") == Catch::Approx(0.10).margin(1e-12));
+    CHECK(output.values.at("pickup_active") == 1.0);
+    CHECK(output.values.at("tripped") == 0.0);
+    CHECK(output.values.at("trip_command_suppressed") == 1.0);
+  }
+
+  SECTION("spurious trip bypasses pickup and emits exactly one auditable action") {
+    set_balanced_voltage(y, 0, std::polar(1.0, 0.0));
+    ProtectionRelay relay = make_relay(ProtectionRelayFailureMode::SpuriousTrip);
+    int offset = 0;
+    relay.assignStateIndices(offset);
+    DynamicState x;
+    x.resize(static_cast<std::size_t>(offset));
+    relay.initializeFromPowerFlow({}, x, y);
+    std::vector<DynamicEvent> events;
+
+    const DynamicProtectionEventPreview preview = relay.previewProtection(0.05, 0.05, y);
+    REQUIRE(preview.has_event);
+    CHECK(preview.time_s == Catch::Approx(0.0).margin(1e-12));
+    CHECK_FALSE(relay.updateProtection(0.05, 0.05, x, y, events));
+    CHECK_FALSE(relay.updateProtection(0.10, 0.05, x, y, events));
+    REQUIRE(events.size() == 1);
+    CHECK(events.front().time_s == Catch::Approx(0.0).margin(1e-12));
+    CHECK(events.front().params.at("spurious_trip") == 1.0);
+    CHECK(events.front().params.at("relay_failure_mode") ==
+          static_cast<double>(static_cast<int>(ProtectionRelayFailureMode::SpuriousTrip)));
+    const DynamicDeviceOutput output = relay.output(x, y);
+    CHECK(output.values.at("tripped") == 1.0);
+    CHECK(output.values.at("spurious_trip") == 1.0);
+    CHECK(output.values.at("pickup_margin") < 0.0);
+  }
+}
+
 TEST_CASE("Mass-matrix DAE commits external relay load shedding consistently",
           "[dynamics][protection][relay][uvls][event_localization]") {
   auto run = [](double dt_s) {
@@ -9290,6 +9617,77 @@ TEST_CASE("Mass-matrix DAE commits external relay load shedding consistently",
   }
   const auto [minimum, maximum] = std::minmax_element(action_times.begin(), action_times.end());
   CHECK(*maximum - *minimum <= 2e-6);
+}
+
+TEST_CASE("PT ratio failure shifts relay pickup with step-convergent event time",
+          "[dynamics][protection][relay][failure][ct_pt][event_localization]") {
+  auto run = [](double dt_s, double pt_ratio_gain) {
+    auto options = fast_options();
+    options.solver_type = DynamicSolverType::MassMatrixDae;
+    options.dae_step_method = DynamicDaeStepMethod::BackwardEuler;
+    options.enable_der_protection = true;
+    options.localize_der_protection_events = true;
+    options.protection_event_time_tol_s = 1e-6;
+    options.post_event_algebraic_residual_tol = 1e-8;
+    options.algebraic_network_tol = 1e-10;
+    options.algebraic_network_max_iters = 25;
+    options.t_end_s = 0.05;
+    options.dt_s = dt_s;
+    options.record_every_step = false;
+
+    DynamicSystem dynamic = DynamicModelBuilder{}.build(make_transient_2bus(), options);
+    ProtectionRelayParams params;
+    params.component_index = 706;
+    params.bus = 2;
+    params.bus_pos = dynamic.network.acBusPosition(2);
+    params.label = "PT ratio-failure UVLS";
+    params.undervoltage_pickup_pu = 0.90;
+    params.overvoltage_pickup_pu = 2.0;
+    params.pt_ratio_gain = pt_ratio_gain;
+    params.trip_delay_s = 0.025;
+    params.action_type = DynamicEventType::ACLoadScale;
+    params.target_bus = 2;
+    params.action_value = 0.75;
+    params.target_type = "ACLoad";
+    dynamic.devices.push_back(std::make_unique<ProtectionRelay>(params));
+    dynamic.assignStateIndices();
+    dynamic.initializeStatesFromPowerFlow();
+    return DynamicSolver{}.solve(dynamic);
+  };
+
+  const DynamicResults healthy = run(0.01, 1.0);
+  INFO(healthy.message);
+  REQUIRE(healthy.success);
+  CHECK(std::none_of(healthy.applied_event_records.begin(),
+                     healthy.applied_event_records.end(), [](const auto& record) {
+                       const auto relay = record.params.find("relay_component_index");
+                       return relay != record.params.end() && relay->second == 706.0;
+                     }));
+
+  std::vector<double> biased_action_times;
+  for (const double dt_s : {0.01, 0.001}) {
+    const DynamicResults biased = run(dt_s, 0.80);
+    INFO("dt=" << dt_s << ", message=" << biased.message);
+    REQUIRE(biased.success);
+    const auto event =
+        std::find_if(biased.applied_event_records.begin(),
+                     biased.applied_event_records.end(), [](const auto& record) {
+                       const auto relay = record.params.find("relay_component_index");
+                       return relay != record.params.end() && relay->second == 706.0;
+                     });
+    REQUIRE(event != biased.applied_event_records.end());
+    CHECK(event->time_s == Catch::Approx(0.025).margin(1e-6));
+    CHECK(biased.protection_event_localization_used);
+    CHECK(biased.max_protection_event_bracket_s <= 1e-6);
+    CHECK(biased.max_post_event_algebraic_residual <= 1e-8);
+    biased_action_times.push_back(event->time_s);
+    REQUIRE(biased.final_snapshot() != nullptr);
+    const auto& relay_output =
+        require_device_output(*biased.final_snapshot(), "ProtectionRelay", 706);
+    CHECK(relay_output.values.at("pt_ratio_gain") == 0.80);
+    CHECK(relay_output.values.at("measured_voltage_pu") < 0.90);
+  }
+  CHECK(std::abs(biased_action_times[0] - biased_action_times[1]) <= 2e-6);
 }
 
 TEST_CASE("Protection event type prevents cross-asset same-index trips",

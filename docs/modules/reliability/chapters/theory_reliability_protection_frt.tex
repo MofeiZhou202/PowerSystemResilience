@@ -27,6 +27,12 @@ GFL/GFM 动态、电流限幅与优先级、volt-var/freq-watt & 已实现（选
 \end{center}
 \end{boundarynote}
 
+\begin{boundarynote}
+\textbf{控制器—物理元件与部分可观测边界}：换流器控制器只与其所属 VSC/IBR 的端量传感器和电流/模式执行口关联。
+保护功能不按故障元件强制一对一，而由保护区、CT/PT/状态接点量测集和受控断路器/接触器集共同定义；主后备可以区域重叠并动作于不同开断设备。
+系统级恢复只能消费经可用信息通道送达的遥测、位置接点、保护事件和电源资格证书，不能直接读取 DAE 的真实完整状态。不同真实状态可产生相同报告；必需观测缺失时，遥控动作或电源资格不得准入，不得以内部真值补全。平台的有限 POMDP 是独立能力；除非某结果显式调用并声明该模型，不得将其冒充为通用可靠性恢复入口的当前行为。
+\end{boundarynote}
+
 \subsection{混合保护--穿越状态}\label{sec:rel-pf-state}
 \begin{definition}[事件时状态]
 事件时刻的混合状态为
@@ -187,6 +193,19 @@ $L1$——对代表拓扑的给定故障/保护/FRT 轨迹生成互斥类，按�
 Mass-Matrix DAE 生成网络/FRT/限幅轨迹；$L3$ 由连续信息物理事件队列执行年度抽样。类生成器
 $\mathcal M_{PFRT}:(k,\omega)\mapsto(C_P,C_{FRT},C_{rec},T^{clear},\Phi_{k,c},\dots,\mathcal V^{PFRT})$
 必须随附有效性向量 $\mathcal V^{PFRT}$（保真度、收敛、参数溯源、启动/FRT/限幅/同步边界附近的代理误差）。
+严格地，最小混杂动态状态是 $(q,x)$，网络代数量 $y$ 仅在 $g_q(x,y)=0$ 的 index-1 正则分支上作为唯一
+lifting；在线轨迹是在 hybrid time domain 上由模式内 Mass-Matrix DAE flow、可测 guard、首次到达时刻、
+reset 和事件后代数重初始化构成的混杂执行。代数 fiber 为空/不唯一、$\partial g/\partial y$ 奇异或重初始化
+残差不合格时必须进入 unresolved execution。阶段元组只是其可靠性奖励函数。完整执行 $\rho$ 是潜在生成对象，
+类生成器只能消费有限记录 $\mathfrak o=\mathsf O_k(\rho)$；该记录包含已声明的量测/状态报告、事件词、监督命令和
+计量或模型认证的服务边界，缺失字段保留 unknown，不得从隐藏 DAE 坐标补齐。有限类应定义为这些有限记录函数
+在执行空间中的原像，并以 unresolved 原子闭合；$\mathsf O_k$ 非单射时，不同真实执行应留在同一类内。单个状态没有集合补集；
+同层 class 的补集是其余同层类的不交并，子类在父类内的相对补集是 sibling classes 的不交并。该商空间只
+保证同层互斥完备和跨层唯一父类，不宣称强 Markov lumpability 或连续轨迹双模拟；任何线性奖励的无偏压缩
+都必须保存类条件矩，不能以一条名义代表轨迹替代。
+这里的 $(q,x)$ 仅在固定完整场景后是最小动态状态，跨场景不自动构成 Markov state；若需要 Markov kernel，
+必须加入足够的外生过程状态。当前求解器审计非线性收敛、耦合 Jacobian 分解和事件后代数残差，但不输出
+$\inf_t\sigma_{\min}(\partial g/\partial y)>0$ 的全轨迹证书，因此 index-1 正则性是已选分支上的局部分析假设。
 在线年度耦合器 \srcpath{compare\_online\_protection\_cyber\_reliability} 对同一故障分别运行主、后备
 Mass-Matrix DAE 发现过程，保留 CT/PT 后的实测继电轨迹与 DER 逐点轨迹，再构造
 $\mathcal M_{PFRT}$ 的输入并调用三级事件树。设 DAE 输出主保护命令时刻 $t_p^{cmd}$，断路器链总延时为
@@ -204,6 +223,161 @@ $d_p^{br}$，则事件树使用的主清除时刻严格取
 等。只有 \fld{trace\_classes\_validated=true} 且类概率归一时聚合器才接受场景，并始终声明
 \fld{online\_dae\_coupled=false}；在线年度耦合接口成功时单独置真，通用给定轨迹聚合器不冒充在线结果。
 \end{boundarynote}
+
+\subsection{case33bw AC/DC 恢复入口状态能力审计}
+\label{sec:rel-pf-case33-propagation}
+恢复模型中的二值换流器口径只读取
+$a_c^{bin}=\mathbf 1[c\text{ authored in service}]$；DAE 入口口径则在故障
+清除后读取端口在役状态与保护状态，
+$a_c^{dae}=\mathbf 1[s_c^{port}=1\land s_c^{trip}=0]$。二者的差异数为
+\begin{equation}
+ N_{\Delta a}=\sum_c\left|a_c^{bin}-a_c^{dae}\right|.
+\end{equation}
+该比较遵循经典两状态可靠性元件模型与动态保护后果的分层定义，而不把额定容量
+直接当成故障后可传输容量。可复现实现在
+\srcpath{tools/case33bw\_acdc\_propagation\_study.cpp}，固定使用修正
+\texttt{case33bw\_acdc} 的无故障、AC 母线 18 故障、传统 DC 母线 2 故障
+以及启用直流故障控制的 DC 母线 2 故障轨迹。对故障量 $z_f$ 与相同初值的
+无故障量 $z_0$，传播判据为
+\begin{equation}
+ \Delta z=\max_{t\in[t_f,T]}|z_f(t)-z_0(t)|,
+ \qquad \Delta V>10^{-4}\ {\rm pu}\quad\text{or}\quad
+ \Delta P_c>10^{-3}\ {\rm MW}.
+ \label{eq:case33-propagation-gate}
+\end{equation}
+式~\eqref{eq:case33-propagation-gate} 是本研究预先声明的数值分离门，不是保护
+定值；电压与功率门在 10 MVA 基准上均为 $10^{-4}$ pu，并远高于 $10^{-9}$
+代数平衡容差。2 ms 结果的初始联合潮流残差为 $5.362\times10^{-11}$，
+事件后最大代数残差为 $4.62\times10^{-14}$；无故障 AC/DC 电压漂移在输出
+精度内为零。
+
+AC 故障时，静态二值模型仍给出 VSC2 可用，而 DAE 在 0.365577673 s 记录
+IEEE~1547 欠压跳闸并在恢复入口给出不可用，故 $N_{\Delta a}=1$。这证明
+“二值在役”与“动态可恢复入口”可以不同。传统 GFL 路径下，DC 故障只产生
+$2.1082\times10^{-10}$ pu 的 AC 电压偏差和 $1.2604\times10^{-10}$ MW
+的换流器交流功率偏差，证明原路径实际上是单向耦合。启用
+分段直流欠压降额/闭锁模型后，相同 DC 故障的
+两项偏差分别增至 $8.807411\times10^{-2}$ pu 和 $1.05$ MW；1/2/5 ms
+闭锁时刻为 $0.238/0.238/0.240$ s，传播分类一致，时刻离散误差范围为
+2 ms。独立 Julia oracle 不调用 C++ 控制律，重新由 CSV 计算分段包络、20 ms
+定时器、传统路径恒等性和传播门，全部通过。因此准入结论是：平衡相量
+可靠性恢复入口具备 AC$\leftrightarrow$DC 传播，但不具备 EMT 直流故障电流
+双向传播。
+
+\begin{center}\footnotesize
+\begin{tabular}{@{}p{3.0cm}p{4.2cm}p{3.3cm}p{3.2cm}@{}}
+\toprule
+\textbf{近五年 IEEE 证据} & \textbf{DC 故障至 AC 侧机制/验证} &
+\textbf{与本文一致处} & \textbf{本文未覆盖处}\\
+\midrule
+Kaler--Yazdani 2022~\cite{relpf:kaler2022} & dq 动态模型、仿真及 1.25 kW
+实验；故障闭锁拓扑限制电网侧电流 & 直流故障改变交流有功/电流，闭锁型 VSC
+可用平均值控制描述 & 实验硬件拓扑与开关细节\\
+Bandaru 等 2024~\cite{relpf:bandaru2024} & PSCAD/EMTDC；DC 故障时有功降至
+零且可保留无功电压支撑 & 本文保留有功中断及其交流电压后果 & MMC 桥臂、
+子模块与专用 FRT 策略\\
+Yu 等 2024~\cite{relpf:yu2024}；Lv 等 2025~\cite{relpf:lv2025} & 控制/保护
+分阶段动作；饱和改变故障响应 & 采用可审计的降额后定时闭锁顺序 & 桥臂电压
+重构、饱和及阀级模型\\
+Pandey 等 2025~\cite{relpf:pandey2025} & RTDS/CHIL；传统 BIC 二极管可形成
+不控整流馈流，DC 故障显著改变 AC 端电流 & 证明 DC$\rightarrow$AC 物理因果
+必须显式存在 & 二极管续流正是本文不支持的 EMT 路径\\
+\bottomrule
+\end{tabular}
+\end{center}
+表中论文验证的是机制而非本算例数值 oracle；不同拓扑、额定值和故障阻抗下的
+波形幅值不可直接作为 case33 误差真值。本文阈值 $0.95/0.75$ pu 与 20 ms
+延时均为研究参数，不是由文献反演或标准指定。模型仍不覆盖反并联二极管馈流、
+MMC 子模块/桥臂饱和、开关纹波、DC 断路器电弧、直流过流保护及厂家解锁逻辑。
+
+\subsection{N-k DAE 恢复入口类与既有切负荷 MILP}
+\label{sec:rel-pf-nk-entry-class}
+研究驱动 \srcpath{tools/nk\_acdc\_reliability\_study.cpp} 不把恢复优化结果
+混入 trajectory class。对固定同时 N-k 进入事件 $e$，Mass-Matrix DAE 轨迹
+$\rho_{e,\omega}$ 向恢复模型投影为附加不可用 VSC 集
+\begin{equation}
+ h_e(\rho_{e,\omega})=\mathcal U^{dae}_{vsc}(e,\omega),\qquad
+ \rho_{e,\omega}\sim_e\rho_{e,\omega'}
+ \Longleftrightarrow h_e(\rho_{e,\omega})=h_e(\rho_{e,\omega'}).
+ \label{eq:rel-nk-entry-equivalence}
+\end{equation}
+运行状态 $\omega$ 的 AC/DC 负荷尺度仍进入每次恢复 MILP。原模型中的
+$s_i^P,s_i^Q\ge0$ 分别进入有功/无功节点平衡，并由 $\lambda_{shed}$ 惩罚；
+因此 class 只复用式~\eqref{eq:rel-nk-entry-equivalence} 的 DAE 入口，不删除切负荷
+变量，不删除逐状态 MILP，也不使用类平均切负荷量替代状态后果。
+
+该轨迹不是抽象状态序列。连续状态由每台换流器配置的 GFL（PLL、功率滤波、
+电流响应/限幅及可选直流电容）或 GFM（内部相角/频率、电压/无功控制、功率滤波、
+电流限幅及可选直流电容）状态组成；离散状态为开关位置、FRT、闭锁与保护状态。
+交流侧由设备注入与 $Y_{ac}V_{ac}$ 的复电流平衡构成，直流侧由设备注入与
+$G_{dc}V_{dc}$ 的电流平衡构成，VSC 交流功率按效率和直流电容能量平衡写入直流侧。
+只有显式配置直流电压反馈、欠压降额或闭锁时，直流扰动才反向改变 GFL 交流功率/
+电流指令；不能仅凭直流电容方程宣称 DC$\rightarrow$AC 传播。研究算例使用
+MassMatrixDae 后向欧拉，并在每步内对控制状态、交流电压实虚部与直流电压做联立
+阻尼 Newton 求解；状态事件经回退/二分定位、离散复位和事件后代数重初始化。
+系统级恢复 MILP 不进入该 DAE，仅在 $T_{DAE}$ 后执行一次。
+
+若后果相关 VSC 按 $(v_1,\ldots,v_{n_v})$ 排列，并令
+$b^{(\ell)}=(b_{v_1},\ldots,b_{v_\ell})$，则可从包含全部已解析运行状态的单一集合开始，
+逐个加入 VSC 可用状态。第 $\ell$ 层只能保持或细分第 $\ell-1$ 层，最终层等价于
+式~\eqref{eq:rel-nk-entry-equivalence} 的完整不可用 VSC 集划分。层数因而等于
+$n_v$，而不是固定三层；VSC 排序只影响中间层，不影响最终类。对固定进入事件，非空类互斥且
+完备，类数不超过 $2^{n_v-|\mathcal V\cap\Delta\Phi_e|}$。按各类重新排列
+$f_ep_\omega E_{e,\omega}$ 的求和严格保持事件频率和 EENS；这一恒等式不构成邻近运行状态
+类别预测正确性的证据，预测仍必须由留一验证和被留出状态上的恢复重求解审计。
+
+预测验证对每个事件留出一个运行状态，在归一化
+$(\alpha_{AC},\alpha_{DC})$ 平面内从其余状态选择最近邻，只继承其入口类，随后
+在被留出状态上重新求解恢复：
+\begin{equation}
+ \widehat S(e,\omega)=R\!\left(e,
+ h_e(\rho_{e,j^*(e,\omega)}),\omega\right).
+ \label{eq:rel-nk-loo-restoration}
+\end{equation}
+由类条件均值重构总体 EENS 是全概率公式恒等式，不作为式~\eqref{eq:rel-nk-loo-restoration}
+的预测证据。成本审计保留恢复项：
+\begin{equation}
+ T_{direct}=N(\bar t_{DAE}+\bar t_{MILP}),\qquad
+ T_{class}=T_{library}+N(\bar t_{lookup}+\bar t_{MILP}).
+ \label{eq:rel-nk-cost}
+\end{equation}
+case33 的 92 个 N-1/N-2/N-3 联合进入事件与 6 个状态形成 552 个条件，全部求解；
+92 个入口类给出 $1/6$ 压缩比，留一入口类准确率 100\%，恢复 EENS 误差为 0。
+静态/DAE 入口 EENS 为 0.0905562/0.260831 MWh/yr；100000 样本的分项时间投影为
+5.76--5.99 倍端到端加速，净节省成立但预注册 20 倍门槛失败。旧约 150 倍口径漏计了
+每个状态的恢复 MILP，不能使用。
+
+高阶故障组合和入口类划分不能混为同一层压缩。若 $d_e$ 为同时进入停运向量，
+$\vartheta_e$ 为修复阶段参数，则恢复接口的完整离散特征为
+\begin{equation}
+ z_{e,\omega}=(d_e,h_e(\rho_{e,\omega}),\vartheta_e).
+ \label{eq:rel-nk-complete-interface}
+\end{equation}
+当前代码以 `(event_index, class_label)` 分组，正好保持
+式~\eqref{eq:rel-nk-complete-interface}：相同不可用 VSC 集在不同初始事件下不会合并。
+对固定事件，$h_e$ 的非空逆像构成唯一最粗无损划分；任何保持恢复入口的其他划分都只能进一步细分它。
+若全部枚举，事件数仍按 $\sum_m\binom{n_u}{m}$ 增长，trajectory class 只减少后续样本中重复 DAE 的
+入口状态数，不消除故障组合空间。由于限流、孤岛和延时保护可导致故障阶数与跳闸集合非单调，不能未经
+验证把父事件类传给子事件。当前驱动对 authored N-1/N-2/N-3 目录完全枚举；更高阶只能由具有频率的
+联合事件模型/采样器给出，或在未展开 EENS 上界
+$B_R=\sum_{(e,\omega)\in R}f_ep_\omega\bar E_{e,\omega}$ 小于给定容差后带证书停止。
+该停止上界是理论扩展，当前算例没有把它宣称为已验证数值能力。
+
+分域树模式曾因统一 AC+DC+VSC 连通图误剪 AC tie 而产生 150 个假不可行条件；
+修正后统一图预剪仅用于统一树，分域模式由各域森林等式排环。该问题不是缺少
+负荷切除能力。回归测试固定 VSC--DC--VSC 旁路、两条同时 AC 故障和两条必需
+AC tie。当前频率为逐阶显式联合进入测度；顺序重叠、共因校准、EMT、原生三相
+DAE 与恢复后非线性 AC/DC 认证均明确不覆盖。
+
+case123 的 175 个联合进入事件与 6 个状态形成 1050 个条件；当前仅 892 个条件
+进入并完成恢复 MILP，158 个在 DAE 或事件时代数网络求解阶段失败，未解析频率为
+0.0319160/yr。已解析子测度上的静态/DAE 入口 EENS 为
+0.0578627/0.235781 MWh/yr；已覆盖邻域入口类准确率为 100\%，但仍有
+0.000761066/yr 的留一状态无已解析邻居。故准确性不准入。两次正式复跑的 8.81--8.91 倍成本投影也只作
+诊断：失败长尾计入类库，而直接侧均值只来自已解析条件。未解析质量非零时
+\fld{timing\_projection\_admissible=false} 且
+\fld{net\_computational\_saving\_demonstrated=false}。这些失败属于 DAE 数值/模型
+闭环，而非恢复 MILP 缺少负荷切除。
 
 \subsection{与实现的对应}\label{sec:rel-pf-impl}
 \begin{center}\footnotesize
@@ -231,11 +405,32 @@ DER IEEE~1547 越限/跳闸/重连状态机 & \textbf{已实现}（动态，选�
 \end{center}
 
 \subsection{参考文献}
-\begin{thebibliography}{9}
+\begin{thebibliography}{99}
 \bibitem{relpf:ieee1547} IEEE Std 1547-2018, \emph{IEEE Standard for Interconnection and Interoperability
  of Distributed Energy Resources with Associated Electric Power Systems Interfaces}, 2018.
 \bibitem{relpf:iec60255} IEC 60255-151, \emph{Measuring relays and protection equipment -- Part 151:
  Functional requirements for over/under current protection}, 2009.
 \bibitem{relpf:c37} IEEE Std C37.113, \emph{IEEE Guide for Protective Relay Applications to Transmission Lines}.
+\bibitem{relpf:kundur} P. Kundur, \emph{Power System Stability and Control}. New York, NY, USA:
+ McGraw--Hill, 1994.
+\bibitem{relpf:yazdani} A. Yazdani and R. Iravani, \emph{Voltage-Sourced Converters in Power Systems}.
+ Hoboken, NJ, USA: Wiley--IEEE Press, 2010.
+\bibitem{relpf:kaler2022} S. Kaler and A. Yazdani, ``A DC-side fault-tolerant
+ bidirectional AC--DC converter for applications in distribution systems,''
+ \emph{IEEE Access}, vol. 10, pp. 52625--52637, 2022,
+ doi: 10.1109/ACCESS.2022.3171346.
+\bibitem{relpf:bandaru2024} S. Bandaru \emph{et al.}, ``AC and DC fault
+ ride-through strategies for hybrid MMC based HVDC link and interaction with
+ multimachine power system dynamics,'' \emph{IEEE Trans. Ind. Appl.}, 2024,
+ doi: 10.1109/TIA.2024.3396790.
+\bibitem{relpf:yu2024} X. Yu \emph{et al.}, ``An active DC fault current
+ limiting control for half-bridge MMC based on arm voltage reconstruction,''
+ \emph{IEEE Trans. Power Del.}, 2024, doi: 10.1109/TPWRD.2023.3294173.
+\bibitem{relpf:lv2025} Z. Lv \emph{et al.}, ``Modeling of the DC fault response
+ of MMCs with fault control capability considering converter saturation,''
+ \emph{IEEE Trans. Power Del.}, 2025, doi: 10.1109/TPWRD.2024.3485910.
+\bibitem{relpf:pandey2025} R. Pandey \emph{et al.}, ``Time-domain backup
+ protection for converter dominated hybrid AC--DC microgrids,''
+ \emph{IEEE Trans. Ind. Informat.}, 2025, doi: 10.1109/TII.2025.3574424.
 \bibitem{relpf:designdoc} HySim 团队，\emph{可靠性数学模型与智能信息物理评估}，\S18（设计文档）。
 \end{thebibliography}

@@ -822,7 +822,12 @@ TopoReconfResult run_topology_reconfiguration(
   // -------------------------------------------------------------------
   // Connected component awareness: fix same-component tie switches
   // -------------------------------------------------------------------
-  {
+  if (!split_topology) {
+    // The unified AC+DC component graph is valid only for the unified forest.
+    // In split mode, a VSC-DC-VSC path does not participate in the AC
+    // fictitious-flow equations (T1) or AC forest cardinality (T4), so using
+    // that path to prune an AC tie can remove a required per-domain edge.
+    // T4 already excludes cycles; retain all eligible ties in split mode.
     std::vector<std::vector<int>> tree_adj(nb);
     for (int i = 0; i < nl + nl_vsc; ++i) {
       if (!edge_participates[i]) continue;

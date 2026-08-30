@@ -1,0 +1,236 @@
+\documentclass[journal]{IEEEtran}
+
+\usepackage{amsmath,amssymb,amsthm}
+\usepackage{array}
+\usepackage{booktabs}
+\usepackage{cite}
+\usepackage{graphicx}
+\usepackage{multirow}
+\usepackage[ruled,vlined,linesnumbered]{algorithm2e}
+
+\newcommand{\E}{\mathbb{E}}
+\newcommand{\Prb}{\mathbb{P}}
+\newcommand{\ind}{\mathbf{1}}
+\newcommand{\cK}{\mathcal K}
+\newcommand{\cC}{\mathcal C}
+\newcommand{\cF}{\mathcal F}
+\newcommand{\cP}{\mathcal P}
+\newcommand{\cS}{\mathcal S}
+\newcommand{\cW}{\mathcal W}
+\newcommand{\FRT}{\mathrm{FRT}}
+\newcommand{\MC}{\mathrm{MC}}
+\newcommand{\sat}{\operatorname{sat}}
+
+\newtheorem{theorem}{Theorem}
+\newtheorem{lemma}{Lemma}
+\newtheorem{proposition}{Proposition}
+
+\title{Transition Aware Reliability Assessment of Hybrid AC/DC Distribution
+Systems with Inverter Based Resources}
+
+\author{Runze~Han,
+        Tianyang~Zhao,~\IEEEmembership{Member,~IEEE,}
+        and~Peng~Wang,~\IEEEmembership{Fellow,~IEEE}%
+\thanks{Runze Han and Tianyang Zhao are with the School of Electrical
+Engineering, Xi'an Jiaotong University, Xi'an 710049, China (e-mail:
+zhao@xjtu.edu.cn).}%
+\thanks{Peng Wang is with the School of Electrical and Electronic Engineering,
+Nanyang Technological University, Singapore 639798.}}
+
+\begin{document}
+\maketitle
+
+\begin{abstract}
+Conventional reliability assessment of hybrid AC/DC distribution systems
+prescribes the fault-isolation boundary and voltage-source-converter (VSC)
+availability before restoration, and therefore neglects subsequent VSC outages
+caused by protection--IBR interactions. This paper proposes a transition-aware
+reliability assessment method. A pre-restoration mass-matrix
+differential-algebraic equation (DAE) first generates the fault-to-isolation
+trajectory. For each initiating contingency, a trajectory-class mapping then
+partitions operating conditions into mutually exclusive classes according to
+the DAE-derived unavailable-VSC set supplied to restoration. The class
+frequencies inherit the joint-contingency frequencies and
+operating-state probabilities. Conditions in one trajectory class, termed a
+restoration-entry state, reuse the same DAE-derived entry, while their original
+load, generation, and active/reactive load-shedding MILPs remain state specific.
+Thus, transient states are compressed without approximating the restoration
+problem. $N$--1, $N$--2, and $N$--3 joint contingencies are considered.
+On a modified IEEE 33-bus hybrid AC/DC system, transient modeling increases EENS
+from 0.090556 to 0.260831~MWh/yr. The 552 contingency--operating-state conditions
+form 92 trajectory classes. Leave-one-state-out validation gives 100\%
+class-identification accuracy and zero held-out EENS error, while 100000
+projected samples yield 5.76--5.99 times speedup. The results verify the
+reliability impact of protection--IBR-induced transitions and the computational
+benefit of trajectory-class reuse.
+\end{abstract}
+
+\begin{IEEEkeywords}
+Distribution system reliability, hybrid AC/DC distribution system,
+inverter-based resource, protection, service restoration, transient simulation,
+voltage-source converter.
+\end{IEEEkeywords}
+
+\section{Introduction}
+
+\subsection{Motivation}
+
+\IEEEPARstart{H}{ybrid} AC/DC distribution systems integrate AC and DC feeders,
+inverter-based resources (IBRs), energy storage systems, and interlinking
+voltage-source converters (VSCs). The VSCs provide controllable power transfer
+between the two subsystems and are therefore important resources for post-fault
+service restoration. In conventional reliability assessment, the isolated
+fault section and the resources available after isolation are normally given
+before a network reconfiguration problem is solved. However, the fault current
+of an IBR-dominated system is determined by converter control and current
+limitation. The resulting voltage and current trajectories affect relay
+operation, fault ride-through (FRT), converter blocking, and converter tripping
+\cite{baeckeland2022stationary,azizi2024gridcode,fan2023faultrecovery,
+cisneros2024protection}. Consequently, an initiating fault may cause additional
+VSC outages before network reconfiguration starts, changing the power-transfer
+paths and generation resources available to the restoration controller. A
+steady-state restoration model cannot determine these outages by itself, while
+performing a differential-algebraic equation (DAE) simulation for every
+operating state and every $N$--$k$ contingency results in a heavy computational
+burden. It calls for a reliability assessment method that determines the
+post-fault restoration entry condition from the transient response and reuses
+this information without simplifying the subsequent restoration calculation.
+
+\subsection{Literature Review}
+
+The reliability of active distribution systems has been extensively studied by
+analytical and simulation-based approaches. In analytical approaches,
+component failure rates and repair times are combined with network topology to
+calculate annual reliability indices. Optimization models have been introduced
+to represent the detailed placement of circuit breakers and switches and to
+determine post-fault network reconfiguration \cite{li2020switchplacement,
+li2020reconfiguration}. Distributed energy resources (DERs) and microgrids have
+also been included to account for islanded operation and emergency power supply
+\cite{karngala2021der}. These models can enforce radiality, power-flow limits,
+converter capacities, and load shedding during restoration. Nevertheless, the
+fault-isolation boundary and the availability of converters and DERs are
+usually treated as known inputs. Thus, the restoration result may be optimistic
+when protection--converter interaction removes a resource that is assumed to be
+available.
+
+To improve the representation of DERs and microgrids, detailed subsystem
+simulation has been combined with analytical reliability assessment. In
+\cite{omri2024microgrid}, sequential Monte Carlo simulation and an islanded
+resource-management problem are used to derive a multi-state generation model
+for each microgrid, which is then incorporated into distribution-system
+reliability evaluation. Sequential Monte Carlo methods can also represent
+chronological component outages and the operation of decentralized power
+systems \cite{breve2024flow}. These studies demonstrate that a detailed model
+can be calculated in advance and reused in a large number of reliability
+states. However, the retained states mainly describe available generation
+capacity or component availability over the scheduling and restoration time
+scale. Whether fault clearing and FRT leave an interlinking converter available
+at the beginning of restoration is still prescribed rather than obtained from
+the coupled transient response.
+
+In parallel, detailed studies have investigated the fault behavior of IBRs and
+their interactions with protection systems. Current-limiting control, FRT, and
+post-fault recovery strongly affect the current magnitude, voltage support, and
+recovery of grid-forming and grid-following converters
+\cite{li2022adaptivefrt,qoria2023overcurrent,fan2023faultrecovery,
+azizi2024gridcode}. Protection studies further show that the limited and
+control-dependent fault current of IBRs can alter relay sensitivity and
+coordination \cite{cisneros2024protection}. Time-domain DAE simulation is a
+well-established means of representing these control and network interactions
+\cite{lara2023psd}, and IEEE Std. 1547 specifies voltage and frequency
+ride-through requirements for DERs \cite{ieee1547,ieee1547a}. These transient
+studies provide the physical models required to determine converter survival,
+but they normally stop after the fault response and do not calculate annual
+distribution reliability indices through post-fault network reconfiguration.
+
+Only a few studies have linked the fast protection and converter response to
+the inputs of a distribution restoration model. A direct combination is
+computationally demanding because the DAE and the restoration mixed-integer
+linear programming (MILP) problem must be solved repeatedly for many
+contingencies and operating states. The difficulty becomes more significant
+for higher-order contingencies, for which the number of simultaneous outage
+combinations increases rapidly. More importantly, operating states cannot be
+grouped only by load level or by the initiating contingency: two states can
+enter restoration with different available VSCs after experiencing different
+protection and FRT responses. Therefore, a reusable link between transient
+simulation and conventional reliability restoration is still required.
+
+\subsection{Contributions}
+
+To determine the actual post-fault inputs of the restoration problem, a
+transition-aware reliability assessment method is proposed in this paper. For
+each initiating contingency and operating state, a coupled AC/DC DAE model is
+first used to determine the VSCs that become unavailable before restoration.
+For each initiating contingency, operating states are progressively partitioned
+into trajectory classes according to the DAE-derived unavailable-VSC vector;
+each class defines one restoration-entry state. The load and
+generation levels are not averaged: the original restoration MILP, including
+active and reactive load shedding, is solved for every operating state. The
+main contributions of this paper can be summarized as follows:
+
+\begin{enumerate}
+    \item A transition-aware reliability assessment model is proposed for
+    hybrid AC/DC distribution systems. The coupled network, converter, FRT, and
+    protection response is represented by a mass-matrix DAE, and its output is
+    converted into the unavailable-VSC set supplied to post-fault restoration.
+    Explicit $N$--1, $N$--2, and $N$--3 joint contingencies are included without
+    multiplying marginal failure rates or treating converter trips as new
+    initiating failures.
+
+    \item A trajectory-class theory is developed to compress the DAE-derived
+    restoration entries. An ordered subset tree constructs high-order joint
+    events without duplication, while the inverse images of the complete
+    DAE-to-restoration interface define the unique coarsest lossless partition
+    for each event. The class frequencies conserve initiating-event exposure,
+    and the class-conditioned EENS is proved equal to direct state-by-state
+    evaluation when each state retains its own load, generation, and restoration
+    MILP. The theory separates class compression from the combinatorial
+    $N$--$k$ event space and gives an EENS remainder bound for certified order
+    truncation. A DAE library and leave-one-state-out test enable reuse without
+    claiming to compress the restoration optimization; unresolved frequency is
+    retained explicitly.
+\end{enumerate}
+
+% The remainder of the paper is organized as follows. Section II defines the
+% hierarchical controller architecture, reliability assessment scheme, and
+% modeling assumptions. Section III formulates the initiating
+% failure exposure, progressive consequence partition, and reliability metrics.
+% Section IV presents the adaptive equivalent-state calculation. Section
+% V reports the numerical studies, and Section VI concludes.
+
+\input{sections_ii_iv}
+\input{case_studies}
+
+\section{Conclusion}
+In this paper, a transition-aware reliability assessment method for hybrid
+AC/DC distribution systems with IBRs is proposed. A pre-restoration DAE model
+is used to determine whether the initiating fault causes additional VSC
+outages through converter control, FRT, and protection interaction. The
+resulting unavailable-VSC vector is supplied to the conventional restoration
+MILP. For each initiating event, a terminal-status map progressively partitions
+the DAE trajectories into finite, mutually exclusive trajectory classes. This
+partition conserves the initiating-event frequency and the state-specific EENS.
+Operating states in one class share only the DAE-derived restoration entry;
+their original load, generation, and active/reactive load-shedding calculations
+are retained. The method therefore improves the physical basis of the
+restoration input and reduces repeated DAE calculations without compressing the
+restoration problem.
+
+The modified IEEE 33-bus results demonstrate that prescribing VSC availability
+can considerably underestimate EENS under the stated $N$--1, $N$--2, and
+$N$--3 design frequencies. The leave-one-out tests verify trajectory-class
+identification within the six evaluated operating states, and the complete
+timing model demonstrates a net computational saving, although the specified
+20-times speedup target is not reached. The modified IEEE 123-bus study further
+shows that numerical closure of the DAE library is a necessary condition for
+reporting feeder-wide indices: 158 unresolved transient conditions prevent its
+resolved-submeasure EENS and timing projection from being treated as complete
+validation. Future work will improve the event-time AC/DC algebraic solution,
+use utility-calibrated joint-contingency and operating-state data, and validate
+the restoration entry against detailed three-phase and vendor-specific
+converter and protection models.
+
+\bibliographystyle{IEEEtran}
+\bibliography{references}
+
+\end{document}

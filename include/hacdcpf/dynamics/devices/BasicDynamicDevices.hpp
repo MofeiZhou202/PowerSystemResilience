@@ -49,6 +49,29 @@ enum class CurrentLimiterKind {
   Hybrid
 };
 
+// Deterministic converter-control failure consequence. Failure occurrence and
+// probability belong to the reliability/scenario layer; the dynamic device
+// receives only the authored consequence state.
+enum class ConverterControlFailureMode {
+  None,
+  ForcedBlock
+};
+
+// Reduced average-value DC-fault response for a grid-following VSC. Thresholds
+// are device/study parameters, not universal protection settings. The control
+// is opt-in because a topology-specific MMC or fault-blocking converter needs a
+// different arm/submodule model.
+struct DCLinkFaultControlSettings {
+  bool enabled{false};
+  double active_power_derate_start_pu{0.95};
+  double undervoltage_block_pu{0.75};
+  double undervoltage_block_delay_s{0.02};
+};
+
+[[nodiscard]] double dc_link_active_power_scale(
+    const DCLinkFaultControlSettings& settings,
+    double dc_link_voltage_pu);
+
 enum class SynchronousMachineModelKind {
   Classical,
   OneDOneQ,
@@ -943,6 +966,8 @@ struct GridFormingInverterParams {
   // §11.7): the filtered references adjust the reactive/active setpoints.
   VoltVarSettings volt_var{};
   FreqWattSettings freq_watt{};
+  ConverterControlFailureMode control_failure_mode{
+      ConverterControlFailureMode::None};
   bool in_service{true};
 };
 
@@ -1051,6 +1076,7 @@ struct GridFollowingInverterParams {
   double vdc_max_pu{2.00};
   DCLinkMode dc_link_mode{DCLinkMode::ConstantDCVoltage};
   bool stamp_dc_power{false};
+  DCLinkFaultControlSettings dc_fault_control{};
   bool reactive_current_priority{false};
   // Phase-domain current control for explicitly unbalanced networks. Six
   // differential states represent the real/imaginary current of phases a/b/c;
@@ -1081,6 +1107,8 @@ struct GridFollowingInverterParams {
   double lcl_cf_pu{2.5};         // shunt capacitance
   double lcl_lg_pu{0.002};       // grid-side inductance
   double lcl_rg_pu{0.003};       // grid-side resistance
+  ConverterControlFailureMode control_failure_mode{
+      ConverterControlFailureMode::None};
   bool in_service{true};
 };
 
@@ -1143,6 +1171,9 @@ class GridFollowingInverter : public DynamicDevice {
   InverterInnerVariableBus inner_vars_;
   IEEE1547RuntimeState protection_state_;
   SmartInverterState smart_state_;
+  double dc_undervoltage_timer_s_{0.0};
+  bool dc_undervoltage_blocked_{false};
+  double dc_undervoltage_block_time_s_{-1.0};
 };
 
 struct VSCConverterDynamicParams : public GridFollowingInverterParams {
@@ -1973,6 +2004,12 @@ enum class ProtectionRelayMeasurementDomain {
   EmtInstantaneous
 };
 
+enum class ProtectionRelayFailureMode {
+  None,
+  FailToTrip,
+  SpuriousTrip
+};
+
 struct ProtectionRelayParams {
   int component_index{0};
   int bus{0};
@@ -1994,6 +2031,10 @@ struct ProtectionRelayParams {
   double ct_filter_t_s{0.0};
   double frequency_filter_t_s{0.0};
   double frequency_min_voltage_pu{0.05};
+  // Deterministic instrument-transformer ratio errors. A zero gain represents
+  // loss of the corresponding measurement channel in the phasor model.
+  double pt_ratio_gain{1.0};
+  double ct_ratio_gain{1.0};
   ProtectionRelayMeasurementKind measurement_kind{
       ProtectionRelayMeasurementKind::VoltageMagnitude};
   ProtectionRelayMeasurementDomain measurement_domain{
@@ -2009,6 +2050,7 @@ struct ProtectionRelayParams {
   int target_bus{0};
   double action_value{1.0};
   std::string target_type;
+  ProtectionRelayFailureMode failure_mode{ProtectionRelayFailureMode::None};
   bool tripped{false};
   bool in_service{true};
 };
@@ -2071,12 +2113,15 @@ class ProtectionRelay : public DynamicDevice {
   [[nodiscard]] double pickupMargin(const LocalMeasurement& measurement) const;
   [[nodiscard]] double pickupMargin(const NetworkState& y, double dt) const;
   void mirrorTimerToState(DynamicState& x) const;
+  void emitTripEvent(double event_time_s, bool spurious,
+                     std::vector<DynamicEvent>& events);
 
   ProtectionRelayParams params_;
   StateIndexRange range_;
   double pickup_timer_s_{0.0};
   double last_pickup_margin_{0.0};
   bool have_pickup_margin_{false};
+  bool trip_command_suppressed_{false};
   LocalMeasurementState measurement_state_;
 };
 

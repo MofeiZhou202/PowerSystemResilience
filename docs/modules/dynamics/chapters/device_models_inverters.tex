@@ -292,3 +292,121 @@ $\to V_{cnv}$，经差分 LCL 滤波注入电网；PLL 由滤波电容电压锁�
 GFM 遵循 NERC 标准命名，缺省 \texttt{GridFormingNortonDroop}；两族均支持 IEEE 1547 穿越 / 跳闸 / 重连
 保护与 volt-var / frequency-watt 智能逆变功能（\srcpath{updateSmartControls}），缺省关闭。相域控制
 （\fld{phase\_domain\_control}）为显式不平衡网络提供每相端口，共用一个正序同步 / 频率成形环。
+\fld{VSCConverter::current\_limit\_priority} 在动态装配时对 GFM 与 GFL 端口均映射为
+magnitude、active-power priority 或 reactive-power priority 限流几何；构建级回归测试
+\srcpath{tests/test\_transient\_dynamics.cpp} 核验三种 authored 值进入
+\fld{current\_limiter\_model} 输出。
+
+GFL、GFM 与二者的 VSC 包装器实现确定性控制失效枚举
+\texttt{ConverterControlFailureMode::None/ForcedBlock}。令 $b_f\in\{0,1\}$ 为闭锁状态，
+平均值相量端口采用
+\[
+ b_f=1:\qquad I_{abc}^{\rm inj}=0,\quad I_{dc}^{\rm inj}=0,\quad
+ \dot x_c=0,
+\]
+即门极/控制不可用的后果是同时打开 AC 与 DC 端口并冻结控制状态；它不等价于
+MMC 阀级闭锁或电磁暂态换流过程。健康缺省 $b_f=0$ 完全沿用原控制方程，
+\fld{converter\_forced\_block}=1 可由 rich VSC 的
+\fld{dynamic\_model.parameters} 显式装配。运行输出给出
+\fld{control\_failure\_mode}、\fld{control\_available}、\fld{forced\_block} 与实际
+\fld{terminal\_current\_injection\_pu}；内部冻结状态仍保留作审计，不伪装为端口电流。
+该模型只计算已给定失效的暂态后果，失效发生率和抽样仍由可靠性/场景层负责。
+构建级验证证明显式健康模式与缺省模式的状态、网络电压和全部输出逐值相同；GFL/GFM
+闭锁后的 AC/DC stamp、微分残差和端口电流均在 $10^{-12}$ 门内为零。
+
+\srcpath{tools/case33bw\_acdc\_propagation\_study.cpp} 以
+\srcpath{build\_case33bw\_acdc()} 的 33 个 AC 母线、2 个 DC 母线、37 条 AC
+支路、1 条 DC 支路和 2 台 VSC 为拓扑基线，仅补充 1 MW DC 负荷、明确的
+VSC 功率/限流参数和 VSC2 的 IEEE~1547 端子保护。对故障轨迹 $z_f(t)$ 与
+同一初值的无故障轨迹 $z_0(t)$，跨域传播量定义为
+\[
+ \Delta z=\max_{t\ge t_f}|z_f(t)-z_0(t)|.
+\]
+为补齐故障闭锁型/电流控制型 VSC 的 DC$\rightarrow$AC 可靠性入口机制，GFL
+端口可显式启用平均值直流欠压降额。令 $v_{dc}^{der}>v_{dc}^{blk}\geq0$，则
+\begin{equation}
+ \alpha(v_{dc})=
+ \begin{cases}
+ 0, & v_{dc}\leq v_{dc}^{blk},\\
+ (v_{dc}-v_{dc}^{blk})/(v_{dc}^{der}-v_{dc}^{blk}),
+      & v_{dc}^{blk}<v_{dc}<v_{dc}^{der},\\
+ 1, & v_{dc}\geq v_{dc}^{der},
+ \end{cases}
+ \qquad p_{ref}^{eff}=\alpha(v_{dc})p_{ref}.
+ \label{eq:gfl-dc-fault-derating}
+\end{equation}
+式~\eqref{eq:gfl-dc-fault-derating} 是 Kaler--Yazdani 的直流故障闭锁型双向
+AC/DC 换流器在平均值相量层的降阶包络~\cite{dyninv:kaler2022}，并保留
+Bandaru 等所报告的“直流故障使有功交换中断、交流端响应改变”机制
+~\cite{dyninv:bandaru2024}；它不是从这些论文辨识得到的通用控制曲线。
+当 $v_{dc}\leq v_{dc}^{blk}$ 连续保持 $T_{blk}$ 后，设备发出内部
+DC-link undervoltage block 事件并锁存端口退出。三个量均由设备或研究工况
+给定；当前算例采用 $v_{dc}^{der}=0.95$ pu、$v_{dc}^{blk}=0.75$ pu、
+$T_{blk}=20$ ms，不冒充标准或厂家定值。
+
+2 ms Backward-Euler 质量矩阵 DAE 中，AC 母线 18 故障造成 DC 母线最大
+电压偏差 $7.790176\times10^{-4}$ pu。关闭式~\eqref{eq:gfl-dc-fault-derating}
+时，DC 母线 2 故障仅造成 $2.1082\times10^{-10}$ pu 的 AC 电压偏差和
+$1.2604\times10^{-10}$ MW 的 VSC2 交流功率偏差；启用后相同故障分别产生
+$8.807411\times10^{-2}$ pu 与 $1.05$ MW 偏差，并由直流欠压轨迹在
+$0.238$ s 触发闭锁。1/2/5 ms 步长得到相同传播分类，闭锁时刻为
+$0.238/0.238/0.240$ s。该证据只准入“DC 电压崩落$\rightarrow$有功降额
+$\rightarrow$AC 电流/功率变化$\rightarrow$闭锁”的平衡相量可靠性入口。
+传统 BIC 在直流极间故障时经反并联二极管形成不控整流器的 EMT 馈流机制已由
+RTDS/CHIL 观测~\cite{dyninv:pandey2025}，但本模型不含该路径，也不含 MMC
+桥臂饱和、子模块电容、开关纹波、DCCB 电弧、直流过流保护或解锁/预充电。
+
+研究扫描工具 \srcpath{tools/terminal\_state\_boundary\_study.cpp} 直接消费
+\fld{applied\_event\_records} 中的 \texttt{VSCTrip}/\texttt{Custom reconnect}
+动作和 \fld{protection\_restore\_scale}，分别报告“曾发生保护性跳闸”、仿真终点仍
+不可用和已经重连三种口径。其参数网格内比例只是所声明均匀设计空间的经验测度，
+不能解释为现场或年度概率。当前 \texttt{VSCTrip} 对应 IEEE~1547 端子保护，未覆盖
+MMC 阀闭锁、直流过流闭锁、预充电和厂家解锁状态机；轨迹后处理识别的 momentary
+cessation 也尚未反馈为换流器电流抑制状态。研究结果必须保留这些模型边界。
+
+在 networked hybrid AC/DC microgrid 试验中，$0.625$ 与 $0.3125$ ms
+步长的 3 s 轨迹给出一致的 21/60 保护跳闸结局，最大跳闸时刻差为
+$2.976$ ms；三种限流优先级各为 7/20 跳闸，未改变任何终端类别。
+该比例仅是均匀设计网格测度。25 s 重连轨迹未通过步长一致性门：5 ms
+给出重连/满功率时刻 18.56568/20.56568 s，2.5 与 1.25 ms 在终点仍未
+重连，0.625 ms 于 5.488125 s 触发电压健康失败。因此当前只准入短时
+保护/FRT 分类，不准入实际重连时间或由其推导的静态可靠性适用边界。
+
+在准入的 $H=3$ s 有限观察窗内，研究工具还将无暂态模型定义为
+暂态模型的嵌套退化情形：网络于 $t_f+T_N$ 恢复后，静态模型令换流器
+立即可用，而暂态模型增加
+\[
+ \Delta E(T_N)=\frac{L_{\mathrm{dc}}}{3600}
+ \int_{t_f+T_N}^{H}\left[1-s_g(t)\right]dt,
+\]
+其中 $s_g$ 为 \fld{protection\_restore\_scale}。在 $0.3125$ ms 结果中，
+$T_N=0.25,0.5,1.0,1.5,2.0$ s 时静态 ENS 相对低估分别为
+$44.680\%,26.677\%,11.539\%,4.459\%,0\%$；与 $0.625$ ms 的最大差为
+$0.0093$ 个百分点。39 个未跳闸工况的 $\Delta E$ 均为零，所有工况均满足
+$E_{\mathrm{dyn}}\ge E_{\mathrm{stat}}$。该结论只是给定负荷、故障设计网格
+与 3 s 窗口下的条件边界，不能外推为年度 EENS。
+
+快速聚合采用全期望公式
+\[
+ \overline E_{\mathrm{dyn}}=E_{\mathrm{stat}}+
+ p_{\mathrm{trip}}\frac{L_{\mathrm{dc}}}{3600}
+ \overline A_{\mathrm{trip}},
+\]
+其中 $\overline A_{\mathrm{trip}}$ 是跳闸条件下由 DAE 轨迹识别的平均不可用
+面积（秒）。工具同时输出解析重构和逐轨迹平均，并以 $10^{-12}$ MWh 为
+一致性门。该恒等式只消除在线重复 DAE；未见故障与运行点仍需独立验证
+终端类别概率及不可用面积响应面的泛化误差。
+
+\begin{thebibliography}{9}\small
+\bibitem{dyninv:kaler2022} S. Kaler and A. Yazdani, ``A DC-side fault-tolerant
+ bidirectional AC--DC converter for applications in distribution systems,''
+ \emph{IEEE Access}, vol. 10, pp. 52625--52637, 2022,
+ doi: 10.1109/ACCESS.2022.3171346.
+\bibitem{dyninv:bandaru2024} S. Bandaru \emph{et al.}, ``AC and DC fault
+ ride-through strategies for hybrid MMC based HVDC link and interaction with
+ multimachine power system dynamics,'' \emph{IEEE Trans. Ind. Appl.}, 2024,
+ doi: 10.1109/TIA.2024.3396790.
+\bibitem{dyninv:pandey2025} R. Pandey \emph{et al.}, ``Time-domain backup
+ protection for converter dominated hybrid AC--DC microgrids,''
+ \emph{IEEE Trans. Ind. Informat.}, 2025, doi: 10.1109/TII.2025.3574424.
+\end{thebibliography}

@@ -1095,9 +1095,15 @@ PT 相角定义
 当 $|V_{\rm PT}|$ 低于配置的有效门槛时频率元件闭锁；电压恢复后，必须经过一个
 首尾 PT 电压均有效的完整区间才解除闭锁，不能把跌落前的陈旧频率重新标为有效，
 也不能用零值或 COI 伪装本地测量。该模型是相量域 CT/PT 等效动态，不生成 EMT 瞬时波形；请求 EMT
-测量会显式失败。
-相角差解缠要求每个接受区间 $|\Delta\theta|<\pi$；当前线性 CT/PT 等效模型不含
-饱和、磁滞、变比误差、抗混叠和数字继电器采样固件。
+测量会显式失败。按 IEC~61869 的线性变比误差抽象\cite{dym:iec61869}，滤波器输入为
+\begin{equation}
+ V_{\rm PT}^{\rm raw}=g_{\rm PT}V_1,\qquad
+ I_{\rm CT}^{\rm raw}=g_{\rm CT}I_1,\qquad g_{\rm PT},g_{\rm CT}\ge 0,
+ \label{eq:dy-th-mac-instrument-ratio-failure}
+\end{equation}
+健康极限为 $g_{\rm PT}=g_{\rm CT}=1$；零增益表示相量测量通道丢失，而不是把未知量
+当作真实零值。相角差解缠要求每个接受区间 $|\Delta\theta|<\pi$；当前模型不含
+CT 饱和、PT 铁磁谐振、磁滞、抗混叠和数字继电器采样固件。
 令 $q(m)$ 为 IEEE~1547 电压或频率越限守卫，$d$ 为连续越限计时器，则定时限
 动作时刻是
 \begin{equation}
@@ -1121,6 +1127,24 @@ COSMIC 的越限连续计时器\cite{dym:cosmic}共享同一事件语义。除 I
 动作可生成 \texttt{ACLoadScale} 或 \texttt{ACBranchTrip}，并进入与预定事件相同的
 网络重置路径。当前继电器须通过 \texttt{DynamicSystem} API 直接挂接，rich-model
 builder 与 JSON/HTTP/GUI 尚未自动装配。
+
+失效发生概率与发生时刻属于可靠性/场景层，DAE 设备只接收确定性的失效后果。令
+$r\in\{0,r_{\rm FTT},r_{\rm ST}\}$ 分别表示健康、拒动和误动。测量元件与定时器仍按
+式~\eqref{eq:dy-th-mac-fixed-delay-event} 演化，而输出触点命令满足
+\begin{equation}
+ u_{\rm trip}=
+ \begin{cases}
+  1, & r=0\ \text{且}\ d=d_{\rm set},\\
+  0, & r=r_{\rm FTT},\\
+  1, & r=r_{\rm ST}\ \text{首次求值},
+ \end{cases}
+ \label{eq:dy-th-mac-relay-failure-command}
+\end{equation}
+这对应 IEC~60255 保护功能中测量/定时与输出触点链的分离\cite{dym:iec60255}。
+\texttt{FailToTrip} 保留拾取裕度、计时器及 \fld{trip\_command\_suppressed}，但不生成
+网络动作；\texttt{SpuriousTrip} 绕过守卫并只生成一次带
+\fld{relay\_failure\_mode}、\fld{spurious\_trip} 的动作记录。当前失效模式在场景构造时
+给定，不是随机失效率模型，也不覆盖断路器机械拒动、通信延迟或后备保护配合。
 
 \texttt{MassMatrixDae} 对每个已接受候选步先调用不改变设备状态的保护预览。
 若右端已发生动作，则回滚到左端一致状态，在 $[0,h]$ 上二分``截至该时刻是否
@@ -1317,4 +1341,9 @@ doi:10.1109/DRPT.2008.4523550.
 Hines, ``Dynamic Modeling of Cascading Failure in Power Systems,''
 \emph{IEEE Trans. Power Syst.}, vol.~31, no.~3, 2016,
 doi:10.1109/TPWRS.2015.2439237.
+\bibitem{dym:iec61869} IEC 61869-1:2023, \emph{Instrument Transformers---Part 1:
+General Requirements}, International Electrotechnical Commission, 2023.
+\bibitem{dym:iec60255} IEC 60255-1:2022, \emph{Measuring Relays and Protection
+Equipment---Part 1: Common Requirements}, International Electrotechnical
+Commission, 2022.
 \end{thebibliography}}

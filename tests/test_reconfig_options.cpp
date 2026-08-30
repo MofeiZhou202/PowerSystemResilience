@@ -153,6 +153,98 @@ TEST_CASE("Split-domain radiality keeps both converters as bridges", "[reconfig_
   CHECK(vsc_open == 0);  // both VSC bridges may stay closed
 }
 
+TEST_CASE("Split-domain tie pruning does not use a cross-domain bypass",
+          "[reconfig_opts][split_domain][nk][regression]") {
+  HybridPowerSystem s;
+  s.base_mva = s.ac.base_mva = s.dc.base_mva = 10.0;
+  for (int index = 1; index <= 4; ++index) {
+    ACBus bus;
+    bus.index = index;
+    bus.bus_type = index == 1 ? BusType::SLACK : BusType::PQ;
+    bus.base_kv = 10.0;
+    bus.vmin_pu = 0.9;
+    bus.vmax_pu = 1.1;
+    s.ac.buses.push_back(bus);
+  }
+  ExternalGrid grid;
+  grid.index = 1;
+  grid.bus = 1;
+  grid.in_service = true;
+  grid.s_sc_max_mva = 100.0;
+  s.ac.external_grids = {grid};
+  auto ac_branch = [](int index, int from, int to, bool in_service) {
+    ACBranch branch;
+    branch.index = index;
+    branch.from_bus = from;
+    branch.to_bus = to;
+    branch.r_pu = 0.01;
+    branch.x_pu = 0.02;
+    branch.rate_a_mva = 10.0;
+    branch.in_service = in_service;
+    return branch;
+  };
+  s.ac.branches = {
+      ac_branch(1, 1, 2, true), ac_branch(2, 2, 3, true),
+      ac_branch(3, 3, 4, true), ac_branch(4, 1, 3, false),
+      ac_branch(5, 2, 4, false),
+  };
+  for (int index = 1; index <= 3; ++index) {
+    DCBus bus;
+    bus.index = index;
+    bus.base_kv = 1.5;
+    bus.bus_type = index == 1 ? DCBusType::DC_V : DCBusType::DC_P;
+    s.dc.buses.push_back(bus);
+  }
+  auto dc_branch = [](int index, int from, int to) {
+    DCBranch branch;
+    branch.index = index;
+    branch.from_bus = from;
+    branch.to_bus = to;
+    branch.r_pu = 0.01;
+    branch.rate_a_mva = 10.0;
+    branch.in_service = true;
+    return branch;
+  };
+  s.dc.branches = {dc_branch(101, 1, 2), dc_branch(102, 2, 3)};
+  auto converter = [](int index, int ac_bus, int dc_bus) {
+    VSCConverter vsc;
+    vsc.index = index;
+    vsc.bus_ac = ac_bus;
+    vsc.bus_dc = dc_bus;
+    vsc.in_service = true;
+    vsc.pmax_mw = 2.0;
+    vsc.pmin_mw = -2.0;
+    return vsc;
+  };
+  // With AC lines 1 and 3 faulted, the DC path makes all three AC sections
+  // look connected in a unified graph. It is not an AC fictitious-flow path.
+  s.vsc_converters = {
+      converter(201, 1, 1), converter(202, 2, 2), converter(203, 4, 3)};
+
+  TopoReconfOptions options;
+  options.enable_pf = false;
+  options.split_domain_trees = true;
+  options.skip_heuristic = true;
+  options.faulted_branches = {
+      {graph::EdgeCategory::AC_Line, 1},
+      {graph::EdgeCategory::AC_Line, 3},
+  };
+  options.switchable_branches = {
+      {graph::EdgeCategory::AC_Line, 4},
+      {graph::EdgeCategory::AC_Line, 5},
+  };
+
+  const auto result = run_topology_reconfiguration(s, options);
+
+  INFO(result.solver_status);
+  REQUIRE(result.feasible);
+  CHECK(std::count_if(result.closed_branches.begin(), result.closed_branches.end(),
+                      [](const auto& branch) {
+                        return branch.category == graph::EdgeCategory::AC_Line &&
+                               (branch.index == 4 || branch.index == 5);
+                      }) == 2);
+}
+
 TEST_CASE("G4/G5 toggles do not break feasibility", "[reconfig_opts]") {
   auto s = make_loop_case();
   TopoReconfOptions base; base.split_domain_trees = true; base.skip_heuristic = true;

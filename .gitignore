@@ -136,6 +136,13 @@ docs/latex
 docs/latex/*
 # !docs/latex/paper/
 docs/latex/paper/*
+!docs/latex/paper/Progressive Class-Conditioned Frequency–Duration/
+docs/latex/paper/Progressive Class-Conditioned Frequency–Duration/*
+!docs/latex/paper/Progressive Class-Conditioned Frequency–Duration/README.md
+!docs/latex/paper/Progressive Class-Conditioned Frequency–Duration/main.tex
+!docs/latex/paper/Progressive Class-Conditioned Frequency–Duration/sections_ii_iv.tex
+!docs/latex/paper/Progressive Class-Conditioned Frequency–Duration/references.bib
+!docs/latex/paper/Progressive Class-Conditioned Frequency–Duration/make_terminal_state_boundary_figure.m
 # !docs/latex/paper/ev_power_traffic_joint_opt/
 docs/latex/paper/ev_power_traffic_joint_opt/*
 # !docs/latex/paper/ev_power_traffic_joint_opt/*.md

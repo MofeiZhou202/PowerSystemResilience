@@ -6,6 +6,7 @@
 #include <complex>
 #include <limits>
 #include <map>
+#include <stdexcept>
 #include <unordered_set>
 
 #include <Eigen/LU>
@@ -155,6 +156,17 @@ void apply_inverter_filter_and_limiter_params(const std::map<std::string, double
     params.limiter_kind = CurrentLimiterKind::ReactivePriority;
     params.reactive_current_priority = true;
   }
+  const double forced_block =
+      param_or(p, {"converter_forced_block", "control_forced_block"},
+               params.control_failure_mode == ConverterControlFailureMode::ForcedBlock
+                   ? 1.0
+                   : 0.0);
+  if (!std::isfinite(forced_block) || (forced_block != 0.0 && forced_block != 1.0)) {
+    throw std::invalid_argument("converter_forced_block must be exactly 0 or 1");
+  }
+  params.control_failure_mode = forced_block == 1.0
+                                    ? ConverterControlFailureMode::ForcedBlock
+                                    : ConverterControlFailureMode::None;
 }
 
 // Reads IEEE 1547 ride-through / trip / reconnect settings (design doc §11.7)
@@ -251,6 +263,23 @@ void apply_gfl_params(const std::map<std::string, double>& p,
   params.allow_zero_sequence_current =
       param_or(p, {"allow_zero_sequence_current", "four_wire_converter"},
                params.allow_zero_sequence_current ? 1.0 : 0.0) > 0.5;
+  const double dc_fault_enabled =
+      param_or(p, {"dc_fault_control_enabled"},
+               params.dc_fault_control.enabled ? 1.0 : 0.0);
+  if (!std::isfinite(dc_fault_enabled) ||
+      (dc_fault_enabled != 0.0 && dc_fault_enabled != 1.0)) {
+    throw std::invalid_argument("dc_fault_control_enabled must be exactly 0 or 1");
+  }
+  params.dc_fault_control.enabled = dc_fault_enabled == 1.0;
+  params.dc_fault_control.active_power_derate_start_pu = param_or(
+      p, {"dc_active_power_derate_start_pu"},
+      params.dc_fault_control.active_power_derate_start_pu);
+  params.dc_fault_control.undervoltage_block_pu = param_or(
+      p, {"dc_undervoltage_block_pu"},
+      params.dc_fault_control.undervoltage_block_pu);
+  params.dc_fault_control.undervoltage_block_delay_s = param_or(
+      p, {"dc_undervoltage_block_delay_s"},
+      params.dc_fault_control.undervoltage_block_delay_s);
 }
 
 void apply_gfl_profile(const hacdcpf::DynamicModelProfile& profile,
@@ -2641,6 +2670,23 @@ DynamicSystem DynamicModelBuilder::build(const HybridPowerSystem& sys,
       p.p_ref_mw = conv.p_schedule_mw != 0.0 ? conv.p_schedule_mw : conv.p_set_mw;
       p.q_ref_mvar = conv.q_set_mvar;
       p.current_limit_pu = conv.i_ac_max_pu;
+      // VSCConverter::current_limit_priority is a system-base current-control
+      // contract (converter_components.hpp). Preserve the same geometry used
+      // by limited_current() for GFL and GFM dynamic ports.
+      switch (conv.current_limit_priority) {
+        case VSCCurrentLimitPriority::Magnitude:
+          p.limiter_kind = CurrentLimiterKind::Magnitude;
+          p.reactive_current_priority = false;
+          break;
+        case VSCCurrentLimitPriority::ActivePower:
+          p.limiter_kind = CurrentLimiterKind::ActivePriority;
+          p.reactive_current_priority = false;
+          break;
+        case VSCCurrentLimitPriority::ReactivePower:
+          p.limiter_kind = CurrentLimiterKind::ReactivePriority;
+          p.reactive_current_priority = true;
+          break;
+      }
       p.f_ref_hz = positive_or(conv.f_ref_hz, network.frequency_hz);
       p.v_ref_pu = positive_or(conv.v_ac_set_pu, positive_or(conv.v_ref_pu, 1.0));
       p.frequency_watt_droop_pu = conv.k_p;

@@ -103,6 +103,51 @@ if(TARGET transient_validation_matrix)
     LABELS "dynamics;transient;validation" TIMEOUT 120)
 endif()
 
+if(TARGET terminal_state_boundary_study)
+  add_test(NAME terminal_state_boundary_study_smoke
+    COMMAND "$<TARGET_FILE:terminal_state_boundary_study>" --smoke
+            --output "${CMAKE_CURRENT_BINARY_DIR}/terminal_state_boundary_smoke.json")
+  set_tests_properties(terminal_state_boundary_study_smoke PROPERTIES
+    LABELS "dynamics;reliability;research" TIMEOUT 120)
+endif()
+
+if(TARGET case33bw_acdc_propagation_study)
+  add_test(NAME case33bw_acdc_propagation_study_smoke
+    COMMAND "$<TARGET_FILE:case33bw_acdc_propagation_study>" --smoke
+            --output "${CMAKE_CURRENT_BINARY_DIR}/case33bw_acdc_propagation_smoke.json"
+            --csv "${CMAKE_CURRENT_BINARY_DIR}/case33bw_acdc_propagation_smoke.csv")
+  set_tests_properties(case33bw_acdc_propagation_study_smoke PROPERTIES
+    LABELS "dynamics;reliability;research;acdc" TIMEOUT 120)
+  find_program(HACDCPF_JULIA_EXECUTABLE julia)
+  if(HACDCPF_JULIA_EXECUTABLE)
+    add_test(NAME case33bw_acdc_dc_fault_julia_oracle
+      COMMAND "${HACDCPF_JULIA_EXECUTABLE}"
+              "${CMAKE_SOURCE_DIR}/tools/validate_case33bw_acdc_dc_fault_oracle.jl"
+              "$<TARGET_FILE:case33bw_acdc_propagation_study>")
+    set_tests_properties(case33bw_acdc_dc_fault_julia_oracle PROPERTIES
+      LABELS "dynamics;reliability;research;acdc;cross-validation" TIMEOUT 120)
+  endif()
+endif()
+
+if(TARGET nk_acdc_reliability_study)
+  add_test(NAME nk_acdc_reliability_study_smoke
+    COMMAND "$<TARGET_FILE:nk_acdc_reliability_study>" --smoke
+            --audit-only
+            --output "${CMAKE_CURRENT_BINARY_DIR}/nk_acdc_reliability_smoke.json")
+  set_tests_properties(nk_acdc_reliability_study_smoke PROPERTIES
+    LABELS "dynamics;reliability;research;acdc;nk" TIMEOUT 180)
+  find_program(HACDCPF_NK_PYTHON_EXECUTABLE python3)
+  if(HACDCPF_NK_PYTHON_EXECUTABLE)
+    add_test(NAME nk_acdc_reliability_oracle
+      COMMAND "${HACDCPF_NK_PYTHON_EXECUTABLE}"
+              "${CMAKE_SOURCE_DIR}/tools/validate_nk_acdc_reliability.py"
+              "$<TARGET_FILE:nk_acdc_reliability_study>")
+    set_tests_properties(nk_acdc_reliability_oracle PROPERTIES
+      LABELS "dynamics;reliability;research;acdc;nk;cross-validation"
+      TIMEOUT 180)
+  endif()
+endif()
+
 # Unit conversion: actual (ohm/km, kV) → per-unit branch impedance bridge.
 hacdcpf_add_test(test_unit_conversion     test_unit_conversion.cpp)
 

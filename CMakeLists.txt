@@ -850,6 +850,32 @@ if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/tools/transient_validation_matrix.cpp")
   endif()
 endif()
 
+# Research pilot: derive converter protection/FRT terminal-state frequencies
+# and the static-reliability adequacy boundary from the production DAE.
+if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/tools/terminal_state_boundary_study.cpp")
+  add_executable(terminal_state_boundary_study
+    tools/terminal_state_boundary_study.cpp)
+  target_link_libraries(terminal_state_boundary_study PRIVATE hacdcpf::hacdcpf)
+endif()
+
+# Capability audit: cross-domain fault propagation and binary-versus-DAE
+# restoration-entry state on a dynamically completed case33bw_acdc feeder.
+if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/tools/case33bw_acdc_propagation_study.cpp")
+  add_executable(case33bw_acdc_propagation_study
+    tools/case33bw_acdc_propagation_study.cpp)
+  target_link_libraries(case33bw_acdc_propagation_study PRIVATE hacdcpf::hacdcpf)
+endif()
+
+# N-k research benchmark: production DAE restoration-entry states, hybrid
+# AC/DC reconfiguration, trajectory-class accuracy and amortized cost audit.
+if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/tools/nk_acdc_reliability_study.cpp")
+  add_executable(nk_acdc_reliability_study
+    tools/nk_acdc_reliability_study.cpp)
+  target_link_libraries(nk_acdc_reliability_study PRIVATE hacdcpf::hacdcpf)
+  target_compile_definitions(nk_acdc_reliability_study PRIVATE
+    HACDCPF_PROJECT_ROOT="${CMAKE_CURRENT_SOURCE_DIR}")
+endif()
+
 # Paper experiment: deterministic small-case dynamic-security baseline.
 if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/tools/cyber_dynamic_safe_restoration_small.cpp")
   add_executable(cyber_dynamic_safe_restoration_small
