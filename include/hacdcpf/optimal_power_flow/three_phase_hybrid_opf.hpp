@@ -67,6 +67,24 @@ struct PhaseVSCDynamicEquilibrium {
   double max_differential_residual{0.0};
 };
 
+// Per-phase AC line thermal limit |sum_k coefficients[k]*v[nodes[k]]|^2 <=
+// i_max_pu^2, where the coefficients are the series-admittance entries of the
+// segment. Nodes are full AC phase-node indices; a segment incident to an
+// eliminated passive node is recovered through the Kron map T automatically.
+struct ACLineCurrentLimit {
+  std::vector<int> nodes;
+  std::vector<std::complex<double>> coefficients;
+  double i_max_pu{0.0};
+};
+
+// DC branch current limit (conductance_pu*(u_from - u_to))^2 <= i_max_pu^2.
+struct DCLineCurrentLimit {
+  int from_node{-1};
+  int to_node{-1};
+  double conductance_pu{0.0};
+  double i_max_pu{0.0};
+};
+
 struct ThreePhaseHybridOPFCase {
   std::string name;
   double base_mva{1.0};
@@ -93,6 +111,9 @@ struct ThreePhaseHybridOPFCase {
   Eigen::VectorXd v_dc_max_pu;
   std::vector<int> dc_reference_terminals;
   Eigen::VectorXd dc_reference_voltage_pu;
+
+  std::vector<ACLineCurrentLimit> ac_line_limits;
+  std::vector<DCLineCurrentLimit> dc_line_limits;
 };
 
 enum class ModelVariant {

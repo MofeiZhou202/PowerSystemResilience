@@ -3789,9 +3789,10 @@ ThreePhaseACSystem load_three_phase_system_from_opendss(
   reject_enabled_unsupported_class(
       ctx_Storages_Get_First, ctx_Storages_Get_Next,
       ctx_Storages_Get_Name, "Storages", "Storage");
-  reject_enabled_unsupported_class(
-      ctx_Reactors_Get_First, ctx_Reactors_Get_Next,
-      ctx_Reactors_Get_Name, "Reactors", "Reactor");
+  // Reactors are passive series, shunt, or neutral impedances that carry no
+  // independent power injection; their admittance is already assembled into the
+  // system Y matrix consumed by the sparse-Y phase-graph path, so enabled
+  // reactors are tolerated here rather than rejected.
 
   for (int has_line = ctx_Lines_Get_First(api.get());
        has_line != 0;

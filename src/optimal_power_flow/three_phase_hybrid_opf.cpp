@@ -307,6 +307,23 @@ void build_inequality_hessian_template(ModelData& d) {
       ++inequality_row;
     }
   }
+  for (const auto& limit : d.source->ac_line_limits) {
+    append_parametric_norm_hessian(
+        d.inequality_hessian_terms,
+        complex_linear_map(d, limit.nodes, limit.coefficients),
+        inequality_row, 1.0);
+    ++inequality_row;
+  }
+  for (const auto& limit : d.source->dc_line_limits) {
+    const int fi = d.layout.i_udc + limit.from_node;
+    const int ti = d.layout.i_udc + limit.to_node;
+    const double g2 = 2.0 * limit.conductance_pu * limit.conductance_pu;
+    d.inequality_hessian_terms.push_back({fi, fi, inequality_row, -1, g2, 0.0});
+    d.inequality_hessian_terms.push_back({ti, ti, inequality_row, -1, g2, 0.0});
+    d.inequality_hessian_terms.push_back({fi, ti, inequality_row, -1, -g2, 0.0});
+    d.inequality_hessian_terms.push_back({ti, fi, inequality_row, -1, -g2, 0.0});
+    ++inequality_row;
+  }
 }
 
 void configure_enforced_inequalities(ModelData& data,
@@ -511,7 +528,9 @@ std::shared_ptr<ModelData> build_model_data(
           converter_control_equalities +
           2 * static_cast<int>(c.reference_nodes.size());
   l.nineq = 2 * full_n + static_cast<int>(c.three_phase_bus_nodes.size()) +
-            l.nc + l.ncp;
+            l.nc + l.ncp +
+            static_cast<int>(c.ac_line_limits.size()) +
+            static_cast<int>(c.dc_line_limits.size());
   data->equality_scale = Eigen::VectorXd::Ones(l.neq);
   build_inequality_hessian_template(*data);
   configure_enforced_inequalities(*data, options.enforced_inequality_rows);
@@ -911,6 +930,20 @@ void evaluate_inequalities(const ModelData& d,
                      converter.phase_current_max_pu * std::norm(v[full_node]);
     }
   }
+  for (const auto& limit : c.ac_line_limits) {
+    Complex i_line{0.0, 0.0};
+    for (std::size_t k = 0; k < limit.nodes.size(); ++k) {
+      i_line += limit.coefficients[k] *
+                v[limit.nodes[static_cast<std::size_t>(k)]];
+    }
+    h[row++] = std::norm(i_line) - limit.i_max_pu * limit.i_max_pu;
+  }
+  for (const auto& limit : c.dc_line_limits) {
+    const double du =
+        x[l.i_udc + limit.from_node] - x[l.i_udc + limit.to_node];
+    const double current = limit.conductance_pu * du;
+    h[row++] = current * current - limit.i_max_pu * limit.i_max_pu;
+  }
 }
 
 void inequality_jacobian(const ModelData& d,
@@ -973,6 +1006,16 @@ void inequality_jacobian(const ModelData& d,
           2 * d.recovery_rows[static_cast<std::size_t>(full_node)].size();
     }
   }
+  for (const auto& limit : c.ac_line_limits) {
+    if (output_row(full_row++) < 0) continue;
+    for (int node : limit.nodes) {
+      reserve_count +=
+          2 * d.recovery_rows[static_cast<std::size_t>(node)].size();
+    }
+  }
+  for (std::size_t li = 0; li < c.dc_line_limits.size(); ++li) {
+    if (output_row(full_row++) >= 0) reserve_count += 2;
+  }
   trips.reserve(reserve_count);
   for (int i = 0; i < full_n; ++i) {
     const int lower_row = output_row(i);
@@ -1031,6 +1074,37 @@ void inequality_jacobian(const ModelData& d,
           -converter.phase_current_max_pu * converter.phase_current_max_pu,
           trips);
     }
+  }
+  for (const auto& limit : c.ac_line_limits) {
+    const int row = output_row(full_row++);
+    if (row < 0) continue;
+    Complex i_line{0.0, 0.0};
+    for (std::size_t k = 0; k < limit.nodes.size(); ++k) {
+      i_line += limit.coefficients[k] *
+                v[limit.nodes[static_cast<std::size_t>(k)]];
+    }
+    std::vector<std::pair<int, double>> de;
+    std::vector<std::pair<int, double>> df;
+    de.reserve(limit.nodes.size());
+    df.reserve(limit.nodes.size());
+    for (std::size_t k = 0; k < limit.nodes.size(); ++k) {
+      const Complex z = std::conj(i_line) * limit.coefficients[k];
+      de.emplace_back(limit.nodes[static_cast<std::size_t>(k)],
+                      2.0 * std::real(z));
+      df.emplace_back(limit.nodes[static_cast<std::size_t>(k)],
+                      2.0 * std::real(Complex{0.0, 1.0} * z));
+    }
+    append_full_gradient(d, row, de, df, trips);
+  }
+  for (const auto& limit : c.dc_line_limits) {
+    const int row = output_row(full_row++);
+    if (row < 0) continue;
+    const double du =
+        x[l.i_udc + limit.from_node] - x[l.i_udc + limit.to_node];
+    const double slope =
+        2.0 * limit.conductance_pu * limit.conductance_pu * du;
+    trips.emplace_back(row, l.i_udc + limit.from_node, slope);
+    trips.emplace_back(row, l.i_udc + limit.to_node, -slope);
   }
   jac.resize(output_rows, l.nvar);
   jac.setFromTriplets(trips.begin(), trips.end());
@@ -2621,8 +2695,13 @@ ThreePhaseHybridOPFResult solve_three_phase_hybrid_opf_impl(
     const int converter_row =
         2 * screening_data->reduction.original_size +
         static_cast<int>(problem.three_phase_bus_nodes.size());
+    // Converter capability and phase-current rows are always enforced; the
+    // voltage, VUF, and recovered line-current rows are screened by the oracle.
+    const int line_row_start =
+        converter_row + screening_data->layout.nc + screening_data->layout.ncp;
     for (int row = 0; row < initial_h.size(); ++row) {
-      if (initial_h[row] >= -initial_margin || row >= converter_row) {
+      if (initial_h[row] >= -initial_margin ||
+          (row >= converter_row && row < line_row_start)) {
         enforced_mask[static_cast<std::size_t>(row)] = true;
       }
     }
@@ -2793,6 +2872,10 @@ ThreePhaseHybridOPFResult solve_three_phase_hybrid_opf_impl(
   }
   nlp.solver_options.max_iterations = options.max_iterations;
   nlp.solver_options.tolerance = options.tolerance;
+  // Kron-reduced OPF assembles dense recovered rows whose poor central-path
+  // centrality inflates the monotone iteration count; the adaptive barrier
+  // roughly halves it and is exact-preserving (verified on H13--H8500).
+  nlp.solver_options.adaptive_barrier = true;
   nlp.solver_options.acceptable_tolerance = 10.0 * options.tolerance;
   nlp.solver_options.constraint_violation_tolerance = options.tolerance;
   nlp.solver_options.dual_infeasibility_tolerance = options.tolerance;

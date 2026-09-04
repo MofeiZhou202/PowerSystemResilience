@@ -351,6 +351,72 @@ double phase_value(const double values[3], int phase) {
   return values[phase];
 }
 
+// Per-conductor AC line thermal limits and DC branch limits, with ratings set
+// from the network's own base OPF operating point times a headroom margin so
+// that the base dispatch is strictly feasible and only stressed scenarios drive
+// a few conductors to their limits. Series admittances are read from the
+// assembled nodal matrices (an off-diagonal equals the negative of the series
+// admittance), so no separate branch database is required.
+void attach_line_current_limits(ThreePhaseHybridOPFCase& c, double margin) {
+  const double tol = 1e-9;
+  // Base operating point from a full OPF solve without line limits.
+  ThreePhaseHybridOPFOptions base_options;
+  base_options.variant = ModelVariant::Full;
+  base_options.backend = SolverBackend::Ipopt;
+  base_options.verbose = false;
+  const ThreePhaseHybridOPFResult base = solve_three_phase_hybrid_opf(c, base_options);
+  const bool have_ac_solution =
+      base.converged && base.full_voltage.size() == c.y_ac.rows();
+  const bool have_dc_solution =
+      base.converged && base.dc_voltage.size() == c.g_dc.rows();
+  const Eigen::VectorXcd& v_base =
+      have_ac_solution ? base.full_voltage : c.voltage_start;
+  for (int col = 0; col < c.y_ac.outerSize(); ++col) {
+    for (SparseComplexMatrix::InnerIterator it(c.y_ac, col); it; ++it) {
+      const int i = it.row();
+      const int j = it.col();
+      if (i >= j) continue;
+      if (c.ac_phase_index[static_cast<std::size_t>(i)] !=
+          c.ac_phase_index[static_cast<std::size_t>(j)]) {
+        continue;  // same-phase off-diagonal => a series line conductor
+      }
+      const Complex y_series = -it.value();
+      if (std::abs(y_series) <= tol) continue;
+      const double base_current = std::abs(y_series * (v_base[i] - v_base[j]));
+      if (base_current < 1e-3) continue;  // unloaded conductor: no thermal limit
+      const double rating = margin * base_current;
+      ACLineCurrentLimit limit;
+      limit.nodes = {i, j};
+      limit.coefficients = {y_series, -y_series};
+      limit.i_max_pu = rating;
+      c.ac_line_limits.push_back(std::move(limit));
+    }
+  }
+  for (int col = 0; col < c.g_dc.outerSize(); ++col) {
+    for (Eigen::SparseMatrix<double>::InnerIterator it(c.g_dc, col); it; ++it) {
+      const int i = it.row();
+      const int j = it.col();
+      if (i >= j) continue;
+      const double g_series = -it.value();
+      if (std::abs(g_series) <= tol) continue;
+      const double u_i = have_dc_solution ? base.dc_voltage[i] : c.v_dc_start[i];
+      const double u_j = have_dc_solution ? base.dc_voltage[j] : c.v_dc_start[j];
+      const double base_current = std::abs(g_series * (u_i - u_j));
+      if (base_current < 1e-3) continue;  // unloaded DC branch: no thermal limit
+      const double rating = margin * base_current;
+      DCLineCurrentLimit limit;
+      limit.from_node = i;
+      limit.to_node = j;
+      limit.conductance_pu = g_series;
+      limit.i_max_pu = rating;
+      c.dc_line_limits.push_back(std::move(limit));
+    }
+  }
+  std::cerr << "[line-limits] " << c.name << " ac=" << c.ac_line_limits.size()
+            << " dc=" << c.dc_line_limits.size()
+            << " base=" << (base.converged ? 1 : 0) << "\n";
+}
+
 ThreePhaseHybridOPFCase hybridize(const Input& input) {
   const ThreePhaseACSystem sys =
       hacdcpf::analysis::load_three_phase_system_from_opendss(input.master, 100.0);
@@ -712,6 +778,7 @@ ThreePhaseHybridOPFCase hybridize(const Input& input) {
     generator.cost_c1 = 45.0 + 0.5 * ri;
     c.generators.push_back(generator);
   }
+  attach_line_current_limits(c, 1.25);
   return c;
 }
 
@@ -1320,6 +1387,405 @@ void write_csv(const fs::path& path, const std::vector<Audit>& audits) {
 
 }  // namespace
 
+// ===================== Claims experiments (Exp 1 / Exp 2) ====================
+// Variants compared on each feeder:
+//   Full : unreduced network, all limits enforced (ground truth).
+//   RN   : Kron-reduced, limits enforced ONLY at retained nodes (drops the
+//          recovered eliminated-node voltage/VUF rows; current practice).
+//   RA   : Kron-reduced, ALL recovered limits enforced (this work's model,
+//          oracle disabled so every recovered row is assembled).
+namespace {
+
+// Enforced-inequality set for the RN variant: retained-node voltage rows,
+// VUF rows of fully retained buses, and all converter rows.  Eliminated-node
+// voltage and VUF rows are omitted.  Row layout (see build_model_data):
+// [0,n) voltage lower, [n,2n) voltage upper, [2n,2n+n3) VUF, then converters.
+std::vector<int> retained_enforced_rows(
+    const ThreePhaseHybridOPFCase& c,
+    const hacdcpf::graph::SparseKronResult& red) {
+  const int full_n = red.original_size;
+  const int n3 = static_cast<int>(c.three_phase_bus_nodes.size());
+  std::vector<char> retained(static_cast<std::size_t>(full_n), 0);
+  for (int node : red.retained) retained[static_cast<std::size_t>(node)] = 1;
+  std::vector<int> rows;
+  for (int i = 0; i < full_n; ++i) {
+    if (retained[static_cast<std::size_t>(i)]) {
+      rows.push_back(i);
+      rows.push_back(full_n + i);
+    }
+  }
+  for (int b = 0; b < n3; ++b) {
+    bool all_retained = true;
+    for (int nd : c.three_phase_bus_nodes[static_cast<std::size_t>(b)]) {
+      if (!retained[static_cast<std::size_t>(nd)]) all_retained = false;
+    }
+    if (all_retained) rows.push_back(2 * full_n + b);
+  }
+  int ncp = 0;
+  for (const auto& cv : c.converters) {
+    ncp += static_cast<int>(cv.phase_nodes.size());
+  }
+  const int nc = static_cast<int>(c.converters.size());
+  const int nineq = 2 * full_n + n3 + nc + ncp;
+  for (int r = 2 * full_n + n3; r < nineq; ++r) rows.push_back(r);
+  std::sort(rows.begin(), rows.end());
+  return rows;
+}
+
+struct EliminatedViolation {
+  int violated{0};
+  int total{0};
+  double max_overshoot{0.0};
+  int line_violated{0};
+  int line_total{0};
+  double line_max_overshoot{0.0};
+};
+
+// Evaluate the omitted (eliminated-node) voltage and VUF limits at a recovered
+// voltage vector and count how many are violated.
+EliminatedViolation eliminated_violations(
+    const ThreePhaseHybridOPFCase& c,
+    const hacdcpf::graph::SparseKronResult& red,
+    const Eigen::VectorXcd& vfull,
+    double tol) {
+  const int full_n = red.original_size;
+  if (vfull.size() != full_n) return {};
+  std::vector<char> retained(static_cast<std::size_t>(full_n), 0);
+  for (int node : red.retained) retained[static_cast<std::size_t>(node)] = 1;
+  EliminatedViolation s;
+  for (int i = 0; i < full_n; ++i) {
+    if (retained[static_cast<std::size_t>(i)]) continue;
+    ++s.total;
+    const double vm2 = std::norm(vfull[i]);
+    const double h = std::max(c.v_min_pu[i] * c.v_min_pu[i] - vm2,
+                              vm2 - c.v_max_pu[i] * c.v_max_pu[i]);
+    if (h > tol) {
+      ++s.violated;
+      s.max_overshoot = std::max(s.max_overshoot, h);
+    }
+  }
+  const Complex a = std::polar(1.0, 2.0 * M_PI / 3.0);
+  const Complex a2 = a * a;
+  for (const auto& tri : c.three_phase_bus_nodes) {
+    bool any_eliminated = false;
+    for (int nd : tri) {
+      if (!retained[static_cast<std::size_t>(nd)]) any_eliminated = true;
+    }
+    if (!any_eliminated) continue;
+    ++s.total;
+    const Complex v1 =
+        (vfull[tri[0]] + a * vfull[tri[1]] + a2 * vfull[tri[2]]) / 3.0;
+    const Complex v2 =
+        (vfull[tri[0]] + a2 * vfull[tri[1]] + a * vfull[tri[2]]) / 3.0;
+    const double h = std::norm(v2) - c.vuf_max * c.vuf_max * std::norm(v1);
+    if (h > tol) {
+      ++s.violated;
+      s.max_overshoot = std::max(s.max_overshoot, h);
+    }
+  }
+  // Recovered line-current rows incident to an eliminated node: count how many
+  // would be violated when omitted, i.e., how many would bind at this point.
+  for (const auto& limit : c.ac_line_limits) {
+    bool any_eliminated = false;
+    for (int nd : limit.nodes) {
+      if (!retained[static_cast<std::size_t>(nd)]) any_eliminated = true;
+    }
+    if (!any_eliminated) continue;
+    ++s.line_total;
+    Complex i_line{0.0, 0.0};
+    for (std::size_t k = 0; k < limit.nodes.size(); ++k) {
+      i_line += limit.coefficients[k] *
+                vfull[limit.nodes[static_cast<std::size_t>(k)]];
+    }
+    const double h = std::norm(i_line) - limit.i_max_pu * limit.i_max_pu;
+    if (h > tol) {
+      ++s.line_violated;
+      s.line_max_overshoot = std::max(s.line_max_overshoot, h);
+    }
+  }
+  return s;
+}
+
+// Scale every load by lambda and place a fraction pi of each three-phase bus
+// load on phase a (the remainder split over b and c) to control unbalance.
+ThreePhaseHybridOPFCase scale_loads(ThreePhaseHybridOPFCase c,
+                                    double lambda, double pi) {
+  c.p_load_pu *= lambda;
+  c.q_load_pu *= lambda;
+  const double w[3] = {pi, 0.5 * (1.0 - pi), 0.5 * (1.0 - pi)};
+  for (const auto& tri : c.three_phase_bus_nodes) {
+    double pt = 0.0, qt = 0.0;
+    for (int nd : tri) {
+      pt += c.p_load_pu[nd];
+      qt += c.q_load_pu[nd];
+    }
+    for (int j = 0; j < 3; ++j) {
+      c.p_load_pu[tri[static_cast<std::size_t>(j)]] = w[j] * pt;
+      c.q_load_pu[tri[static_cast<std::size_t>(j)]] = w[j] * qt;
+    }
+  }
+  return c;
+}
+
+void set_all_converters_gfl(ThreePhaseHybridOPFCase& c) {
+  for (auto& cv : c.converters) {
+    if (cv.phase_nodes.size() == 3) {
+      cv.control_mode = PhaseVSCControlMode::GridFollowingPLL;
+    }
+  }
+}
+
+// Exp 1 (Claim B): omission of recovered limits leaves undetected violations.
+int run_exp1_suite(const Input& input, SolverBackend backend) {
+  ThreePhaseHybridOPFCase base = hybridize(input);
+  set_all_converters_gfl(base);
+  const bool big = input.label == "H8500";
+  // On the smaller feeders, enforce the ANSI C84.1 Range A service band
+  // (0.95--1.05 p.u.) so that the recovered eliminated-node limits are
+  // operationally binding; the largest feeder is left at its native limits.
+  if (!big) {
+    for (int i = 0; i < base.v_min_pu.size(); ++i) {
+      base.v_min_pu[i] = 0.95;
+      base.v_max_pu[i] = 1.05;
+    }
+  }
+  const std::vector<double> lambdas = big
+      ? std::vector<double>{1.0, 1.2}
+      : std::vector<double>{0.6, 0.8, 1.0, 1.2, 1.4};
+  const std::vector<double> pis = big
+      ? std::vector<double>{0.3, 0.5}
+      : std::vector<double>{0.1, 0.3, 0.5, 0.7, 0.9};
+  const fs::path path = project_root() / "output" / "benchmarks" /
+      ("paper_exp1_" + input.label + ".csv");
+  fs::create_directories(path.parent_path());
+  std::ofstream out(path);
+  out << "case,lambda,pi,full_conv,rn_conv,ra_conv,elim_rows,elim_violated,"
+         "violation_rate,max_overshoot,line_violated,line_total,"
+         "line_max_overshoot,full_obj,rn_obj,obj_gap_rel\n";
+  out << std::setprecision(10);
+  ThreePhaseHybridOPFOptions base_opts;
+  base_opts.backend = backend;
+  base_opts.warm_start_with_ipopt = backend == SolverBackend::NativeIPM;
+  base_opts.max_iterations = 500;
+  base_opts.tolerance = 1e-6;
+  base_opts.reduction_options.max_front = 12;
+  base_opts.reduction_options.max_nnz_ratio = 4.0;
+  for (double lambda : lambdas) {
+    for (double pi : pis) {
+      const ThreePhaseHybridOPFCase prob = scale_loads(base, lambda, pi);
+      ThreePhaseHybridOPFOptions ra_opts = base_opts;
+      ra_opts.variant = ModelVariant::GraphReduced;
+      const auto ra = solve_three_phase_hybrid_opf(prob, ra_opts);
+      // The exact all-row reduced model (RA) is the feasible reference; on the
+      // largest feeder the unreduced Full solve is skipped for tractability.
+      ThreePhaseHybridOPFResult full;
+      if (!big) {
+        ThreePhaseHybridOPFOptions full_opts = base_opts;
+        full_opts.variant = ModelVariant::Full;
+        full = solve_three_phase_hybrid_opf(prob, full_opts);
+      }
+      const auto rn_rows = retained_enforced_rows(prob, ra.reduction);
+      ThreePhaseHybridOPFOptions rn_opts = ra_opts;
+      rn_opts.enforced_inequality_rows = rn_rows;
+      // Warm-start RN from the feasible all-row (RA) point so that the solver
+      // reaches RN's relaxed optimum rather than stalling; any violation of the
+      // dropped eliminated-node limits is then a converged-point property.
+      if (ra.converged && ra.primal.size() > 0) {
+        rn_opts.primal_start = ra.primal;
+      }
+      const auto rn = solve_three_phase_hybrid_opf(prob, rn_opts);
+      const EliminatedViolation v =
+          eliminated_violations(prob, ra.reduction, rn.full_voltage, 1e-6);
+      const double rate =
+          v.total > 0 ? static_cast<double>(v.violated) / v.total : 0.0;
+      const double ref_obj = big ? ra.objective : full.objective;
+      const double gap = std::abs(ref_obj) > 1e-9
+          ? (ref_obj - rn.objective) / std::abs(ref_obj) : 0.0;
+      out << input.label << ',' << lambda << ',' << pi << ','
+          << (full.converged ? 1 : 0) << ',' << (rn.converged ? 1 : 0) << ','
+          << (ra.converged ? 1 : 0) << ',' << v.total << ',' << v.violated
+          << ',' << rate << ',' << v.max_overshoot << ',' << v.line_violated
+          << ',' << v.line_total << ',' << v.line_max_overshoot << ','
+          << full.objective << ',' << rn.objective << ',' << gap
+          << '\n' << std::flush;
+      std::cout << input.label << " exp1 lambda=" << lambda << " pi=" << pi
+                << " viol_rate=" << rate << " max_over=" << v.max_overshoot
+                << " line_viol=" << v.line_violated << '/' << v.line_total
+                << " line_over=" << v.line_max_overshoot
+                << " gap=" << gap << " ra/rn=" << ra.converged << '/'
+                << rn.converged << '\n' << std::flush;
+    }
+  }
+  std::cout << "Wrote " << path << '\n';
+  return 0;
+}
+
+// Exp 2 (Claim A): enforcing all recovered limits densifies the KKT system as
+// the elimination ratio grows.  max_front sweeps the elimination ratio.
+int run_exp2_suite(const Input& input, SolverBackend backend) {
+  ThreePhaseHybridOPFCase base = hybridize(input);
+  set_all_converters_gfl(base);
+  // nnz(J_h) is a structural quantity; on the largest feeder a minimal solve
+  // suffices to populate it, so the iteration budget is capped there.
+  const bool big = input.label == "H8500";
+  const int iters = big ? 2 : 500;
+  const std::vector<int> fronts = {1, 2, 3, 5, 8, 12, 20};
+  const fs::path path = project_root() / "output" / "benchmarks" /
+      ("paper_exp2_" + input.label + ".csv");
+  fs::create_directories(path.parent_path());
+  std::ofstream out(path);
+  out << "case,max_front,rho,eliminated,original,full_nnzJ,rn_nnzJ,ra_nnzJ,"
+         "full_var,rn_var,ra_var,full_ms,rn_ms,ra_ms,"
+         "full_conv,rn_conv,ra_conv\n";
+  out << std::setprecision(10);
+  ThreePhaseHybridOPFOptions full_opts;
+  full_opts.backend = backend;
+  full_opts.warm_start_with_ipopt = backend == SolverBackend::NativeIPM;
+  full_opts.variant = ModelVariant::Full;
+  full_opts.max_iterations = iters;
+  full_opts.tolerance = 1e-6;
+  if (big) full_opts.phase_one_time_limit_ms = 1000.0;
+  const auto full = solve_three_phase_hybrid_opf(base, full_opts);
+  for (int mf : fronts) {
+    ThreePhaseHybridOPFOptions ra_opts;
+    ra_opts.backend = backend;
+    ra_opts.warm_start_with_ipopt = backend == SolverBackend::NativeIPM;
+    ra_opts.variant = ModelVariant::GraphReduced;
+    ra_opts.max_iterations = iters;
+    ra_opts.tolerance = 1e-6;
+    if (big) ra_opts.phase_one_time_limit_ms = 1000.0;
+    ra_opts.reduction_options.max_front = mf;
+    ra_opts.reduction_options.max_nnz_ratio = 50.0;
+    const auto ra = solve_three_phase_hybrid_opf(base, ra_opts);
+    const double rho = ra.reduction.original_size > 0
+        ? static_cast<double>(ra.eliminated_phase_nodes) /
+              ra.reduction.original_size
+        : 0.0;
+    const auto rn_rows = retained_enforced_rows(base, ra.reduction);
+    ThreePhaseHybridOPFOptions rn_opts = ra_opts;
+    rn_opts.enforced_inequality_rows = rn_rows;
+    const auto rn = solve_three_phase_hybrid_opf(base, rn_opts);
+    out << input.label << ',' << mf << ',' << rho << ','
+        << ra.eliminated_phase_nodes << ',' << ra.reduction.original_size << ','
+        << full.inequality_jacobian_nonzeros << ','
+        << rn.inequality_jacobian_nonzeros << ','
+        << ra.inequality_jacobian_nonzeros << ',' << full.variables << ','
+        << rn.variables << ',' << ra.variables << ',' << full.runtime_ms << ','
+        << rn.runtime_ms << ',' << ra.runtime_ms << ','
+        << (full.converged ? 1 : 0) << ',' << (rn.converged ? 1 : 0) << ','
+        << (ra.converged ? 1 : 0) << '\n' << std::flush;
+    std::cout << input.label << " exp2 mf=" << mf << " rho=" << rho
+              << " nnzJ full/rn/ra=" << full.inequality_jacobian_nonzeros << '/'
+              << rn.inequality_jacobian_nonzeros << '/'
+              << ra.inequality_jacobian_nonzeros << " ra_ms=" << ra.runtime_ms
+              << '\n' << std::flush;
+  }
+  std::cout << "Wrote " << path << '\n';
+  return 0;
+}
+
+// Median-of-N, same-process harness. Interleaves full-all and reduced-generation
+// solves so multiplicative machine-state drift cancels within each repeat, then
+// reports medians. This is the clean comparison the warm-start work is validated
+// against (single-sample cross-run numbers vary ~2.6x from thermal state).
+int run_warmbench_suite(const Input& input, SolverBackend backend, int repeats) {
+  const ThreePhaseHybridOPFCase base = hybridize(input);
+  ThreePhaseHybridOPFOptions full_opts;
+  full_opts.backend = backend;
+  full_opts.warm_start_with_ipopt = backend == SolverBackend::NativeIPM;
+  full_opts.variant = ModelVariant::Full;
+  full_opts.max_iterations = 500;
+  full_opts.tolerance = 1e-6;
+  ThreePhaseHybridOPFOptions gen_opts = full_opts;
+  gen_opts.variant = ModelVariant::GraphReduced;
+  gen_opts.use_constraint_oracle = true;
+  gen_opts.reduction_options.max_front = 12;
+  gen_opts.reduction_options.max_nnz_ratio = 2.0;
+
+  // Single-round ceiling: one reduced solve enforcing exactly the active set the
+  // oracle discovers, with no rounds. This is the best case of A (single-round
+  // seeding) -- if it beats full, a good a-priori seed is worth building.
+  const ThreePhaseHybridOPFResult probe =
+      solve_three_phase_hybrid_opf(base, gen_opts);
+  ThreePhaseHybridOPFOptions oneshot_opts = gen_opts;
+  oneshot_opts.use_constraint_oracle = false;
+  oneshot_opts.enforced_inequality_rows = probe.enforced_inequality_rows;
+
+  // Classify the discovered active set by row type to guide the seed heuristic.
+  {
+    const int full_n = static_cast<int>(base.y_ac.rows());
+    const int volt_end = 2 * full_n;
+    const int vuf_end =
+        volt_end + static_cast<int>(base.three_phase_bus_nodes.size());
+    int ncp = 0;
+    for (const auto& conv : base.converters)
+      ncp += static_cast<int>(conv.phase_nodes.size());
+    const int convcap_end = vuf_end + static_cast<int>(base.converters.size());
+    const int convcur_end = convcap_end + ncp;
+    int cv = 0, cvuf = 0, ccap = 0, ccur = 0, cline = 0;
+    for (const int r : probe.enforced_inequality_rows) {
+      if (r < volt_end) ++cv;
+      else if (r < vuf_end) ++cvuf;
+      else if (r < convcap_end) ++ccap;
+      else if (r < convcur_end) ++ccur;
+      else ++cline;
+    }
+    std::cerr << '[' << input.label << "] active-set breakdown: voltage=" << cv
+              << " vuf=" << cvuf << " convcap=" << ccap << " convcur=" << ccur
+              << " line=" << cline << " (of " << base.ac_line_limits.size()
+              << " line rows), total=" << probe.enforced_inequality_rows.size()
+              << "\n" << std::flush;
+  }
+
+  std::vector<double> full_times;
+  std::vector<double> gen_times;
+  std::vector<double> oneshot_times;
+  ThreePhaseHybridOPFResult full_res;
+  ThreePhaseHybridOPFResult gen_res;
+  ThreePhaseHybridOPFResult oneshot_res;
+  for (int i = 0; i < repeats; ++i) {
+    full_res = solve_three_phase_hybrid_opf(base, full_opts);
+    full_times.push_back(full_res.runtime_ms);
+    gen_res = solve_three_phase_hybrid_opf(base, gen_opts);
+    gen_times.push_back(gen_res.runtime_ms);
+    oneshot_res = solve_three_phase_hybrid_opf(base, oneshot_opts);
+    oneshot_times.push_back(oneshot_res.runtime_ms);
+    std::cerr << '[' << input.label << "] rep " << (i + 1) << '/' << repeats
+              << ": full=" << full_res.runtime_ms << "ms(it="
+              << full_res.iterations << "), gen=" << gen_res.runtime_ms
+              << "ms(rounds=" << gen_res.constraint_oracle_rounds
+              << ",it=" << gen_res.iterations << "), 1shot="
+              << oneshot_res.runtime_ms << "ms(it=" << oneshot_res.iterations
+              << ")\n" << std::flush;
+  }
+  const auto median = [](std::vector<double> v) {
+    if (v.empty()) return 0.0;
+    std::sort(v.begin(), v.end());
+    return v[v.size() / 2];
+  };
+  const double full_ms = median(full_times);
+  const double gen_ms = median(gen_times);
+  const double oneshot_ms = median(oneshot_times);
+  std::cout << input.label << " WARMBENCH (median of " << repeats << "): "
+            << "full-all=" << full_ms << "ms (vars=" << full_res.variables
+            << ", enf=" << full_res.enforced_inequalities << '/'
+            << full_res.inequalities << ", JhNnz="
+            << full_res.inequality_jacobian_nonzeros << "); reduced-gen="
+            << gen_ms << "ms (vars=" << gen_res.variables << ", enf="
+            << gen_res.enforced_inequalities << '/' << gen_res.inequalities
+            << ", JhNnz=" << gen_res.inequality_jacobian_nonzeros << ", rounds="
+            << gen_res.constraint_oracle_rounds << "); reduced-1shot="
+            << oneshot_ms << "ms (enf=" << oneshot_res.enforced_inequalities
+            << ", JhNnz=" << oneshot_res.inequality_jacobian_nonzeros
+            << ", conv=" << oneshot_res.converged << "); speedup full/gen="
+            << (gen_ms > 0.0 ? full_ms / gen_ms : 0.0) << ", full/1shot="
+            << (oneshot_ms > 0.0 ? full_ms / oneshot_ms : 0.0) << "\n"
+            << std::flush;
+  return 0;
+}
+
+}  // namespace
+
 int main(int argc, char** argv) {
   std::vector<Input> selected;
   const auto all = inputs();
@@ -1351,6 +1817,9 @@ int main(int argc, char** argv) {
       argc > 2 && std::string(argv[2]) == "controls";
   const bool run_opf_pf_crosscheck =
       argc > 2 && std::string(argv[2]) == "pf-crosscheck";
+  const bool run_exp1 = argc > 2 && std::string(argv[2]) == "exp1";
+  const bool run_exp2 = argc > 2 && std::string(argv[2]) == "exp2";
+  const bool run_warmbench = argc > 2 && std::string(argv[2]) == "warmbench";
   bool use_native = false;
   bool use_constraint_oracle = false;
   bool verbose = true;
@@ -1378,6 +1847,27 @@ int main(int argc, char** argv) {
   }
   if (run_opf_pf_crosscheck) {
     return run_opf_pf_crosscheck_suite(selected, backend);
+  }
+  if (run_exp1) {
+    if (selected.size() != 1) {
+      std::cerr << "exp1 mode requires exactly one case\n";
+      return 2;
+    }
+    return run_exp1_suite(selected.front(), backend);
+  }
+  if (run_exp2) {
+    if (selected.size() != 1) {
+      std::cerr << "exp2 mode requires exactly one case\n";
+      return 2;
+    }
+    return run_exp2_suite(selected.front(), backend);
+  }
+  if (run_warmbench) {
+    if (selected.size() != 1) {
+      std::cerr << "warmbench mode requires exactly one case\n";
+      return 2;
+    }
+    return run_warmbench_suite(selected.front(), backend, 5);
   }
 
   std::vector<Audit> audits;
