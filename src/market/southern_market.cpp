@@ -1,6 +1,8 @@
 #include "hacdcpf/market/southern_market.hpp"
+#include "southern_solver_status.hpp"
 
 #include <algorithm>
+#include <array>
 #include <chrono>
 #include <cmath>
 #include <map>
@@ -63,8 +65,11 @@ struct Build {
   double constant_cost{0};
   std::map<std::string, double> fixed;
   std::string stage;
+  std::set<int> compact_units;
+  bool compact{false};
   int var(std::string name, double lo, double hi, double cost = 0,
-          const char* category = "energy", bool binary = false, bool freeze = false) {
+          const char* category = "energy", bool binary = false, bool freeze = false,
+          bool implied_integer = false) {
     if (freeze) {
       const auto found = fixed.find(name);
       if (found == fixed.end()) throw std::logic_error("missing preceding-stage variable: " + name);
@@ -74,7 +79,7 @@ struct Build {
     const int id = static_cast<int>(costs.size());
     columns.emplace(name, id); costs.push_back(cost); cost_categories.emplace_back(category);
     model.linear_part.vars.push_back({binary ? engine::VarType::Binary : engine::VarType::Continuous, lo, hi, name});
-    if (binary && !freeze) model.binary_idx.push_back(id);
+    if (binary && !freeze && !implied_integer) model.binary_idx.push_back(id);
     return id;
   }
   int col(const char* family, int id, int t) const { return columns.at(key(family, id, t)); }
@@ -116,6 +121,7 @@ Build build_model(const J& j, const std::string& stage,
   Build b; b.stage = stage; b.fixed = std::move(previous);
   const bool uc = stage == "scuc", pricing = stage == "lmp";
   const auto& exec = j.at("execution");
+  b.compact = exec.value("formulation",std::string("compact")) == "compact";
   const auto& penalties = exec.at(pricing ? "pricing_penalties" : "penalties");
   const auto w = [&](int t) { return num(j.at("periods")[t], "weight_hr"); };
   const auto dt = [&](int t) { return num(j.at("periods")[t], "duration_hr"); };
@@ -141,17 +147,25 @@ Build build_model(const J& j, const std::string& stage,
 
   for (const auto& g : j.at("generators")) {
     const int id = g.at("id"), bus = g.at("bus"), area = bus_area.at(bus);
+    // Exact projection and event hull: southern_execution_contract.md,
+    // "2000-bus exact formulation experiment" (2.6.3.13 derivation).
+    const bool compact_class = b.compact && g.at("startup_cost")[0] == g.at("startup_cost")[1]
+      && g.at("startup_cost")[1] == g.at("startup_cost")[2]
+      && std::all_of(g.at("startup_curves_mw").begin(),g.at("startup_curves_mw").end(),[](const J& c){return c.empty();});
+    if (compact_class) b.compact_units.insert(id);
     const bool renewable = g.at("kind") == "renewable" || g.at("kind") == "wind" || g.at("kind") == "solar";
     for (int t = 0; t < T; ++t) {
       const double active = at(g, "available", t)*(1-at(g, "must_off", t));
       b.var(key("u", id, t), at(g, "must_on", t), active, uc ? num(g, "minimum_cost_per_hour")*w(t) : 0, "minimum_output", true, !uc);
-      b.var(key("start", id, t), 0, 1, 0, "startup", true, !uc);
-      b.var(key("stop", id, t), 0, 1, 0, "startup", true, !uc);
+      b.var(key("start", id, t), 0, 1, uc && compact_class ? g.at("startup_cost")[0].get<double>() : 0, "startup", true, !uc, b.compact);
+      b.var(key("stop", id, t), 0, 1, 0, "startup", true, !uc, b.compact);
       b.var(key("stable", id, t), 0, 1, 0, "energy", false, !uc);
+      if (!compact_class) {
       b.var(key("offline_minutes", id, t), 0, max_time, 0, "energy", false, !uc);
       for (int k = 0; k < 3; ++k)
         b.var(key(("start"+std::to_string(k)).c_str(), id, t), 0, 1,
               uc ? g.at("startup_cost")[k].get<double>() : 0, "startup", true, !uc);
+      }
       double lo = 0, hi = at(g, "pmax_mw", t)*active;
       if (pricing) {
         // Remove accepted predecessor bound roundoff before taking the pricing
@@ -191,10 +205,17 @@ Build build_model(const J& j, const std::string& stage,
       Expr transition = u; transition.add(prev_u, -1).add(start, -1).add(stop);
       b.equal(key("2.6.3.13/state", id, t), transition);
       Expr events = start; events.add(stop); b.upper(key("2.6.3.13/exclusive", id, t), events, 1);
+      if (b.compact) {
+        Expr e = start; e.add(u,-1); b.upper(key("2.6.3.13/start_on",id,t),e);
+        e = start; e.add(prev_u); b.upper(key("2.6.3.13/start_off",id,t),e,1);
+        e = stop; e.add(prev_u,-1); b.upper(key("2.6.3.13/stop_on",id,t),e);
+        e = stop; e.add(u); b.upper(key("2.6.3.13/stop_off",id,t),e,1);
+      }
       starts.add(start); stops.add(stop);
+      const double elapsed = t ? minute(t)-minute(t-1) : 0;
+      if (!compact_class) {
       Expr categories; for (int k = 0; k < 3; ++k) categories.add(b.col(("start"+std::to_string(k)).c_str(), id, t));
       categories.add(start, -1); b.equal(key("2.6.3.13/start_class", id, t), categories);
-      const double elapsed = t ? minute(t)-minute(t-1) : 0;
       Expr downtime = t ? b.expr("offline_minutes", id, t-1) : Expr(num(g, "initial_on") ? 0 : num(g, "initial_state_minutes"));
       downtime.constant += elapsed; downtime.add(prev_u, -elapsed);
       // Integer-minute history makes hot/warm/cold thresholds disjoint, including ties.
@@ -212,6 +233,7 @@ Build build_model(const J& j, const std::string& stage,
       Expr offdiff = off; offdiff.add(downtime, -1);
       Expr plus = offdiff; plus.add(u, -max_time); b.upper(key("history/offline_up", id, t), plus);
       Expr minus; minus.add(offdiff, -1).add(u, -max_time); b.upper(key("history/offline_down", id, t), minus);
+      }
       // 2.6.3.12: event windows include the residual obligation of the authored initial state.
       for (int s = 0; s <= t; ++s) {
         if (minute(t)-minute(s) < num(g, "min_up_minutes")) {
@@ -523,6 +545,16 @@ Build build_model(const J& j, const std::string& stage,
 }
 
 engine::SolveResult solve(const Build& b, const J& input) {
+  if (input.at("execution").value("solver",std::string("highs")) == "gurobi") {
+    // Same sparse model and row ordering; options and parity ledger in execution contract.
+    engine::GurobiOptions options;
+    options.time_limit_sec = num(input.at("execution"),"time_limit_sec");
+    options.mip_gap = num(input.at("execution"),"mip_gap");
+    options.threads = input.at("execution").value("threads",0);
+    engine::GurobiAdapter adapter(options);
+    if (!adapter.available()) throw std::runtime_error("Gurobi unavailable: library or license initialization failed; no solver substitution performed");
+    return b.model.binary_idx.empty() ? adapter.solve_lp(b.model.linear_part) : adapter.solve_milp(b.model);
+  }
   if (b.model.binary_idx.empty()) return engine::HighsAdapter{}.solve_lp(b.model.linear_part);
   engine::BCOptions options;
   options.time_limit_sec = num(input.at("execution"), "time_limit_sec");
@@ -531,11 +563,18 @@ engine::SolveResult solve(const Build& b, const J& input) {
 }
 
 J stage_result(const Build& b, const engine::SolveResult& solved, const J& j) {
+  const auto failed = detail::southern_solver_status(solved.stats.status, false, solved.stats.mip_gap);
   J out = {{"stage", b.stage}, {"solver_status", solved.stats.status}, {"solver", solved.stats.solver_name},
     {"solver_success", solved.stats.success}, {"variables", b.costs.size()}, {"binary_variables", b.model.binary_idx.size()},
     {"equalities", b.eq.size()}, {"inequalities", b.le.size()}, {"runtime_sec", solved.stats.runtime_sec},
+    {"nonzeros", b.model.linear_part.A.nonZeros()+b.model.linear_part.Aeq.nonZeros()},
+    {"formulation",b.compact ? "compact" : "reference"}, {"compact_units",b.compact_units.size()},
     {"mip_gap", solved.stats.success ? J(solved.stats.mip_gap) : J(nullptr)},
-    {"optimality_proven", solved.stats.success && solved.stats.status.find("optimal") != std::string::npos && solved.stats.mip_gap <= 1e-9}, {"feasible", false}};
+    {"requested_solver",j.at("execution").value("solver",std::string("highs"))},
+    {"requested_time_limit_sec",num(j.at("execution"),"time_limit_sec")},
+    {"requested_mip_gap",num(j.at("execution"),"mip_gap")},
+    {"requested_threads",j.at("execution").value("threads",0)},
+    {"optimality_proven", false}, {"solution_quality",failed.quality}, {"limit_reached",failed.limit_reached}, {"feasible", false}};
   if (solved.x.size() != static_cast<Eigen::Index>(b.costs.size()) || !solved.x.allFinite()) return out;
   double residual = 0;
   J families = J::object(), binding = J::array();
@@ -560,10 +599,45 @@ J stage_result(const Build& b, const engine::SolveResult& solved, const J& j) {
     residual = std::max({residual, v.lb-solved.x[i], solved.x[i]-v.ub});
     if (v.type == engine::VarType::Binary) residual = std::max(residual, std::abs(solved.x[i]-std::round(solved.x[i])));
   }
+  // Recover and audit every projected history/class row in original units,
+  // including big-M inequalities. See the exact-projection proof in the contract.
+  std::map<int,std::array<std::vector<double>,3>> recovered_classes;
+  double reconstructed_residual = 0;
+  const double max_time = num(j.at("periods")[T-1],"start_minute")+1000001;
+  for (const auto& g : j.at("generators")) {
+    const int id = g.at("id");
+    if (!b.compact_units.count(id)) continue;
+    auto& classes = recovered_classes[id];
+    double offline = num(g,"initial_on") ? 0 : num(g,"initial_state_minutes");
+    double previous_u = num(g,"initial_on");
+    for (int t = 0; t < T; ++t) {
+      const double u = solved.x[b.col("u",id,t)], start = solved.x[b.col("start",id,t)];
+      const double elapsed = t ? num(j.at("periods")[t],"start_minute")-num(j.at("periods")[t-1],"start_minute") : 0;
+      const double downtime = offline+elapsed*(1-previous_u);
+      const int category = downtime < num(g,"warm_after_minutes") ? 0 : downtime < num(g,"cold_after_minutes") ? 1 : 2;
+      const double lo[3] = {0,num(g,"warm_after_minutes"),num(g,"cold_after_minutes")};
+      const double hi[3] = {lo[1]-1,lo[2]-1,max_time};
+      for (int k = 0; k < 3; ++k) {
+        const double sk = k == category ? start : 0;
+        classes[k].push_back(sk);
+        reconstructed_residual = std::max({reconstructed_residual,-downtime+max_time*sk-max_time+lo[k],
+          downtime+max_time*sk-max_time-hi[k],-sk,sk-1,std::abs(sk-std::round(sk))});
+      }
+      offline = u > .5 ? 0 : downtime;
+      reconstructed_residual = std::max({reconstructed_residual,-offline,offline-max_time,
+        offline+max_time*u-max_time,offline-downtime-max_time*u,downtime-offline-max_time*u});
+      previous_u = u;
+    }
+  }
+  residual = std::max(residual,reconstructed_residual);
+  out["reconstructed_max_residual"] = reconstructed_residual;
   out["max_residual"] = residual; out["constraint_families"] = families; out["binding_constraints"] = binding;
   out["binding_constraint_count"] = binding_count;
   out["binding_constraints_truncated"] = binding_count > binding.size();
   out["feasible"] = solved.stats.success && residual <= tolerance;
+  const auto quality = detail::southern_solver_status(solved.stats.status, out.at("feasible").get<bool>(), solved.stats.mip_gap);
+  out["solution_quality"] = quality.quality;
+  out["optimality_proven"] = quality.optimality_proven;
   out["objective"] = b.model.linear_part.c.dot(solved.x);
   J costs = J::object();
   for (size_t i = 0; i < b.costs.size(); ++i) {
@@ -592,6 +666,9 @@ J stage_result(const Build& b, const engine::SolveResult& solved, const J& j) {
   };
   out["generators"] = rows("generators", {{"power_mw", "p"}, {"online", "u"}, {"start", "start"}, {"stop", "stop"},
     {"hot_start", "start0"}, {"warm_start", "start1"}, {"cold_start", "start2"}, {"trajectory_mw", "trajectory"}, {"renewable_deviation_mw", "renewable_deviation"}});
+  for (auto& g : out["generators"]) if (const auto found = recovered_classes.find(g.at("id")); found != recovered_classes.end()) {
+    g["hot_start"] = found->second[0]; g["warm_start"] = found->second[1]; g["cold_start"] = found->second[2];
+  }
   out["storage"] = rows("storage", {{"discharge_mw", "dis"}, {"charge_mw", "ch"}, {"energy_mwh", "energy"}});
   out["controllable_loads"] = rows("controllable_loads", {{"reduction_mw", "load_reduction"}});
   double reduced_energy = 0;
@@ -795,6 +872,13 @@ J audit_security(const J& j, const std::map<std::string,double>& x,
 
 }  // namespace
 
+J southern_market_solver_capabilities() {
+  const bool gurobi = engine::GurobiAdapter{}.available();
+  return J::array({{{"id","highs"},{"available",true},{"label","HiGHS"}},
+    {{"id","gurobi"},{"available",gurobi},{"label","Gurobi"},
+     {"reason",gurobi ? "Local environment initialized; model-specific license limits checked at solve" : "Gurobi library or license initialization unavailable"}}});
+}
+
 J run_southern_day_ahead_market(const J& boundary) {
   const auto begin = std::chrono::steady_clock::now();
   const J effective = validate_southern_market(boundary);
@@ -833,7 +917,10 @@ J run_southern_day_ahead_market(const J& boundary) {
         out["error"] = e.what(); return finish();
       }
       const double assembly = std::chrono::duration<double>(std::chrono::steady_clock::now()-start).count();
-      const auto solved = solve(model, effective); out[stage] = stage_result(model, solved, effective);
+      const auto solved = solve(model, effective);
+      const auto audit_start = std::chrono::steady_clock::now();
+      out[stage] = stage_result(model, solved, effective);
+      out[stage]["audit_sec"] = std::chrono::duration<double>(std::chrono::steady_clock::now()-audit_start).count();
       out[stage]["assembly_sec"] = assembly;
       if (!out[stage].at("feasible").get<bool>()) { out["status"] = stage+"_failed"; return finish(); }
       dispatch = solution_map(model, solved);
@@ -848,8 +935,14 @@ J run_southern_day_ahead_market(const J& boundary) {
         continue;
       }
     }
+    const auto assembly_start = std::chrono::steady_clock::now();
     auto lmp = build_model(effective, "lmp", std::move(dispatch), cuts);
-    const auto priced = solve(lmp, effective); out["lmp"] = stage_result(lmp, priced, effective);
+    const double assembly = std::chrono::duration<double>(std::chrono::steady_clock::now()-assembly_start).count();
+    const auto priced = solve(lmp, effective);
+    const auto audit_start = std::chrono::steady_clock::now();
+    out["lmp"] = stage_result(lmp, priced, effective);
+    out["lmp"]["assembly_sec"] = assembly;
+    out["lmp"]["audit_sec"] = std::chrono::duration<double>(std::chrono::steady_clock::now()-audit_start).count();
     if (!out["lmp"].at("feasible").get<bool>() || !out["lmp"].value("prices_valid", false)) { out["status"] = "lmp_failed"; return finish(); }
     out["prices_valid"] = true; out["feasible"] = ac_required;
     out["status"] = ac_required ? "converged" : "schedule_only";

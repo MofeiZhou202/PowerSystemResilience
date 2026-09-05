@@ -4,7 +4,7 @@
 <meta charset="UTF-8"/>
 <meta name="viewport" content="width=device-width,initial-scale=1.0"/>
 <title>HySim-XJTU-HRPES</title>
-<link rel="stylesheet" href="css/style.css?v=20260818-gui-tour-v1"/>
+<link rel="stylesheet" href="css/style.css?v=20260905-lookahead2"/>
 <script src="https://cdn.plot.ly/plotly-2.27.0.min.js"></script>
 </head>
 <body>
@@ -125,6 +125,7 @@
   <button id="moduleTimeSeries"   class="module-btn" data-module="timeSeries" data-group="planning">时序生产模拟</button>
   <button id="moduleMarketBehavior" class="module-btn" data-module="marketBehavior" data-group="market">市场行为</button>
   <button id="moduleMarketBoundary" class="module-btn" data-module="marketBoundary" data-group="market">边界条件</button>
+  <button id="moduleMarketOperation" class="module-btn" data-module="marketOperation" data-group="market">运行模拟</button>
   <button id="moduleMarket"       class="module-btn" data-module="market" data-group="market">市场出清</button>
   <button id="moduleMarketSecurity" class="module-btn" data-module="marketSecurity" data-group="market">安全校核</button>
   <button id="moduleMarketSettlement" class="module-btn" data-module="marketSettlement" data-group="market">市场结算</button>
@@ -1297,7 +1298,7 @@
   </div>
   <!-- Native day-ahead electricity market -->
   <div class="sub-section market-sub-section" data-sub="market" hidden>
-    <nav id="marketWorkflowSteps" class="market-flow-strip" aria-label="电力市场五步流程">
+    <nav id="marketWorkflowSteps" class="market-flow-strip" data-market-scope="behavior boundary clearing security settlement" aria-label="电力市场五步流程">
       <button type="button" class="market-flow-step" data-market-step-target="marketBehavior"><b>1</b><span>市场行为</span><small>主体与策略</small></button>
       <span class="market-flow-arrow" aria-hidden="true">→</span>
       <button type="button" class="market-flow-step" data-market-step-target="marketBoundary"><b>2</b><span>边界条件</span><small>预测与可用性</small></button>
@@ -3349,6 +3350,129 @@
         </div>
         </div><!-- /result-group timeSeries -->
         <div class="result-group" data-result-group="market">
+          <div class="topo-section" id="marketOperationWorkspace" data-market-result-scope="operation" hidden>
+            <h4>运行模拟 · 周 / 月</h4>
+            <div class="operation-actions">
+              <label>市场算例<select id="operationCase"><option value="demo">风光水火储 / 可控负荷演示</option><option value="example">单节点解析验证</option><option value="activsg2000">ACTIVSg2000 水电扩展（2000 节点）</option></select></label>
+              <button id="operationLoadCase" type="button">加载算例</button>
+              <button id="operationBoundary" type="button">编辑完整边界与报价</button>
+              <button id="operationReload" type="button">重载任务</button>
+            </div>
+            <p id="operationBoundaryName"></p>
+            <section id="operationRuleBoundaries" aria-label="细则市场边界">
+              <h4>日前市场边界 · 细则 2.3–2.4</h4>
+              <label>边界类别<select id="operationRuleCategory"></select></label>
+              <p id="operationRuleDefinition"></p>
+              <p id="operationRuleCoverage"></p>
+              <div id="operationRuleFields"></div>
+              <details><summary>条款覆盖与当前算例</summary><div id="operationRuleCatalog"></div></details>
+              <p>交易申报：机组与储能报价属于细则 2.5；可控负荷补偿报价、概率场景及节点缺额罚变量为研究扩展。</p>
+            </section>
+            <div class="southern-view-tabs" role="tablist" aria-label="运行模拟模式">
+              <button id="operationForecastMode" role="tab" aria-selected="true" type="button">预测场景</button>
+              <button id="operationManualMode" role="tab" aria-selected="false" type="button">手工周 / 月边界</button>
+            </div>
+            <section id="marketForecastWorkspace">
+              <fieldset id="forecastConfig"><legend>一周预测与联合场景（研究扰动）</legend>
+                <div id="forecastSolverOptions" class="operation-fields"></div>
+                <div class="operation-actions"><button id="forecastUseManual" type="button">采用手工周边界为底稿</button><button id="forecastResetTemplate" type="button">恢复每日基准模板</button><span id="forecastTemplateStatus">底稿：每日基准模板</span></div>
+                <div class="operation-fields">
+                  <label>预测口径<select id="forecastMode"><option value="probabilistic">概率分布</option><option value="interval">区间范围（无概率）</option></select></label>
+                  <label>预测起始日<input id="forecastStartDate" type="date" required></label>
+                  <label>场景数<input id="forecastCount" type="number" min="1" max="512" required></label>
+                  <label>随机种子<input id="forecastSeed" type="number" min="0" max="4294967295" required></label>
+                  <label>相邻日潜变量相关<input id="forecastRho" type="number" min="-0.95" max="0.95" step="any" required></label>
+                  <label>缺额 / 富余罚价（元/MWh）<input id="forecastPenalty" type="number" min="1" max="10000000" required></label>
+                  <label class="operation-checkbox"><input id="forecastExplain" type="checkbox">相对预测中心恢复重算</label>
+                </div>
+                <div id="forecastMarginals"></div>
+                <details><summary>七日＋末日预安排预测中心</summary><div id="forecastCenters"></div></details>
+                <details><summary>联合相关矩阵（高斯潜变量）</summary><div id="forecastCorrelation"></div></details>
+              </fieldset>
+              <div class="operation-actions">
+                <button id="forecastGenerate" type="button" class="btn-primary">生成一周市场边界</button>
+                <button id="forecastRun" type="button" disabled>逐日出清全部场景</button>
+                <button id="forecastPause" type="button" disabled>当日结束后暂停</button>
+                <button id="forecastCancel" type="button" disabled>终止场景任务</button>
+                <button id="forecastReload" type="button">重载场景任务</button>
+                <button id="forecastExport" type="button" disabled>导出预测、边界与结果</button>
+              </div>
+              <p id="forecastStatus" role="status" aria-live="polite"></p>
+              <p class="operation-scope">ΔPᵢ = 缺额 − 富余；异常幅值采用 |ΔPᵢ|。ΔPᵢⱼ 为线路有功越限，阈值 10⁻⁶ MW。</p>
+              <div id="forecastStatistics"></div>
+              <div class="operation-charts"><div id="forecastDeltaPChart" class="market-chart"></div><div id="forecastDeltaPijChart" class="market-chart"></div></div>
+              <details><summary>672 个时段的异常统计</summary><div id="forecastPeriodStatistics"></div></details>
+              <div class="operation-fields">
+                <label>相关性输入<select id="forecastScatterFactor"></select></label>
+                <label>相关性结果<select id="forecastScatterMetric"><option value="deficit_mwh">周缺额 MWh</option><option value="overload_mwh">周越限积分和 MW·h</option></select></label>
+              </div>
+              <div id="forecastScatterChart" class="market-chart"></div><div id="forecastCorrelations"></div>
+              <details><summary>节点异常统计</summary><div id="forecastNodeStatistics"></div></details>
+              <details><summary>线路越限统计</summary><div id="forecastLineStatistics"></div></details>
+              <details><summary>预测假设与统计范围</summary><div id="forecastLimitations"></div></details>
+              <div class="operation-fields"><label>场景与时段原因复核<select id="forecastScenario"></select></label></div>
+              <div id="forecastBoundaryPreview"></div>
+            </section>
+            <fieldset id="operationConfig" data-operation-mode="manual" hidden><legend>仿真设置</legend>
+              <div id="operationSolverOptions" class="operation-fields"></div>
+              <div class="operation-fields">
+                <label>时间尺度<select id="operationHorizon"><option value="week">1 周（7 天）</option><option value="month">1 个自然月</option></select></label>
+                <label>起始日期<input id="operationStartDate" type="date" required></label>
+                <label>缺额 / 富余罚价（元/MWh）<input id="operationPenalty" type="number" min="1" max="10000000" value="100000" required></label>
+                <label class="operation-checkbox"><input id="operationExplain" type="checkbox" checked>单因素恢复重算</label>
+              </div>
+              <div class="operation-fields">
+                <label>边界日期<select id="operationEditDay"></select></label>
+                <label>起始时段<input id="operationFirst" type="number" min="1" max="96" value="1" required></label>
+                <label>结束时段<input id="operationLast" type="number" min="1" max="96" value="96" required></label>
+              </div>
+              <details open><summary>预测与报价扰动倍数（研究情景参数）</summary><div class="operation-fields" id="operationFactors"></div></details>
+              <div class="operation-fields">
+                <label>停运机组 ID（逗号分隔）<input id="operationGeneratorOutages" type="text"></label>
+                <label>停运线路 ID（逗号分隔）<input id="operationBranchOutages" type="text"></label>
+              </div>
+              <div class="operation-actions"><button id="operationSaveDay" type="button">应用当日边界</button><span id="operationDraftStatus" role="status"></span></div>
+              <h5>当日设备级边界值</h5>
+              <div class="operation-fields">
+                <label>条款字段<select id="operationBoundaryField"></select></label>
+                <label>边界实体<select id="operationBoundaryEntity"></select></label>
+                <label>本日覆盖起点<input id="operationOverrideFirst" type="number" min="1" max="96" value="1"></label>
+                <label>本日覆盖终点<input id="operationOverrideLast" type="number" min="1" max="96" value="96"></label>
+                <label id="operationBoundaryValueLabel">边界值<input id="operationBoundaryValue" type="number"></label>
+                <label>调整依据<input id="operationBoundaryReason" type="text" maxlength="512"></label>
+              </div>
+              <p id="operationBoundaryAuthored"></p>
+              <div class="operation-actions"><button id="operationBoundaryAdd" type="button">加入当日覆盖</button><button id="operationBoundaryPreview" type="button">校验并预览当日边界</button></div>
+              <p id="operationBoundaryFeedback" role="status"></p>
+              <div id="operationBoundaryEdits"></div>
+              <div id="operationBoundaryResolved"></div>
+              <div id="operationPlan" class="topo-table-wrap"></div>
+            </fieldset>
+            <div class="operation-actions" data-operation-mode="manual" hidden>
+              <button id="operationRun" type="button" class="btn-primary">开始仿真</button>
+              <button id="operationPause" type="button" disabled>当日结束后暂停</button>
+              <button id="operationResume" type="button" disabled>继续仿真</button>
+              <button id="operationCancel" type="button" disabled>终止任务</button>
+              <button id="operationExport" type="button" disabled>导出报告 JSON</button>
+            </div>
+            <p id="operationStatus" data-operation-mode="manual" hidden role="status" aria-live="polite">尚未运行</p>
+            <p class="operation-scope">诊断模式 · 15 分钟 · 逐日滚动 · 未进行交流安全认证</p>
+            <div id="operationSummary" class="results-summary"></div>
+            <div class="operation-charts">
+              <div id="operationBalanceChart" class="market-chart"></div>
+              <div id="operationOverloadChart" class="market-chart"></div>
+            </div>
+            <div id="operationDays" class="topo-table-wrap"></div>
+            <div class="operation-fields">
+              <label>结果日期<select id="operationResultDay"></select></label>
+              <label>结果时段<select id="operationSlot"></select></label>
+              <label class="operation-checkbox"><input id="operationOnlyAffected" type="checkbox" checked>仅异常设备</label>
+            </div>
+            <h5>时段原因复核</h5><div id="operationCauses"></div>
+            <h5>节点缺额 / 富余与数值残差</h5><div id="operationNodes"></div>
+            <h5>输电线路越限</h5><div id="operationLines"></div>
+            <details><summary>计算范围与结果有效性</summary><div id="operationLimitations"></div></details>
+          </div>
           <div class="topo-section" id="southernMarketWorkspace" data-market-result-scope="behavior boundary clearing security settlement">
             <h4>南方区域日前市场 · 边界与出清</h4>
             <div class="southern-actions">
@@ -3884,7 +4008,7 @@
   <script src="js/components.js?v=20260712-cb-source-flow-v2"></script>
   <script src="js/search_registry.js?v=20260709-phase5"></script>
   <script src="js/core/network_overview.js?v=20260719-webgl-lod-v1"></script>
-  <script src="js/canvas.js?v=20260728-gui-performance-v3"></script>
+  <script src="js/canvas.js?v=20260905-market-canvas1"></script>
   <script src="js/core/analysis_contracts.js?v=20260714-market-v3"></script>
   <script src="js/core/task_manager.js?v=20260712-hysim-phase3-v1"></script>
   <script src="js/core/api_client.js?v=20260712-hysim-phase3-v1"></script>
@@ -3895,8 +4019,12 @@
   <script src="js/core/layout_engine.js?v=20260712-hysim-layout-v1"></script>
   <script src="js/core/accessibility.js?v=20260712-hysim-phase5-v1"></script>
   <script src="js/core/runtime_diagnostics.js?v=20260712-hysim-phase6-v1"></script>
-  <script src="js/app.js?v=20260905-southern-entry2"></script>
-  <script src="js/core/southern_market.js?v=20260905-entry2"></script>
+  <script src="js/app.js?v=20260905-market-canvas1"></script>
+  <script src="js/core/market_canvas.js?v=20260905-boundary1"></script>
+  <script src="js/core/southern_market.js?v=20260905-gurobi1"></script>
+  <script src="js/core/market_operation.js?v=20260905-gurobi1"></script>
+  <script src="js/core/market_boundary_controls.js?v=20260905-lookahead2"></script>
+  <script src="js/core/market_forecast.js?v=20260905-gurobi1"></script>
   <script src="js/core/help_panel.js?v=20260817-help-panel-v1"></script>
   <script src="vendor/marked.min.js?v=15.0.12"></script>
   <script src="js/core/help_center.js?v=20260818-help-center-v1"></script>

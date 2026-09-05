@@ -212,7 +212,7 @@ J southern_market_schema() {
       {"penalties", array("M1 / M2 / M3 / M4", number("出清罚因子", "CNY/MWh", 0.001), 4, 4)},
       {"pricing_penalties", array("M1' / M2' / M3' / M4'", number("定价罚因子", "CNY/MWh", 0.001), 4, 4)},
       {"price_delta", number("定价邻域比例", "p.u.", 0.000001, 1)},
-      {"time_limit_sec", number("每次 MILP 时限", "s", 0.1, 3600)},
+      {"time_limit_sec", number("每次优化时限（HiGHS仅MILP）", "s", 0.1, 3600)},
       {"mip_gap", number("相对最优性间隙", "", 0, 0.1)},
       {"ac_security", choice("交流安全校核", {"required", "schedule_only"})},
       {"security_iterations", integer("全链路安全迭代上限", 1, 20)}})}
@@ -221,6 +221,9 @@ J southern_market_schema() {
   auto& required = schema["required"];
   schema["properties"]["execution"]["properties"]["balance_policy"] = choice("节点平衡策略", {"strict", "diagnostic"});
   schema["properties"]["execution"]["properties"]["balance_penalty_per_mwh"] = number("诊断缺额/富余罚价", "CNY/MWh", 1, 1e7);
+  schema["properties"]["execution"]["properties"]["solver"] = choice("市场求解器", {"highs", "gurobi"});
+  schema["properties"]["execution"]["properties"]["threads"] = integer("Gurobi线程数（0自动；HiGHS须0）",0,128);
+  schema["properties"]["execution"]["properties"]["formulation"] = choice("等价建模形式", {"compact", "reference"});
   required.erase(std::remove(required.begin(), required.end(), J("controllable_loads")), required.end());
   auto& bus_properties = schema["properties"]["buses"]["items"]["properties"];
   bus_properties["gs_mw"] = number("并联电导额定损耗", "MW", 0);
@@ -234,11 +237,56 @@ J southern_market_schema() {
   return schema;
 }
 
+J southern_market_boundary_catalog() {
+  // Rules 2.3/2.4 distinguish physical boundaries from 2.5 commercial offers.
+  // Field coverage and unresolved source-material conversions are not certification.
+  const auto schema = southern_market_schema();
+  J items = J::array();
+  const auto add = [&](const char* id, const char* title, const char* clauses,
+                       const char* definition, const char* limitation,
+                       std::initializer_list<const char*> paths) {
+    J fields = J::array();
+    for (const auto* path : paths) {
+      const std::string p(path); const auto dot = p.find('.');
+      const auto table = p.substr(0,dot), field = p.substr(dot+1);
+      fields.push_back({{"table",table},{"field",field},
+        {"schema",schema.at("properties").at(table).at("items").at("properties").at(field)}});
+    }
+    items.push_back({{"id",id},{"title",title},{"clauses",clauses},{"definition",definition},
+      {"coverage","resolved_inputs"},{"limitation",limitation},{"fields",fields}});
+  };
+  add("dispatch_load","统调负荷预测","2.4.1.1","各平衡区运行日每15分钟统调需求，共96点。","输入为预测结果，未自动实现气象、节假日等原始数据预测流程。",{"areas.load_mw"});
+  add("bus_load","母线负荷预测","2.4.1.2","220kV母线（海南110kV）节点负荷；与统调总量的偏差按原始母线预测比例分摊。","研究算例可含其他电压等级；无功预测仅在基准交流校核输入维护，滚动有功出清不使用无功预测。",{"buses.load_mw"});
+  add("priority_transfer","跨省跨区送电下限及外来电计划","2.4.2–2.4.3","D-2校核后的跨省优先计划保障执行下限、交易功率/电量界及区外计划。","D-2审批与披露不自动执行；计划调整依据必须输入。关口及方向在基准边界建立。",{"trades.min_mw","trades.max_mw","trades.original_min_mwh","trades.adjusted_min_mwh","trades.max_mwh","trades.adjustment_reason","dc_links.min_mw","dc_links.max_mw"});
+  add("nonmarket_schedule","不参与现货优化机组出力安排","2.3.9；2.4.10–2.4.11","非市场水电、新能源、生物质、核电、自备及区外主体的经校核96点计划净注入。","计划编制、公平消纳和调度调整流程未自动优化；主体类别与接入点在基准边界建立。",{"external_schedules.power_mw"});
+  add("unit_availability","发电机组检修计划及可用状态","2.3.1–2.3.2","D-1日12:00前确定96点可用/不可用状态；检修、缺燃料等不可用，调试仍可用。","可用不等于已开机；不自动执行检修审批、燃料真实性核验与考核。",{"generators.available"});
+  add("network_availability","输变电设备检修、投产与退役计划","2.4.4–2.4.5","批复的设备检修和投退运时段决定网络可用状态。","仅支持基准中已建模的支路/变压器等值与直流端口；新增拓扑须先编辑基准。",{"branches.available","dc_links.available"});
+  add("unit_limits","发电机组运行约束","2.2.4–2.2.9；2.3.3–2.3.7","额定/水头/供热/燃料/试验条件形成的96点出力界、启停及爬坡条件。","热电工况、燃料供应、启动通知时刻需外部换算；滚动入口拒绝非空启停轨迹；初始状态由跨日承接。",{"generators.pmin_mw","generators.pmax_mw","generators.ramp_up_mw_min","generators.ramp_down_mw_min","generators.min_up_minutes","generators.min_down_minutes","generators.max_starts","generators.max_stops","generators.price_setting"});
+  add("renewable_forecast","新能源功率预测及出力下限","2.3.10；2.4.10","新能源D日及D+1日预测；参与现货优化主体的预测功率与省区下限系数α。","当前日窗仅存D日96点和D+1峰谷代表点，不接收完整D+1的96点或自动填补缺测预测。",{"generators.forecast_mw","generators.renewable_alpha"});
+  add("reserve","运行备用及一次调频要求","2.4.6；2.6.3.2–2.6.3.4","分区正负备用、网络受限量、负荷侧负备用及一次调频容量要求。","跨省备用交易、辅助服务预出清需外部结果，不以电能量报价替代。",{"areas.reserve_up_mw","areas.reserve_down_mw","areas.network_reserve_reduction_mw","areas.load_side_down_reserve_mw","areas.primary_mw","primary_groups.requirement_mw","generators.reserve_up_eligible","generators.reserve_down_eligible","generators.primary_fraction","generators.regulation_up_mw","generators.regulation_down_mw","generators.regulation_source"});
+  add("network_security","系统安全约束：设备与断面极限功率","2.4.7.1","调度给定输变电设备及关键断面正反向功率限值。","滚动出清为线性有功模型；rate_mva和电压界属于交流校核输入，滚动不执行交流安全认证。",{"branches.min_mw","branches.max_mw","sections.min_mw","sections.max_mw"});
+  add("commitment_security","系统安全约束：必开必停及机组群","2.4.7.2–2.4.7.4","系统/非系统原因的必开必停时段，单机及机组群出力和开机台数限制。","必停不同于自主停机；安全成因、通知和审批依据由来源记录说明。",{"generators.must_on","generators.must_off","groups.min_online","groups.max_online","groups.min_mw","groups.max_mw"});
+  add("reservoir_use","水电厂水库运用约束","2.3.8；2.2.6","区间来水、耗水率、生态航运出库界、防洪与下泄变幅、水位上下限。","采用恒定库面/耗水率与固定时滞；未完整表示水位库容曲线、水头曲线、振动区、固定泄洪计划、水位升降幅原始约束。",{"reservoirs.inflow_m3_s","reservoirs.water_m3_mwh","reservoirs.min_level_m","reservoirs.max_level_m","reservoirs.release_min_m3_s","reservoirs.release_max_m3_s","reservoirs.release_ramp_m3_s","reservoirs.spill_max_m3_s"});
+  add("hydro_dispatch","水电优化调度约束","2.4.8","中长期水电计划形成的调度水位、日发电量、出力及交易成分电量界，含同库多机和梯级协同边界。","流域与同库关联在基准建立；不自动制定中长期水能计划、分省消纳方案或梯级检修协调方案。",{"reservoirs.min_level_m","reservoirs.max_level_m","reservoirs.min_mwh","reservoirs.max_mwh","groups.min_mwh","groups.max_mwh","groups.min_mw","groups.max_mw","trades.adjusted_min_mwh","trades.max_mwh"});
+  add("clean_energy","清洁能源消纳约束","2.4.9","依据消纳政策设定弃风弃光和弃水限制。","新能源偏差上界与泄洪上界为当前模型表达；泄洪不必然等于经济性弃水，不能混同。",{"generators.max_curtailment_mw","reservoirs.spill_max_m3_s"});
+  add("storage_operation","储能运行边界","2.2.8；2.6.3.16","充放电功率、能量上下限、终值及循环约束。","保留每日日末申报目标；不把报价作为物理容量；初始能量跨日继承。",{"storage.available","storage.discharge_min_mw","storage.discharge_max_mw","storage.charge_min_mw","storage.charge_max_mw","storage.min_mwh","storage.max_mwh","storage.terminal_mwh","storage.max_cycles"});
+  return {{"rule","南方区域电力市场现货电能量交易实施细则（2025年V1.0版）"},
+    {"sections","2.3–2.4（运行边界）；2.2（参数）；2.5（交易申报）"}, {"items",items},
+    {"commercial_inputs",{"generators.segments","storage.discharge_price","storage.charge_price"}},
+    {"research_extensions",{"controllable_loads","balance_policy=diagnostic","probabilistic/interval scenario sampling"}},
+    {"model_limitations",{"条款目录覆盖不等于物理模型完全等价。所有条目展示已建模字段与未覆盖原始材料。","报价属于交易申报；可控负荷补偿、概率扰动和节点缺额罚变量为研究扩展。","96点边界加D+1两代表点；周/月顺序运行，不是全周期联合优化。"}}};
+}
+
 J validate_southern_market(const J& boundary) {
   check(boundary, southern_market_schema(), "");
   if (boundary.at("execution").value("balance_policy", std::string("strict")) == "diagnostic")
     require(boundary.at("execution").at("ac_security") == "schedule_only", "execution", "diagnostic slack requires schedule_only; it is not AC certification");
   J effective = boundary;
+  if (!effective["execution"].contains("solver")) effective["execution"]["solver"] = "highs";
+  if (!effective["execution"].contains("threads")) effective["execution"]["threads"] = 0;
+  if (!effective["execution"].contains("formulation")) effective["execution"]["formulation"] = "compact";
+  require(effective["execution"]["solver"] == "gurobi" || effective["execution"]["threads"] == 0,
+    "execution", "nonzero threads currently requires gurobi");
   if (!effective.contains("controllable_loads")) effective["controllable_loads"] = J::array();
   std::map<std::string, std::set<int>> ids;
   for (const auto* name : {"areas", "buses", "generators", "branches", "sections", "external_schedules", "groups", "storage", "dc_hubs", "dc_links", "trades", "reservoirs", "primary_groups"}) {
@@ -410,7 +458,7 @@ J make_southern_market_example() {
   j["execution"] = {{"interpretation", "explicit-time-incremental-bids-si-water-v1"}, {"priority_policy", "hard"},
     {"lmp_storage_policy", "power_neighborhood_only"}, {"lmp_renewable_priority", "omit_unlisted"},
     {"penalties", {10000, 1000, 1000, 10000}}, {"pricing_penalties", {12000, 1200, 1200, 12000}},
-    {"price_delta", 0.05}, {"time_limit_sec", 120}, {"mip_gap", 0}, {"ac_security", "required"}, {"security_iterations", 4}};
+    {"price_delta", 0.05}, {"time_limit_sec", 120}, {"mip_gap", 0}, {"solver","highs"}, {"threads",0}, {"ac_security", "required"}, {"security_iterations", 4}};
   validate_southern_market(j);
   return j;
 }

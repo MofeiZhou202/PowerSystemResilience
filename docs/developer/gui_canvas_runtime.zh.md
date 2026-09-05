@@ -2,6 +2,11 @@
 
 # 画布运行时与结果回放
 
+南方市场模块通过 `web/js/core/market_canvas.js` 在主视口显示独立市场拓扑，
+保留原工程 Canvas；按市场稳定 ID 联动场景/日期/时段、点击、播放和局部邻域。
+有效性、单位和回归证据见[市场 Canvas 契约](../modules/market/southern_execution_contract.md#市场-canvas-身份与时段契约)。
+下述工程 WebGL 总览使用另一套视图和身份空间。
+
 对于大模型，主视口不再是一块空的 headless 表面。
 `web/js/core/network_overview.js` 使用 WebGL2 与 LOD0/1/2 聚合渲染完整的
 母线/一次边图，且不创建任何逐母线的 SVG DOM。渲染状态存放在预分配的

@@ -55,6 +55,12 @@ hacdcpf_add_test(test_uc_mobile_storage    test_uc_mobile_storage.cpp)
 # integration suites can be configured in the same CTest tree.
 hacdcpf_add_test(hacdcpf_test_market_simulation test_market_simulation.cpp)
 hacdcpf_add_test(test_southern_market test_southern_market.cpp)
+if(UNIX)
+  add_executable(run_southern_market_benchmark run_southern_market_benchmark.cpp)
+  target_link_libraries(run_southern_market_benchmark PRIVATE hacdcpf)
+  target_compile_definitions(run_southern_market_benchmark PRIVATE HACDCPF_TEST_DATA_DIR="${CMAKE_SOURCE_DIR}/data")
+endif()
+hacdcpf_add_test(test_market_forecast test_market_forecast.cpp)
 hacdcpf_add_test(test_integrated_energy_campus test_integrated_energy_campus.cpp)
 hacdcpf_add_test(test_scaling_regression  test_scaling_regression.cpp)
 hacdcpf_add_test(test_hacdcdss            test_hacdcdss.cpp)
@@ -889,6 +895,18 @@ if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/run_gui_server.cpp")
                 --server "$<TARGET_FILE:run_gui_server>")
       set_tests_properties(southern_market_e2e PROPERTIES
         LABELS "gui;e2e;browser;market" TIMEOUT 180)
+      add_test(NAME market_operation_e2e
+        COMMAND "${HACDCPF_NODE_EXECUTABLE}"
+                "${CMAKE_SOURCE_DIR}/tests/e2e/market_operation_e2e.mjs"
+                --server "$<TARGET_FILE:run_gui_server>")
+      set_tests_properties(market_operation_e2e PROPERTIES
+        LABELS "gui;e2e;browser;market" TIMEOUT 300)
+      add_test(NAME market_forecast_e2e
+        COMMAND "${HACDCPF_NODE_EXECUTABLE}"
+                "${CMAKE_SOURCE_DIR}/tests/e2e/market_forecast_e2e.mjs"
+                --server "$<TARGET_FILE:run_gui_server>")
+      set_tests_properties(market_forecast_e2e PROPERTIES
+        LABELS "gui;e2e;browser;market" TIMEOUT 300)
     endif()
 
     add_test(NAME rpo_gui_e2e

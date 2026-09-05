@@ -1,5 +1,13 @@
 # Canvas Runtime and Result Playback
 
+Southern market modules use a separate market topology inside the main viewport,
+implemented by `web/js/core/market_canvas.js`. They preserve the engineering
+Canvas model and use typed Southern stable IDs, synchronized scenario/day/slot
+results and bounded large-case neighborhoods. See the
+[market Canvas contract](../modules/market/southern_execution_contract.md#市场-canvas-身份与时段契约)
+for validity, clicking, playback and regression evidence. The engineering
+WebGL overview described below is a different view and identity space.
+
 For large models the main viewport is no longer an empty headless surface.
 `web/js/core/network_overview.js` renders the full bus/primary-edge graph with
 WebGL2 and LOD0/1/2 aggregation while creating no per-bus SVG DOM. Render state

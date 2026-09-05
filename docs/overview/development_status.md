@@ -8,8 +8,147 @@ the current Git worktrees remain authoritative.
 
 ## Southern Market Execution and Boundary GUI
 
-GUI entry repair: `/xjtu/#southern-market` opens the workspace directly;
-entering any market stage also reveals it. The named case selector exposes the
+Gurobi integration is verified: explicit Southern execution and
+operation/forecast solver options, per-call time/gap/threads, sparse LP dispatch
+through the existing MIPSolvers adapter, ranged-row dual remapping and honest
+limit status handling. Local Gurobi 13.0 license initialization and two adapter/
+parity tests (41 assertions) passed, including actual TimeLimit LP without Pi.
+Final Release Southern passes 30 cases / 11263 assertions, forecast 8 / 12503;
+four browser suites pass (34.89 s) with real Gurobi manual/forecast dispatch.
+Rebuilt ASan/UBSan with Gurobi disabled passes `[solver_options]` (1 / 9), including
+explicit unavailable failure and unchanged carry. This does not sanitize Gurobi.
+The new port 8085 server completed a multi-resource manual week and a fixed-input
+forecast week with Gurobi, 2 threads, 120 s/call, 1% gap target. Day-1 audited
+SCUC/SCED objective is 481998.849107 CNY, stage residuals below 9e-14; SCUC took
+0.169 s in this small run, not a scale claim. Exports and screenshots are
+`output/market-operation/gurobi-{week,forecast}-evidence.json` and `gurobi-*.png`.
+Both this repository and sibling MIPSolvers contain the required source changes.
+
+Rolling correction: windows now assemble D+1 peak/valley time-series inputs from
+the following sampled/overridden 96-point forecast, with stable-ID/source-slot
+provenance. Calendar editors include a forecast-only terminal day; sampling uses
+8 days but executes/statistically integrates 7. Solver quality is audited before
+optimality labeling; limited/unproven complete scenarios are separately counted.
+New hand oracle: next-day 180 MW minimum at 00:00 and 2 MW/min ramp causes D-end
+150 MW carry and 17.5 MWh surplus. Demand compensation now changes correctly at
+the two representatives: 397220 CNY, versus the old template-tail 396410 CNY
+(difference 2*0.25*20*(90-9)=810). Final macOS Release rebuild passes Southern
+27 cases / 11214 assertions and forecast 8 / 12503. Rebuilt ASan/UBSan Southern
+`[lookahead]` passes 3 / 438 (leak detection disabled), no sanitizer report.
+All four registered market browser suites pass (33.22 s); JavaScript syntax and
+`git diff --check` pass. Multi-resource seven-day replay on port 8084 completed,
+with day 7 using day 8 load 550 MW. Evidence:
+`output/market-operation/lookahead-demo-evidence.json`; live desktop/mobile
+screenshots `lookahead-live-*.png`. Older evidence below predates this correction.
+Remaining solver work: process isolation and whole-day budgets; no 2000-node throughput claim.
+
+Rule boundary organization now follows sections 2.3/2.4, using 15 backend-owned
+categories with definitions, schema fields, entity counts and explicit coverage
+limits. Daily typed `boundary_overrides` enter the real rolling solver and forecast
+template; metadata/probabilistic offers are distinguished from physical inputs.
+Raw bus forecasts are preserved through job creation, with proportional
+reconciliation after daily edits. A read-only `preview` operation exposes authored
+and effective boundaries; day node results now carry effective `load_mw` for Canvas.
+Three new tests (336 assertions) cover admitted-field round trips, invalid overlays,
+200 MW allocation 50/150 -> 100/100, and 40 MW nonmarket injection reducing generator
+dispatch 100 -> 60 MW, including forecast templates. Release Southern passes
+24 cases / 2035 assertions; rebuilt forecast passes 7 / 12486. Rebuilt ASan/UBSan
+passes the new boundary tests (3 / 336; leak detection disabled as in the baseline).
+All four registered market E2E suites pass, including real rule-field editing,
+sampled-day preview, clearing, reload, atomic failure and mobile.
+Remaining original-rule gaps include nonlinear reservoir/head curves, vibration
+zones, fixed spill plans, level-rate bounds, full D+1 forecast ingestion and business
+approval/forecast-material conversion. This is not complete rule certification.
+The review server's multi-resource week also completed 7 days with day 2 authored
+dispatch load 700 MW and reservoir inflow 150 m3/s. Both day-2 deficit and line
+excess integrals were zero; the joint boundary restoration was valid. This is a
+synthetic feasible boundary case, not evidence that every boundary edit creates
+violations. Export: `output/market-operation/rule-boundary-demo-evidence.json`;
+desktop/mobile hydro catalog screenshots: `rule-hydro-*.png` in that directory.
+The following Canvas-only evidence predates this backend boundary extension.
+
+Market Canvas synchronization now uses an isolated Southern topology in the
+main viewport (`web/js/core/market_canvas.js`). Stable typed market IDs never
+overwrite engineering Canvas state. Scenario/day/slot controls, daily following,
+playback, node/line clicks, result table links, resource lookup and boundary
+editor navigation are connected. Failed/pending/stale data are gray/unavailable;
+restoration differences remain system conditional sensitivities. Large cases
+show an explicitly bounded 80-bus neighborhood, with all devices selectable.
+The four registered market browser suites pass with real Canvas interaction,
+100 MW deficit color changes, 50/75 MW line excess, forecast/API value parity,
+engineering same-ID isolation, mobile screenshots and 2000-bus last-ID picking.
+Artifacts: `output/market-operation/overload.png`, `canvas-mobile.png` and the
+existing Southern/forecast evidence directories. This frontend change does not
+alter numerical models or backend schemas; no new C++/sanitizer or large-case
+clearing claim is made.
+The existing synthetic multi-resource forecast was replayed for all 3 paths /
+21 daily windows. Live Canvas desktop/mobile checks passed; screenshots are
+`output/market-operation/demo-canvas-{desktop,mobile}.png`. Scene 1, September 8,
+00:00 shows line 1 at 1035.951 MW against +/-82.179 MW, with 953.772 MW excess.
+These deliberately stressed synthetic results are diagnostic, not operating limits
+that passed an AC security assessment.
+
+Forecast extension: the operation page now defaults to probabilistic / interval
+seven-day scenario generation. Seven factors include separate generation/storage
+and controllable-load compensation offers. Gaussian copula/AR1 correlations,
+interval stratification, independent weekly carry, per-slot/entity Delta P and
+Delta Pij statistics, valid/unknown denominators, Wilson intervals and paired
+restoration to daily prediction centers are connected through
+`/api/session/market_forecast`. Whole-report export includes the base boundary.
+Forecast centers multiply the baseline daily curve (and any authored daily
+overrides); no claim of fitted real-world forecasts, node-specific errors,
+15-minute random innovations or large-case ensemble throughput is made.
+
+Release and rebuilt ASan/UBSan `test_market_forecast` both pass 7 cases / 12486
+assertions. Uniform mean/variance are .981108/.342838 versus 1/(1/3), within
+the preregistered .02 tolerance; AR1 correlation .579475 versus .6, within .1.
+Two-path hand oracle: event fraction .5, mean weekly deficit 8400 MWh; an unknown
+third path expands probability bounds to [1/3,2/3] without changing valid-only
+means. Original Southern Release passes 21 / 1699. All four registered market
+browser suites pass, including forecast statistics, export/reload, interval
+semantics, atomic rejection, cancellation, cause restoration and mobile charts.
+The rebuilt sanitizer rolling-operation regression passes 5 cases / 1250
+assertions; no sanitizer report. Leak detection remains disabled as in the
+existing macOS baseline.
+
+The multi-resource forecast demo completes 3 weekly paths / 21 daily windows
+(seed 42, seven triangular factors, load/wind latent correlation -.3,
+AR1 .5, authored load/maintenance stress). Mean weekly deficit is
+10962.6607637 MWh; mean node/line weekly peak excess is
+495.0653368 / 952.3247118 MW. All three paths have events; Wilson95 is
+[.438503,1], explicitly unsuitable as a calibrated real-world risk estimate.
+Export and desktop/mobile screenshots: `output/market-forecast/demo-*`.
+
+The market workflow now contains a Canvas/results split "运行模拟" page at
+`/xjtu/#market-operation`. Its browser-driven task API runs sequential Southern
+98-slot daily windows, carries realized slot 95 state, and reports the first
+96 slots per day for a week or actual calendar month. Daily boundary factors,
+interval outages, diagnostic deficit/surplus, signed line-limit violations,
+conditional prices and one-factor restoration comparisons are connected end
+to end. Pause/resume/cancel and stale revision rejection are explicit.
+Each generated path uses rolling diagnosis with penalty slacks, not a full-horizon
+joint optimum or AC certification. Startup/shutdown
+power trajectories are rejected at rolling admission; daily storage targets
+remain authored. Large-case week/month clearing has not been executed.
+
+Current Release tests pass 21 cases / 1699 assertions. Predictions match:
+100 MW deficit / 2400 MWh per day, 50 MW surplus / 1200 MWh, line tightening
+adds 25 MW for one hour (25 MW h), 7 days = 672 slots, leap February = 2784
+slots, delayed downstream reservoir ends at 195.5 m then 291.5 m.
+Registered operation browser E2E covers week/month, restored-factor evidence,
+nonzero line overload, reload/resume/cancel/stale revisions and desktop/mobile.
+Generic market E2E expectation was updated for the new menu entry; it and the
+Southern GUI suite pass. Rebuilt `macos-asan-ubsan` also passes all 21 cases /
+1699 assertions with `ASAN_OPTIONS=detect_leaks=0 UBSAN_OPTIONS=halt_on_error=1`.
+The multi-resource demo completes seven days with all changed-factor restoration
+runs valid; source boundary, results and screenshots are under
+`output/market-operation/demo-*`. The deliberately extreme sixfold-load day
+has 23227.5948004 MWh deficit and 22416 MW h line excess. This is a synthetic
+stress experiment, not a forecast or a probability estimate.
+Full input/output/limitation ledger: `docs/modules/market/southern_execution_contract.md`.
+
+Earlier GUI entry baseline: `/xjtu/#southern-market` opens the workspace directly;
+entering the five day-ahead stages also reveals it. The named case selector exposes the
 analytic 100 MW case, a runnable 2-bus wind/solar/hydro/thermal/storage/DR demo,
 and an ACTIVSg2000 research boundary. The latter validates at 2000 buses,
 3206 branches, 1744 units including 720 hydro, 180 four-unit reservoirs in
@@ -18,14 +157,15 @@ the previous unconditional importer augmentation and invalid hydro renewable
 fields; old claims that this large import already worked were incorrect.
 The ordinary engineering importer no longer adds synthetic assets.
 
-Release direct tests pass 16 cases / 445 assertions. Browser E2E exercises
+Before the operation extension, Release direct tests passed 16 cases / 445 assertions. Browser E2E exercises
 the direct entry, named demo, shared-reservoir editor, storage bid save,
 dispatch, node/branch results, mobile layout and the large boundary (including
 the last reservoir). Screenshots: `output/southern-market/demo-boundary.png`,
 `demo-results.png`, `demo-mobile.png`, `large-boundary.png`.
-No full large-case clearing was executed. Week/month simulation, probabilistic
-scenario dashboards and cause attribution are not implemented GUI features.
-Node imbalance is a numerical equality residual, not an economic deficit slack.
+No full large-case clearing was executed. The forecast page now supplies
+probabilistic/interval statistics and conditional restoration evidence.
+`node_imbalance_mw` remains a numerical equality residual; diagnostic mode now
+reports physical deficit/surplus penalty variables separately.
 Line overload is now recomputed from signed flow limits. A new demo exposed
 tiny SCED storage bound roundoff causing an inverted LMP intersection; projecting
 the neighborhood center onto physical bounds fixes this without loosening the

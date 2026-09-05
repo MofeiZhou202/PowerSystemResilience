@@ -67,6 +67,11 @@ try {
   assert.equal(state.latest.effective_boundary.buses[0].load_mw[0], 101);
   assert.equal(state.latest.boundary_snapshot.buses[0].load_mw[0], 100);
   assert.equal(state.latest.lmp.buses[0].lmp_per_mwh[0], 200);
+  await page.locator('[data-market-ref="buses:1"] .market-bus').click();
+  assert.match(await page.locator('#marketCanvasDetails').textContent(), /101 MW/);
+  await page.getByLabel('Canvas 时段', { exact: true }).selectOption('1');
+  assert.equal(await page.getByLabel('结果时点', { exact: true }).inputValue(), '2');
+  assert.match(await page.locator('#marketCanvasDetails').textContent(), /100 MW/);
   await mkdir(path.join(root, 'output/southern-market'), { recursive: true });
   await writeFile(path.join(root, 'output/southern-market/numerical-evidence.json'), JSON.stringify({ baseline: state.baseline, scenario: state.latest }, null, 2));
   await page.screenshot({ path: path.join(root, 'output/southern-market/desktop.png') });
@@ -94,6 +99,10 @@ try {
   await page.locator('#southernCase').selectOption('demo');
   await page.locator('#southernLoadCase').click();
   await page.waitForFunction(() => document.querySelector('#southernCaseSummary').textContent.includes('8 机组'));
+  await page.locator('#marketCanvasEntity').selectOption('storage:1');
+  await page.getByRole('button', { name: '编辑所选市场设备基准边界', exact: true }).click();
+  await page.waitForFunction(() => document.querySelector('#southernCategory').value === 'storage');
+  assert.equal(await page.locator('[data-southern-path="storage/0/id"]').inputValue(), '1');
   await page.locator('#southernCategory').selectOption('reservoirs');
   assert.equal(await page.locator('[data-southern-path="reservoirs/0/generators/3"]').count(), 1);
   await page.locator('#southernCategory').selectOption('storage');
@@ -119,6 +128,12 @@ try {
   await page.locator('#southernCase').selectOption('activsg2000');
   await page.locator('#southernLoadCase').click();
   await page.waitForFunction(() => document.querySelector('#southernCaseSummary').textContent.includes('1744 机组'), { timeout: 120000 });
+  assert.equal(await page.locator('#marketTopology').getAttribute('data-total-buses'), '2000');
+  assert.ok(Number(await page.locator('#marketTopology').getAttribute('data-visible-buses')) <= 80);
+  const large = await get(); const lastBus = large.boundary.buses.at(-1).id;
+  await page.locator('#marketCanvasEntity').selectOption(`buses:${lastBus}`);
+  await page.locator(`[data-market-ref="buses:${lastBus}"] .market-bus`).click();
+  assert.equal(await page.locator('#marketCanvas').getAttribute('data-selected'), `buses:${lastBus}`);
   await page.locator('#southernCategory').selectOption('reservoirs');
   await page.locator('#southernEntity').selectOption('179');
   assert.equal(await page.locator('[data-southern-path="reservoirs/179/upstream"]').inputValue(), '179');

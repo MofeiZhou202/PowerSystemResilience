@@ -2075,6 +2075,7 @@ const Canvas = (() => {
   }
 
   function onKeyDown(e) {
+    if (document.body.classList.contains('market-canvas-active')) return;
     // Never hijack keys while the user is typing in a form field / editable area.
     const t = e.target;
     if (t.tagName === 'INPUT' || t.tagName === 'SELECT' || t.tagName === 'TEXTAREA' || t.isContentEditable) return;

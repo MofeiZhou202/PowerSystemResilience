@@ -96,7 +96,7 @@ async function main() {
     const marketModules = await page.locator('.module-btn[data-group="market"]')
       .evaluateAll(elements => elements.map(element => element.textContent.trim()));
     if (JSON.stringify(marketModules) !== JSON.stringify([
-      '市场行为', '边界条件', '市场出清', '安全校核', '市场结算'])) {
+      '市场行为', '边界条件', '运行模拟', '市场出清', '安全校核', '市场结算'])) {
       throw new Error(`market workflow order is wrong: ${JSON.stringify(marketModules)}`);
     }
     if (!(await page.locator('[data-market-step-target="marketBehavior"]')

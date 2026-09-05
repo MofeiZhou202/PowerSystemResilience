@@ -12,7 +12,7 @@
     if (!results && typeof Plotly !== 'undefined') Plotly.purge($('southernChart'));
   }
   const text = (tag, content) => { const el = document.createElement(tag); el.textContent = String(content); return el; };
-  const status = message => { $('southernStatus').textContent = message; $('southernToolbarStatus').textContent = message; };
+  const status = message => { $('southernStatus').textContent = message; $('southernToolbarStatus').textContent = message; window.HySimMarketCanvas.progress(message, false); };
   async function api(path, body) {
     const response = await fetch(path, body ? { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) } : {});
     const result = await response.json();
@@ -127,6 +127,8 @@
     } else target.append(renderValue(schema, [key], state.boundary[key]));
   }
   function render() {
+    if(state.boundary) { state.boundary.execution.solver ??= 'highs'; state.boundary.execution.threads ??= 0; }
+    window.HySimMarketCanvas.setBoundary(state.boundary, state.revision);
     const category = $('southernCategory'); const current = category.value; category.replaceChildren();
     if (!state.schema || !state.boundary) { $('southernEditor').replaceChildren(); return; }
     Object.entries(state.schema.properties).forEach(([key, schema]) => {
@@ -146,7 +148,7 @@
     const body = document.createElement('tbody'); let page = 0;
     const draw = () => {
       body.replaceChildren();
-      rows.slice(page * 100, (page + 1) * 100).forEach(row => { const tr = document.createElement('tr'); row.forEach(v => tr.append(text('td', v ?? '未提供'))); body.append(tr); });
+      rows.slice(page * 100, (page + 1) * 100).forEach(row => { const tr = document.createElement('tr'); row.forEach(v => { const td = document.createElement('td'); if (v instanceof Node) td.append(v); else td.textContent = String(v ?? '未提供'); tr.append(td); }); body.append(tr); });
     };
     table.append(body); wrapper.append(table);
     if (rows.length > 100) {
@@ -194,9 +196,14 @@
       up: '上调', down: '下调', overload_mw: '有功越限 MW', node_imbalance_mw: '节点平衡残差 MW', reduction_mw: '负荷削减 MW', kind: '类型', level_m: '水位 m', spill_m3_s: '泄洪 m³/s', release_m3_s: '下泄 m³/s', priority_shortfall_mwh: '优先电量缺口 MWh', lmp_per_mwh: '电价 元/MWh' };
     const draw = () => {
       const rows = result[stage.value]?.[category.value] || []; const t = Math.max(0, Math.min(97, Number(period.value) - 1));
+      window.HySimMarketCanvas.southern(state.boundary, result, stage.value, t);
       detail.replaceChildren(); if (!rows.length) { detail.append(text('p', '该类别无交易单元')); return; }
       const fields = Object.keys(rows[0]);
-      detail.append(table(fields.map(f => fieldLabels[f] || f), rows.map(row => fields.map(f => { const v = Array.isArray(row[f]) ? row[f][t] : row[f]; return typeof v === 'number' ? Number(v.toFixed(6)) : v; }))));
+      detail.append(table(fields.map(f => fieldLabels[f] || f), rows.map(row => fields.map(f => {
+        const v = Array.isArray(row[f]) ? row[f][t] : row[f];
+        if (f === 'id' && ['buses','branches','generators','storage','controllable_loads','reservoirs','dc_links'].includes(category.value)) return window.HySimMarketCanvas.link(category.value, v);
+        return typeof v === 'number' ? Number(v.toFixed(6)) : v;
+      }))));
     };
     stage.addEventListener('change', draw); category.addEventListener('change', draw); period.addEventListener('change', draw);
     selectors.append(stage, category, text('label', '时点'), period); target.append(selectors, detail); draw();
@@ -295,6 +302,17 @@
   document.addEventListener('southern-market-open', () => {
     if (state.dirty || state.busy) { App.showSouthernMarketWorkspace(); return; }
     load().catch(e => status(e.message));
+  });
+  document.addEventListener('market-canvas-edit', async e => {
+    try {
+      if (!state.dirty && !state.busy) await load();
+      const { type, id } = e.detail;
+      const position = state.boundary?.[type]?.findIndex(row => row.id === id);
+      if (position == null || position < 0) return;
+      view(false); $('southernCategory').value = type; renderEntities();
+      $('southernEntity').value = position; renderEditor();
+      window.HySimMarketCanvas.select(`${type}:${id}`);
+    } catch (e) { status(e.message); }
   });
   const openDirect = () => {
     if (location.hash !== '#southern-market') return;

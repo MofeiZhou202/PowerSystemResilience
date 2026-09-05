@@ -606,6 +606,7 @@ const App = (() => {
     topology: 'planning',
     timeSeries: 'planning',
     market: 'market',
+    marketOperation: 'market',
     marketBehavior: 'market',
     marketBoundary: 'market',
     marketSecurity: 'market',
@@ -635,6 +636,7 @@ const App = (() => {
   // action group. Any module not listed uses its own name for both.
   const SUBSECTION_FOR_MODULE = {
     tspf: 'timeSeries',
+    marketOperation: 'market',
     marketBehavior: 'market',
     marketBoundary: 'market',
     marketSecurity: 'market',
@@ -642,6 +644,7 @@ const App = (() => {
   };
   const RESULT_GROUP_FOR_MODULE = {
     tspf: 'timeSeries',
+    marketOperation: 'market',
     marketBehavior: 'market',
     marketBoundary: 'market',
     marketSecurity: 'market',
@@ -15188,6 +15191,9 @@ const App = (() => {
     });
   }
   function setActiveModule(moduleName) {
+    document.body.classList.toggle('market-operation-active', moduleName === 'marketOperation');
+    document.body.classList.toggle('market-canvas-active', subsectionForModule(moduleName) === 'market');
+    if (subsectionForModule(moduleName) !== 'market') window.HySimMarketCanvas?.stopPlayback();
     const prev = document.querySelector('.module-btn.active');
     const changed = !prev || prev.dataset.module !== moduleName;
     setActiveWorkflow(workflowForModule(moduleName), { preserveModule: true });
@@ -15222,7 +15228,7 @@ const App = (() => {
       setTimeout(() => refreshRpoInputAudit({ quiet: true }), 0);
     }
     if (changed && subsectionForModule(moduleName) === 'market') {
-      document.dispatchEvent(new CustomEvent('southern-market-open'));
+      document.dispatchEvent(new CustomEvent(moduleName === 'marketOperation' ? 'market-operation-open' : 'southern-market-open'));
     }
     HySimCore.Accessibility?.syncNavigation();
   }
@@ -15253,6 +15259,7 @@ const App = (() => {
     }
     if (subKey === 'market') {
       const activeScope = moduleName === 'marketBehavior' ? 'behavior'
+        : moduleName === 'marketOperation' ? 'operation'
         : moduleName === 'marketBoundary' ? 'boundary'
         : moduleName === 'marketSecurity' ? 'security'
         : moduleName === 'marketSettlement' ? 'settlement'
@@ -24972,7 +24979,7 @@ const App = (() => {
       applyTrialEditionProfile();
       setActiveModule('modelIO');
     } else {
-      setActiveModule(location.hash === '#southern-market' ? 'marketBoundary' : 'powerFlow');
+      setActiveModule(location.hash === '#market-operation' ? 'marketOperation' : location.hash === '#southern-market' ? 'marketBoundary' : 'powerFlow');
     }
     updateDependencyChips();
 

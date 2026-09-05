@@ -7,4 +7,5 @@ namespace hacdcpf::engine {
   using mipsolvers::engine::IpoptAdapter;
   using mipsolvers::engine::ScipAdapter;
   using mipsolvers::engine::GurobiAdapter;
+  using mipsolvers::engine::GurobiOptions;
 }
