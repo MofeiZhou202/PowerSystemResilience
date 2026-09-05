@@ -8,6 +8,39 @@ the current Git worktrees remain authoritative.
 
 ## Southern Market Execution and Boundary GUI
 
+GUI entry repair: `/xjtu/#southern-market` opens the workspace directly;
+entering any market stage also reveals it. The named case selector exposes the
+analytic 100 MW case, a runnable 2-bus wind/solar/hydro/thermal/storage/DR demo,
+and an ACTIVSg2000 research boundary. The latter validates at 2000 buses,
+3206 branches, 1744 units including 720 hydro, 180 four-unit reservoirs in
+three-reservoir chains, 80 storage and 120 interruptible loads. This repairs
+the previous unconditional importer augmentation and invalid hydro renewable
+fields; old claims that this large import already worked were incorrect.
+The ordinary engineering importer no longer adds synthetic assets.
+
+Release direct tests pass 16 cases / 445 assertions. Browser E2E exercises
+the direct entry, named demo, shared-reservoir editor, storage bid save,
+dispatch, node/branch results, mobile layout and the large boundary (including
+the last reservoir). Screenshots: `output/southern-market/demo-boundary.png`,
+`demo-results.png`, `demo-mobile.png`, `large-boundary.png`.
+No full large-case clearing was executed. Week/month simulation, probabilistic
+scenario dashboards and cause attribution are not implemented GUI features.
+Node imbalance is a numerical equality residual, not an economic deficit slack.
+Line overload is now recomputed from signed flow limits. A new demo exposed
+tiny SCED storage bound roundoff causing an inverted LMP intersection; projecting
+the neighborhood center onto physical bounds fixes this without loosening the
+1e-6 stage residual gate.
+
+The rebuilt `macos-asan-ubsan` target also passes all 16 cases / 445 assertions
+with `ASAN_OPTIONS=detect_leaks=0 UBSAN_OPTIONS=halt_on_error=1`; unlike the old
+11-case binary, this includes the new demo, importer and large-boundary checks.
+Generic market GUI regression passes its expected DA `n1_security_failed`,
+RT/hybrid `converged` and game `maximum_rounds_reached` fixtures.
+The locally served default demo produces `schedule_only`, valid conditional
+prices, and SCUC/SCED/LMP maximum residuals 8.53e-14 / 3.11e-7 / 2.84e-14.
+Its SCUC/SCED objective is 460211.0600616677 CNY; LMP objective is
+457911.73434347636 CNY. The day-only commercial schedule is not AC certification.
+
 The worktree now adds the separate `market::run_southern_day_ahead_market`
 entry point (`southern_market.hpp`, `southern_boundary.cpp`,
 `southern_market.cpp`) and schema-driven GUI work area. The existing generic
@@ -3450,13 +3483,13 @@ pinned clean-clone build.
 
 ## Southern market large-system extension (2026-09-05)
 
-`southern_market_from_system` now preserves imported AC topology and augments the
+`southern_market_from_system(system, true)` preserves imported AC topology and augments the
 ACTIVSg2000-scale engineering system with 240 wind, 240 solar and 720 hydro
-synthetic market units (1744 added units), 80 storage units when authored, and 120 compensated
+synthetic market units (1200 added, 1744 total), 80 storage units, and 120 compensated
 interruptible-load records. The schema accepts `wind`/`solar` kinds, exposes
 bus shunt fields, and returns demand-response reductions and binding-count
-truncation metadata. GUI result tables show at most 200 rows and price plots
-at most 80 traces, while entity selection retains access to the full result.
+truncation metadata. GUI result tables use 100-row pagination and price plots
+at most 80 traces; all nodes remain accessible in result tables and exports.
 
 The augmentation is explicitly synthetic and is not Southern grid data or a
 claim of official rule equivalence. Focused regression remains 11 cases / 323

@@ -50,7 +50,7 @@
 | 谐波潮流、标准与跨引擎验证 | 实现参考 | [谐波潮流专著](modules/harmonics_power_flow/harmonics_power_flow_manual.tex) |
 | 全部源码模块技术手册 | 实现参考 | [模块手册索引](modules/README.md) |
 | 南方区域 2025 V1.0 日前 SCUC/SCED/LMP 规则与实现差异 | 规则参考与实现对照 | [市场规则原文与手册](modules/market/README.md)、[逐条对照](modules/market/southern_rules_comparison.md) |
-| 南方日前市场边界、执行解释与 GUI 情景比较 | 契约 | [南方规则执行契约](modules/market/southern_execution_contract.md) |
+| 南方日前市场边界、执行解释、GUI 算例入口与情景比较 | 契约 | [南方规则执行契约](modules/market/southern_execution_contract.md) |
 | HTTP 路由与响应边界 | 契约 | [运行时 API](reference/runtime_api.md) |
 | 内置算例与能力示例 | 契约 | [算例目录](overview/case_catalog.md) |
 | Python 客户端边界 | 契约 | [Python API](reference/python_api.md) |

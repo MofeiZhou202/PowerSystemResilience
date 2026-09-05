@@ -130,6 +130,14 @@ Build build_model(const J& j, const std::string& stage,
     injection[{node.at("id"), t}].constant = -at(node, "load_mw", t)-node.value("gs_mw", 0.0);
   for (const auto& e : j.at("external_schedules")) for (int t = 0; t < T; ++t)
     injection[{e.at("bus"), t}].constant += at(e, "power_mw", t);
+  // Research slack balance; see southern_execution_contract.md rolling rationale.
+  const bool diagnostic = exec.value("balance_policy", std::string("strict")) == "diagnostic";
+  if (diagnostic) for (const auto& node : j.at("buses")) for (int t = 0; t < T; ++t) {
+    const int id = node.at("id");
+    const double penalty = exec.value("balance_penalty_per_mwh", 100000.0)*w(t);
+    injection[{id,t}].add(b.var(key("deficit", id, t), 0, at(node, "load_mw", t), penalty, "diagnostic_imbalance"));
+    injection[{id,t}].add(b.var(key("surplus", id, t), 0, inf, penalty, "diagnostic_imbalance"), -1);
+  }
 
   for (const auto& g : j.at("generators")) {
     const int id = g.at("id"), bus = g.at("bus"), area = bus_area.at(bus);
@@ -146,7 +154,9 @@ Build build_model(const J& j, const std::string& stage,
               uc ? g.at("startup_cost")[k].get<double>() : 0, "startup", true, !uc);
       double lo = 0, hi = at(g, "pmax_mw", t)*active;
       if (pricing) {
-        const double p = b.fixed.at(key("p", id, t));
+        // Remove accepted predecessor bound roundoff before taking the pricing
+        // intersection; see southern_execution_contract.md GUI numerical audit.
+        const double p = std::clamp(b.fixed.at(key("p", id, t)), 0.0, hi);
         const double delta = num(exec, "price_delta");
         if (at(g, "price_setting", t) == 0) lo = hi = p;
         else { lo = std::max(0.0, (1-delta)*p); hi = std::min(hi, (1+delta)*p); }
@@ -333,7 +343,8 @@ Build build_model(const J& j, const std::string& stage,
       double dlo = 0, dhi = num(s, "discharge_max_mw")*avail;
       double clo = -num(s, "charge_max_mw")*avail, chi = 0;
       if (pricing) {
-        const double dis = b.fixed.at(key("dis", id, t)), ch = b.fixed.at(key("ch", id, t));
+        const double dis = std::clamp(b.fixed.at(key("dis", id, t)), 0.0, dhi);
+        const double ch = std::clamp(b.fixed.at(key("ch", id, t)), clo, 0.0);
         const double delta = at(s, "price_setting", t) ? num(exec, "price_delta") : 0;
         dlo = std::max(dlo, (1-delta)*dis); dhi = std::min(dhi, (1+delta)*dis);
         clo = std::max(clo, (1+delta)*ch); chi = std::min(chi, (1-delta)*ch);
@@ -587,6 +598,15 @@ J stage_result(const Build& b, const engine::SolveResult& solved, const J& j) {
   for (const auto& d : out["controllable_loads"]) for (int t = 0; t < 96; ++t) reduced_energy += at(d, "reduction_mw", t)*0.25;
   out["day_load_reduction_mwh"] = reduced_energy;
   out["branches"] = rows("branches", {{"power_mw", "flow"}, {"slack_plus_mw", "line_slack_plus"}, {"slack_minus_mw", "line_slack_minus"}});
+  for (size_t i = 0; i < out["branches"].size(); ++i) {
+    auto& line = out["branches"][i]; const auto& input = j.at("branches")[i];
+    line["overload_mw"] = J::array();
+    // Physical signed-limit excess, independent of auxiliary penalty variables.
+    for (int t = 0; t < T; ++t) {
+      const double flow = at(line, "power_mw", t), available = at(input, "available", t);
+      line["overload_mw"].push_back(std::max({0.0, flow-available*at(input, "max_mw", t), available*at(input, "min_mw", t)-flow}));
+    }
+  }
   out["sections"] = rows("sections", {{"power_mw", "section_flow"}, {"slack_plus_mw", "section_slack_plus"}, {"slack_minus_mw", "section_slack_minus"}});
   out["dc_links"] = rows("dc_links", {{"power_mw", "dc"}, {"up", "dc_up"}, {"down", "dc_down"}});
   out["reservoirs"] = rows("reservoirs", {{"level_m", "level"}, {"spill_m3_s", "spill"}, {"release_m3_s", "release"}});
@@ -608,8 +628,15 @@ J stage_result(const Build& b, const engine::SolveResult& solved, const J& j) {
   const bool duals = b.stage == "lmp" && solved.stats.success && solved.constraint_duals.size() == static_cast<Eigen::Index>(b.eq.size()+b.le.size());
   out["prices_valid"] = duals && residual <= tolerance;
   for (const auto& node : j.at("buses")) {
-    J row = {{"id", node.at("id")}, {"name", node.at("name")}, {"lmp_per_mwh", J::array()}};
+    J row = {{"id", node.at("id")}, {"name", node.at("name")}, {"lmp_per_mwh", J::array()}, {"node_imbalance_mw", J::array()}};
+    row["deficit_mw"] = J::array(); row["surplus_mw"] = J::array();
     for (int t = 0; t < T; ++t) {
+      const auto balance = b.balance_rows.at(key("bus", node.at("id"), t));
+      row["node_imbalance_mw"].push_back(value(b.eq.at(balance).expr, solved.x) - b.eq.at(balance).rhs);
+      for (const auto* family : {"deficit", "surplus"}) {
+        const auto c = b.columns.find(key(family, node.at("id"), t));
+        row[std::string(family)+"_mw"].push_back(c == b.columns.end() ? 0.0 : std::max(0.0, solved.x[c->second]));
+      }
       const int index = static_cast<int>(b.le.size()) + b.balance_rows.at(key("bus", node.at("id"), t));
       // 2.6.6 uses the original balance multiplier. Reserve substitution added
       // balance to the upward row and subtracted it from the downward row;
@@ -785,6 +812,8 @@ J run_southern_day_ahead_market(const J& boundary) {
         "Prices are conditional on the preceding discrete dispatch states; nonlinear AC losses are certified separately."}}}}};
   if (!effective.at("controllable_loads").empty())
     out["model_scope"]["limitations"].push_back("Compensated interruptible demand is a research extension; no rebound, load reserve, or independent demand-side bidding rule certification. LMP fixes its SCED dispatch.");
+  out["diagnostic"] = effective.at("execution").value("balance_policy", std::string("strict")) == "diagnostic";
+  if (out["diagnostic"].get<bool>()) out["model_scope"]["limitations"].push_back("Diagnostic node deficit/surplus slacks are penalized research extensions. Prices depend on the diagnostic penalty; this is not a feasible physical supply schedule or normal-market price certification.");
   std::vector<SecurityCut> cuts;
   const auto finish = [&]() {
     out["runtime_sec"] = std::chrono::duration<double>(std::chrono::steady_clock::now()-begin).count(); return out;

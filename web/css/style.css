@@ -5189,6 +5189,9 @@ body[data-workspace-density="compact"] #rightPanel:not([style]) {
 }
 /* Southern market boundaries use the backend schema and bounded editors. */
 .southern-actions, .southern-editor-layout { display: flex; flex-wrap: wrap; gap: 8px; align-items: end; margin: 10px 0; }
+.southern-actions label { min-width: 0; max-width: 100%; }
+#southernCase { display: block; width: 100%; max-width: 440px; }
+#southernCaseSummary { overflow-wrap: anywhere; font-size: 12px; line-height: 1.6; }
 .southern-editor-layout[hidden], .southern-editor[hidden], .southern-results[hidden], #southernChart[hidden] { display: none !important; }
 .southern-view-tabs { display: flex; border-bottom: 1px solid var(--border); gap: 4px; margin-bottom: 10px; }
 .southern-view-tabs [aria-selected="true"] { border-bottom: 2px solid var(--accent); color: var(--accent); }

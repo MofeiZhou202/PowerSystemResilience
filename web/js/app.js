@@ -15221,6 +15221,9 @@ const App = (() => {
     if (moduleName === 'rpo' && changed) {
       setTimeout(() => refreshRpoInputAudit({ quiet: true }), 0);
     }
+    if (changed && subsectionForModule(moduleName) === 'market') {
+      document.dispatchEvent(new CustomEvent('southern-market-open'));
+    }
     HySimCore.Accessibility?.syncNavigation();
   }
   function renderSubToolbar(moduleName) {
@@ -24969,7 +24972,7 @@ const App = (() => {
       applyTrialEditionProfile();
       setActiveModule('modelIO');
     } else {
-      setActiveModule('powerFlow');  // default-activate Power Flow module
+      setActiveModule(location.hash === '#southern-market' ? 'marketBoundary' : 'powerFlow');
     }
     updateDependencyChips();
 

@@ -542,6 +542,7 @@ set(HACDCPF_SOURCES
   src/market/market_simulation.cpp
   src/market/southern_boundary.cpp
   src/market/southern_market.cpp
+  src/market/market_operation.cpp
   # ── power_models stubs (AML model builders) ──────────────────────────
   src/power_models/acopf_builder.cpp
   src/power_models/acdcopf_builder.cpp

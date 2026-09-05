@@ -219,6 +219,8 @@ J southern_market_schema() {
   });
   // Additive execution-1 fields: older saved snapshots retain their meaning.
   auto& required = schema["required"];
+  schema["properties"]["execution"]["properties"]["balance_policy"] = choice("节点平衡策略", {"strict", "diagnostic"});
+  schema["properties"]["execution"]["properties"]["balance_penalty_per_mwh"] = number("诊断缺额/富余罚价", "CNY/MWh", 1, 1e7);
   required.erase(std::remove(required.begin(), required.end(), J("controllable_loads")), required.end());
   auto& bus_properties = schema["properties"]["buses"]["items"]["properties"];
   bus_properties["gs_mw"] = number("并联电导额定损耗", "MW", 0);
@@ -234,6 +236,8 @@ J southern_market_schema() {
 
 J validate_southern_market(const J& boundary) {
   check(boundary, southern_market_schema(), "");
+  if (boundary.at("execution").value("balance_policy", std::string("strict")) == "diagnostic")
+    require(boundary.at("execution").at("ac_security") == "schedule_only", "execution", "diagnostic slack requires schedule_only; it is not AC certification");
   J effective = boundary;
   if (!effective.contains("controllable_loads")) effective["controllable_loads"] = J::array();
   std::map<std::string, std::set<int>> ids;
@@ -411,7 +415,7 @@ J make_southern_market_example() {
   return j;
 }
 
-J southern_market_from_system(const HybridPowerSystem& system) {
+J southern_market_from_system(const HybridPowerSystem& system, bool augment_research_resources) {
   // Conversion is deliberately limited to explicit AC buses, branches, loads,
   // and generators. Missing market declarations must remain visible inputs.
   require(system.dc.buses.empty() && system.vsc_converters.empty() && system.lcc_converters.empty(), "system", "hybrid assets require explicit Southern gateway/boundary authoring");
@@ -455,12 +459,15 @@ J southern_market_from_system(const HybridPowerSystem& system) {
     row["qmin_mvar"] = g.qmin_mvar; row["qmax_mvar"] = g.qmax_mvar; row["voltage_pu"] = g.vg_pu;
     j["generators"].push_back(row);
   }
+  if (augment_research_resources) {
+  require(!j["buses"].empty(), "system", "research case requires active buses");
   // Large-system research augmentation: preserve every imported unit and add
   // explicitly synthetic renewable/hydro units to exercise the full market
   // boundary. Stable IDs are outside the source case's authored range.
   const std::vector<int> bus_ids = [&] { std::vector<int> ids; for (const auto& b : j["buses"]) ids.push_back(b.at("id")); return ids; }();
   const int next_gen = j["generators"].empty() ? 1 : (*std::max_element(j["generators"].begin(), j["generators"].end(), [](const J& a, const J& b) { return a.at("id") < b.at("id"); })).at("id").get<int>() + 1;
-  const int add_wind = 240, add_solar = 240, add_hydro = 720;
+  const bool large = j["buses"].size() >= 2000;
+  const int add_wind = large ? 240 : 1, add_solar = large ? 240 : 1, add_hydro = large ? 720 : 4;
   for (int k = 0; k < add_wind + add_solar + add_hydro; ++k) {
     const int id = next_gen + k, bus = bus_ids[static_cast<size_t>(k) % bus_ids.size()];
     const char* kind = k < add_wind ? "wind" : k < add_wind + add_solar ? "solar" : "hydro";
@@ -470,18 +477,50 @@ J southern_market_from_system(const HybridPowerSystem& system) {
     row["source"] = "synthetic resource augmentation for 2000-bus benchmark"; row["kind"] = kind;
     row["pmax_mw"] = constant(cap); row["pmin_mw"] = constant(0); row["technical_min_mw"] = 0;
     row["segments"][0]["quantity_mw"] = cap; row["segments"][0]["price_per_mwh"] = kind[0] == 'h' ? 35 : 5;
-    row["forecast_mw"] = constant(cap * (kind[0] == 'h' ? 0.55 : 0.45)); row["max_curtailment_mw"] = constant(cap);
-    row["bid_mode"] = "quantity"; row["initial_on"] = 1; row["initial_power_mw"] = cap * 0.4;
+    row["forecast_mw"] = constant(kind[0] == 'h' ? 0 : cap*0.45);
+    row["max_curtailment_mw"] = constant(kind[0] == 'h' ? 0 : cap);
+    row["bid_mode"] = "price"; row["initial_on"] = 1; row["initial_power_mw"] = 0;
+    if (kind[0] != 'h') for (int t = 0; t < kT; ++t) {
+      const double hour = j["periods"][t]["start_minute"].get<double>()/60;
+      const double factor = kind[0] == 's' ? std::max(0.0, std::sin(std::acos(-1)*(hour-6)/12))
+        : 0.45+0.15*std::cos(2*std::acos(-1)*hour/24+k*0.1);
+      row["forecast_mw"][t] = cap*factor;
+    }
     row["ramp_up_mw_min"] = cap; row["ramp_down_mw_min"] = cap;
     j["generators"].push_back(std::move(row));
   }
   const int next_load = j["controllable_loads"].empty() ? 1 : (*std::max_element(j["controllable_loads"].begin(), j["controllable_loads"].end(), [](const J& a, const J& b) { return a.at("id") < b.at("id"); })).at("id").get<int>() + 1;
-  for (int k = 0; k < 120; ++k) {
+  for (int k = 0; k < (large ? 120 : 2); ++k) {
     const int bus = bus_ids[static_cast<size_t>(k * 17) % bus_ids.size()];
     j["controllable_loads"].push_back({{"id", next_load + k}, {"name", "Synthetic interruptible load " + std::to_string(next_load + k)},
       {"source", "synthetic demand-response augmentation for 2000-bus benchmark"}, {"bus", bus},
       {"available", std::vector<int>(kT, 1)}, {"max_reduction_mw", constant(20)},
       {"compensation_per_mwh", constant(90)}, {"max_day_reduction_mwh", 480}});
+  }
+  // Shared reservoir SI conservation and four-unit membership: contract GUI rationale.
+  for (int k = 0; k < add_hydro/4; ++k) {
+    J members = J::array();
+    for (int m = 0; m < 4; ++m) members.push_back(next_gen+add_wind+add_solar+4*k+m);
+    j["reservoirs"].push_back({{"id", k+1}, {"name", "Synthetic basin " + std::to_string(k/3+1) + " reservoir " + std::to_string(k+1)},
+      {"source", "synthetic constant-area four-unit reservoir; three-reservoir chains"},
+      {"generators", members}, {"upstream", k%3 ? k : -1}, {"lag_slots", 1},
+      {"release_history_m3_s", {0}}, {"water_m3_mwh", 3600}, {"area_m2", 1e8},
+      {"initial_level_m", 100}, {"physical_min_m", 90}, {"physical_max_m", 110},
+      {"min_level_m", constant(90)}, {"max_level_m", constant(110)}, {"inflow_m3_s", constant(300)},
+      {"spill_max_m3_s", constant(10000)}, {"release_min_m3_s", constant(0)}, {"release_max_m3_s", constant(10000)},
+      {"release_ramp_m3_s", constant(10000)}, {"initial_release_m3_s", 0}, {"min_mwh", 0}, {"max_mwh", 720*24}});
+  }
+  for (int k = 0; k < (large ? 80 : 2); ++k) {
+    j["storage"].push_back({{"id", k+1}, {"name", "Synthetic storage " + std::to_string(k+1)}, {"source", "synthetic 20 MW / 80 MWh storage"},
+      {"bus", bus_ids[static_cast<size_t>(k)%bus_ids.size()]}, {"available", std::vector<int>(kT, 1)},
+      {"discharge_min_mw", 0}, {"discharge_max_mw", 20}, {"charge_min_mw", 0}, {"charge_max_mw", 20},
+      {"rated_mwh", 80}, {"roundtrip_efficiency", 0.81}, {"initial_mwh", 40}, {"terminal_mwh", 40},
+      {"min_mwh", constant(8)}, {"max_mwh", constant(72)}, {"max_cycles", 2},
+      {"discharge_price", 60}, {"charge_price", 10}, {"price_setting", std::vector<int>(kT, 1)}});
+  }
+  j["name"] = large ? "ACTIVSg2000 水电扩展研究边界" : "南方多资源两节点演示";
+  j["source"] = "Synthetic market boundary and offers; not Southern grid data. Shared reservoir / cascade extension.";
+  j["execution"]["ac_security"] = "schedule_only";
   }
   for (const auto& b : system.ac.branches) {
     require(area.count(b.from_bus) && area.count(b.to_bus), "branches", "branch references inactive bus");
@@ -493,5 +532,21 @@ J southern_market_from_system(const HybridPowerSystem& system) {
   }
   validate_southern_market(j);
   return j;
+}
+
+J make_southern_market_demo() {
+  HybridPowerSystem system; system.base_mva = system.ac.base_mva = 100;
+  for (int id = 1; id <= 2; ++id) {
+    ACBus bus; bus.index = id; bus.area = 1; bus.base_kv = 220;
+    bus.name = "Demo bus " + std::to_string(id); bus.pd_mw = id == 2 ? 500 : 0;
+    system.ac.buses.push_back(bus);
+    Generator g; g.index = id; g.bus = id; g.name = "Synthetic thermal " + std::to_string(id);
+    g.pmin_mw = 0; g.pmax_mw = 600; g.pg_mw = 0; g.qmin_mvar = -300; g.qmax_mvar = 300;
+    system.ac.generators.push_back(g);
+  }
+  ACBranch line; line.index = 1; line.name = "Demo tie line"; line.from_bus = 1; line.to_bus = 2;
+  line.x_pu = 0.1; line.r_pu = 0.01; line.rate_a_mva = 80; line.tap = 1;
+  system.ac.branches.push_back(line);
+  return southern_market_from_system(system, true);
 }
 }  // namespace hacdcpf::market

@@ -3,10 +3,36 @@
 #include <numeric>
 #include <random>
 #include "hacdcpf/market/southern_market.hpp"
+#include "hacdcpf/io/matpower_parser.hpp"
 
 using nlohmann::json;
 using namespace hacdcpf::market;
 using Catch::Approx;
+
+TEST_CASE("Southern GUI factories expose valid named research boundaries", "[southern_market]") {
+  const auto demo = make_southern_market_demo();
+  REQUIRE(demo["buses"].size() == 2);
+  REQUIRE(demo["generators"].size() == 8);
+  REQUIRE(demo["reservoirs"].size() == 1);
+  REQUIRE(demo["reservoirs"][0]["generators"].size() == 4);
+  REQUIRE(demo["storage"].size() == 2);
+  const auto result = run_southern_day_ahead_market(demo);
+  INFO(result.value("status", ""));
+  INFO((result.contains("lmp") ? result["lmp"].dump().substr(0, 4000) : result.dump().substr(0, 1000)));
+  REQUIRE(result["schedule_feasible"] == true);
+  REQUIRE(result["prices_valid"] == true);
+  auto system = hacdcpf::io::parse_matpower(std::string(HACDCPF_TEST_DATA_DIR)+"/case_ACTIVSg2000.m");
+  const auto imported = southern_market_from_system(system);
+  REQUIRE(imported["generators"].size() == system.ac.generators.size());
+  REQUIRE(imported["reservoirs"].empty());
+  const auto large = southern_market_from_system(system, true);
+  REQUIRE(large["buses"].size() == 2000);
+  REQUIRE(large["branches"].size() == 3206);
+  REQUIRE(large["generators"].size() == 1744);
+  REQUIRE(large["reservoirs"].size() == 180);
+  REQUIRE(large["storage"].size() == 80);
+  REQUIRE(large["controllable_loads"].size() == 120);
+}
 
 namespace {
 json series(double x) { return std::vector<double>(98, x); }
@@ -142,6 +168,37 @@ TEST_CASE("Southern internal scenario sweep preserves weighted result semantics"
     if (load_factor[i] > load_factor[0] + 0.02) REQUIRE(generation[i] > generation[0]);
     if (load_factor[i] < load_factor[0] - 0.02) REQUIRE(generation[i] < generation[0]);
   }
+}
+
+TEST_CASE("Southern joint input scenarios emit overload price and renewable statistics", "[southern_market][scenario][statistics]") {
+  constexpr int scenarios = 12;
+  std::mt19937 rng(20260905); std::normal_distribution<double> eps(0.0, 0.06);
+  int valid = 0, overload_events = 0; double price_sum = 0, renewable_util_sum = 0;
+  for (int s = 0; s < scenarios; ++s) {
+    auto j = make_southern_market_example(); j["execution"]["ac_security"] = "schedule_only";
+    const double load = std::clamp(1.0 + eps(rng), 0.85, 1.15);
+    const double wind = std::clamp(1.0 + eps(rng), 0.0, 1.2);
+    const double solar = std::clamp(1.0 + eps(rng), 0.0, 1.2);
+    j["areas"][0]["load_mw"] = series(100 * load); j["buses"][0]["load_mw"] = series(100 * load);
+    auto renewable = j["generators"][0]; renewable["id"] = 2; renewable["kind"] = "wind"; renewable["bid_mode"] = "quantity";
+    renewable["pmax_mw"] = series(80); renewable["segments"][0]["quantity_mw"] = 80;
+    renewable["forecast_mw"] = series(40 * wind); renewable["max_curtailment_mw"] = series(80);
+    renewable["price_setting"] = std::vector<int>(98, 0); renewable["initial_power_mw"] = 0; j["generators"].push_back(renewable);
+    auto solar_unit = renewable; solar_unit["id"] = 3; solar_unit["kind"] = "solar"; solar_unit["forecast_mw"] = series(30 * solar); j["generators"].push_back(solar_unit);
+    auto d = record("controllable_loads"); d["id"] = 8; d["bus"] = 1; d["available"] = std::vector<int>(98, 1);
+    d["max_reduction_mw"] = series(10); d["compensation_per_mwh"] = series(70 + 20 * load); d["max_day_reduction_mwh"] = 240; j["controllable_loads"].push_back(d);
+    const auto result = run_southern_day_ahead_market(j);
+    if (!result.value("schedule_feasible", false)) continue;
+    ++valid; REQUIRE(result.at("sced").at("max_residual").get<double>() <= 1e-6);
+    price_sum += result.at("lmp").at("buses")[0].at("lmp_per_mwh")[0].get<double>();
+    double forecast = 0, dispatched = 0;
+    for (const auto& g : result.at("effective_boundary").at("generators")) if (g.at("kind") == "wind" || g.at("kind") == "solar") forecast += g.at("forecast_mw")[0].get<double>();
+    for (const auto& g : result.at("sced").at("generators")) if (g.at("kind") == "wind" || g.at("kind") == "solar") dispatched += g.at("power_mw")[0].get<double>();
+    if (forecast > 1e-9) renewable_util_sum += dispatched / forecast;
+    for (const auto& line : result.at("sced").at("branches")) if (line.at("slack_plus_mw")[0].get<double>() > 1e-6 || line.at("slack_minus_mw")[0].get<double>() > 1e-6) ++overload_events;
+  }
+  REQUIRE(valid == scenarios); REQUIRE(price_sum / valid >= 0); REQUIRE(renewable_util_sum / valid >= 0);
+  REQUIRE(overload_events >= 0);
 }
 
 TEST_CASE("Southern boundaries reject silent field and identity errors", "[southern_market]") {

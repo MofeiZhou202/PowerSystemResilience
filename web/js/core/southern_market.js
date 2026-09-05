@@ -60,6 +60,7 @@
     if (schema.type === 'object') {
       const grid = document.createElement('div'); grid.className = 'southern-fields';
       Object.entries(schema.properties).forEach(([key, fieldSchema]) => {
+        if (!(key in value)) return;
         const wrap = document.createElement('div'); wrap.className = 'southern-field';
         const label = text('label', `${fieldSchema.title}${fieldSchema.unit ? ` (${fieldSchema.unit})` : ''}`);
         const editor = renderValue(fieldSchema, [...path, key], value[key]);
@@ -132,14 +133,31 @@
       const option = text('option', schema.title); option.value = key; category.append(option);
     });
     category.value = [...category.options].some(o => o.value === current) ? current : 'areas';
+    const b = state.boundary;
+    const counts = {};
+    b.generators.forEach(g => { counts[g.kind] = (counts[g.kind] || 0) + 1; });
+    $('southernCaseSummary').textContent = `${b.name} · ${b.buses.length} 节点 / ${b.branches.length} 支路 / ${b.generators.length} 机组 · 水 ${counts.hydro || 0} / 火 ${counts.thermal || 0} / 风 ${counts.wind || 0} / 光 ${counts.solar || 0} · 储能 ${b.storage.length} / 水库 ${b.reservoirs.length} / 可控负荷 ${b.controllable_loads?.length || 0} · 报价来源：${b.source}`;
     renderEntities(); renderResults(state.latest);
   }
   function table(headers, rows) {
     const wrapper = document.createElement('div'); wrapper.className = 'topo-table-wrap';
     const table = document.createElement('table'); const head = document.createElement('thead'); const tr = document.createElement('tr');
     headers.forEach(h => tr.append(text('th', h))); head.append(tr); table.append(head);
-    const body = document.createElement('tbody'); rows.forEach(row => { const tr = document.createElement('tr'); row.forEach(v => tr.append(text('td', v ?? '未提供'))); body.append(tr); });
-    table.append(body); wrapper.append(table); return wrapper;
+    const body = document.createElement('tbody'); let page = 0;
+    const draw = () => {
+      body.replaceChildren();
+      rows.slice(page * 100, (page + 1) * 100).forEach(row => { const tr = document.createElement('tr'); row.forEach(v => tr.append(text('td', v ?? '未提供'))); body.append(tr); });
+    };
+    table.append(body); wrapper.append(table);
+    if (rows.length > 100) {
+      const controls = document.createElement('div'); controls.className = 'southern-actions';
+      const prev = text('button', '←'); const next = text('button', '→'); const label = text('span', '');
+      prev.type = next.type = 'button'; prev.title = '上一页'; next.title = '下一页';
+      const update = () => { draw(); label.textContent = `${page+1} / ${Math.ceil(rows.length/100)} · ${rows.length} 条`; prev.disabled = page === 0; next.disabled = (page+1)*100 >= rows.length; };
+      prev.onclick = () => { --page; update(); }; next.onclick = () => { ++page; update(); };
+      controls.append(prev, label, next); wrapper.prepend(controls); update();
+    } else draw();
+    return wrapper;
   }
   function renderResults(result) {
     const target = $('southernResults'); target.replaceChildren();
@@ -165,7 +183,7 @@
     ['scuc', 'sced', 'lmp'].filter(k => result[k]).forEach(k => { const o = text('option', k.toUpperCase()); o.value = k; stage.append(o); });
     const category = document.createElement('select'); category.setAttribute('aria-label', '结果类别');
     Object.entries({ generators: '机组出力与启停', storage: '储能功率与能量', branches: '线路潮流与松弛', sections: '断面潮流与松弛',
-      dc_links: '直流功率与调节方向', reservoirs: '水位与下泄', trades: '交易成分', buses: '节点电价' }).forEach(([k, label]) => {
+      dc_links: '直流功率与调节方向', reservoirs: '水位与下泄', controllable_loads: '可控负荷削减', trades: '交易成分', buses: '节点电价与平衡残差' }).forEach(([k, label]) => {
       const o = text('option', label); o.value = k; category.append(o);
     });
     const period = document.createElement('input'); period.className = 'southern-input'; period.type = 'number'; period.min = '1'; period.max = '98'; period.value = '1'; period.step = '1'; period.setAttribute('aria-label', '结果时点');
@@ -173,14 +191,12 @@
     const fieldLabels = { id: 'ID', name: '名称', bus: '母线', power_mw: '出力 MW', online: '开机', start: '启动', stop: '停机', hot_start: '热态启动',
       warm_start: '温态启动', cold_start: '冷态启动', trajectory_mw: '启停轨迹 MW', renewable_deviation_mw: '新能源偏差 MW',
       discharge_mw: '放电 MW', charge_mw: '充电 MW', energy_mwh: '能量 MWh', slack_plus_mw: '正松弛 MW', slack_minus_mw: '负松弛 MW',
-      up: '上调', down: '下调', level_m: '水位 m', spill_m3_s: '泄洪 m³/s', release_m3_s: '下泄 m³/s', priority_shortfall_mwh: '优先电量缺口 MWh', lmp_per_mwh: '电价 元/MWh' };
+      up: '上调', down: '下调', overload_mw: '有功越限 MW', node_imbalance_mw: '节点平衡残差 MW', reduction_mw: '负荷削减 MW', kind: '类型', level_m: '水位 m', spill_m3_s: '泄洪 m³/s', release_m3_s: '下泄 m³/s', priority_shortfall_mwh: '优先电量缺口 MWh', lmp_per_mwh: '电价 元/MWh' };
     const draw = () => {
       const rows = result[stage.value]?.[category.value] || []; const t = Math.max(0, Math.min(97, Number(period.value) - 1));
       detail.replaceChildren(); if (!rows.length) { detail.append(text('p', '该类别无交易单元')); return; }
       const fields = Object.keys(rows[0]);
-      const visibleRows = rows.length > 200 ? rows.slice(0, 200) : rows;
-      detail.append(table(fields.map(f => fieldLabels[f] || f), visibleRows.map(row => fields.map(f => { const v = Array.isArray(row[f]) ? row[f][t] : row[f]; return typeof v === 'number' ? Number(v.toFixed(6)) : v; }))));
-      if (rows.length > visibleRows.length) detail.append(text('p', `显示前 ${visibleRows.length} / ${rows.length} 条，请用实体选择器查看其余记录。`));
+      detail.append(table(fields.map(f => fieldLabels[f] || f), rows.map(row => fields.map(f => { const v = Array.isArray(row[f]) ? row[f][t] : row[f]; return typeof v === 'number' ? Number(v.toFixed(6)) : v; }))));
     };
     stage.addEventListener('change', draw); category.addEventListener('change', draw); period.addEventListener('change', draw);
     selectors.append(stage, category, text('label', '时点'), period); target.append(selectors, detail); draw();
@@ -240,7 +256,12 @@
   bind('btnSouthernOpen', async () => { await load(); $('southernMarketWorkspace').scrollIntoView({ block: 'nearest' }); });
   bind('southernBoundaryView', () => view(false)); bind('southernResultView', () => { view(true); renderResults(state.latest); });
   bind('btnSouthernRun', run); bind('southernLoad', load);
+  bind('southernRunSaved', run);
   bind('southernExample', async () => { if (!state.schema) await load(); await action('example'); });
+  bind('southernLoadCase', async () => {
+    if (!state.schema) await load();
+    status('正在加载市场算例'); await action($('southernCase').value);
+  });
   bind('southernFromSystem', async () => { if (!state.schema) await load(); await action('from_system'); });
   bind('southernSave', () => action('save')); bind('southernBaseline', () => action('pin_baseline')); bind('southernRestore', () => action('restore_baseline'));
   bind('southernExport', () => download(state.boundary, 'southern-boundary.json'));
@@ -249,7 +270,7 @@
   $('southernImportFile').addEventListener('change', async e => {
     try {
       const file = e.target.files[0]; if (!file) return;
-      if (file.size > 16 * 1024 * 1024) throw new Error('边界文件超过 16 MiB');
+      if (file.size > 128 * 1024 * 1024) throw new Error('边界文件超过 128 MiB');
       if (!state.schema) await load();
       const candidate = JSON.parse(await file.text());
       const data = await api('/api/session/southern_market', { action: 'save', revision: state.revision, boundary: candidate });
@@ -271,4 +292,16 @@
   document.querySelectorAll('#southernMarketWorkspace button').forEach(b => b.classList.add('btn', 'btn-sm'));
   $('southernSave').classList.add('btn-primary');
   view(false);
+  document.addEventListener('southern-market-open', () => {
+    if (state.dirty || state.busy) { App.showSouthernMarketWorkspace(); return; }
+    load().catch(e => status(e.message));
+  });
+  const openDirect = () => {
+    if (location.hash !== '#southern-market') return;
+    App.setActiveModule('marketBoundary');
+    load().catch(e => status(e.message));
+  };
+  window.addEventListener('hashchange', openDirect);
+  if (document.readyState === 'complete') openDirect();
+  else window.addEventListener('load', openDirect, { once: true });
 })();

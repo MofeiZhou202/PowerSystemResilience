@@ -3011,6 +3011,9 @@ struct Session {
   std::optional<json> southern_baseline;
   std::optional<json> southern_latest;
   std::uint64_t southern_revision{0};
+  std::optional<json> market_operation;
+  std::uint64_t market_operation_id{0};
+  std::atomic<bool> market_operation_cancel{false};
   // Current system held as a read-shared immutable snapshot.  Request handlers
   // copy this shared_ptr under a short lock (read sharing); writers build a new
   // system and atomically replace the pointer via session_replace_system
@@ -3116,6 +3119,9 @@ void session_replace_system(Session& s, hacdcpf::HybridPowerSystem sys) {
   s.southern_boundary.reset();
   s.southern_baseline.reset();
   s.southern_latest.reset();
+  s.market_operation.reset();
+  ++s.market_operation_id;
+  s.market_operation_cancel.store(true);
   ++s.southern_revision;
   auto shared = std::make_shared<hacdcpf::HybridPowerSystem>(std::move(sys));
   ++s.system_revision;
@@ -22099,6 +22105,12 @@ int main(int argc, char** argv) {
         }
         json candidate;
         if (action == "example") candidate = hacdcpf::market::make_southern_market_example();
+        else if (action == "demo") candidate = hacdcpf::market::make_southern_market_demo();
+        else if (action == "activsg2000") {
+          const auto path = fs::path(HACDCPF_PROJECT_ROOT) / "data" / "case_ACTIVSg2000.m";
+          if (!fs::exists(path)) throw std::invalid_argument("Missing data/case_ACTIVSg2000.m");
+          candidate = hacdcpf::market::southern_market_from_system(hacdcpf::io::parse_matpower(path.string()), true);
+        }
         else if (action == "from_system") {
           if (!g_session.current_system) throw std::invalid_argument("No engineering system loaded");
           candidate = hacdcpf::market::southern_market_from_system(*g_session.current_system);
@@ -22119,7 +22131,7 @@ int main(int argc, char** argv) {
         const auto effective = hacdcpf::market::validate_southern_market(candidate);
         g_session.southern_boundary = candidate;
         g_session.southern_latest.reset();
-        if (action == "example" || action == "from_system") g_session.southern_baseline.reset();
+        if (action == "example" || action == "demo" || action == "activsg2000" || action == "from_system") g_session.southern_baseline.reset();
         ++g_session.southern_revision;
         res.set_content(json{{"revision", g_session.southern_revision}, {"boundary", candidate},
           {"effective_boundary", effective}, {"baseline", g_session.southern_baseline.value_or(json(nullptr))}}.dump(), "application/json");
@@ -22159,6 +22171,69 @@ int main(int argc, char** argv) {
           g_session.busy.store(false); owns_busy = false;
         }
         res.set_content(result.dump(), "application/json");
+      } catch (const std::invalid_argument& e) {
+        if (owns_busy) g_session.busy.store(false);
+        res.status = 400; res.set_content(json{{"error", e.what()}}.dump(), "application/json");
+      } catch (const std::exception& e) {
+        if (owns_busy) g_session.busy.store(false);
+        res.status = 400; res.set_content(json{{"error", e.what()}}.dump(), "application/json");
+      }
+    });
+
+    const auto operation_view = [](const json& job) {
+      json out = job; out.erase("base"); out.erase("carry"); return out;
+    };
+    svr.Get("/api/session/market_operation", [operation_view](const httplib::Request&, httplib::Response& res) {
+      std::lock_guard<std::mutex> lock(g_session.mu);
+      res.set_content(json{{"revision", g_session.southern_revision}, {"run_id", g_session.market_operation_id},
+        {"boundary_name", g_session.southern_boundary ? g_session.southern_boundary->value("name", "") : ""},
+        {"busy", g_session.busy.load()}, {"job", g_session.market_operation ? operation_view(*g_session.market_operation) : json(nullptr)}}.dump(), "application/json");
+    });
+    svr.Post("/api/session/market_operation", [operation_view](const httplib::Request& req, httplib::Response& res) {
+      bool owns_busy = false;
+      try {
+        const json body = json::parse(req.body); const std::string action = body.at("action");
+        const std::set<std::string> allowed = action == "start" ? std::set<std::string>{"action", "revision", "config"}
+          : action == "step" ? std::set<std::string>{"action", "run_id", "day"} : std::set<std::string>{"action", "run_id"};
+        for (auto it = body.begin(); it != body.end(); ++it) if (!allowed.count(it.key())) throw std::invalid_argument("Unknown operation request field: " + it.key());
+        json job; std::uint64_t id, revision;
+        {
+          std::lock_guard<std::mutex> lock(g_session.mu);
+          id = g_session.market_operation_id; revision = g_session.southern_revision;
+          if (action == "cancel") {
+            if (body.at("run_id").get<std::uint64_t>() != id) { res.status = 409; res.set_content("{\"error\":\"Run changed\"}", "application/json"); return; }
+            g_session.market_operation_cancel.store(true);
+            if (g_session.market_operation) (*g_session.market_operation)["status"] = "cancelled";
+            res.set_content("{\"status\":\"cancelled\"}", "application/json"); return;
+          }
+          if (g_session.busy.load()) { res.status = 409; res.set_content("{\"error\":\"Another computation is running\"}", "application/json"); return; }
+          if (action == "start") {
+            if (body.at("revision").get<std::uint64_t>() != revision) { res.status = 409; res.set_content("{\"error\":\"Boundary changed; reload\"}", "application/json"); return; }
+            if (!g_session.southern_boundary) throw std::invalid_argument("Load and save a Southern market boundary first");
+            job = hacdcpf::market::make_market_operation(*g_session.southern_boundary, body.at("config"));
+            job["boundary_name"] = g_session.southern_boundary->at("name"); job["boundary_revision"] = revision;
+            g_session.market_operation = job; g_session.market_operation_cancel.store(false);
+            ++g_session.market_operation_id;
+            res.set_content(json{{"run_id", g_session.market_operation_id}, {"job", operation_view(job)}}.dump(), "application/json"); return;
+          }
+          if (action != "step") throw std::invalid_argument("Unknown operation action");
+          if (!g_session.market_operation || body.at("run_id").get<std::uint64_t>() != id ||
+              body.at("day") != g_session.market_operation->at("completed_days") ||
+              g_session.market_operation->at("boundary_revision") != revision) {
+            res.status = 409; res.set_content("{\"error\":\"Run or boundary changed; reload\"}", "application/json"); return;
+          }
+          job = *g_session.market_operation;
+          g_session.busy.store(true); owns_busy = true;
+        }
+        job = hacdcpf::market::step_market_operation(job);
+        {
+          std::lock_guard<std::mutex> lock(g_session.mu);
+          if (g_session.market_operation_cancel.load()) job["status"] = "cancelled";
+          if (id != g_session.market_operation_id || revision != g_session.southern_revision) job["status"] = "stale";
+          else g_session.market_operation = job;
+          g_session.busy.store(false); owns_busy = false;
+        }
+        res.set_content(json{{"run_id", id}, {"job", operation_view(job)}}.dump(), "application/json");
       } catch (const std::invalid_argument& e) {
         if (owns_busy) g_session.busy.store(false);
         res.status = 400; res.set_content(json{{"error", e.what()}}.dump(), "application/json");
@@ -28055,6 +28130,7 @@ int main(int argc, char** argv) {
   if (fs::exists(web_dir)) {
     svr.set_mount_point("/xjtu", web_dir);
     std::cout << "XJTU frontend: http://" << args.host << ":" << args.port << "/xjtu/\n";
+    std::cout << "Southern market: http://" << args.host << ":" << args.port << "/xjtu/#southern-market\n";
     std::cout << "  (serving from " << web_dir << ")\n";
   } else {
     std::cerr << "WARNING: web/ frontend directory not found.\n"

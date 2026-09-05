@@ -1309,9 +1309,9 @@
       <button type="button" class="market-flow-step" data-market-step-target="marketSettlement"><b>5</b><span>市场结算</span><small>账本与偏差</small></button>
     </nav>
 
-    <div class="control-param-group market-param-group" data-market-scope="boundary clearing security">
+    <div class="control-param-group market-param-group" data-market-scope="behavior boundary clearing security settlement">
       <span class="control-param-group-title">南方区域日前 · 2025 V1.0</span>
-      <button type="button" id="btnSouthernOpen" class="toolbar-btn">边界工作区</button>
+      <button type="button" id="btnSouthernOpen" class="toolbar-btn">南方市场 · 算例与边界</button>
       <button type="button" id="btnSouthernRun" class="toolbar-btn run-btn">南方规则出清</button>
       <span id="southernToolbarStatus" role="status">未载入边界</span>
     </div>
@@ -3349,8 +3349,18 @@
         </div>
         </div><!-- /result-group timeSeries -->
         <div class="result-group" data-result-group="market">
-          <div class="topo-section" id="southernMarketWorkspace" data-market-result-scope="boundary clearing security">
+          <div class="topo-section" id="southernMarketWorkspace" data-market-result-scope="behavior boundary clearing security settlement">
             <h4>南方区域日前市场 · 边界与出清</h4>
+            <div class="southern-actions">
+              <label>市场算例<select id="southernCase" aria-label="市场算例">
+                <option value="demo">南方多资源两节点演示（风光水火储/可控负荷）</option>
+                <option value="example">单节点解析验证（100 MW）</option>
+                <option value="activsg2000">ACTIVSg2000 水电扩展研究边界（2000 节点）</option>
+              </select></label>
+              <button type="button" id="southernLoadCase">加载市场算例</button>
+              <span>运行日：1 天 · 96 点 + 次日峰谷</span>
+            </div>
+            <div id="southernCaseSummary" role="status"></div>
             <div class="southern-view-tabs" role="tablist" aria-label="南方市场视图">
               <button type="button" id="southernBoundaryView" role="tab" aria-selected="true">边界数据</button>
               <button type="button" id="southernResultView" role="tab" aria-selected="false">出清结果</button>
@@ -3363,6 +3373,7 @@
               <input type="file" id="southernImportFile" accept="application/json,.json" hidden>
               <button type="button" id="southernExport">导出边界</button>
               <button type="button" id="southernSave">保存边界</button>
+              <button type="button" id="southernRunSaved">南方规则出清</button>
               <button type="button" id="southernBaseline">设为基准</button>
               <button type="button" id="southernRestore">恢复基准边界</button>
               <button type="button" id="southernExportResult">导出结果</button>
@@ -3884,8 +3895,8 @@
   <script src="js/core/layout_engine.js?v=20260712-hysim-layout-v1"></script>
   <script src="js/core/accessibility.js?v=20260712-hysim-phase5-v1"></script>
   <script src="js/core/runtime_diagnostics.js?v=20260712-hysim-phase6-v1"></script>
-  <script src="js/app.js?v=20260818-gui-tour-v1"></script>
-  <script src="js/core/southern_market.js?v=20260905"></script>
+  <script src="js/app.js?v=20260905-southern-entry2"></script>
+  <script src="js/core/southern_market.js?v=20260905-entry2"></script>
   <script src="js/core/help_panel.js?v=20260817-help-panel-v1"></script>
   <script src="vendor/marked.min.js?v=15.0.12"></script>
   <script src="js/core/help_center.js?v=20260818-help-center-v1"></script>
