@@ -5,6 +5,37 @@
 
 ## 1. 范围与结论
 
+### Gurobi 请求级参数与稀疏连续模型
+
+`GurobiAdapter(GurobiOptions{time_limit_sec,mip_gap,threads})` 为可选显式构造方式，
+参数作用于该实例，不修改进程环境。时限>0，gap在[0,1]，线程0为自动、最大1024；
+参数优先于旧MILP环境默认值。无参构造保留既有策略。环境以empty/start初始化，
+启动前关闭控制台输出。库未链接或许可证不可用时available=false，不替换后端。
+
+RATIONALE: 对同一LP/MILP矩阵作恒等传递，显式参数实例的`solve_lp`复用现有
+`solve_milp`稀疏装配，整数索引为空，Gurobi仍求解连续LP。转换及复制O(nnz+m+n)，
+不采用原LP入口的m*n系数探测；不承诺优化算法速度改善。区间行展开的上/下界Pi
+按原行求和，等式Pi按原等式位置恢复。仅最优连续解导出Pi，限时解不作价格证据。
+显式MILP参数使用MIPGapAbs=0、FeasibilityTol/IntFeasTol=1e-8，为下游原单位1e-6
+审计留余量；并不放宽模型。依据Gurobi C API `TimeLimit/MIPGap/Threads`、
+`Status/SolCount/Pi`语义及下游Southern执行契约。
+
+限额状态不以SolCount替代状态：有incumbent则返回候选供调用方审计，无候选则失败。
+优化API错误单独返回错误码；不可行、无界、不可行或无界区分。动态网络行分离路径
+不导出不完整连续对偶。QP仅继承实例环境时限/线程等参数，未改其装配及证据范围。
+
+预注册验证：下游`HybridACDCDistributionSystemsSimulation`的
+`test_southern_market '[gurobi]'`，解析出力100MW、日费用480000、节点价200，
+原模型残差<=1e-6；多资源目标与HiGHS差<=1e-4元（相对比较1e-5）；
+`min x+2y, 2<=x<=3, y=4`应得目标10、区间行/等式对偶1/2，误差<=1e-8。
+极小LP时限应返回TimeLimit且不导出Pi。构造无效参数显式拒绝。
+本地Release实测及GUI证据集中在下游市场执行契约；未宣称大规模时延或库全量回归。
+
+本次下游macOS arm64 Release、Gurobi13.0实测：专项2用例41断言通过（含真实
+TimeLimit与对偶为空），解析数值及区间行Pi符合预期；Southern/forecast共38用例
+23766断言通过，四项浏览器E2E通过。无Gurobi的ASan/UBSan配置校验1用例9断言
+通过，验证available=false及无状态推进，不算Gurobi库的sanitizer覆盖。
+
 MIPSolvers 使用统一模型变体和适配器注册表承载八类问题：线性方程（LE）、
 非线性方程（NLE）、线性规划（LP）、二次规划（QP）、非线性规划（NLP）、
 混合整数线性规划（MILP）、混合整数非线性规划（MINLP）和锥规划（CONIC）。

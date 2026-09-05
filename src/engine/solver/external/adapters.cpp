@@ -3547,10 +3547,10 @@ static int gurobi_scuc_cut_callback(
 GurobiAdapter::GurobiAdapter() {
 #ifdef HACDCPF_HAVE_GUROBI
   GRBenv* env = nullptr;
-  if (GRBloadenv(&env, nullptr) == 0 && env != nullptr) {
-    // Suppress console output.
+  if (GRBemptyenv(&env) == 0 && env != nullptr) {
     GRBsetintparam(env, "OutputFlag", 0);
-    env_ = env;
+    if (GRBstartenv(env) == 0) env_ = env;
+    else GRBfreeenv(env);
   }
 #endif
 }
@@ -3559,6 +3559,20 @@ GurobiAdapter::~GurobiAdapter() {
 #ifdef HACDCPF_HAVE_GUROBI
   if (env_) {
     GRBfreeenv(static_cast<GRBenv*>(env_));
+  }
+#endif
+}
+
+GurobiAdapter::GurobiAdapter(GurobiOptions options) : GurobiAdapter() {
+  if (!std::isfinite(options.time_limit_sec) || options.time_limit_sec <= 0 ||
+      !std::isfinite(options.mip_gap) || options.mip_gap < 0 || options.mip_gap > 1 || options.threads < 0 || options.threads > 1024)
+    throw std::invalid_argument("Invalid Gurobi time limit, MIP gap or threads");
+  options_ = options;
+#ifdef HACDCPF_HAVE_GUROBI
+  if (env_) {
+    auto* env = static_cast<GRBenv*>(env_);
+    if (GRBsetdblparam(env,"TimeLimit",options.time_limit_sec) || GRBsetdblparam(env,"MIPGap",options.mip_gap) ||
+        GRBsetintparam(env,"Threads",options.threads)) throw std::invalid_argument("Gurobi rejected solve options");
   }
 #endif
 }
@@ -3578,6 +3592,10 @@ bool GurobiAdapter::available() const {
 }
 
 SolveResult GurobiAdapter::solve_lp(const LPModel& prob) const {
+  if (options_) {
+    MIPModel linear; linear.linear_part = prob;
+    return solve_milp(linear);
+  }
   SolveResult out;
   out.stats.solver_name = name();
 #ifndef HACDCPF_HAVE_GUROBI
@@ -3840,6 +3858,8 @@ SolveResult GurobiAdapter::solve_milp(const MIPModel& prob) const {
   const int n = static_cast<int>(lp.vars.size());
   const int m_ineq = static_cast<int>(lp.A.rows());
   const int m_eq = static_cast<int>(lp.Aeq.rows());
+  std::vector<int> upper_rows(m_ineq), lower_rows(m_ineq, -1), equality_rows(m_eq);
+  int loaded_rows = 0;
   const double obj_sign = (lp.sense == Sense::Maximize) ? -1.0 : 1.0;
 
   // Prepare variable metadata.
@@ -3893,6 +3913,7 @@ SolveResult GurobiAdapter::solve_milp(const MIPModel& prob) const {
     Eigen::SparseMatrix<double, Eigen::RowMajor> A_rm(lp.A);
     for (int i = 0; i < m_ineq; ++i) {
       if (skip_ineq_row[static_cast<std::size_t>(i)] != 0) continue;
+      upper_rows[i] = loaded_rows++;
       std::vector<int> ind;
       std::vector<double> val;
       for (Eigen::SparseMatrix<double, Eigen::RowMajor>::InnerIterator it(A_rm, i); it; ++it) {
@@ -3905,6 +3926,7 @@ SolveResult GurobiAdapter::solve_milp(const MIPModel& prob) const {
                    GRB_LESS_EQUAL, lp.b[i], nullptr);
       const double lhs = lp_row_lhs_or_neg_inf(lp, i);
       if (std::isfinite(lhs)) {
+        lower_rows[i] = loaded_rows++;
         GRBaddconstr(model, static_cast<int>(ind.size()), ind.data(), val.data(),
                      GRB_GREATER_EQUAL, lhs, nullptr);
       }
@@ -3915,6 +3937,7 @@ SolveResult GurobiAdapter::solve_milp(const MIPModel& prob) const {
   {
     Eigen::SparseMatrix<double, Eigen::RowMajor> Aeq_rm(lp.Aeq);
     for (int i = 0; i < m_eq; ++i) {
+      equality_rows[i] = loaded_rows++;
       std::vector<int> ind;
       std::vector<double> val;
       for (Eigen::SparseMatrix<double, Eigen::RowMajor>::InnerIterator it(Aeq_rm, i); it; ++it) {
@@ -4243,6 +4266,15 @@ SolveResult GurobiAdapter::solve_milp(const MIPModel& prob) const {
       if (endp != tl_env && tl > 0.0)
         GRBsetdblparam(model_env, "TimeLimit", tl);
     }
+    // Per-instance options win over legacy environment defaults; docs/solvers.md.
+    if (options_) {
+      GRBsetdblparam(model_env, "TimeLimit", options_->time_limit_sec);
+      GRBsetdblparam(model_env, "MIPGap", options_->mip_gap);
+      GRBsetdblparam(model_env, "MIPGapAbs", 0);
+      GRBsetintparam(model_env, "Threads", options_->threads);
+      GRBsetdblparam(model_env, "FeasibilityTol", 1e-8);
+      GRBsetdblparam(model_env, "IntFeasTol", 1e-8);
+    }
 
     // Output to stderr when MIPSOLVERS_GUROBI_VERBOSE is set.
     if (std::getenv("MIPSOLVERS_GUROBI_VERBOSE") != nullptr)
@@ -4336,7 +4368,12 @@ SolveResult GurobiAdapter::solve_milp(const MIPModel& prob) const {
     GRBsetcallbackfunc(model, gurobi_scuc_cut_callback, &cut_data);
   }
 
-  GRBoptimize(model);
+  const int optimize_error = GRBoptimize(model);
+  if (optimize_error != 0) {
+    out.stats.status = "Gurobi optimize error=" + std::to_string(optimize_error);
+    out.stats.runtime_sec = std::chrono::duration<double>(std::chrono::steady_clock::now()-t0).count();
+    GRBfreemodel(model); return out;
+  }
 
   int status = 0;
   GRBgetintattr(model, "Status", &status);
@@ -4347,11 +4384,18 @@ SolveResult GurobiAdapter::solve_milp(const MIPModel& prob) const {
   if (status == GRB_OPTIMAL) {
     out.stats.success = true;
     out.stats.status = "Optimal";
-  } else if ((status == GRB_TIME_LIMIT || status == GRB_NODE_LIMIT) && has_incumbent) {
-    out.stats.success = true;
-    out.stats.status = (status == GRB_TIME_LIMIT) ? "Time limit" : "Node limit";
+  } else if (status == GRB_TIME_LIMIT || status == GRB_NODE_LIMIT || status == GRB_ITERATION_LIMIT ||
+             status == GRB_SOLUTION_LIMIT || status == GRB_INTERRUPTED || status == GRB_WORK_LIMIT || status == GRB_MEM_LIMIT) {
+    out.stats.success = has_incumbent;
+    out.stats.status = status == GRB_TIME_LIMIT ? "TimeLimit" : status == GRB_NODE_LIMIT ? "NodeLimit" :
+      status == GRB_ITERATION_LIMIT ? "IterationLimit" : status == GRB_SOLUTION_LIMIT ? "SolutionLimit" :
+      status == GRB_INTERRUPTED ? "Interrupt" : status == GRB_WORK_LIMIT ? "WorkLimit" : "MemoryLimit";
   } else if (status == GRB_INFEASIBLE) {
     out.stats.status = "Infeasible";
+  } else if (status == GRB_INF_OR_UNBD) {
+    out.stats.status = "UnboundedOrInfeasible";
+  } else if (status == GRB_UNBOUNDED) {
+    out.stats.status = "Unbounded";
   } else {
     out.stats.status = "Gurobi status=" + std::to_string(status);
   }
@@ -4361,20 +4405,22 @@ SolveResult GurobiAdapter::solve_milp(const MIPModel& prob) const {
     GRBgetdblattr(model, "ObjVal", &objval);
     out.stats.objective = obj_sign * objval;
     out.x.resize(n);
-    GRBgetdblattrarray(model, "X", 0, n, out.x.data());
+    if (GRBgetdblattrarray(model, "X", 0, n, out.x.data()) != 0) {
+      out.x.resize(0); out.stats.success = false; out.stats.status = "Gurobi solution extraction failed";
+    }
     double mip_gap = 0.0;
     if (GRBgetdblattr(model, "MIPGap", &mip_gap) == 0)
       out.stats.mip_gap = mip_gap;
 
     // Extract constraint duals (Pi) for pure LP problems.
-    if (prob.binary_idx.empty() && prob.integer_idx.empty()) {
+    if (status == GRB_OPTIMAL && prob.binary_idx.empty() && prob.integer_idx.empty() && !separate_gurobi_network) {
       const int m_total = m_ineq + m_eq;
-      out.constraint_duals.resize(m_total);
-      if (GRBgetdblattrarray(model, "Pi", 0, m_total,
-                             out.constraint_duals.data()) == 0) {
-        out.constraint_duals *= obj_sign;
-      } else {
-        out.constraint_duals.resize(0);
+      std::vector<double> pi(loaded_rows);
+      if (GRBgetdblattrarray(model, "Pi", 0, loaded_rows, pi.data()) == 0) {
+        out.constraint_duals.resize(m_total);
+        for (int i = 0; i < m_ineq; ++i)
+          out.constraint_duals[i] = obj_sign*(pi[upper_rows[i]] + (lower_rows[i] >= 0 ? pi[lower_rows[i]] : 0));
+        for (int i = 0; i < m_eq; ++i) out.constraint_duals[m_ineq+i] = obj_sign*pi[equality_rows[i]];
       }
     }
   }

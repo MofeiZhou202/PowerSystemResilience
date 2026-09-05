@@ -59,9 +59,16 @@ class ScipAdapter final : public SolverAdapter {
 };
 
 /// Gurobi adapter using the native C API (requires libgurobi linked at build time).
+struct GurobiOptions {
+  double time_limit_sec{3600};
+  double mip_gap{1e-9};
+  int threads{0};
+};
+
 class GurobiAdapter final : public SolverAdapter {
  public:
   GurobiAdapter();
+  explicit GurobiAdapter(GurobiOptions options);
   ~GurobiAdapter() override;
 
   GurobiAdapter(const GurobiAdapter&) = delete;
@@ -76,6 +83,7 @@ class GurobiAdapter final : public SolverAdapter {
   bool available() const;
 
  private:
+  std::optional<GurobiOptions> options_;
 #ifdef HACDCPF_HAVE_GUROBI
   void* env_{nullptr};  // GRBenv* (opaque to avoid header dependency)
 #endif
