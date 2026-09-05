@@ -352,6 +352,62 @@ TEST_CASE("Filter IPM satisfies the full inequality Newton equations",
   CHECK(detail.complementarity < 1e-8);
 }
 
+TEST_CASE("Filter IPM crosses a converged barrier point to the active-set KKT limit",
+          "[ipm][nlp][active-set-polish][regression]") {
+  constexpr int kInactiveRows = 64;
+  NLPModel nlp;
+  nlp.sense = Sense::Minimize;
+  nlp.vars.push_back({VarType::Continuous, -1e20, 1e20, "dispatch"});
+  nlp.x0 = Eigen::VectorXd::Zero(1);
+  nlp.f = [](const Eigen::VectorXd& x) {
+    const double residual = x[0] - 2.0;
+    return 0.5 * residual * residual;
+  };
+  nlp.grad = [](const Eigen::VectorXd& x, Eigen::VectorXd& gradient) {
+    gradient = Eigen::VectorXd::Constant(1, x[0] - 2.0);
+  };
+  nlp.lagrangian_hess = [](const Eigen::VectorXd&, const Eigen::VectorXd&,
+                            const Eigen::VectorXd*,
+                            Eigen::SparseMatrix<double>& hessian) {
+    hessian.resize(1, 1);
+    hessian.insert(0, 0) = 1.0;
+  };
+  nlp.h = [](const Eigen::VectorXd& x, Eigen::VectorXd& inequality) {
+    inequality.resize(1 + kInactiveRows);
+    inequality[0] = x[0] - 1.0;
+    for (int row = 1; row < inequality.size(); ++row) {
+      inequality[row] = x[0] - (1e4 + row);
+    }
+  };
+  nlp.jac_h = [](const Eigen::VectorXd&,
+                  Eigen::SparseMatrix<double>& jacobian) {
+    jacobian.resize(1 + kInactiveRows, 1);
+    for (int row = 0; row < jacobian.rows(); ++row) {
+      jacobian.insert(row, 0) = 1.0;
+    }
+  };
+
+  IPMOptions options;
+  options.max_iter = 100;
+  options.tol_primal = 1e-6;
+  options.tol_dual = 1e-6;
+  options.tol_complementarity = 1e-6;
+  options.tol_accept = 0.0;
+  options.scale_problem = false;
+  options.use_restoration_phase = false;
+  NativeIPMAdapter solver(options);
+  const auto [result, detail] = solver.solve_nlp_detail(nlp);
+
+  INFO(result.stats.status);
+  REQUIRE(result.stats.success);
+  CHECK(result.stats.status == "Converged after active-set KKT polish");
+  CHECK(detail.active_set_polish_factorizations > 0);
+  CHECK(result.x[0] == Approx(1.0).margin(1e-10));
+  CHECK(result.stats.primal_feas <= options.tol_primal);
+  CHECK(result.stats.dual_feas <= options.tol_dual);
+  CHECK(detail.complementarity <= options.tol_complementarity);
+}
+
 TEST_CASE("Native IPM acceptable tolerance requires full KKT feasibility",
           "[ipm][nlp][regression]") {
   NLPModel nlp;
@@ -887,6 +943,47 @@ TEST_CASE("Filter diagnostics report coherent trial accounting",
   if (detail.numeric_factorizations > 0) {
     CHECK(detail.linear_solver_backend != "unselected");
   }
+}
+
+TEST_CASE("Filter IPM bounds primary work before restoration",
+          "[ipm][nlp][restoration][budget]") {
+  NLPModel nlp;
+  nlp.sense = Sense::Minimize;
+  nlp.vars.push_back({VarType::Continuous, -2.0, 2.0, "state"});
+  nlp.x0 = Eigen::VectorXd::Constant(1, 0.25);
+  nlp.f = [](const Eigen::VectorXd& x) { return 0.5 * x.squaredNorm(); };
+  nlp.grad = [](const Eigen::VectorXd& x, Eigen::VectorXd& gradient) {
+    gradient = x;
+  };
+  nlp.hess = [](const Eigen::VectorXd&,
+                Eigen::SparseMatrix<double>& hessian) {
+    hessian.resize(1, 1);
+    hessian.insert(0, 0) = 1.0;
+  };
+  nlp.g = [](const Eigen::VectorXd& x, Eigen::VectorXd& equality) {
+    equality = Eigen::VectorXd::Constant(1, x[0] * x[0] - 1.0);
+  };
+  nlp.jac_g = [](const Eigen::VectorXd& x,
+                  Eigen::SparseMatrix<double>& jacobian) {
+    jacobian.resize(1, 1);
+    jacobian.insert(0, 0) = 2.0 * x[0];
+  };
+
+  IPMOptions options;
+  options.max_iter = 20;
+  options.primary_max_iter_before_restoration = 1;
+  options.restoration_max_iter = 1;
+  options.tol_accept = 0.0;
+  options.scale_problem = false;
+  const auto [result, detail] =
+      NativeIPMAdapter(options).solve_nlp_detail(nlp);
+  (void)result;
+
+  CHECK(detail.initial_attempt_iterations <= 1);
+  CHECK(detail.initial_attempt_factorizations >= 0);
+  CHECK(detail.restoration_factorizations > 0);
+  CHECK(detail.numeric_factorizations >=
+        detail.initial_attempt_factorizations);
 }
 
 TEST_CASE("Fixed-variable reduction audits restored starts in original coordinates",

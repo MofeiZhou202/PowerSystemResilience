@@ -874,7 +874,11 @@ void MumpsSolver::analyze_pattern(const Eigen::SparseMatrix<double>& a) {
   p.par.icntl[2] = -1;
   p.par.icntl[3] = 0;
   p.par.icntl[6] = 7;   // ICNTL(7) ordering: auto (METIS/PORD nested dissection)
-  p.par.icntl[7] = 0;   // ICNTL(8) scaling: none (caller equilibrates already)
+  // ICNTL(8)=77 lets MUMPS choose symmetric scaling. This is a diagonal
+  // congruence for SYM=2, so Sylvester inertia is preserved while mixed-unit
+  // KKT rows no longer trip numerical-null-pivot detection.
+  // MUMPS 5.7.3 User Guide, Sections 3.9 and 5.2.4.
+  p.par.icntl[7] = 77;
   p.par.icntl[19] = 0;  // ICNTL(20): centralized dense RHS
   p.par.icntl[20] = 0;  // ICNTL(21): centralized solution
   p.par.icntl[23] = 1;  // ICNTL(24): detect numerical null pivots

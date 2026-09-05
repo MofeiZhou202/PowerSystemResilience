@@ -1230,8 +1230,10 @@ class CallbackTNLP final : public Ipopt::TNLP {
         return false;
       }
       for (int i = 0; i < n_; ++i) {
-        z_L[i] = 0.0;
-        z_U[i] = 0.0;
+        z_L[i] = prob_.solver_options.primal_dual_warm_start
+            ? prob_.box_dual_lb_start[i] : 0.0;
+        z_U[i] = prob_.solver_options.primal_dual_warm_start
+            ? prob_.box_dual_ub_start[i] : 0.0;
       }
     }
 
@@ -1239,8 +1241,21 @@ class CallbackTNLP final : public Ipopt::TNLP {
       if (lambda == nullptr || m != m_) {
         return false;
       }
-      for (int i = 0; i < m_; ++i) {
-        lambda[i] = 0.0;
+      if (prob_.solver_options.primal_dual_warm_start) {
+        // Ipopt TNLP rows are [equalities | h(x)<=0], whereas the engine's
+        // public dual contract is [inequalities | equalities]. The sign is
+        // unchanged because both use L=f+lambda'g+mu'h with mu>=0.
+        // Ipopt TNLP::get_starting_point; Waechter--Biegler (2006), Sec. 3.1.
+        for (int i = 0; i < meq_; ++i) {
+          lambda[i] = prob_.constraint_dual_start[mineq_ + i];
+        }
+        for (int i = 0; i < mineq_; ++i) {
+          lambda[meq_ + i] = prob_.constraint_dual_start[i];
+        }
+      } else {
+        for (int i = 0; i < m_; ++i) {
+          lambda[i] = 0.0;
+        }
       }
     }
     return true;
@@ -1627,6 +1642,7 @@ class CallbackTNLP final : public Ipopt::TNLP {
     out.stats.unscaled_dual_feas = unscaled_dual_inf_;
     out.stats.unscaled_complementarity = unscaled_complementarity_;
     out.stats.residual_inf = std::max(primal_inf_, dual_inf_);
+    out.stats.warm_start_used = prob_.solver_options.primal_dual_warm_start;
 
     switch (app_status) {
       case Ipopt::Solve_Succeeded:
@@ -2492,6 +2508,34 @@ SolveResult IpoptAdapter::solve_nlp(const NLPModel& prob_in) const {
     return out;
   }
 
+  if (prob.solver_options.primal_dual_warm_start) {
+    Eigen::VectorXd equality_values;
+    Eigen::VectorXd inequality_values;
+    if (prob.g) prob.g(prob.x0, equality_values);
+    if (prob.h) prob.h(prob.x0, inequality_values);
+    const int constraint_count = static_cast<int>(
+        equality_values.size() + inequality_values.size());
+    const bool valid_dimensions =
+        prob.constraint_dual_start.size() == constraint_count &&
+        prob.box_dual_lb_start.size() == n_vars &&
+        prob.box_dual_ub_start.size() == n_vars;
+    const bool valid_values = valid_dimensions &&
+        prob.constraint_dual_start.allFinite() &&
+        prob.box_dual_lb_start.allFinite() &&
+        prob.box_dual_ub_start.allFinite() &&
+        (inequality_values.size() == 0 ||
+         (prob.constraint_dual_start.head(inequality_values.size()).array() >=
+          0.0).all()) &&
+        (prob.box_dual_lb_start.array() >= 0.0).all() &&
+        (prob.box_dual_ub_start.array() >= 0.0).all();
+    if (!valid_dimensions || !valid_values) {
+      out.stats.status =
+          "Invalid NLP primal-dual warm start: expected finite constraint "
+          "duals [inequalities|equalities] and nonnegative bound duals";
+      return out;
+    }
+  }
+
   Ipopt::SmartPtr<Ipopt::TNLP> nlp = new CallbackTNLP(prob);
   Ipopt::SmartPtr<Ipopt::IpoptApplication> app = IpoptApplicationFactory();
 
@@ -2500,6 +2544,28 @@ SolveResult IpoptAdapter::solve_nlp(const NLPModel& prob_in) const {
   app->Options()->SetStringValue(
       "hessian_approximation",
       prob.lagrangian_hess ? "exact" : "limited-memory");
+  if (prob.solver_options.adaptive_barrier) {
+    app->Options()->SetStringValue("mu_strategy", "adaptive");
+  }
+  if (prob.solver_options.primal_dual_warm_start) {
+    // Ipopt's warm-start initializer perturbs a supplied KKT point into the
+    // strict interior. A common small push preserves nearby active sets while
+    // avoiding zero slack/multiplier pairs. Ipopt
+    // IpWarmStartIterateInitializer.cpp; Waechter--Biegler (2006), Sec. 3.1.
+    const double warm_start_push =
+        std::isfinite(prob.solver_options.warm_start_push) &&
+                prob.solver_options.warm_start_push > 0.0
+            ? prob.solver_options.warm_start_push : 1e-8;
+    app->Options()->SetStringValue("warm_start_init_point", "yes");
+    app->Options()->SetNumericValue("warm_start_bound_push", warm_start_push);
+    app->Options()->SetNumericValue("warm_start_bound_frac", warm_start_push);
+    app->Options()->SetNumericValue(
+        "warm_start_slack_bound_push", warm_start_push);
+    app->Options()->SetNumericValue(
+        "warm_start_slack_bound_frac", warm_start_push);
+    app->Options()->SetNumericValue(
+        "warm_start_mult_bound_push", warm_start_push);
+  }
   // Keep the adapter boundary deterministic for malformed configuration.
   // Passing NaN/Inf through SetNumericValue makes Ipopt fail during option
   // initialisation, while zero/negative tolerances are outside its contract.

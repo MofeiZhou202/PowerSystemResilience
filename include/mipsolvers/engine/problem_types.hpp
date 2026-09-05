@@ -247,6 +247,19 @@ struct NLPSolverOptions {
   double acceptable_dual_infeasibility_tolerance{1e10};
   double acceptable_constraint_violation_tolerance{1e-2};
   double acceptable_complementarity_tolerance{1e-2};
+  // Opt-in Mehrotra-style adaptive barrier (Ipopt mu_strategy=adaptive).
+  // Default off preserves the historical monotone schedule for every existing
+  // caller; problems with poor central-path centrality (e.g. dense recovered
+  // rows in Kron-reduced OPF) converge in materially fewer iterations with it.
+  bool adaptive_barrier{false};
+  /// Request a complete primal-dual warm start from x0 and the three dual
+  /// vectors on NLPModel. External adapters must reject incomplete or invalid
+  /// vectors instead of silently reverting to a primal-only initialization.
+  bool primal_dual_warm_start{false};
+  /// Common interior push applied to Ipopt's warm-start bound, slack, and
+  /// multiplier initialization. Ipopt's WarmStartIterateInitializer uses this
+  /// to keep a supplied KKT point strictly inside the barrier subproblem.
+  double warm_start_push{1e-8};
 };
 
 struct NLPModel {
@@ -291,6 +304,12 @@ struct NLPModel {
 
   std::vector<VariableMeta> vars;
   Eigen::VectorXd x0;
+  /// Optional complete dual warm start in the public SolveResult convention:
+  /// [nonlinear inequality multipliers | equality multipliers].
+  Eigen::VectorXd constraint_dual_start;
+  /// Variable lower/upper-bound multipliers in original variable order.
+  Eigen::VectorXd box_dual_lb_start;
+  Eigen::VectorXd box_dual_ub_start;
   NLPSolverOptions solver_options;
 };
 

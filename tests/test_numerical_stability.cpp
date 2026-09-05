@@ -625,7 +625,7 @@ TEST_CASE("Augmented Newton path matches condensed path on inequality NLP",
           "[numerical][augmented]") {
   // min 0.5*x0^2 + x1^2  s.t.  x0 + x1 >= 2,  x0 <= 1.5
   // Optimum: (4/3, 2/3), obj = 4/3 (constraint x0+x1=2 active, x0<=1.5 slack).
-  auto make_nlp = []() {
+  auto make_nlp = [](double second_row_scale = 1.0) {
     NLPModel nlp;
     nlp.sense = Sense::Minimize;
     nlp.vars.push_back({VarType::Continuous, -1e20, 1e20});
@@ -645,23 +645,25 @@ TEST_CASE("Augmented Newton path matches condensed path on inequality NLP",
       H.insert(1, 1) = 2.0;
       H.makeCompressed();
     };
-    nlp.h = [](const Eigen::VectorXd& x, Eigen::VectorXd& v) {
+    nlp.h = [second_row_scale](const Eigen::VectorXd& x,
+                              Eigen::VectorXd& v) {
       v.resize(2);
       v[0] = 2.0 - x[0] - x[1];
-      v[1] = x[0] - 1.5;
+      v[1] = second_row_scale * (x[0] - 1.5);
     };
-    nlp.jac_h = [](const Eigen::VectorXd&, Eigen::SparseMatrix<double>& J) {
+    nlp.jac_h = [second_row_scale](const Eigen::VectorXd&,
+                                  Eigen::SparseMatrix<double>& J) {
       J.resize(2, 2);
       J.insert(0, 0) = -1.0;
       J.insert(0, 1) = -1.0;
-      J.insert(1, 0) = 1.0;
+      J.insert(1, 0) = second_row_scale;
       J.makeCompressed();
     };
     return nlp;
   };
 
-  auto solve = [&](bool augmented) {
-    NLPModel nlp = make_nlp();
+  auto solve = [&](bool augmented, double second_row_scale = 1.0) {
+    NLPModel nlp = make_nlp(second_row_scale);
     IPMOptions options;
     options.max_iter = 100;
     options.tol_primal = 1e-8;
@@ -692,6 +694,16 @@ TEST_CASE("Augmented Newton path matches condensed path on inequality NLP",
   CHECK(ra.stats.objective == Approx(rc.stats.objective).margin(1e-7));
   CHECK(ra.x[0] == Approx(rc.x[0]).margin(1e-6));
   CHECK(ra.x[1] == Approx(rc.x[1]).margin(1e-6));
+
+  // Positive row scaling leaves the feasible set unchanged. The augmented
+  // congruence sqrt(M/S)Jh and MUMPS symmetric equilibration must retain the
+  // same solution even when one inequality row differs by four decades.
+  const auto [ra_scaled, da_scaled] = solve(true, 1e4);
+  REQUIRE(ra_scaled.stats.success);
+  CHECK(da_scaled.newton_formulation == "augmented");
+  CHECK(ra_scaled.stats.objective == Approx(ra.stats.objective).margin(1e-7));
+  CHECK(ra_scaled.x[0] == Approx(ra.x[0]).margin(1e-6));
+  CHECK(ra_scaled.x[1] == Approx(ra.x[1]).margin(1e-6));
 }
 
 TEST_CASE("Native NLP exactly eliminates fixed variables and restores KKT",
