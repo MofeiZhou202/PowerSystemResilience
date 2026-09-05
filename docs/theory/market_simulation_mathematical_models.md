@@ -1,5 +1,10 @@
 # 市场模拟数学模型（实现审核稿）
 
+本文仍为平台实现审核稿，不等同于南方区域 2025 年 V1.0 规则。
+该规则第 2.6 节的正式原页、日前 SCUC 逐条转写及 SCED/LMP 对照见
+[市场模块入口](../modules/market/README.md) 与
+[规则差异表](../modules/market/southern_rules_comparison.md)。
+
 本文从当前生产实现
 `include/hacdcpf/market/market_simulation.hpp`、
 `src/market/market_simulation.cpp` 与

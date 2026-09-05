@@ -1,5 +1,12 @@
 # Native Day-Ahead Market Runtime
 
+This describes the platform implementation, which is not equivalent to section
+2.6 of the Southern Regional Spot Energy Trading Implementation Rules (2025
+V1.0). The [official source and manual](../modules/market/README.md) and
+[clause comparison](../modules/market/southern_rules_comparison.md) distinguish
+the regulatory SCUC/SCED/LMP models from this runtime. No rule-equivalence
+certification is implied by the existing market tests.
+
 The first native electricity-market vertical slice is implemented by
 `hacdcpf::market::run_day_ahead_market`.  It operates on an immutable
 `HybridPowerSystem` and a `TimeSeriesData` horizon:

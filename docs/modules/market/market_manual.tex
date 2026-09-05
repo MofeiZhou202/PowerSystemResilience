@@ -4,21 +4,29 @@
 %           docs/reference/market_simulation_runtime.md，公式与参数以代码为准。
 \documentclass[UTF8,fontset=fandol,a4paper,11pt]{ctexart}
 \usepackage{../../_manual_common/hysim_manual}
+\usepackage{pdfpages}
 
 \title{\textbf{交直流混合高弹性能源电力系统仿真平台}\\[0.5em]
        {\Large 电力市场仿真技术手册}\\[0.3em]
-       {\large 数学模型、接口参数、验证校核与工业级评价}}
+       {\large 南方区域 2025 年 V1.0 日前模型与平台实现对照}}
 \author{HySim-XJTU-HRPES（西安交通大学 HRPES 团队）}
 \date{\today}
 
 \begin{document}
 \maketitle
 \begin{abstract}
-\noindent 本手册依据 HySim-XJTU-HRPES 平台电力市场仿真模块
+\noindent 本手册的\textbf{日前规则模型基准}为广州电力交易中心发布的
+《南方区域电力市场现货电能量交易实施细则（2025 年 V1.0 版）》第 2.6 节，
+正文第 28--63 页（PDF 文件第 31--66 页）。第~\ref{sec:southern-rule}~节按条款
+转写 SCUC，并说明 SCED 与独立 LMP 模型；附录~\ref{sec:southern-facsimile}~直接
+嵌入该范围原页，保留全部公式、定义和原文歧义。
+\textbf{规则模型不等于当前生产实现，现有代码尚未与该细则完全一致。}
+本手册同时依据 HySim-XJTU-HRPES 平台电力市场仿真模块
 （\srcpath{src/market/}、\srcpath{include/hacdcpf/market/market\_simulation.hpp}）整理，
 覆盖日前市场全链路（报价$\to$SCUC$\to$固定组合 SCED/LMP$\to$LODF N-1 割$\to$AC 认证$\to$结算）、
 实时两结算市场（再调度 + 偏差结算 + 辅助/不平衡）与同步局部最优响应的重复博弈。
-全部结论以源码与既有契约 \srcpath{docs/reference/market\_simulation\_runtime.md} 为准。
+运行行为以源码与既有契约 \srcpath{docs/reference/market\_simulation\_runtime.md} 为准；
+规则内容以下载的正式附件为准，二者的差异不得互相覆盖。
 \textbf{诚实口径（线性化全混合）}：SCUC/SCED 对混合 AC/DC 系统联合出清，
 直流网络以线性化直流电压参与定价、VSC 与 DC/DC 换流器按双向效率建模；
 \fld{model\_scope} 与各 \fld{ValidityFlags} 在运行时按系统组成改写
@@ -32,19 +40,24 @@
 \tableofcontents
 \newpage
 
-\section{阅读指南与约定}
+\input{chapters/southern_day_ahead_rules}
+
+\section{平台实现阅读指南与约定（非南方规则模型）}
 \subsection{数据来源}
 \begin{itemize}
   \item \srcpath{include/hacdcpf/market/market\_simulation.hpp} —— 日前/实时/重复博弈接口、
         \texttt{MarketOptions}/\texttt{MarketResult}/\texttt{MarketModelScope} 定义；
   \item \srcpath{src/market/market\_simulation.cpp} —— 出清流水线、SCED/LMP、N-1 割、AC 认证与结算实现；
   \item \srcpath{src/market/participant\_behavior.cpp} —— 参与者报价策略（加价/扣留）与所有权解析；
-  \item \srcpath{tests/test\_market\_simulation.cpp} —— 验证依据（目标 \texttt{hacdcpf\_test\_market\_simulation}）。
+  \item \srcpath{tests/test\_market\_simulation.cpp}：验证依据，目标
+        \srcpath{hacdcpf\_test\_market\_simulation}。
 \end{itemize}
 入口族定义于 \srcpath{include/hacdcpf/market/market\_simulation.hpp}。
 
 \subsection{单位制与索引空间}
-价格 LMP 单位 元/MWh，功率 MW，时段为整数小时索引。\fld{lmp\_per\_mwh} 按 AC 母线顺序，
+价格 LMP 单位 元/MWh，功率 MW，时段为整数步索引，长度由
+\fld{step\_duration\_hr} 给定，不能把索引等同于小时。
+平台不自动建立规则的 D 日 96 点加 D+1 日峰谷 2 点。\fld{lmp\_per\_mwh} 按 AC 母线顺序，
 \fld{branch\_flow\_mw} 按 AC 支路顺序；\fld{dc\_lmp\_per\_mwh} 按 DC 母线顺序，
 取自 DC 母线平衡约束的对偶（参与直流侧定价）；
 \fld{vsc\_ac\_injection\_mw}/\fld{vsc\_dc\_injection\_mw} 为换流器端口注入输出。机组组合结果
@@ -56,7 +69,7 @@
 \srcpath{include/hacdcpf/market/market\_simulation.hpp:MarketModelScope}（\fld{model\_scope}=\texttt{"ac-dc-linear-v1"}、
 各布尔标志 false），并在出清入口按系统组成运行时改写
 （\srcpath{src/market/market\_simulation.cpp:run\_day\_ahead\_market}）：含 DC 母线/支路/换流器的混合系统置
-\fld{model\_scope}=\texttt{"ac-dc-linear-v1:dc-voltage+bidirectional-converters"}、
+\fld{model\_scope}=\srcpath{"ac-dc-linear-v1:dc-voltage+bidirectional-converters"}、
 \fld{dc\_network\_modelled}=\fld{dc\_voltage\_linearized}=true，
 \fld{vsc\_bidirectional\_efficiency\_modelled} 与
 \fld{dcdc\_bidirectional\_efficiency\_modelled} 按在役 VSC/DC/DC 换流器是否非空置真，
@@ -75,14 +88,14 @@ DC 支路损耗不进入商业出清、在非线性认证中校核；VSC 固定/
 \fld{scuc\_mip\_relative\_gap}=$10^{-2}$ 意味着 SCUC 为近似解，除非 \fld{scuc\_optimality\_proven}
 置真；AC 应急校核为 opt-in，失败在 \texttt{SecurityResult} 中保持显式（不静默修复）。
 
-\section{功能定位与架构}
+\section{平台功能定位与架构（实现对照）}
 \subsection{公共入口族}
 \begin{center}\footnotesize
 \begin{tabular}{@{}L{6.6cm}L{3.0cm}L{5.4cm}@{}}
 \toprule
 入口 & 定义位置 & 说明\\
 \midrule
-\srcpath{run\_day\_ahead\_market(system, time\_series, options)} & market\_simulation.hpp & 报价$\to$SCUC$\to$固定组合 SCED/定价$\to$LODF N-1$\to$AC 认证$\to$结算\\
+\srcpath{run\_day\_ahead\_market(system, time\_series, options)} & \srcpath{market\_simulation.hpp} & 报价$\to$SCUC$\to$固定组合 SCED/定价$\to$LODF N-1$\to$AC 认证$\to$结算\\
 \srcpath{run\_real\_time\_market(system, da\_ts, realized\_ts, da\_result, options)} & 同上 & 再调度 + 两结算偏差 + 辅助/不平衡\\
 \srcpath{run\_repeated\_market\_game(system, da\_ts, realized\_ts, options)} & 同上 & 同步局部最优响应重复博弈\\
 \srcpath{make\_cost\_based\_offers(system, segment\_count)} & 同上 & 由成本曲线生成真实分段线性报价\\
@@ -124,7 +137,8 @@ DC 支路损耗不进入商业出清、在非线性认证中校核；VSC 固定/
 参与者策略 \texttt{ParticipantBehavior} 的 \fld{BehaviorPolicyType} 可取
 \texttt{CostBased}/\allowbreak\texttt{FixedMarkup}/\allowbreak
 \texttt{CapacityWithholding}/\allowbreak\texttt{MarkupAndWithholding}；
-实时侧辅助服务参数位于 \texttt{AncillaryServiceOptions}。
+实时侧辅助服务参数位于
+\texttt{Ancillary\allowbreak Service\allowbreak Options}。
 
 \section{验证与边界局限}
 \subsection{验证与校核}
@@ -137,14 +151,14 @@ DC 支路损耗不进入商业出清、在非线性认证中校核；VSC 固定/
         SCUC/SCED 定价（\fld{dc\_lmp\_per\_mwh} 取 DC 平衡约束对偶，
         \srcpath{src/market/market\_simulation.cpp:extract\_pricing}），VSC/DC/DC 换流器按双向效率建模；
         \fld{model\_scope} 运行时按系统组成改写为
-        \texttt{"ac-dc-linear-v1:dc-voltage+bidirectional-converters"} 或
+        \srcpath{"ac-dc-linear-v1:dc-voltage+bidirectional-converters"} 或
         \texttt{"ac-only-dc-power-flow"}，效率/储能标志按在役设备条件化置真
         （\srcpath{src/market/market\_simulation.cpp:run\_day\_ahead\_market}）；
   \item DC 支路损耗不进入商业 SCUC/SCED、在非线性认证中校核；VSC 固定/电流相关损耗、
         容量圆、电流与调制限值不是商业约束（\fld{limitations}，
         \srcpath{src/market/market\_simulation.cpp:run\_day\_ahead\_market}）；
   \item 公式无法表示的在役资产（目前仅 external\_grid、energy\_router）以
-        \texttt{UnsupportedMarketAsset} 退回（不静默丢弃，
+        \texttt{Unsupported\allowbreak Market\allowbreak Asset} 退回（不静默丢弃，
         \srcpath{src/market/market\_simulation.cpp:unsupported\_market\_assets}）；
   \item N-1：预防式 LODF 割覆盖 AC 支路；机组、DC 支路、换流器与 DC 储能停用在启用
         N-1 时以校正性固定组合 SCED 校核（\fld{hybrid\_n1\_modelled}，
@@ -153,8 +167,19 @@ DC 支路损耗不进入商业出清、在非线性认证中校核；VSC 固定/
   \item \fld{scuc\_mip\_relative\_gap}=$10^{-2}$：SCUC 为近似解，除非 \fld{scuc\_optimality\_proven}；
   \item \fld{energy\_prices\_valid} 在基态定价成功前为 false（\srcpath{src/market/market\_simulation.cpp:pricing\_objective（lambda）}）。
 \end{itemize}
-规范文档：\srcpath{docs/reference/market\_simulation\_runtime.md}、
-\srcpath{docs/theory/market\_simulation\_mathematical\_models.md}。
+平台实现参考：
+\begin{itemize}
+ \item \srcpath{docs/reference/market\_simulation\_runtime.md}；
+ \item \srcpath{docs/theory/market\_simulation\_mathematical\_models.md}。
+\end{itemize}
 \input{../../_manual_common/industrial_evaluation}
+
+\appendix
+\section{第 2.6 节正式原页：日前出清模型}\label{sec:southern-facsimile}
+以下直接载入正式 PDF 文件第 31--66 页，即正文第 28--63 页，共 36 页。
+原页保留其自身页码。起止页含相邻条款的边界文字，不将其误归入 SCUC。
+原文件正文第 28 页目标函数的右缘排版截断也原样保留；前文按各项定义分行转写，
+不得用重新排版的公式冒充发布机构修订版。
+\includepdf[pages=31-66,fitpaper=true,pagecommand={\thispagestyle{empty}}]{references/southern_region_spot_energy_rules_2025_v1_0.pdf}
 
 \end{document}

@@ -1,24 +1,21 @@
 % theory_market_economics.tex -- 电力市场通用理论层
-\section{市场清算、价格与安全约束理论}\label{sec:market-theory}
+\section{平台价格与结算的通用解释（非规则等价模型）}\label{sec:market-theory}
 
 \begin{theorynote}
-本章给出 SCUC、固定承诺 SCED、节点边际电价和 N-1 预防式清算的通用理论。
+本章给出平台固定承诺 SCED、节点边际电价和 N-1 预防式清算的通用解释。
 公式用于解释经济含义；源码实际消费的变量、近似和回退以源码等价章为准。
+南方区域规则 SCUC 仅以第~\ref{sec:southern-rule}~节及正式原页为基准。
 \end{theorynote}
 
-\subsection{日前机组组合}
-令 $u_{gt}\in\{0,1\}$ 为机组开机状态，$p_{gt}$ 为 MW 出力，$r_{gt}$ 为上调备用，
-则基本 UC 约束为
-\begin{align}
-\underline P_g u_{gt}&\le p_{gt}\le\overline P_g u_{gt},\\
-\sum_g p_{gt}+s_t&=D_t,\\
-\sum_g r_{gt}&\ge R_t,\qquad 0\le r_{gt}\le\overline P_g u_{gt}-p_{gt}.
-\end{align}
-启停变量把 $u_{gt}-u_{g,t-1}$ 分解为启动和停机事件；最小开停机、爬坡和储能 SOC
-把相邻时段连接起来。市场实现使用报价分段和求解器后端，因而 SCUC 的最优性必须由
-\fld{scuc\_optimality\_proven} 与实际 gap 一起解释。
+\subsection{日前机组组合的引用边界}
+日前 SCUC 的规则目标与 21 类约束见第~\ref{sec:southern-rule}~节。
+平台现有机组组合的实际装配见源码等价章，不能以通用 UC 三条约束替代规则模型。
+平台的 \fld{scuc\_optimality\_proven} 与实际 gap 只说明实际装配模型的求解状态，
+不证明与南方区域规则一致。
 
 \subsection{固定承诺 SCED 与 LMP}
+本小节解释平台的直接对偶定价；南方规则另设含 $\delta$ 出力邻域、定价资格及
+$M'_1$--$M'_4$ 的 LMP 模型，见第~\ref{sec:southern-sced-lmp}~节。
 固定 $u$ 后，线性 SCED 可写成
 \begin{equation}
 \min_{p,r,s}\;\sum_g c_g(p_g)+\mathrm{VOLL}\sum_i s_i

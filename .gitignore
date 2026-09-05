@@ -33,6 +33,7 @@ playwright-report/
 # LaTeX build artifacts
 /*.md.tex
 docs/**/*.pdf
+!docs/modules/market/references/southern_region_spot_energy_rules_2025_v1_0.pdf
 docs/**/*.xdv
 docs/**/*.aux
 docs/**/*.log

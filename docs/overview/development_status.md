@@ -6,6 +6,45 @@ This is the living handoff for verified build state and active engineering work.
 Update it in place; do not create dated copies. Source, registered tests, and
 the current Git worktrees remain authoritative.
 
+## Southern regional day-ahead rules documentation (2026-09-05)
+
+The market manual now uses section 2.6 of the official Southern Regional Spot
+Energy Trading Implementation Rules (2025 V1.0) as its regulatory model baseline.
+The complete 171-page attachment from Guangzhou Power Exchange is retained at
+`docs/modules/market/references/southern_region_spot_energy_rules_2025_v1_0.pdf`.
+Its SHA-256 is `dba60a0baaa3c296a3fd90047bfdb926fda1426893a397c7c4f69c6ea15b1b73`.
+Printed pages 28--63 correspond to PDF pages 31--66; the manual includes these
+36 original pages and an editable transcription of the SCUC objective and all
+21 constraint clauses, plus the 18-clause SCED / 16-clause LMP correspondence.
+
+`docs/modules/market/southern_rules_comparison.md` records the source-backed gaps:
+98-point horizon, provincial positive/negative/primary-frequency reserves,
+startup trajectories and three-state fees, unit groups, reservoirs, interprovincial
+transactions, soft line/section limits, signed storage charging and hourly
+direction restrictions, and a separate LMP solve with pricing eligibility and
+dispatch neighborhoods. The official text has unresolved index, time-weight,
+startup-state, priority-slack, reservoir-unit, and storage-pricing ambiguities;
+the transcription retains these rather than silently selecting an execution model.
+
+This is a documentation and reference-source change, not a production solver
+upgrade. Existing market regression evidence is explicitly historical and does
+not certify equivalence to these rules. C++ code, interfaces and numerical tests
+are unchanged; no new numerical market run is claimed.
+
+Verification: XeLaTeX/latexmk (TeX Live 2026) builds a 59-page manual at
+`output/pdf/market_rules/market_manual.pdf`. From `docs/modules/market`, reproduce
+with `latexmk -norc -xelatex -interaction=nonstopmode -halt-on-error
+-outdir=../../../output/pdf/market_rules market_manual.tex`. Final checks confirm
+all 21 SCUC, 18 SCED and 16 LMP constraint clause identifiers and the 2.6.6 price
+formula, the source hash/page count, local module links, and whitespace-normalized
+text equality for all 36 included official pages. No authored text extends beyond
+the output pages, and the final log has no overfull boxes, missing characters or
+undefined references. Authored pages and the referenced original pages were
+rendered and inspected; original formula clipping/notation issues remain explicitly
+documented. The shared-style package-name warning, underfull text boxes and ignored
+glue-shrinkage diagnostics remain, without observed overlap. `git diff --check`
+passes. These are document checks, not numerical rule-equivalence tests.
+
 ## Cyber-dynamic safe-restoration source audit bundle (2026-09-05)
 
 The paper workspace now contains a source-backed audit bundle under

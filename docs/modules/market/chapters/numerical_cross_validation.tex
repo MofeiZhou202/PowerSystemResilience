@@ -1,9 +1,10 @@
 % numerical_cross_validation.tex -- 市场数值证据
 \section{数值结果、恒等式校核与验证边界}\label{sec:market-numerical}
 
-本节记录当前 macOS Release 二进制的实际结果。执行目标为
-\srcpath{build/macos-release/tests/test\_market\_simulation}，本轮通过 22 cases、845 assertions。
+本节保留既有 macOS Release 平台模型的历史验证结果；本次规则文档对齐未重跑 C++ 测试。
+原执行目标为 \srcpath{build/macos-release/tests/test\_market\_simulation}，记录为 22 cases、845 assertions。
 这是市场模块内部回归证据，不是独立商业市场软件 oracle。
+尤其不能作为南方区域 2025 年 V1.0 的 98 点 SCUC、分省备用、水库或独立 LMP 模型的数值证据。
 
 \subsection{24 时段日前链路}
 固定算例完成 24 个 SCUC 时段、24 个定价时段和 24 个 AC 认证时段，结果状态为
@@ -50,7 +51,7 @@ ctest --test-dir build/macos-release \
 两个算例的解析期望为：负荷 60 MW 时仅廉价机组边际，$\mathrm{LMP}=20$、出力 $(60,0)$、用户
 支付与资源收益均为 $1200$；负荷 140 MW 时廉价机组满发、调峰机组边际，$\mathrm{LMP}=40$、出力
 $(100,40)$、用户支付与资源收益均为 $5600$；两例阻塞租金与现金流残差均为 $0$。准入阈值为 $10^{-6}$；
-本轮九类检查最大误差为 $0$，负控制（人为改写一个 LMP）如期触发失败。该 oracle 校核铜板经济
+既有记录中九类检查最大误差为 $0$，负控制（人为改写一个 LMP）如期触发失败。该 oracle 校核铜板经济
 调度的边际定价与结算恒等式；有网络阻塞的 LMP、损耗、备用协优和 N-1 仍由市场 Catch2 套件验证，
 本节不以铜板一致性冒充含网市场的外部准确度。
 

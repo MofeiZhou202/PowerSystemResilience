@@ -1,6 +1,6 @@
 # 文档分类台账
 
-最后核实：2026-08-18
+最后核实：2026-09-05
 
 本台账给 `docs/` 下 Markdown 资产指定唯一的**主要归属**。Markdown 已按分类物理迁移到对应目录；
 一个文档可由其他分类交叉引用，但只在本表登记一个主要归属。
@@ -47,6 +47,11 @@
 - 历史 LaTeX 审计：`archive/`，由 [归档索引](../archive/README.md) 管理。
 
 ## 防孤儿规则
+
+市场模块新增的 [南方区域规则对照](../modules/market/southern_rules_comparison.md) 归属模块文档，
+由 [market 入口](../modules/market/README.md) 管理。规则转写章节属于原有市场 LaTeX 主手册；
+`modules/market/references/southern_region_spot_energy_rules_2025_v1_0.pdf` 为官方外部规范源附件，
+不是手册构建产物，来源、版本、页码和 SHA-256 记录在该模块入口。
 
 新增 Markdown 必须满足下列至少一项：列入根目录归属表；位于已登记路径规则之下；由模块或论文
 README 明确引用。新增主 LaTeX 必须登记到模块索引、论文索引或 LaTeX 分类表。文档检查应报告

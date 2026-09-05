@@ -1,0 +1,398 @@
+% Official baseline: attachment 2, gzpec.cn, 2025 V1.0, section 2.6.
+\section{南方区域日前市场规则模型（2025 年 V1.0）}\label{sec:southern-rule}
+
+\begin{theorynote}
+本章为\textbf{规则原文模型层}。SCUC 逐条对应第 2.6.3 节，SCED 和 LMP 对应
+第 2.6.4、2.6.5 节，节点电价乘子公式对应第 2.6.6 节；全部原页见附录~\ref{sec:southern-facsimile}。
+公式保留原符号及不等式方向，仅调整换行；带编号的校核注单独记录歧义。
+本章不宣称生产求解器已实现这些条款。条款、源码与验证的逐项对照见
+\srcpath{southern\_rules\_comparison.md}。
+\end{theorynote}
+
+\subsection{版本、时域与出清顺序（2.6.1--2.6.2）}
+正式来源为广州电力交易中心 2025 年 6 月 24 日发布通知的附件 2：
+\url{http://www.gzpec.cn/law/jygz/202506/t20250624_34712.html}。
+本地完整附件为 \srcpath{references/southern\_region\_spot\_energy\_rules\_2025\_v1\_0.pdf}，
+共 171 页；哈希与来源记录见本目录 README。
+
+日前优化在 D$-1$ 日 17:30 前进行。第 2.6.2 节的顺序为：
+\begin{enumerate}
+  \item SCUC 求运行日 96 点开机组合；
+  \item 在该组合上进行南方区域中东部主网、云南电网调频辅助服务市场预出清，
+        修改相关机组出力上下限；
+  \item SCED 求运行日 96 点出力曲线与分时节点电价；独立定价模型见 2.6.5；
+  \item 交流潮流安全校核不通过时，添加相应约束并重复以上第一至第四步，直到满足约束。
+\end{enumerate}
+第 2.6.3、2.6.4、2.6.5 节均定义优化时段数 $T=98$：D 日每 15 分钟一段、共 96 段，
+D$+1$ 日另取负荷高峰和低谷 2 段。全天电量条款明确只计 D 日 96 段。
+这两个代表时段不是自动附加的两个连续 15 分钟时段（校核注 A1）。
+
+规则索引包括平衡区/省区 $a$、交易单元 $i$、区域外联络线 $j$、区域内交易成分 $k$、
+直流联络线 $d$、线路 $l$、断面 $s$、新能源 $r$ 和储能 $es$。
+它们不是平台内部 vector position，也不能由裸 AC/DC 母线 ID 代替。
+出力与联络线功率为 MW、电量为 MWh、能量报价为元/MWh、启动费为元/次；
+储能式中的 $E$ 采用能量口径。原文目标式的时间权重问题见 A1，水量单位问题见 A6。
+
+\subsection{SCUC 目标函数（2.6.3，正文第 28--30 页）}
+\begin{equation}\label{eq:southern-objective}
+\begin{aligned}
+\min\ \bigg\{&\sum_{i=1}^{N}\sum_{t=1}^{T}
+ [C_{i,t}(P_{i,t})+C^U_{i,t}+C^{p\min}_{i,t}]
+ +\sum_{i=1}^{n}\sum_{t=1}^{T}P_{gwf}[P_{L,i,t}]\\
+ &+\sum_{l=1}^{NL}\sum_{t=1}^{T}M_1[SL_l^++SL_l^-]
+ +\sum_{s=1}^{NS}\sum_{t=1}^{T}M_1[SL_s^++SL_s^-]\\
+ &+\sum_{r=1}^{NR}\sum_{t=1}^{T}M_2P^d_{r,t}
+ +\sum_{i=1}^{NH}\sum_{t=1}^{T}M_3P^d_{i,t}
+ +\sum_{k\in\Phi_a}\sum_{t=1}^{T}M_4[SL_k^-]\\
+ &+\sum_{es=1}^{ES}\sum_{t=1}^{T}
+ [\lambda^{dis}_{es}P^{dis}_{es,t}+\lambda^{ch}_{es}P^{ch}_{es,t}]\bigg\}.
+\end{aligned}
+\end{equation}
+$N$ 不含储能；$C_{i,t}$ 为分段运行费用，$C^U_{i,t}$ 按停机时长区分冷、温、热态，
+$C^{p\min}_{i,t}$ 只在开机时计入。$P_{gwf}$ 为跨省输电费（含网损费）、送出侧省内
+输配电费与输电费分享空间之和；$n$ 为跨省送电成分数。
+$M_1$ 为线路/断面松弛罚因子，$M_2$ 为新能源弃电罚因子，$M_3$ 为水电弃水功率
+罚因子，$M_4$ 为通道优先计划松弛罚因子。
+$NR,NH,ES$ 对应新能源场站、水电厂、储能交易单元；$SL_l^\pm,SL_s^\pm,SL_k^-$
+为对应松弛量，$P^d_{i,t}$ 的水电分量根据泄洪流量计算。
+原文以 $\Phi_a$ 表示通道 $a$ 包含的联络线范围。
+储能充电为负功率，保留目标中的加号。原式没有单列停机费、上调备用报价或失负荷费用。
+
+\subsubsection{2.6.3.1 系统负荷平衡约束（第 30 页）}
+\begin{equation}
+ \sum_{i=1}^{N_a}P^a_{i,t}+\sum_{j=1}^{NT_a}T^a_{j,t,O}
+ +\sum_{k=1}^{NTI_a}T^a_{k,t,I}=D^a_t.
+\end{equation}
+$P^a_{i,t}$ 包含非市场机组计划；$T^a_{j,t,O}$ 为区域外计划功率，受入为正、送出为负；
+$T^a_{k,t,I}$ 为区域内交易成分，默认受入为正；$D^a_t$ 为除地方电源外的系统负荷。
+原文对 $N_a$ 的文字定义与求和索引不一致，见 A2。
+
+\subsubsection{2.6.3.2 系统正备用容量约束（第 30--31 页）}
+\begin{equation}
+ \sum_{i=1}^{N_a}\alpha^a_{i,t}P^{\max,a}_{i,t}
+ +\sum_{j=1}^{NT_a}T^a_{j,t,O}+\sum_{k=1}^{NTI_a}T^a_{k,t,I}
+ -R^{red,a}_t\ge D^a_t+R^{U,a}_t.
+\end{equation}
+火电 $\alpha^a_{i,t}$ 表示开停机；水电表示是否具有正备用能力。
+$R^{red,a}_t$ 为系统网络备用受限值，$R^{U,a}_t$ 为省区正备用需求。
+
+\subsubsection{2.6.3.3 系统负备用容量约束（第 31 页）}
+\begin{equation}
+ \sum_{i=1}^{N_a}\alpha^\beta_{i,t}P^{\min,a}_{i,t}
+ -\sum_{i=1}^{N_a}\alpha^\beta_{q,t}P^{\max,a}_{q,t}
+ +\sum_{j=1}^{NT_a}T^a_{j,t,O}+\sum_{k=1}^{NTI_a}T^a_{k,t,I}
+ \le D^a_t-R^{D,a}_t.
+\end{equation}
+$q$ 为负荷侧备用单元，$P^{\max,a}_{q,t}$ 为其最大上调节能力；火电负备用状态与开机
+状态一致，水电、虚拟电厂的 $\alpha^\beta$ 表示负备用资格。第二项沿用原文求和下标
+$i$ 与被加项 $q$ 的写法，歧义见 A2。
+
+\subsubsection{2.6.3.4 系统一次调频备用容量约束（第 31--32 页）}
+\begin{align}
+ \sum_{f=1}^{NF}P^{pf}_{f,t}+\sum_{p=1}^{NHP}P^{pf}_{p,t}
+ +\sum_{h=1}^{NHC}P^{pf}_{h,t}&\ge R^{pf}_t,\\
+ P^{pf}_{f,t}&=\min(P^{\max}_{f,t}-P_{f,t},P^{\max}_{f,t}\alpha^{pf}_{f,t}),\\
+ P^{pf}_{p,t}&=\min(P^{on,\max}_{p,t}-P_{p,t},P^{on,\max}_{p,t}\alpha^{pf}_{p,t}),\\
+ P^{pf}_{h,t}&=\min(P^{\max}_{h,t}-P_{h,t},P^{\max}_{h,t}\alpha^{pf}_{h,t}).
+\end{align}
+分别统计火电、抽蓄和常规水电；抽蓄与水电仅含开机机组。
+$P^{on,\max}_{p,t}$ 为抽蓄开机容量，$\alpha^{pf}$ 为容量计算系数。约束作用于分省及直调系统。
+
+\subsubsection{2.6.3.5 特殊机组状态约束（第 32 页）}
+\begin{equation}
+ \alpha_{i,t}=1,\qquad \forall i\in I_s.
+\end{equation}
+$I_s$ 包括必开、热电联产和调试机组，按相应有效时段执行。
+
+\subsubsection{2.6.3.6 机组出力表达式（第 32--33 页）}
+\begin{align}
+ P_{i,t}&=\sum_{m=1}^{NM}P_{i,t,m}+P^{\min}_{i,m},\\
+ P^{\min}_{i,m}&\le P_{i,t,m}\le P^{\max}_{i,m}.
+\end{align}
+$NM$ 为报价段数，$P_{i,t,m}$ 为分段中标功率，$P^{\min}_{i,m},P^{\max}_{i,m}$ 为申报区间界。
+第一式求和外的 $m$ 原样保留，不能默认为平台的 $P^{\min}_iu_{i,t}$，见 A3。
+
+\subsubsection{2.6.3.7 机组运行费用表达式（第 33 页）}
+\begin{equation}
+ C_{i,t}(P_{i,t})=\sum_{m=1}^{NM}C_{i,m}P_{i,t,m}.
+\end{equation}
+$C_{i,m}$ 为机组申报的分段能量价格；不是从成本曲线自动生成的等宽弦斜率报价。
+
+\subsubsection{2.6.3.8 机组出力上下限约束（第 33--34 页）}
+\begin{equation}
+ \alpha_{i,t}P^{\min}_{i,t}\le P_{i,t}\le\alpha_{i,t}P^{\max}_{i,t}.
+\end{equation}
+非市场机组开机时上下限均为计划出力；停机时 $\alpha=0$。必开机组取必开最低出力。
+热电联产上下限由计划供热流量折算。调试机组上下限均取调试计划。
+优化机组还须满足原文两条下限和两条上限：
+\begin{align}
+ P_{i,t}&\ge P_{i,\min}\left[\alpha_{i,t}-\sum_{tt=1}^{DD}\gamma_{i,t+tt}
+                 -\sum_{tt=1}^{UD}\eta_{i,t-tt+1}\right]
+                 +\sum_{tt=1}^{UD}P_U(tt)\eta_{i,t-tt+1},\\
+ P_{i,t}&\ge P_{i,\min}\left[\alpha_{i,t}-\sum_{tt=1}^{DD}\gamma_{i,t+tt}
+                 -\sum_{tt=1}^{UD}\eta_{i,t-tt+1}\right]
+                 +\sum_{tt=1}^{DD}P_D(tt)\gamma_{i,t+DD-tt+1},\\
+ P_{i,t}&\le\sum_{tt=1}^{UD}P_U(tt)\eta_{i,t-tt+1}
+                 +P_{i,\max}\left[\alpha_{i,t}-\sum_{tt=1}^{UD}\eta_{i,t-tt+1}\right],\\
+ P_{i,t}&\le\sum_{tt=1}^{DD}P_D(tt)\gamma_{i,t+DD-tt+1}
+                 +P_{i,\max}\left[\alpha_{i,t}-\sum_{tt=1}^{DD}\gamma_{i,t+tt}\right].
+\end{align}
+$UD,DD$ 分别为到最小出力的启动过程、从最小出力开始的停机过程持续时间；
+$P_U,P_D$ 为对应轨迹，$\eta,\gamma$ 为启停事件变量。
+
+\subsubsection{2.6.3.9 机组群出力上下限约束（第 34 页）}
+\begin{equation}
+ P^{\min}_{j,t}\le\sum_{i\in j}P_{i,t}\le P^{\max}_{j,t}.
+\end{equation}
+$j$ 为机组群，不能用逐台机组限额替代群约束。
+
+\subsubsection{2.6.3.10 机组群电量上下限约束（第 34 页）}
+\begin{equation}
+ Q^{\min}_j\le\sum_{i\in j}\sum_{i=1}^{T}Q_{i,t}\le Q^{\max}_j.
+\end{equation}
+原式的重复 $i$ 下标保留（A2）。该处 $T$ 明确定义为 D 日 96 段，$Q_{i,t}$ 为出清电量。
+水电总电量上限按水库中长期运用、跨省优先计划、供需、蓄能保供及主汛期调蓄能力设置。
+
+\subsubsection{2.6.3.11 机组爬坡约束（第 35 页）}
+\begin{align}
+ P_{i,t}-P_{i,t-1}&\le P_{i,\max}\sum_{tt=1}^{UD}\eta_{i,t-tt+1}
+       +RU_i\left[\alpha_{i,t}-\sum_{tt=1}^{UD}\eta_{i,t-tt+1}\right],\\
+ P_{i,t-1}-P_{i,t}&\le P_{i,\max}\sum_{tt=1}^{DD}\gamma_{i,t+tt-1}
+       +RD_i\left[\alpha_{i,t-1}-\sum_{tt=1}^{DD}\gamma_{i,t+tt-1}\right].
+\end{align}
+正文解释使用 $\Delta P_i^U,\Delta P_i^D$，公式使用 $RU_i,RD_i$，保留此差别。
+不能删除启动、停机轨迹状态项而称为原式。
+
+\subsubsection{2.6.3.12 机组最小连续开停时间约束（第 35 页）}
+\begin{align}
+ T^D_{i,t}-(\alpha_{i,t}-\alpha_{i,t-1})T_D&\ge0,\\
+ T^U_{i,t}-(\alpha_{i,t-1}-\alpha_{i,t})T_U&\ge0,\\
+ T^U_{i,t}&=\sum_{k=t-T_U}^{t-1}\alpha_{i,k},\\
+ T^D_{i,t}&=\sum_{k=t-T_D}^{t-1}(1-\alpha_{i,k}).
+\end{align}
+$T_U,T_D$ 为最小开停机时间；跨越优化起点的状态必须有历史边界，不能擅自截断为零。
+
+\subsubsection{2.6.3.13 机组最大启停次数约束（第 35--36 页）}
+\begin{align}
+ \eta_{i,t}&=\begin{cases}1,&\alpha_{i,t}=1,\ \alpha_{i,t-1}=0,\\0,&\text{其余情况},\end{cases}\\
+ \gamma_{i,t}&=\begin{cases}1,&\alpha_{i,t}=0,\ \alpha_{i,t-1}=1,\\0,&\text{其余情况},\end{cases}\\
+ \sum_{t=1}^{T}\eta_{i,t}&\le\eta_i^{\max},\qquad
+ \sum_{t=1}^{T}\gamma_{i,t}\le\gamma_i^{\max},\\
+ C^U_{i,t}&=\eta_{i,t}C_i^U.
+\end{align}
+$C_i^U$ 为申报单次启动费；与第 29 页冷/温/热态说明的关系见 A4。
+
+\subsubsection{2.6.3.14 线路潮流约束（第 36 页）}
+\begin{equation}
+\begin{aligned}
+ P_l^{\min}\le{}&\sum_{i=1}^{N}G_{l-i}P_{i,t}
+ +\sum_{j=1}^{NT}G_{l-j}T_{j,t,O}
+ +\sum_{d=1}^{NTD}G_{l-d}T^{DC}_{d,t,I}\\
+ &-\sum_{k=1}^{K}G_{l-k}D_{k,t}-SL_l^++SL_l^-\le P_l^{\max}.
+\end{aligned}
+\end{equation}
+$G$ 为机组（含储能）、区域外联络线、区域内直流联络线及母线负荷节点对线路的
+功率转移分布因子。正反向传输极限独立给定，松弛量进入 $M_1$ 罚项。
+
+\subsubsection{2.6.3.15 断面潮流约束（第 36--37 页）}
+\begin{equation}
+\begin{aligned}
+ P_s^{\min}\le{}&\sum_{i=1}^{N}G_{s-i}P_{i,t}
+ +\sum_{j=1}^{NT}G_{s-j}T_{j,t,O}
+ +\sum_{d=1}^{NTD}G_{s-d}T^{DC}_{d,t,I}\\
+ &-\sum_{k=1}^{K}G_{s-k}D_{k,t}-SL_s^++SL_s^-\le P_s^{\max}.
+\end{aligned}
+\end{equation}
+$G_{s-\cdot}$ 为断面分布因子，$P_s^{\min},P_s^{\max}$ 为断面限额。
+该式与线路约束同时存在，不能以支路 N-1 约束替代。
+
+\subsubsection{2.6.3.16 储能约束（第 37--38 页）}
+（1）功率上下限与时段方向：
+\begin{align}
+ \alpha_{es,t}P^{dis,\min}_{es}&\le P^{dis}_{es,t}\le\alpha_{es,t}P^{dis,\max}_{es},\\
+ \beta_{es,t}P^{ch,\max}_{es}&\le P^{ch}_{es,t}\le\beta_{es,t}P^{ch,\min}_{es},\\
+ 0&\le\alpha_{es,t}+\beta_{es,t}\le1,\qquad
+ P^{ch,\min}_{es}<0,\quad P^{ch,\max}_{es}<0.
+\end{align}
+$\alpha_{es,t},\beta_{es,t}$ 为 0--1 变量。充电负号与原文以 $ch,\max$ 表示左界的写法保留。
+
+（2）能量状态递推与上下限：
+\begin{align}
+ E_{es,t}&=E_{es,t-1}-P^{ch}_{es,t}\eta^{ch}_{es}\Delta t
+                   -(P^{dis}_{es,t}/\eta^{dis}_{es})\Delta t,\\
+ \underline E_{es,t}&\le E_{es,t}\le\overline E_{es,t}.
+\end{align}
+充、放电效率均暂取充放电能量转换效率的平方根。原式不含自放电项。
+
+（3）运行日起末状态：
+\begin{equation}
+ E^0_{es}=E^{ini}_{es},\qquad E^T_{es}=E^{fin}_{es}.
+\end{equation}
+初值为前一天末时段状态，末值为申报末时段目标；不要求二者必然相等。
+
+（4）小时内不可同时充放电：
+\begin{equation}
+ 1-\alpha_{es,t}\ge\frac{\sum_{tt=4n-3}^{4n}\beta_{es,tt}}{4},
+ \qquad t\in[4n-3,4n],\quad n\in[1,24].
+\end{equation}
+同一小时的四个 15 分钟时段不得既有充电又有放电；仅逐时段互斥不足以满足该条款。
+
+（5）循环次数：
+\begin{equation}
+ \frac{\sum_{t=1}^{T}(P^{dis}_{es,t}/\eta^{dis}_{es}
+                  -P^{ch}_{es,t}\eta^{ch}_{es})\Delta t}{2E_{es}}
+ \le N_{es,circle}.
+\end{equation}
+$E_{es}$ 为额定容量；必须保留效率权重，不能换成无效率的交流侧吞吐。
+
+\subsubsection{2.6.3.17 直流联络线优化功率建模（第 38--40 页）}
+区域内直流传输功率单独优化，送端为负荷、受端为注入。
+多端直流包括以下四组约束：
+\begin{align}
+ \sum_{s\in J^{send}_{MT}}T^{DC}_{s,t,I}(1-\eta_I)
+       &=\sum_{d\in J^{rec}_{MT}}T^{DC}_{d,t,I},\\
+ T^{DC,\min}_{j,t,I}&\le T^{DC}_{j,t,I}\le T^{DC,\max}_{j,t,I},\\
+ -x_{j,t,l}\Delta P_j^-&\le T^{DC}_{j,t,I}-T^{DC}_{j,t-1,I}
+                      \le x_{j,t,r}\Delta P_j^+,\\
+ x_{j,t,l}+x_{j,t,r}&\le1,\\
+ x_{j,t,l}+x_{j,t+1,r}&\le1,\qquad
+ x_{j,t+1,l}+x_{j,t,r}\le1.
+\end{align}
+$\eta_I$ 为线损率，$J^{send}_{MT},J^{rec}_{MT}$ 分别为中枢节点注入/流出集合。
+$x_{j,t,l},x_{j,t,r}$ 为下调、上调二元标志；最后一组限制的是相邻时段\emph{调节方向}，
+不是功率传输方向。符号 $\eta_I$ 与联络线下标的对应由原始边界数据明确。
+
+\subsubsection{2.6.3.18 水电厂水库水位控制约束（第 40 页）}
+为便于排版，仅将原文两次重复的同一代数式记为 $\mathcal Z_{i,t}$：
+\begin{equation}
+ \mathcal Z_{i,t}:=Z_{i,0}-\sum_{\tau=1}^{t}
+ \frac{P_{i,\tau}h_i+Q^d_{i,\tau}
+ -[I_{i,\tau}+(P_{up(i),\tau-s(i)}h_{up(i)}+Q^d_{up(i),\tau-s(i)})]}{S_i}.
+\end{equation}
+\begin{align}
+ Z^{\min}_{i,t,end}&\le\mathcal Z_{i,t}\le Z^{\max}_{i,t,end},\\
+ Z_i^{\min}&\le\mathcal Z_{i,t}\le Z_i^{\max}.
+\end{align}
+第一组为调度控制水位，第二组为允许运行水位。$Z_{i,0}$ 为次日零点预计初始水位，
+$h_i$ 为耗水率，$S_i$ 为当前水位对应面积，$I_{i,\tau}$ 为区间流量，$Q^d$ 为泄洪流量，
+$up(i),s(i)$ 为上游电站及传播迟滞。保持原式未显式写时间换算的形式，见 A6。
+
+\subsubsection{2.6.3.19 水电厂发电量控制约束（第 40--41 页）}
+\begin{equation}
+ Q_i^{\min}\le\sum_{i=1}^{T}Q_{i,t}\le Q_i^{\max}.
+\end{equation}
+原式时间求和的下标印为 $i$（A2），正文含义为运行日全天电量上下限。
+
+\subsubsection{2.6.3.20 新能源出力约束（第 41 页）}
+报量报价场站：
+\begin{equation}
+ \alpha_nP^{st}_{r,t}-P^d_{r,t}\le P_{i,t}\le P^{st}_{r,t}.
+\end{equation}
+$\alpha_n$ 按省区新能源政策和参与机制单独给定，$P^{st}_{r,t}$ 为短期预测。
+报量不报价场站：
+\begin{equation}
+ P_{i,t}+P^d_{r,t}=P^F_{r,t}.
+\end{equation}
+原文在目标中称 $P^d$ 为弃电功率、此处称偏差功率；保留该用语差别，不能扩展成任意有符号偏差。
+
+\subsubsection{2.6.3.21 跨省优先计划约束（第 41--42 页）}
+\begin{align}
+ \sum_{t=1}^{T}Q_{k,t}&\ge Q_k^{sch},\\
+ T^\alpha_t&=\sum^{NM}T^\alpha_{k,t}.
+\end{align}
+$Q_k^{sch}$ 为 D$-2$ 校核调整电量，时间范围为全天；第二式按原文省区交易成分与
+物理关口映射书写，受入为正、送出为负。该式的求和下限原文未印出。
+目标中的 $M_4SL_k^-$ 在此约束中未显式出现，见 A5。
+
+\subsection{SCED 与独立 LMP 模型（2.6.4--2.6.5）}\label{sec:southern-sced-lmp}
+这两套模型完整原式纳入附录，不能合并为“固定组合 LP 的对偶即规则 LMP”。
+令 $J_{UC}$ 表示式~\eqref{eq:southern-objective}~的大括号内表达式，仅作代数缩写，则：
+\begin{align}
+ J_{SCED}&=J_{UC}-\sum_{i=1}^{N}\sum_{t=1}^{T}(C^U_{i,t}+C^{p\min}_{i,t}),\\
+ J_{LMP}&=\left.J_{SCED}\right|_{M_1,M_2,M_3,M_4\mapsto M'_1,M'_2,M'_3,M'_4}.
+\end{align}
+三者都保留输电费用、网络松弛、新能源弃电、水电弃水、优先计划松弛和储能报价。
+SCED 的跨省费率说明按送电类别取过网费；上式只表示目标项的对应，不推定三模型
+费率输入恒等。$M'_j$ 是定价罚因子，不默认等于出清的 $M_j$。
+
+\begin{center}\footnotesize
+\begin{longtable}{@{}L{2.6cm}L{5.6cm}L{7.0cm}@{}}
+\toprule SCED / LMP 条款 & 约束族 & 对照与区别\\\midrule
+\endfirsthead\toprule SCED / LMP 条款 & 约束族 & 对照与区别\\\midrule\endhead
+2.6.4.1 / 2.6.5.1 & 平衡区负荷平衡 & 对应 2.6.3.1，保留区域内外交易分量\\
+2.6.4.2 / 2.6.5.2 & 分省正备用 & 对应 2.6.3.2；火电开停机取 SCUC 结果\\
+2.6.4.3 / 2.6.5.3 & 分省负备用 & 对应 2.6.3.3，含负荷侧备用单元\\
+2.6.4.4 / 2.6.5.4 & 一次调频备用 & 同类 min 容量式，原文改用 first、NP、NH 记号\\
+2.6.4.5 / 2.6.5.5 & 机组上下限 & SCED 固定启停轨迹；LMP 按定价资格与 $\delta$ 重设界\\
+2.6.4.6 / 2.6.5.6 & 机组群功率 & 对应 2.6.3.9\\
+2.6.4.7 / 2.6.5.7 & 机组群电量 & 对应 2.6.3.10，仅 D 日 96 点\\
+2.6.4.8 / 2.6.5.8 & 爬坡 & $P_{i,t}-P_{i,t-1}\le\Delta P_i^U$；
+ $P_{i,t-1}-P_{i,t}\le\Delta P_i^D$\\
+2.6.4.9 / 2.6.5.9 & 线路潮流 & 对应 2.6.3.14，含正反向松弛\\
+2.6.4.10 / 2.6.5.10 & 断面潮流 & 对应 2.6.3.15\\
+2.6.4.11 / 2.6.5.11 & 储能 & SCED 列功率、SOC、起末值及循环；LMP 改成 SCED 附近的功率界，见 A7\\
+2.6.4.12 / 2.6.5.12 & 分段出力 & 沿用 2.6.3.6 原式，包括其符号问题\\
+2.6.4.13 / 2.6.5.13 & 分段运行费 & 对应 2.6.3.7\\
+2.6.4.14 / 2.6.5.14 & 直流联络线 & 保留中枢平衡、上下界、爬坡、相邻调节方向四组约束\\
+2.6.4.15 / 2.6.5.15 & 水库水位 & 两组水位约束，上游迟滞及泄洪\\
+2.6.4.16 / 2.6.5.16 & 水电发电量 & 全天电量上下界\\
+2.6.4.17 / 无独立条号 & 新能源出力 & SCED 明列报价/不报价两种；2.6.5 未单列\\
+2.6.4.18 / 无独立条号 & 跨省优先计划 & SCED 明列日能量及关口映射；2.6.5 未单列\\
+\bottomrule
+\end{longtable}
+\end{center}
+
+SCED 对停机机组取零上下限，对启停过程机组取轨迹定值。LMP 中停机机组仍为零，
+不可定价机组的上下界都取 $P^{SCED}_{i,t}$；可定价机组为：
+\begin{align}
+ P^{\min}_{i,t}&=\max\{(1-\delta)P^{SCED}_{i,t},(P^{\min}_{i,t})^{SCED}\},\\
+ P^{\max}_{i,t}&=\min\{(1+\delta)P^{SCED}_{i,t},(P^{\max}_{i,t})^{SCED}\}.
+\end{align}
+$\delta$ 表示允许偏离日前 SCED 的比例；第 2.6 节未在此给出可直接采用的数值。
+LMP 储能功率界逐字母保留第 58 页的写法：
+\begin{align}
+ P^{ch,\max}_{es,t}&=\max\{(1-\delta)P^{ch,SCED}_{es,t},(P^{ch,\max}_{es})^{SCED}\},\\
+ P^{ch,\min}_{es,t}&=\min\{(1+\delta)P^{ch,SCED}_{es,t},(P^{ch,\min}_{es})^{SCED}\},\\
+ P^{dis,\max}_{es,t}&=\max\{(1-\delta)P^{dis,SCED}_{es,t},(P^{dis,\min}_{es})^{SCED}\},\\
+ P^{dis,\min}_{es,t}&=\min\{(1+\delta)P^{dis,SCED}_{es,t},(P^{dis,\max}_{es})^{SCED}\}.
+\end{align}
+上述标记与充电负号、放电上下界存在待澄清处（A7），本章未交换其 min/max 标签。
+\subsection{节点电价计算（2.6.6，第 62--63 页）}
+求解第 2.6.5 节模型，得到平衡区平衡、线路和断面潮流约束的乘子后，节点电价为：
+\begin{equation}
+ LMP_{k,t}=\lambda_t-\sum_{l=1}^{L}(\tau^{\max}_{l,t}-\tau^{\min}_{l,t})G_{l-k}
+                       -\sum_{s=1}^{S}(\tau^{\max}_{s,t}-\tau^{\min}_{s,t})G_{s-k}.
+\end{equation}
+$\lambda_t$ 为对应平衡区负荷平衡乘子；$\tau$ 为线路/断面正反向限额乘子。
+潮流越限时相应乘子取网络潮流松弛罚因子。不能忽略断面项或用 SCUC 的 MILP 对偶代替。
+
+\subsection{原文校核注与实现准入边界}\label{sec:southern-ambiguities}
+以下是对发布文本的观察，\textbf{不是自行勘误，更不是新增规则}。
+\begin{description}
+ \item[A1：时间与量纲] 目标的功率报价项未显式乘 $\Delta t$，启动费却为元/次；
+ $T=98$ 与全天 $T=96$ 并存。D$+1$ 峰谷点的权重、先后、物理持续时间及跨点爬坡/SOC
+ 连接未在第 2.6 节充分定义。不得自行用 98 个等长段、默认费用权重或峰谷点储能循环补齐。
+ \item[A2：求和索引] 第 30 页 $N_a$ 被文字称为“平衡区总数”，公式却用于区内单元求和；
+ 第 31 页负荷侧备用被加项为 $q$ 而求和下标为 $i$；第 34、41 页电量式用 $i$ 作时间求和。
+ 可读转写保留原式，执行模型需建立明确集合和经确认的下标映射。
+ \item[A3：分段与状态] 第 32 页求和外的 $P^{\min}_{i,m}$ 有自由下标，且未显式与开机状态
+ 绑定；分段界究竟为绝对区间还是增量宽度不能凭平台习惯推定。第 33 页稳定出力上下限
+ 与低于最小技术出力的启停轨迹之间还需明确适用时段，不能无条件叠加后声称忠实可执行。
+ \item[A4：启动费] 第 29 页按停机时长区分冷/温/热态，第 36 页只写
+ $C^U_{i,t}=\eta_{i,t}C_i^U$；状态选择、门槛和历史状态必须由申报/运行边界补充。
+ 平台单一启动报价不能据此宣称覆盖三态启动。
+ \item[A5：优先计划松弛] 目标含 $M_4SL_k^-$，第 41 页日能量约束却不含该松弛量；
+ 时段索引在 $SL$ 中也省略。不能擅自在硬约束左端加入松弛后称为原式。
+ \item[A6：水库量纲] 原水位式没有显式时长/秒转换；上游 $P$ 在式中乘耗水率，文字却称
+ “发电流量”；$Q^d$ 是泄洪流量，不能与电量 $Q$ 混用。必须有耗水率、流量、面积、时间单位
+ 以及上游历史边界的明确契约，不能仅凭原式报告数值正确。
+ \item[A7：定价模型] 第 58 页储能放电界的 max/min 标签与通常上下界定义相反；
+ 负充电量的 $(1\pm\delta)$ 顺序亦有疑问。第 2.6.5.11 未重列完整 SOC 递推，
+ 第 2.6.5 也未单列新能源出力、优先计划约束，不能自动从 SCED 复制缺失条款后声称原文如此。
+\end{description}
+\begin{gapnote}
+文档的规则基准由完整原页保证可追溯，SCUC 的 21 个条款在本章逐项展开。
+现有生产实现仍是平台混合 AC/DC 市场模型，尚无南方规则等价性或数值认证。
+后续执行模型必须逐项补齐边界数据、澄清上述问题，并建立独立方程及数值证据；
+本次文档对齐不提供此类未执行的结论。
+\end{gapnote}

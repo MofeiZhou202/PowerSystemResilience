@@ -1,4 +1,11 @@
-\section{源码等价市场装配契约}
+\section{平台源码等价市场装配契约（与规则的实现差异）}
+
+\begin{gapnote}
+本章保留当前平台求解模型的事实，\textbf{不是南方区域 2025 年 V1.0 规则模型}。
+其全系统备用、B$\theta$/DC 电压网络、报价目标及 DC 储能与规则均有差异。
+规则正文见第~\ref{sec:southern-rule}~节，逐项结论见
+\srcpath{docs/modules/market/southern\_rules\_comparison.md}。
+\end{gapnote}
 
 市场实现集中于 \srcpath{src/market/market\_simulation.cpp}（超过六千行）。本章不把它压缩成
 教材 SCUC/SCED 通式；只写已逐段核验的报价、关键变量/约束、LODF 和结算赋值，并明确其余覆盖边界。

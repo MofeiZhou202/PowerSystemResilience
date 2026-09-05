@@ -49,6 +49,7 @@
 | 常规/可靠性/弹性场景与台风交通耦合 | 实现参考 | [场景生成手册](modules/scenario_generation/scenario_generation_manual.tex) |
 | 谐波潮流、标准与跨引擎验证 | 实现参考 | [谐波潮流专著](modules/harmonics_power_flow/harmonics_power_flow_manual.tex) |
 | 全部源码模块技术手册 | 实现参考 | [模块手册索引](modules/README.md) |
+| 南方区域 2025 V1.0 日前 SCUC/SCED/LMP 规则与实现差异 | 规则参考与实现对照 | [市场规则原文与手册](modules/market/README.md)、[逐条对照](modules/market/southern_rules_comparison.md) |
 | HTTP 路由与响应边界 | 契约 | [运行时 API](reference/runtime_api.md) |
 | 内置算例与能力示例 | 契约 | [算例目录](overview/case_catalog.md) |
 | Python 客户端边界 | 契约 | [Python API](reference/python_api.md) |
@@ -98,6 +99,7 @@ case123 的 1050 个条件中有 158 个在 DAE/事件时代数求解阶段失�
 - 近似、回退、时限和模型覆盖不足必须声明有效边界及结果标志。
 - HTTP 示例必须使用 `tests/run_gui_server.cpp` 中的生产路由。
 - LaTeX 只提交可编辑源文件；PDF、`.aux`、`.log` 等构建产物不作为规范源。
+  市场手册保留的官方规则 PDF 为外部规范源附件，按精确路径例外管理，来源与哈希记录在模块入口。
 - 新增文档必须登记到本索引与 [文档分类台账](overview/document_catalog.md)，不得形成孤儿文件。
 
 历史审计、旧设计与理论资料统一由 [归档索引](archive/README.md) 管理。归档可解释历史决策，
