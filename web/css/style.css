@@ -5187,3 +5187,35 @@ body[data-workspace-density="compact"] #rightPanel:not([style]) {
     outline: 2px solid Highlight;
   }
 }
+/* Southern market boundaries use the backend schema and bounded editors. */
+.southern-actions, .southern-editor-layout { display: flex; flex-wrap: wrap; gap: 8px; align-items: end; margin: 10px 0; }
+.southern-editor-layout[hidden], .southern-editor[hidden], .southern-results[hidden], #southernChart[hidden] { display: none !important; }
+.southern-view-tabs { display: flex; border-bottom: 1px solid var(--border); gap: 4px; margin-bottom: 10px; }
+.southern-view-tabs [aria-selected="true"] { border-bottom: 2px solid var(--accent); color: var(--accent); }
+.southern-input { color: var(--ink); background: var(--paper); border: 1px solid var(--border); border-radius: 4px; padding: 6px 8px; min-height: 30px; font: inherit; }
+.southern-input:focus { outline: 1px solid var(--accent); }
+.southern-editor-layout label { display: grid; gap: 5px; max-width: 100%; }
+.southern-editor-layout select { max-width: 100%; min-width: 140px; }
+.southern-editor { max-height: 560px; overflow: auto; border-block: 1px solid var(--border); padding: 10px 0; }
+.southern-fields { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 12px; }
+.southern-field { min-width: 0; display: flex; flex-direction: column; gap: 5px; }
+.southern-field > input, .southern-field > select { width: 100%; box-sizing: border-box; min-width: 0; }
+.southern-series { min-width: 0; border-bottom: 1px solid var(--border); padding: 6px 0; }
+.southern-series summary { cursor: pointer; overflow-wrap: anywhere; }
+.southern-bulk { display: flex; flex-wrap: wrap; gap: 4px; align-items: center; margin: 6px 0; }
+.southern-bulk input { width: 68px; min-width: 0; }
+.southern-input[type="checkbox"] { width: 18px; height: 18px; min-height: 18px; align-self: start; }
+.southern-series-items { max-height: 260px; overflow: auto; }
+.southern-series-row { display: grid; grid-template-columns: 78px minmax(0, 1fr); gap: 6px; align-items: start; margin: 5px 0; }
+.southern-series-row input, .southern-series-row select { min-width: 0; max-width: 100%; box-sizing: border-box; }
+.southern-results .topo-table-wrap { max-height: 320px; overflow: auto; }
+.southern-results table { min-width: 620px; width: 100%; }
+.southern-results th { white-space: nowrap; }
+.southern-results td { overflow-wrap: anywhere; max-width: 340px; }
+#southernStatus, #southernToolbarStatus { overflow-wrap: anywhere; font-size: 12px; }
+#southernMarketWorkspace { min-width: 0; }
+#southernChart { height: 310px; }
+@media (max-width: 600px) {
+  .southern-fields { grid-template-columns: minmax(0, 1fr); }
+  .southern-editor-layout label { width: 100%; }
+}

@@ -8,6 +8,7 @@
 
 - [正式细则完整 PDF](references/southern_region_spot_energy_rules_2025_v1_0.pdf)
 - [逐条比较、原文歧义及验证记录](southern_rules_comparison.md)
+- [南方日前执行模型、边界 schema 与 GUI 契约](southern_execution_contract.md)
 - [SCUC 逐条公式与 SCED/LMP 对照源文件](chapters/southern_day_ahead_rules.tex)
 - 主手册附录直接载入第 2.6 节完整原页，保留公式、符号、说明及原始页码。
 
@@ -37,6 +38,11 @@
 `.gitignore` 只对这一文件作例外。
 
 ## 平台实现材料
+
+新增 `run_southern_day_ahead_market` 独立执行入口，以及 GUI 中的南方规则边界工作区。
+其规则版本、A1–A7 执行解释、98 点输入、市场边界和三阶段出清结果均可追溯。
+既有通用市场入口保持原契约。该研究执行模型已有解析/回归检查，但不把工程解释和
+合成算例测试称为正式市场全模型等价认证，具体覆盖与限制见执行契约。
 
 本目录对应源码 `src/market/`，说明范围为日前、实时、安全校核与结算。公共头文件通常位于
 `include/hacdcpf/market/`；若头文件采用仓库的跨模块布局，准确位置以主手册“数据来源”节为准。

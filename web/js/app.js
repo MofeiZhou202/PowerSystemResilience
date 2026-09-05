@@ -1459,6 +1459,16 @@ const App = (() => {
     switchTab('results');
   }
 
+  function showSouthernMarketWorkspace() {
+    document.getElementById('resultsEmpty').style.display = 'none';
+    document.getElementById('resultsContent').style.display = 'block';
+    setActiveResultGroup('market');
+    switchTab('results');
+    const panel = document.getElementById('rightPanel');
+    panel.style.width = `${window.innerWidth <= 900 ? window.innerWidth : Math.round(Math.min(window.innerWidth * 0.68, 1180))}px`;
+    panel.dataset.autoTransientWidth = '1';
+  }
+
   function designHandbookOptionsFromControls() {
     const positive = (id, fallback) => {
       const value = Number(document.getElementById(id)?.value);
@@ -15245,7 +15255,7 @@ const App = (() => {
         : moduleName === 'marketSettlement' ? 'settlement'
         : 'clearing';
       bar.querySelectorAll('[data-market-scope]').forEach(panel => {
-        panel.hidden = panel.dataset.marketScope !== activeScope;
+        panel.hidden = !String(panel.dataset.marketScope || '').split(/\s+/).includes(activeScope);
       });
       bar.querySelectorAll('[data-market-step-target]').forEach(step => {
         step.classList.toggle('active', step.dataset.marketStepTarget === moduleName);
@@ -18187,10 +18197,20 @@ const App = (() => {
   function refreshWorkspaceGeometry() {
     requestAnimationFrame(() => requestAnimationFrame(() => {
       document.querySelectorAll('.js-plotly-plot').forEach(element => {
-        try { Plotly.Plots.resize(element); } catch (_) { /* Plotly is optional */ }
+        resizeVisiblePlotlyChart(element);
       });
       window.dispatchEvent(new Event('resize'));
     }));
+  }
+
+  function resizeVisiblePlotlyChart(element) {
+    if (typeof Plotly === 'undefined' || !element?._fullLayout ||
+        !element.offsetWidth || !element.offsetHeight) return;
+    // Plotly defers resize. A tab may hide or purge the plot before it runs.
+    Promise.resolve(Plotly.Plots.resize(element)).catch(error => {
+      if (element._fullLayout && element.offsetWidth && element.offsetHeight)
+        console.warn('Chart resize failed:', error.message);
+    });
   }
 
   function applyWorkspaceLayout(layout, { persist = true } = {}) {
@@ -24893,7 +24913,7 @@ const App = (() => {
       let startX, startW;
       const resizePlotlyCharts = () => {
         panel.querySelectorAll('.js-plotly-plot').forEach(el => {
-          try { Plotly.Plots.resize(el); } catch (_) {}
+          resizeVisiblePlotlyChart(el);
         });
       };
       resizer.addEventListener('mousedown', (e) => {
@@ -25222,6 +25242,7 @@ const App = (() => {
     onSystemLoaded,
     switchTab,
     setActiveModule,
+    showSouthernMarketWorkspace,
     setActiveCanvasTool,
     showCaseLoadModal,
     hideCaseLoadModal,

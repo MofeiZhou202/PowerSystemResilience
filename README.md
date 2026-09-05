@@ -160,7 +160,7 @@ powershell -ExecutionPolicy Bypass -File tools/package_trial_windows.ps1
 | 谐波分析 | 已实现并完成声明范围闭环 | 频域穿透、Newton 非线性、三相 abc/变压器零序与 AC/DC 耦合，频扫、IEEE 519 / GB/T 14549；14/14 跨域矩阵、24 个强制 GridLAB-D 切片、IEEE13/OpenDSS 164 点。 |
 | 暂态动力学 | 机电暂态相量 DAE 声明范围已闭环（持续扩展设备） | 平衡正序/显式三相相量网络、AC/DC 代数网络、潮流一致初始化、7 类求解器（含 MassMatrixDae 同时式 DAE）、DAE 诊断、小信号与 COI 频率观测；DC/DC Power/Voltage/Droop 动态端口与稳态方程同源，DER_A 7/10 状态链已按 PSD/WECC 逐式实现并使用系统 COI 频率。MassMatrixDae 对 IEEE 1547 及直接 `DynamicSystem` API 装配的定时限欠压/频率/正序 Zone-1 继电器执行回滚/二分定位、固定前向窗口事件聚类、`ACLoadScale`/`ACBranchTrip` 重置和事件后代数残差审计；直接继电器使用本地正序 PT、CT 与相角频率滤波，不以系统 COI 代替本地频率。该闭环不包含 EMT、行波、开关波形或形式化 chronology certification；PSD Test 42 轨迹对照仍受外部 SciML 环境阻断。rich-model/JSON/HTTP/GUI 尚不自动装配外部继电器，其他积分器、反时限、多区距离及步内未采样脉冲仍为声明边界。 |
 | 时序与年度生产模拟 | 核心已实现，年度/生命周期边界已深审计 | UC MILP → AC-OPF → PF 校验流水线；年度全耦合 UC、L0 能量/燃料代理预算、跨周 SOC、bottom-up feedback、物理生命周期 replay、抽样 PF correction、AC/DC/外部网碳分项均可执行。冻结 UC 已由 SciPy/HiGHS 和 256 序列穷举证明，6 步 AC 快照已与 OpenDSS/GridLAB-D 对照。制造/材料碳、网络损耗碳、燃料热率曲线和随机抽样 coverage 仍明确不属于当前范围；schedule-only 不能写成全年物理或生命周期外部认证。 |
-| 电力市场 | 已实现（交直流线性商业模型） | 日前混合 SCUC → 固定组合/换流与储能方向 SCED → AC/DC LMP → DC 储能跨期优化 → 结算/uplift → 非线性交直流认证；实时双结算与重复博弈。N-1 采用 AC 支路预防式切平面、发电机能力约束和全覆盖元件纠正式 SCED 校核。 |
+| 电力市场 | 已实现（通用混合模型与南方规则研究执行入口） | 通用日前/实时/重复博弈保留；新增南方 98 点 SCUC → 调频容量改限 → SCED → AC 反馈 → 独立 LMP，以及 GUI 市场边界编辑、基准/情景差分。A1–A7 使用显式执行解释，未作正式市场等价认证，见 [执行契约](docs/modules/market/southern_execution_contract.md)。 |
 | 园区综合能源 | 已实现 | 电-热-氢-燃料多能流 MILP 调度（CHP、热泵、电解/燃料电池、多层氢储能、CCUS、碳预算）。 |
 | 承载力、薄弱环节与反事实规划 | 已实现 | DL/T 2041-2025 分布式电源承载力（含工程校核）、多维薄弱环节辨识、五类措施反事实对比。 |
 | 场景生成与台风弹性 | 已实现并完成声明范围文档/数值闭环 | 16 专章/56 页手册覆盖三族条件概率、二元 AR(1)、风险边界锚点、Holland 风雨--易损--故障/修复--交通链与全字段契约；4096 步统计、128→12 聚类和固定公式由独立 Python 复算，hybrid 的尾部收益与运输/regime 退化同时披露。气象预报、易损现场校准及外部引擎等价认证不在声明范围。 |
@@ -322,7 +322,7 @@ Canonical 层的一个重要设计原则是：求解器只看到必要的数学�
 | 暂态仿真 | `run_transient_simulation`, `small_signal_analysis`, `computeFrequencyReport` | 机电暂态相量 DAE（7 类求解器，含 MassMatrixDae 同时式）；AC/DC 一致初始化、共享 DC/DC 端口方程、DER_A COI 频率控制；IEEE 1547 及直接 API 装配的本地 CT/PT 定时限 UVLS/频率/正序 Zone-1 继电器可定位、前向窗口聚类并一致重启 | 轨迹、稳定 ID 事件记录、COI/孤岛遥测频率、小信号摘要、初始化残差所有权、事件定位次数/括号/簇跨度与事件后代数残差；COI 不作为直接继电器输入，EMT 测量拒绝，外部继电器尚无 rich-model/HTTP 自动装配 |
 | 碳分析 | `run_carbon_analysis`, `compute_annual_carbon_analysis`, `compute_annual_user_gec_accounting` | PF result + proportional / matrix tracing；年度时序含储能碳库存 | 节点、支路、负荷碳流；年度碳与用户/节点 GEC 核算 |
 | 时序/生产模拟 | `solve_time_series_pf`, `solve_unit_commitment`, `solve_annual_production_simulation`, `run_lifecycle_simulation`, `run_lifecycle_comparison` | 多时段负荷/资源曲线 + OPF/UC | 年度生产、成本、生命周期指标、容量扫描对比 |
-| 电力市场 | `market::run_day_ahead_market`, `run_real_time_market`, `run_repeated_market_game` | 混合 AC/DC SCUC → 固定组合/换流与储能方向 SCED → AC/DC LMP → DC 储能跨期优化 → 混合口径全元件 N-1 → 非线性交直流认证 → 结算/uplift | AC/DC LMP 与分域结算、DC 储能 SOC/结算、全元件事故校核、换流器传输/损耗、模型边界、HHI 等市场力指标 |
+| 电力市场 | `market::run_day_ahead_market`, `run_real_time_market`, `run_repeated_market_game`, `run_southern_day_ahead_market` | 通用混合市场与独立南方规则研究执行模型；后者使用版本化边界快照、三阶段模型和 AC 安全反馈 | 通用结算/市场力；南方边界校正、机组/储能/水库/交易曲线、独立 LMP、约束残差及情景差分 |
 | 园区综合能源 | `integrated_energy::solve_campus_ies` | 电-热-氢-燃料多能流 MILP（CHP、热泵、电解/燃料电池、氢储能、CCUS） | 多能流调度、成本/碳目标 |
 | 承载力评估 | `assess_hosting_capacity`（DL/T 2041-2025） | 设备级区间公式 + 可选 PF/短路/谐波工程校核 | 逐变压器/逐区域承载区间与分级 |
 | 薄弱环节辨识 | `run_multidimensional_weak_link_assessment` | 多维压力证据评分（severity / consensus / Pareto） | 薄弱环节排序与模式对比 |

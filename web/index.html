@@ -1309,6 +1309,13 @@
       <button type="button" class="market-flow-step" data-market-step-target="marketSettlement"><b>5</b><span>市场结算</span><small>账本与偏差</small></button>
     </nav>
 
+    <div class="control-param-group market-param-group" data-market-scope="boundary clearing security">
+      <span class="control-param-group-title">南方区域日前 · 2025 V1.0</span>
+      <button type="button" id="btnSouthernOpen" class="toolbar-btn">边界工作区</button>
+      <button type="button" id="btnSouthernRun" class="toolbar-btn run-btn">南方规则出清</button>
+      <span id="southernToolbarStatus" role="status">未载入边界</span>
+    </div>
+
     <div class="control-param-group market-param-group" data-market-scope="behavior" title="定义市场主体归属、报价行为和策略学习范围">
       <span class="control-param-title">主体与报价行为</span>
       <button id="btnMarketParticipants" class="toolbar-btn run-btn" type="button" title="按机组配置主体归属、报价加成、容量扣留和备用报价">配置主体策略</button>
@@ -1347,8 +1354,7 @@
       </label>
       <button id="btnMarketImportLoadProfile" class="toolbar-btn" type="button" title="导入日前负荷预测时序 JSON">导入负荷预测</button>
       <span id="marketLoadForecastStatus" class="sub-hint">未导入时使用当前会话/默认负荷曲线</span>
-      <span class="market-boundary-notice">当前采用设备“投运/停运”状态作为全时域可用性。</span>
-      <span class="sub-hint">逐时段机组、线路检修窗口尚未接入市场 SCUC/SCED，界面不提供无效参数。</span>
+      <span class="market-boundary-notice">通用市场：设备状态为全时域可用性。南方规则：独立逐时边界。</span>
     </div>
     <div class="control-param-group market-param-group" data-market-scope="boundary" title="设置新能源可用出力和弃电处理方式">
       <span class="control-param-title">新能源处理</span>
@@ -3343,6 +3349,35 @@
         </div>
         </div><!-- /result-group timeSeries -->
         <div class="result-group" data-result-group="market">
+          <div class="topo-section" id="southernMarketWorkspace" data-market-result-scope="boundary clearing security">
+            <h4>南方区域日前市场 · 边界与出清</h4>
+            <div class="southern-view-tabs" role="tablist" aria-label="南方市场视图">
+              <button type="button" id="southernBoundaryView" role="tab" aria-selected="true">边界数据</button>
+              <button type="button" id="southernResultView" role="tab" aria-selected="false">出清结果</button>
+            </div>
+            <div class="southern-actions">
+              <button type="button" id="southernLoad">重载</button>
+              <button type="button" id="southernExample">解析算例</button>
+              <button type="button" id="southernFromSystem">导入当前电网</button>
+              <button type="button" id="southernImport">导入 JSON</button>
+              <input type="file" id="southernImportFile" accept="application/json,.json" hidden>
+              <button type="button" id="southernExport">导出边界</button>
+              <button type="button" id="southernSave">保存边界</button>
+              <button type="button" id="southernBaseline">设为基准</button>
+              <button type="button" id="southernRestore">恢复基准边界</button>
+              <button type="button" id="southernExportResult">导出结果</button>
+            </div>
+            <div id="southernStatus" role="status" aria-live="polite"></div>
+            <div class="southern-editor-layout">
+              <label>边界类别<select id="southernCategory" aria-label="南方市场边界类别"></select></label>
+              <label>实体<select id="southernEntity" aria-label="南方市场边界实体"></select></label>
+              <button type="button" id="southernAdd">新增实体</button>
+              <button type="button" id="southernDelete">删除实体</button>
+            </div>
+            <div id="southernEditor" class="southern-editor"></div>
+            <div id="southernResults" class="southern-results"></div>
+            <div id="southernChart" class="market-chart"></div>
+          </div>
           <div class="topo-section" data-market-result-scope="clearing security settlement">
             <h4>日前电力市场 — 出清概览</h4>
             <div id="marketSummary" class="results-summary"></div>
@@ -3850,6 +3885,7 @@
   <script src="js/core/accessibility.js?v=20260712-hysim-phase5-v1"></script>
   <script src="js/core/runtime_diagnostics.js?v=20260712-hysim-phase6-v1"></script>
   <script src="js/app.js?v=20260818-gui-tour-v1"></script>
+  <script src="js/core/southern_market.js?v=20260905"></script>
   <script src="js/core/help_panel.js?v=20260817-help-panel-v1"></script>
   <script src="vendor/marked.min.js?v=15.0.12"></script>
   <script src="js/core/help_center.js?v=20260818-help-center-v1"></script>

@@ -540,6 +540,8 @@ set(HACDCPF_SOURCES
   # ── day-ahead electricity market ────────────────────────────────────────
   src/market/participant_behavior.cpp
   src/market/market_simulation.cpp
+  src/market/southern_boundary.cpp
+  src/market/southern_market.cpp
   # ── power_models stubs (AML model builders) ──────────────────────────
   src/power_models/acopf_builder.cpp
   src/power_models/acdcopf_builder.cpp
@@ -582,6 +584,10 @@ target_include_directories(hacdcpf
     # Compat shim directory (e.g. spdlog -> fmt bridge)
     $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include/compat>
 )
+if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang|AppleClang")
+  set_source_files_properties(src/market/southern_boundary.cpp src/market/southern_market.cpp
+    PROPERTIES COMPILE_OPTIONS "-Wall;-Wextra;-Wpedantic")
+endif()
 
 # ── Compile definitions ───────────────────────────────────────────────────────
 target_compile_definitions(hacdcpf PRIVATE

@@ -54,6 +54,7 @@ hacdcpf_add_test(test_uc_mobile_storage    test_uc_mobile_storage.cpp)
 # project's executable target distinct so both dependency and application
 # integration suites can be configured in the same CTest tree.
 hacdcpf_add_test(hacdcpf_test_market_simulation test_market_simulation.cpp)
+hacdcpf_add_test(test_southern_market test_southern_market.cpp)
 hacdcpf_add_test(test_integrated_energy_campus test_integrated_energy_campus.cpp)
 hacdcpf_add_test(test_scaling_regression  test_scaling_regression.cpp)
 hacdcpf_add_test(test_hacdcdss            test_hacdcdss.cpp)
@@ -881,6 +882,12 @@ if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/run_gui_server.cpp")
                 "${CMAKE_SOURCE_DIR}/tests/e2e/market_gui_e2e.mjs"
                 --server "$<TARGET_FILE:run_gui_server>")
       set_tests_properties(market_gui_e2e PROPERTIES
+        LABELS "gui;e2e;browser;market" TIMEOUT 180)
+      add_test(NAME southern_market_e2e
+        COMMAND "${HACDCPF_NODE_EXECUTABLE}"
+                "${CMAKE_SOURCE_DIR}/tests/e2e/southern_market_e2e.mjs"
+                --server "$<TARGET_FILE:run_gui_server>")
+      set_tests_properties(southern_market_e2e PROPERTIES
         LABELS "gui;e2e;browser;market" TIMEOUT 180)
     endif()
 

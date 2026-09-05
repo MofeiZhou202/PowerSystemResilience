@@ -72,6 +72,7 @@
 #include "hacdcpf/time_series/lifecycle_simulation.hpp"
 #include "hacdcpf/integrated_energy/integrated_energy_optimizer.hpp"
 #include "hacdcpf/market/market_simulation.hpp"
+#include "hacdcpf/market/southern_market.hpp"
 #include "hacdcpf/carbon_analysis/carbon_analysis.hpp"
 #include "hacdcpf/carbon_analysis/annual_carbon_analysis.hpp"
 #include "hacdcpf/reliability/reliability_assessment.hpp"
@@ -3006,6 +3007,10 @@ hacdcpf::StandardParameterLibrary parameter_library_from_json(
 
 struct Session {
   std::mutex mu;
+  std::optional<json> southern_boundary;
+  std::optional<json> southern_baseline;
+  std::optional<json> southern_latest;
+  std::uint64_t southern_revision{0};
   // Current system held as a read-shared immutable snapshot.  Request handlers
   // copy this shared_ptr under a short lock (read sharing); writers build a new
   // system and atomically replace the pointer via session_replace_system
@@ -3108,6 +3113,10 @@ Session g_session;
 // resident topology graph and bus spatial index once, and drops the stale
 // serialization cache.  This is the ONLY write path for current_system.
 void session_replace_system(Session& s, hacdcpf::HybridPowerSystem sys) {
+  s.southern_boundary.reset();
+  s.southern_baseline.reset();
+  s.southern_latest.reset();
+  ++s.southern_revision;
   auto shared = std::make_shared<hacdcpf::HybridPowerSystem>(std::move(sys));
   ++s.system_revision;
   s.topology_graph = std::make_shared<const hacdcpf::graph::PowerSystemGraph>(
@@ -22065,6 +22074,97 @@ int main(int argc, char** argv) {
         g_session.busy.store(false);
         res.status = 500;
         res.set_content(json{{"error", "Unknown internal error in unit commitment"}}.dump(), "application/json");
+      }
+    });
+
+    // Southern snapshots are independently authored market datasets. Replacing
+    // the engineering model clears them; runs never silently resync Canvas.
+    svr.Get("/api/session/southern_market", [](const httplib::Request&, httplib::Response& res) {
+      std::lock_guard<std::mutex> lock(g_session.mu);
+      res.set_content(json{{"schema", hacdcpf::market::southern_market_schema()},
+        {"revision", g_session.southern_revision}, {"boundary", g_session.southern_boundary.value_or(json(nullptr))},
+        {"baseline", g_session.southern_baseline.value_or(json(nullptr))},
+        {"latest", g_session.southern_latest.value_or(json(nullptr))}}.dump(), "application/json");
+    });
+    svr.Post("/api/session/southern_market", [](const httplib::Request& req, httplib::Response& res) {
+      try {
+        const json body = json::parse(req.body);
+        for (auto it = body.begin(); it != body.end(); ++it)
+          if (it.key() != "action" && it.key() != "revision" && it.key() != "boundary")
+            throw std::invalid_argument("Unknown Southern request field: " + it.key());
+        const std::string action = body.at("action");
+        std::lock_guard<std::mutex> lock(g_session.mu);
+        if (g_session.busy.load() || body.at("revision").get<std::uint64_t>() != g_session.southern_revision) {
+          res.status = 409; res.set_content(json{{"error", "Market state changed or analysis is running; reload before saving"}}.dump(), "application/json"); return;
+        }
+        json candidate;
+        if (action == "example") candidate = hacdcpf::market::make_southern_market_example();
+        else if (action == "from_system") {
+          if (!g_session.current_system) throw std::invalid_argument("No engineering system loaded");
+          candidate = hacdcpf::market::southern_market_from_system(*g_session.current_system);
+        } else if (action == "save") candidate = body.at("boundary");
+        else if (action == "restore_baseline") {
+          if (!g_session.southern_baseline) throw std::invalid_argument("No baseline result");
+          candidate = g_session.southern_baseline->at("boundary_snapshot");
+        } else if (action == "pin_baseline") {
+          if (!g_session.southern_latest || !g_session.southern_latest->value("schedule_feasible", false))
+            throw std::invalid_argument("A feasible schedule is required for baseline");
+          if (!g_session.southern_boundary || g_session.southern_latest->at("boundary_snapshot") != *g_session.southern_boundary)
+            throw std::invalid_argument("Latest result does not match the saved boundary");
+          g_session.southern_baseline = g_session.southern_latest;
+          ++g_session.southern_revision;
+          res.set_content(json{{"revision", g_session.southern_revision}, {"boundary", *g_session.southern_boundary},
+            {"baseline", *g_session.southern_baseline}}.dump(), "application/json"); return;
+        } else throw std::invalid_argument("Unknown Southern action");
+        const auto effective = hacdcpf::market::validate_southern_market(candidate);
+        g_session.southern_boundary = candidate;
+        g_session.southern_latest.reset();
+        if (action == "example" || action == "from_system") g_session.southern_baseline.reset();
+        ++g_session.southern_revision;
+        res.set_content(json{{"revision", g_session.southern_revision}, {"boundary", candidate},
+          {"effective_boundary", effective}, {"baseline", g_session.southern_baseline.value_or(json(nullptr))}}.dump(), "application/json");
+      } catch (const std::invalid_argument& e) {
+        res.status = 400; res.set_content(json{{"error", e.what()}}.dump(), "application/json");
+      } catch (const std::exception& e) { res.status = 400; res.set_content(json{{"error", e.what()}}.dump(), "application/json"); }
+    });
+    svr.Post("/api/session/run_southern_market", [](const httplib::Request& req, httplib::Response& res) {
+      bool owns_busy = false;
+      try {
+        const json body = json::parse(req.body);
+        if (!body.is_object() || body.size() != 1 || !body.contains("revision")) throw std::invalid_argument("Expected only revision");
+        json input; std::optional<json> baseline; std::uint64_t revision;
+        {
+          std::lock_guard<std::mutex> lock(g_session.mu);
+          revision = g_session.southern_revision;
+          if (body.at("revision").get<std::uint64_t>() != revision) {
+            res.status = 409; res.set_content(json{{"error", "Boundary revision changed; reload"}}.dump(), "application/json"); return;
+          }
+          if (!g_session.southern_boundary) throw std::invalid_argument("Save Southern market boundaries first");
+          if (g_session.busy.exchange(true)) {
+            res.status = 409; res.set_content(json{{"error", "Another analysis is running"}}.dump(), "application/json"); return;
+          }
+          owns_busy = true; input = *g_session.southern_boundary; baseline = g_session.southern_baseline;
+        }
+        json result = hacdcpf::market::run_southern_day_ahead_market(input);
+        result["boundary_revision"] = revision;
+        if (baseline) {
+          try { result["comparison"] = hacdcpf::market::compare_southern_market_results(*baseline, result); }
+          catch (const std::exception& e) { result["comparison"] = {{"comparable", false}, {"reason", e.what()}}; }
+        }
+        {
+          std::lock_guard<std::mutex> lock(g_session.mu);
+          if (g_session.southern_revision != revision) {
+            result["stale"] = true;
+          } else { result["stale"] = false; g_session.southern_latest = result; }
+          g_session.busy.store(false); owns_busy = false;
+        }
+        res.set_content(result.dump(), "application/json");
+      } catch (const std::invalid_argument& e) {
+        if (owns_busy) g_session.busy.store(false);
+        res.status = 400; res.set_content(json{{"error", e.what()}}.dump(), "application/json");
+      } catch (const std::exception& e) {
+        if (owns_busy) g_session.busy.store(false);
+        res.status = 400; res.set_content(json{{"error", e.what()}}.dump(), "application/json");
       }
     });
 

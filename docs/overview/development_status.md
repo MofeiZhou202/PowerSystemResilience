@@ -6,6 +6,83 @@ This is the living handoff for verified build state and active engineering work.
 Update it in place; do not create dated copies. Source, registered tests, and
 the current Git worktrees remain authoritative.
 
+## Southern Market Execution and Boundary GUI
+
+The worktree now adds the separate `market::run_southern_day_ahead_market`
+entry point (`southern_market.hpp`, `southern_boundary.cpp`,
+`southern_market.cpp`) and schema-driven GUI work area. The existing generic
+market endpoints retain their own model. This is a research execution model
+with declared A1--A7 interpretations, not completed unconditional reproduction
+of the official market. The full input/solver/API/GUI ledger and open fidelity
+limits are in `docs/modules/market/southern_execution_contract.md`.
+
+Implemented boundaries include dispatch and bus forecasts with proportional
+reconciliation, sourced nonmarket/external schedules, time-dependent generator
+and transmission maintenance, unit/group limits and energy, reserve eligibility,
+primary capacity, storage, HVDC hubs and commercial gateways, adjusted D-2
+priority energy, renewable categories, and cascade reservoir control. Results
+retain raw/effective boundary snapshots, solver stage status, objective terms,
+original-unit row residuals, stable entity IDs, and baseline/scenario differences.
+Session saves are atomic with revision conflicts rejected; engineering-model
+replacement clears independent market snapshots. GUI supports scalar/series
+and interval editing, import/export, save/reload, baseline/restore, all resource
+result categories and AC feedback diagnostics at desktop/mobile widths.
+
+SCUC, fixed-combination SCED and separate LMP are distinct builds. Sourced
+external regulation preclearing awards alter SCED bounds; this is not an
+implementation of the separate regulation-market bidding/optimization rules.
+AC thermal/security violations add local sensitivity cuts and rerun the chain.
+Security failure never publishes prices; `schedule_only` returns a conditional
+linear schedule with `feasible=false`. Original-rule ambiguities, cross-midnight
+startup trajectories, province-specific submission parameters, real market replay,
+and scalable online validation remain open. Inputs starting inside a startup
+trajectory are explicitly rejected. No regulator-certified equivalence is claimed.
+
+Verified against workspace base `92c9c3b49c0dede3c090ee9d1750c745ebcc5086`
+with these uncommitted changes, Apple arm64 / AppleClang, `macos-release`
+(`-O3 -DNDEBUG`), and MIPSolvers `e003dbb11ae29b99e04cbcb1d70c2da02118d4dd`:
+
+- `cmake --build build/macos-release --target test_southern_market run_gui_server -j4`
+  succeeds. New market translation units enable `-Wall -Wextra -Wpedantic`.
+  A pre-existing `DynamicSystem` class/struct forward-declaration warning is
+  exposed through the public API header; the new source itself has no warning.
+- `ctest --test-dir build/macos-release --output-on-failure -R 'Southern|southern_market'`
+  passes 12/12 tests in 6.85 s: 11 numerical suites and registered real-Plotly
+  browser/API E2E. Numerical suites contain 323 assertions, covering analytic
+  prices/fees, forecast changes, validation, congestion and outages, startup
+  classes/history/curves, reserve/group policy, regulation bounds, storage,
+  reservoir lag/history, HVDC losses/hubs/directions, renewable/priority and AC
+  feedback. Following the last CSS/evidence-export change, the browser E2E was
+  rerun successfully. Its screenshots and complete numerical snapshots are in
+  `output/southern-market/`.
+- Predicted vs measured: 100 MW at 200 CNY/MWh gives D-day energy-bid cost
+  480000 vs 480000 CNY, total with explicit representative weights 490000 CNY,
+  and LMP 200 vs 200 CNY/MWh. +1 MW across the D-day gives +4800 vs +4800 CNY;
+  the GUI one-slot +1 MW case gives +50 CNY and +0.25 MWh. Congested-node
+  finite-difference price meets the fixed 1e-4 CNY/MWh threshold. Storage charging
+  10 MWh at 0.9 efficiency adds 9 MWh. Reservoir levels match 99.9/90.4 m and
+  delayed upstream inflow matches 100.5/101.5 m within 1e-6.
+- `cmake --build build/macos-asan-ubsan --target test_southern_market -j4` and
+  `ASAN_OPTIONS=detect_leaks=0 UBSAN_OPTIONS=halt_on_error=1 build/macos-asan-ubsan/tests/test_southern_market`
+  pass all 323 assertions with no sanitizer report. `detect_leaks=1` was rejected
+  by Apple ASan as unsupported, so this is not LeakSanitizer evidence.
+- `node tests/e2e/market_gui_e2e.mjs` passes the existing workflow: its DA fixture
+  intentionally reports `n1_security_failed`, RT/hybrid report `converged`, and
+  the two-round game reports `maximum_rounds_reached`. This is a passing failure-
+  handling contract, not a claim that this DA fixture was secure.
+- JavaScript syntax and `git diff --check` pass. Real browser inspection of the
+  served application confirms editable categories, converged analytic results,
+  490000 CNY total objective and a nonblank 200 CNY/MWh price chart.
+- The manual compiles to 61 pages. All 36 appended official pages remain text-
+  identical after whitespace normalization; no overfull, missing-character or
+  undefined-reference diagnostics. New authored pages were rendered and inspected.
+
+The MIPSolvers checkout is clean but still differs from the recorded pin
+`a39812aa5941691b44e8379a8e0b7d42ccdde955`; no dependency revision was changed.
+No full project-wide C++ suite, external real-market oracle or province-scale
+performance benchmark was run. The local review server is bound to
+`http://127.0.0.1:8080/xjtu/` and seeded only with the synthetic analytic case.
+
 ## Southern regional day-ahead rules documentation (2026-09-05)
 
 The market manual now uses section 2.6 of the official Southern Regional Spot
@@ -3370,6 +3447,36 @@ focused results above therefore record the actual dependency HEAD and do not imp
 pinned clean-clone build.
 
 ## Fast orientation
+
+## Southern market large-system extension (2026-09-05)
+
+`southern_market_from_system` now preserves imported AC topology and augments the
+ACTIVSg2000-scale engineering system with 240 wind, 240 solar and 720 hydro
+synthetic market units (1744 added units), 80 storage units when authored, and 120 compensated
+interruptible-load records. The schema accepts `wind`/`solar` kinds, exposes
+bus shunt fields, and returns demand-response reductions and binding-count
+truncation metadata. GUI result tables show at most 200 rows and price plots
+at most 80 traces, while entity selection retains access to the full result.
+
+The augmentation is explicitly synthetic and is not Southern grid data or a
+claim of official rule equivalence. Focused regression remains 11 cases / 323
+assertions (`test_southern_market`); a 2000-bus end-to-end MILP benchmark and
+AC-security certification are still pending and must report actual runtime,
+memory, gap and residual before being described as scalable.
+
+## Southern model internal verification (2026-09-05)
+
+Release CTest `-R 'Southern|southern_market'` passes 14/14, including GUI E2E;
+the direct C++ filter passes 13 cases / 335 assertions. Coverage includes
+analytic dispatch, compensated interruption, two-generator one-reservoir
+conservation, congestion/LMP sensitivity, startup states, reserves, storage,
+cascade hydrology, HVDC loss, renewable limits, AC feedback, and priority trades.
+
+The existing ASan/UBSan executable passes its 11-case / 323-assertion Southern
+baseline; it predates the two newest hand-oracle cases, so those additions are
+not included in that sanitizer result. No external market oracle or user bid
+data was used. This establishes internal equation, constraint, conservation,
+and synthetic-bid behavior only, not real-market prices or 2000-bus runtime.
 
 ### Protection chronology and local measurement closure (2026-08-24)
 

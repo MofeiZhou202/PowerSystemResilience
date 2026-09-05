@@ -1,5 +1,17 @@
 # Native Day-Ahead Market Runtime
 
+## Southern Regional Execution
+
+The separate `market::run_southern_day_ahead_market(json)` path is now available
+through `/api/session/run_southern_market`. Its versioned boundary schema,
+SCUC / externally precleared regulation award bounds / SCED / AC feedback /
+independent LMP stages, provenance, snapshot comparison, and schema-driven GUI
+are documented in the [Southern execution contract](../modules/market/southern_execution_contract.md).
+Its explicit A1--A7 interpretations and synthetic regression evidence are not
+regulatory certification. `schedule_only`, failed security, and absent pricing
+remain distinct result states. The rest of this document describes the original
+generic market entry points, not the new Southern path.
+
 This describes the platform implementation, which is not equivalent to section
 2.6 of the Southern Regional Spot Energy Trading Implementation Rules (2025
 V1.0). The [official source and manual](../modules/market/README.md) and
