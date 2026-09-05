@@ -126,11 +126,23 @@ enum class SolverBackend {
   NativeIPM,
 };
 
+/// Initial values used for an independently perturbed parametric OPF.
+/// PrimalOnly supplies only the saved OPF variables. PrimalDual additionally
+/// supplies equality, inequality, and variable-bound multipliers. Native IPM
+/// also reuses nonlinear slacks; Ipopt reconstructs its internal slacks.
+enum class ParametricWarmStartMode { PrimalOnly, PrimalDual };
+
 struct ThreePhaseHybridOPFOptions {
   ModelVariant variant{ModelVariant::Full};
   SolverBackend backend{SolverBackend::Ipopt};
   graph::SparseKronOptions reduction_options{};
   int max_iterations{300};
+  /// Native filter-IPM work budgets before and during feasibility restoration.
+  /// The final primal-dual retry retains max_iterations. A nonpositive primary
+  /// cap disables early restoration; a nonpositive restoration cap is clamped
+  /// to one iteration.
+  int native_primary_max_iterations_before_restoration{20};
+  int native_restoration_max_iterations{100};
   double tolerance{1e-7};
   /// Cooperative wall-clock budget for Phase I. A sparse factorization is an
   /// indivisible unit and may finish after this deadline; the factorization
@@ -161,6 +173,8 @@ struct ThreePhaseHybridOPFOptions {
   Eigen::VectorXd equality_dual_start;
   Eigen::VectorXd nonlinear_inequality_dual_start;
   Eigen::VectorXd nonlinear_slack_start;
+  Eigen::VectorXd variable_lower_bound_dual_start;
+  Eigen::VectorXd variable_upper_bound_dual_start;
 };
 
 struct ConstraintOracleRoundDiagnostic {
@@ -224,6 +238,13 @@ struct ThreePhaseHybridOPFResult {
   /// Numeric KKT backend selected by Phase II. "unselected" is valid when
   /// the accepted Phase I point satisfies termination before factorization.
   std::string phase_two_linear_solver_backend{"unselected"};
+  /// Native Phase-II solve diagnostics. Constraint-generation results report
+  /// the final restricted solve rather than a sum over enrichment rounds.
+  int phase_two_initial_attempt_iterations{0};
+  int phase_two_initial_attempt_factorizations{0};
+  int phase_two_total_factorizations{0};
+  int phase_two_restoration_factorizations{0};
+  int phase_two_retry_factorizations{0};
   int initial_worst_equality{-1};
   int initial_worst_inequality{-1};
   double primal_residual{0.0};
@@ -242,6 +263,9 @@ struct ThreePhaseHybridOPFResult {
   Eigen::VectorXd equality_dual;
   Eigen::VectorXd inequality_dual;
   Eigen::VectorXd inequality_slack;
+  Eigen::VectorXd variable_lower_bound_dual;
+  Eigen::VectorXd variable_upper_bound_dual;
+  bool primal_dual_warm_start_used{false};
   Eigen::VectorXcd full_voltage;
   Eigen::VectorXd dc_voltage;
   std::vector<double> generator_active_power_pu;
@@ -268,8 +292,10 @@ std::vector<ThreePhaseHybridOPFResult> solve_three_phase_hybrid_opf_sequence(
 
 std::vector<ThreePhaseHybridOPFResult> solve_three_phase_hybrid_opf_branches(
     const ThreePhaseHybridOPFCase& base_problem,
-    const ThreePhaseHybridOPFResult& certified_base,
+    const ThreePhaseHybridOPFResult& base_result,
     const std::vector<ThreePhaseHybridOPFCase>& perturbed_problems,
-    const ThreePhaseHybridOPFOptions& options = {});
+    const ThreePhaseHybridOPFOptions& options = {},
+    ParametricWarmStartMode warm_start_mode =
+        ParametricWarmStartMode::PrimalDual);
 
 }  // namespace hacdcpf::opf::phase_hybrid

@@ -453,6 +453,8 @@ TEST_CASE("Native Full certifies a graph-reduced primal-dual transport",
        << " d=" << reduced.dual_residual
        << " c=" << reduced.complementarity);
   REQUIRE(reduced.converged);
+  CHECK(reduced.phase_two_initial_attempt_iterations <=
+        options.native_primary_max_iterations_before_restoration);
 
   const int full_nv = static_cast<int>(c.y_ac.rows());
   const int reduced_nv = static_cast<int>(reduced.reduction.retained.size());
@@ -527,6 +529,12 @@ TEST_CASE("Native Full certifies a graph-reduced primal-dual transport",
   CHECK(full.phase_two_start_requested);
   CHECK(full.phase_two_start_accepted);
   CHECK_FALSE(full.phase_two_linear_solver_backend.empty());
+  CHECK(full.phase_two_initial_attempt_iterations <= options.max_iterations);
+  CHECK(full.phase_two_initial_attempt_factorizations >= 0);
+  CHECK(full.phase_two_restoration_factorizations >= 0);
+  CHECK(full.phase_two_retry_factorizations >= 0);
+  CHECK(full.phase_two_total_factorizations >=
+        full.phase_two_initial_attempt_factorizations);
   CHECK(full.primal_residual <= 1e-6);
   CHECK(full.dual_residual <= 1e-6);
   CHECK(full.complementarity <= 1e-6);
@@ -693,6 +701,141 @@ TEST_CASE("Exact constraint oracle preserves the graph-reduced OPF solution",
   CHECK(seeded.enforced_inequality_rows == oracle.enforced_inequality_rows);
   CHECK(std::abs(seeded.objective - oracle.objective) <=
         1e-8 * std::max(1.0, std::abs(oracle.objective)));
+}
+
+TEST_CASE("Parametric Native branches distinguish complete and primal-only state",
+          "[opf][three_phase][hybrid][native][parametric][warm_start]") {
+  const auto base = make_small_hybrid_case();
+  auto perturbed = base;
+  perturbed.p_load_pu *= 1.001;
+  perturbed.q_load_pu *= 1.001;
+  perturbed.p_dc_load_pu *= 1.001;
+
+  ThreePhaseHybridOPFOptions options;
+  options.variant = ModelVariant::GraphReduced;
+  options.backend = SolverBackend::NativeIPM;
+  options.use_constraint_oracle = true;
+  options.max_iterations = 300;
+  options.tolerance = 1e-6;
+  options.native_primary_max_iterations_before_restoration = 0;
+  options.reduction_options.max_front = 8;
+  options.reduction_options.max_nnz_ratio = 10.0;
+
+  const auto base_result = solve_three_phase_hybrid_opf(base, options);
+  REQUIRE(base_result.converged);
+  const auto primal_dual = solve_three_phase_hybrid_opf_branches(
+      base, base_result, {perturbed}, options,
+      ParametricWarmStartMode::PrimalDual).front();
+  const auto primal_only = solve_three_phase_hybrid_opf_branches(
+      base, base_result, {perturbed}, options,
+      ParametricWarmStartMode::PrimalOnly).front();
+  INFO("primal-dual=" << primal_dual.status << " p/d/c="
+       << primal_dual.primal_residual << '/' << primal_dual.dual_residual << '/'
+       << primal_dual.complementarity << " primal-only=" << primal_only.status
+       << " p/d/c=" << primal_only.primal_residual << '/'
+       << primal_only.dual_residual << '/' << primal_only.complementarity);
+  REQUIRE(primal_dual.converged);
+  REQUIRE(primal_only.converged);
+  CHECK(primal_dual.phase_two_start_accepted);
+  CHECK_FALSE(primal_only.phase_two_start_accepted);
+  CHECK(primal_dual.enforced_inequality_rows ==
+        primal_only.enforced_inequality_rows);
+  CHECK(std::abs(primal_dual.objective - primal_only.objective) <=
+        1e-6 * std::max(1.0, std::abs(primal_only.objective)));
+  CHECK((primal_dual.full_voltage - primal_only.full_voltage)
+            .cwiseAbs().maxCoeff() <= 1e-6);
+  CHECK(primal_dual.primal_residual <= 1e-6);
+  CHECK(primal_dual.dual_residual <= 1e-6);
+  CHECK(primal_dual.complementarity <= 1e-6);
+}
+
+TEST_CASE("Parametric Ipopt branches distinguish multiplier and primal-only starts",
+          "[opf][three_phase][hybrid][ipopt][parametric][warm_start]") {
+#ifndef HACDCPF_HAVE_IPOPT
+  SKIP("embedded Ipopt is not available in this build");
+#endif
+  const auto base = make_small_hybrid_case();
+  auto perturbed = base;
+  perturbed.p_load_pu *= 1.001;
+  perturbed.q_load_pu *= 1.001;
+  perturbed.p_dc_load_pu *= 1.001;
+
+  ThreePhaseHybridOPFOptions options;
+  options.variant = ModelVariant::GraphReduced;
+  options.backend = SolverBackend::Ipopt;
+  options.use_constraint_oracle = true;
+  options.max_iterations = 300;
+  options.tolerance = 1e-6;
+  options.reduction_options.max_front = 8;
+  options.reduction_options.max_nnz_ratio = 10.0;
+
+  const auto base_result = solve_three_phase_hybrid_opf(base, options);
+  REQUIRE(base_result.converged);
+  REQUIRE(base_result.equality_dual.size() == base_result.equalities);
+  REQUIRE(base_result.variable_lower_bound_dual.size() == base_result.variables);
+  REQUIRE(base_result.variable_upper_bound_dual.size() == base_result.variables);
+  const auto primal_dual = solve_three_phase_hybrid_opf_branches(
+      base, base_result, {perturbed}, options,
+      ParametricWarmStartMode::PrimalDual).front();
+  const auto primal_only = solve_three_phase_hybrid_opf_branches(
+      base, base_result, {perturbed}, options,
+      ParametricWarmStartMode::PrimalOnly).front();
+
+  INFO("primal-dual=" << primal_dual.status << " iterations="
+       << primal_dual.iterations << " p/d/c=" << primal_dual.primal_residual
+       << '/' << primal_dual.dual_residual << '/' << primal_dual.complementarity
+       << " primal-only=" << primal_only.status << " iterations="
+       << primal_only.iterations << " p/d/c=" << primal_only.primal_residual
+       << '/' << primal_only.dual_residual << '/' << primal_only.complementarity);
+  REQUIRE(primal_dual.converged);
+  REQUIRE(primal_only.converged);
+  CHECK(primal_dual.primal_dual_warm_start_used);
+  CHECK_FALSE(primal_only.primal_dual_warm_start_used);
+  CHECK(primal_dual.enforced_inequality_rows ==
+        primal_only.enforced_inequality_rows);
+  CHECK(std::abs(primal_dual.objective - primal_only.objective) <=
+        1e-6 * std::max(1.0, std::abs(primal_only.objective)));
+  CHECK((primal_dual.full_voltage - primal_only.full_voltage)
+            .cwiseAbs().maxCoeff() <= 1e-6);
+}
+
+TEST_CASE("Native IPM agrees with an independent Ipopt solve",
+          "[opf][three_phase][hybrid][native][ipopt][crosscheck]") {
+#ifndef HACDCPF_HAVE_IPOPT
+  SKIP("embedded Ipopt is not available in this build");
+#endif
+  constexpr double agreement_tolerance = 1e-6;
+  const auto c = make_small_hybrid_case();
+  ThreePhaseHybridOPFOptions native_options;
+  native_options.variant = ModelVariant::GraphReduced;
+  native_options.backend = SolverBackend::NativeIPM;
+  native_options.warm_start_with_ipopt = false;
+  native_options.use_constraint_oracle = true;
+  native_options.max_iterations = 500;
+  native_options.tolerance = agreement_tolerance;
+  native_options.reduction_options.max_front = 8;
+  native_options.reduction_options.max_nnz_ratio = 10.0;
+
+  ThreePhaseHybridOPFOptions ipopt_options = native_options;
+  ipopt_options.backend = SolverBackend::Ipopt;
+  const auto native = solve_three_phase_hybrid_opf(c, native_options);
+  const auto ipopt = solve_three_phase_hybrid_opf(c, ipopt_options);
+  INFO("native=" << native.status << " p=" << native.primal_residual
+       << " ipopt=" << ipopt.status << " p=" << ipopt.primal_residual);
+  REQUIRE(native.converged);
+  REQUIRE(ipopt.converged);
+  CHECK(native.solver == "NativeIPM");
+  CHECK(ipopt.solver == "Ipopt");
+  CHECK(native.primal_residual <= agreement_tolerance);
+  CHECK(ipopt.primal_residual <= agreement_tolerance);
+  CHECK(native.max_omitted_inequality <= agreement_tolerance);
+  CHECK(ipopt.max_omitted_inequality <= agreement_tolerance);
+  CHECK(std::abs(native.objective - ipopt.objective) <=
+        agreement_tolerance * std::max(1.0, std::abs(ipopt.objective)));
+  REQUIRE(native.full_voltage.size() == ipopt.full_voltage.size());
+  CHECK((native.full_voltage - ipopt.full_voltage)
+            .cwiseAbs()
+            .maxCoeff() <= agreement_tolerance);
 }
 
 TEST_CASE("Lifted phase-hybrid relaxation gives a certified OPF lower bound",

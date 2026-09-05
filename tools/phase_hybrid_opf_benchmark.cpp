@@ -13,6 +13,7 @@
 #include <iomanip>
 #include <iostream>
 #include <limits>
+#include <map>
 #include <numeric>
 #include <queue>
 #include <stdexcept>
@@ -48,6 +49,20 @@ struct CandidateBus {
   int bus_offset{-1};
   double p_pu{0.0};
   std::vector<int> nodes;
+};
+
+struct PhysicalFigureMetadata {
+  struct Edge {
+    std::string from_bus;
+    std::string to_bus;
+    std::string phases;
+    std::string element;
+  };
+
+  std::vector<std::string> phase_node_bus;
+  std::vector<int> phase_node_phase;
+  std::vector<std::string> converter_bus;
+  std::vector<Edge> edges;
 };
 
 struct Audit {
@@ -417,7 +432,8 @@ void attach_line_current_limits(ThreePhaseHybridOPFCase& c, double margin) {
             << " base=" << (base.converged ? 1 : 0) << "\n";
 }
 
-ThreePhaseHybridOPFCase hybridize(const Input& input) {
+ThreePhaseHybridOPFCase hybridize(
+    const Input& input, PhysicalFigureMetadata* figure_metadata = nullptr) {
   const ThreePhaseACSystem sys =
       hacdcpf::analysis::load_three_phase_system_from_opendss(input.master, 100.0);
   if (sys.buses.empty()) throw std::runtime_error("OpenDSS import returned no buses");
@@ -672,6 +688,18 @@ ThreePhaseHybridOPFCase hybridize(const Input& input) {
       energized_to_old[static_cast<std::size_t>(energized)] = old;
     }
   }
+  if (figure_metadata != nullptr) {
+    figure_metadata->phase_node_bus.resize(
+        static_cast<std::size_t>(c.y_ac.rows()));
+    figure_metadata->phase_node_phase = c.ac_phase_index;
+    for (int node = 0; node < c.y_ac.rows(); ++node) {
+      const int old = energized_to_old[static_cast<std::size_t>(node)];
+      const int bus_offset =
+          phase_graph.bus_offset[static_cast<std::size_t>(old)];
+      figure_metadata->phase_node_bus[static_cast<std::size_t>(node)] =
+          sys.buses[static_cast<std::size_t>(bus_offset)].name;
+    }
+  }
   std::vector<int> cluster_root(static_cast<std::size_t>(input.vsc_count), -1);
   std::vector<int> cluster_root_distance(
       static_cast<std::size_t>(input.vsc_count), unreachable);
@@ -760,6 +788,11 @@ ThreePhaseHybridOPFCase hybridize(const Input& input) {
     converter.voltage_reference_pu = 1.0;
     converter.voltage_integral_gain = 10.0;
     c.converters.push_back(std::move(converter));
+    if (figure_metadata != nullptr) {
+      const int node = terminal_nodes[static_cast<std::size_t>(k)].front();
+      figure_metadata->converter_bus.push_back(
+          figure_metadata->phase_node_bus[static_cast<std::size_t>(node)]);
+    }
   }
   c.g_dc.setFromTriplets(gtrip.begin(), gtrip.end());
   c.g_dc.makeCompressed();
@@ -777,6 +810,30 @@ ThreePhaseHybridOPFCase hybridize(const Input& input) {
     generator.cost_c2 = 0.01;
     generator.cost_c1 = 45.0 + 0.5 * ri;
     c.generators.push_back(generator);
+  }
+  if (figure_metadata != nullptr) {
+    std::unordered_map<int, std::string> bus_name;
+    for (const auto& bus : sys.buses) bus_name.emplace(bus.index, bus.name);
+    for (const auto& line : sys.lines) {
+      if (!line.in_service) continue;
+      const auto from = bus_name.find(line.from_bus);
+      const auto to = bus_name.find(line.to_bus);
+      if (from == bus_name.end() || to == bus_name.end()) continue;
+      figure_metadata->edges.push_back(
+          {from->second, to->second,
+           hacdcpf::phase_mask_to_string(line.phase_mask),
+           "line"});
+    }
+    for (const auto& transformer : sys.transformers) {
+      if (!transformer.in_service) continue;
+      const auto from = bus_name.find(transformer.hv_bus);
+      const auto to = bus_name.find(transformer.lv_bus);
+      if (from == bus_name.end() || to == bus_name.end()) continue;
+      figure_metadata->edges.push_back(
+          {from->second, to->second,
+           hacdcpf::phase_mask_to_string(transformer.hv_phase_mask),
+           "transformer"});
+    }
   }
   attach_line_current_limits(c, 1.25);
   return c;
@@ -863,6 +920,180 @@ double phase_load_unbalance(const ThreePhaseHybridOPFCase& problem) {
   return deviation / std::max(1e-12, std::abs(mean));
 }
 
+std::string control_mode_name(PhaseVSCControlMode mode) {
+  switch (mode) {
+    case PhaseVSCControlMode::EqualPhasePower:
+      return "Equal phase";
+    case PhaseVSCControlMode::GridFollowingPLL:
+      return "GFL";
+    case PhaseVSCControlMode::GridFormingDroop:
+      return "GFM";
+  }
+  return "Unknown";
+}
+
+double sequence_unbalance_percent(const std::array<Complex, 3>& phasors) {
+  const Complex alpha = std::polar(1.0, 2.0 * M_PI / 3.0);
+  const Complex positive =
+      (phasors[0] + alpha * phasors[1] + alpha * alpha * phasors[2]) / 3.0;
+  const Complex negative =
+      (phasors[0] + alpha * alpha * phasors[1] + alpha * phasors[2]) / 3.0;
+  return 100.0 * std::abs(negative) / std::max(1e-12, std::abs(positive));
+}
+
+void write_physical_figure_rows(
+    const ThreePhaseHybridOPFCase& problem,
+    const ThreePhaseHybridOPFResult& solved,
+    const PhysicalFigureMetadata& metadata,
+    const std::string& mode,
+    std::ostream& node_out,
+    std::ostream& branch_out) {
+  std::map<std::string, std::array<int, 3>> bus_nodes;
+  for (int node = 0; node < problem.y_ac.rows(); ++node) {
+    auto [it, inserted] = bus_nodes.try_emplace(
+        metadata.phase_node_bus[static_cast<std::size_t>(node)],
+        std::array<int, 3>{-1, -1, -1});
+    (void)inserted;
+    const int phase =
+        metadata.phase_node_phase[static_cast<std::size_t>(node)];
+    it->second[static_cast<std::size_t>(phase)] = node;
+  }
+
+  std::vector<int> node_converter(static_cast<std::size_t>(problem.y_ac.rows()), -1);
+  std::vector<int> node_converter_phase(
+      static_cast<std::size_t>(problem.y_ac.rows()), -1);
+  std::vector<double> converter_i_vuf(problem.converters.size(),
+                                      std::numeric_limits<double>::quiet_NaN());
+  for (int ci = 0; ci < static_cast<int>(problem.converters.size()); ++ci) {
+    const auto& converter = problem.converters[static_cast<std::size_t>(ci)];
+    std::array<Complex, 3> phase_current{};
+    bool has_all_phases = converter.phase_nodes.size() == 3;
+    for (int local = 0; local < static_cast<int>(converter.phase_nodes.size()); ++local) {
+      const int node = converter.phase_nodes[static_cast<std::size_t>(local)];
+      const int phase = problem.ac_phase_index[static_cast<std::size_t>(node)];
+      node_converter[static_cast<std::size_t>(node)] = ci;
+      node_converter_phase[static_cast<std::size_t>(node)] = local;
+      if (solved.converged &&
+          ci < static_cast<int>(solved.converter_phase_power_pu.size()) &&
+          local < static_cast<int>(
+              solved.converter_phase_power_pu[static_cast<std::size_t>(ci)].size())) {
+        const Complex voltage = solved.full_voltage[node];
+        const Complex power = solved.converter_phase_power_pu[
+            static_cast<std::size_t>(ci)][static_cast<std::size_t>(local)];
+        phase_current[static_cast<std::size_t>(phase)] =
+            std::abs(voltage) > 1e-12 ? std::conj(power / voltage) : Complex{};
+      }
+    }
+    if (solved.converged && has_all_phases) {
+      converter_i_vuf[static_cast<std::size_t>(ci)] =
+          sequence_unbalance_percent(phase_current);
+    }
+  }
+
+  for (const auto& [bus, nodes] : bus_nodes) {
+    std::array<Complex, 3> voltage{};
+    bool has_all_phases = true;
+    for (int phase = 0; phase < 3; ++phase) {
+      const int node = nodes[static_cast<std::size_t>(phase)];
+      has_all_phases = has_all_phases && node >= 0;
+      if (solved.converged && node >= 0) {
+        voltage[static_cast<std::size_t>(phase)] = solved.full_voltage[node];
+      }
+    }
+    const double voltage_vuf = solved.converged && has_all_phases
+        ? sequence_unbalance_percent(voltage)
+        : std::numeric_limits<double>::quiet_NaN();
+    for (int phase = 0; phase < 3; ++phase) {
+      const int node = nodes[static_cast<std::size_t>(phase)];
+      if (node < 0) continue;
+      const int ci = node_converter[static_cast<std::size_t>(node)];
+      const int local = node_converter_phase[static_cast<std::size_t>(node)];
+      Complex converter_power{};
+      double current_magnitude = std::numeric_limits<double>::quiet_NaN();
+      if (solved.converged && ci >= 0 && local >= 0) {
+        converter_power = solved.converter_phase_power_pu[
+            static_cast<std::size_t>(ci)][static_cast<std::size_t>(local)];
+        current_magnitude = std::abs(converter_power) /
+            std::max(1e-12, std::abs(solved.full_voltage[node]));
+      }
+      const bool is_reference = std::find(
+          problem.reference_nodes.begin(), problem.reference_nodes.end(), node) !=
+          problem.reference_nodes.end();
+      node_out << problem.name.substr(0, problem.name.find('_')) << ',' << mode
+               << ',' << (solved.converged ? "yes" : "no") << ',' << bus << ','
+               << static_cast<char>('A' + phase) << ','
+               << (solved.converged ? std::abs(solved.full_voltage[node])
+                                    : std::numeric_limits<double>::quiet_NaN())
+               << ',' << voltage_vuf << ',' << (is_reference ? "yes" : "no")
+               << ',' << (ci >= 0 ? ci + 1 : 0) << ','
+               << (ci >= 0 ? control_mode_name(
+                                  problem.converters[static_cast<std::size_t>(ci)]
+                                      .control_mode)
+                            : "none")
+               << ',' << converter_power.real() * problem.base_mva << ','
+               << converter_power.imag() * problem.base_mva << ','
+               << current_magnitude << ','
+               << (ci >= 0 ? converter_i_vuf[static_cast<std::size_t>(ci)]
+                           : std::numeric_limits<double>::quiet_NaN())
+               << '\n';
+    }
+  }
+
+  if (!solved.converged) return;
+  std::map<std::pair<std::string, std::string>, PhysicalFigureMetadata::Edge>
+      unique_edges;
+  for (const auto& edge : metadata.edges) {
+    const auto key = std::minmax(edge.from_bus, edge.to_bus);
+    unique_edges.try_emplace(
+        std::make_pair(key.first, key.second), edge);
+  }
+  const auto phase_powers = [&](const std::string& from,
+                                const std::string& to) {
+    std::array<double, 3> active{};
+    const auto from_it = bus_nodes.find(from);
+    const auto to_it = bus_nodes.find(to);
+    if (from_it == bus_nodes.end() || to_it == bus_nodes.end()) return active;
+    for (int phase = 0; phase < 3; ++phase) {
+      const int from_node = from_it->second[static_cast<std::size_t>(phase)];
+      if (from_node < 0) continue;
+      Complex current{};
+      for (int coupled_phase = 0; coupled_phase < 3; ++coupled_phase) {
+        const int from_coupled =
+            from_it->second[static_cast<std::size_t>(coupled_phase)];
+        const int to_coupled =
+            to_it->second[static_cast<std::size_t>(coupled_phase)];
+        if (from_coupled < 0 || to_coupled < 0) continue;
+        const Complex series = -problem.y_ac.coeff(from_node, to_coupled);
+        current += series *
+            (solved.full_voltage[from_coupled] - solved.full_voltage[to_coupled]);
+      }
+      active[static_cast<std::size_t>(phase)] =
+          (solved.full_voltage[from_node] * std::conj(current)).real() *
+          problem.base_mva;
+    }
+    return active;
+  };
+  for (const auto& [key, edge] : unique_edges) {
+    std::string from = edge.from_bus;
+    std::string to = edge.to_bus;
+    auto active = phase_powers(from, to);
+    double total = active[0] + active[1] + active[2];
+    if (total < 0.0) {
+      std::swap(from, to);
+      active = phase_powers(from, to);
+      total = active[0] + active[1] + active[2];
+    }
+    const double magnitude =
+        std::abs(active[0]) + std::abs(active[1]) + std::abs(active[2]);
+    if (magnitude <= 1e-10) continue;
+    branch_out << problem.name.substr(0, problem.name.find('_')) << ',' << mode
+               << ',' << from << ',' << to << ',' << edge.element << ','
+               << active[0] << ','
+               << active[1] << ',' << active[2] << ',' << total << ','
+               << magnitude << '\n';
+  }
+}
+
 void fill_phase_voltage_ranges(const ThreePhaseHybridOPFCase& problem,
                                const Eigen::VectorXcd& voltage,
                                SensitivityRow& row) {
@@ -879,7 +1110,8 @@ void fill_phase_voltage_ranges(const ThreePhaseHybridOPFCase& problem,
 }
 
 int run_converter_mode_suite(const Input& input, SolverBackend backend) {
-  const ThreePhaseHybridOPFCase base = hybridize(input);
+  PhysicalFigureMetadata figure_metadata;
+  const ThreePhaseHybridOPFCase base = hybridize(input, &figure_metadata);
   struct Variant {
     std::string label;
     ThreePhaseHybridOPFCase problem;
@@ -914,14 +1146,38 @@ int run_converter_mode_suite(const Input& input, SolverBackend backend) {
 
   const fs::path path = project_root() / "output" / "benchmarks" /
       ("paper_converter_modes_" + input.label + ".csv");
+  const fs::path topology_path = project_root() / "output" / "benchmarks" /
+      ("paper_converter_topology_" + input.label + ".csv");
+  const fs::path node_path = project_root() / "output" / "benchmarks" /
+      ("paper_converter_node_results_" + input.label + ".csv");
+  const fs::path branch_path = project_root() / "output" / "benchmarks" /
+      ("paper_converter_branch_results_" + input.label + ".csv");
   fs::create_directories(path.parent_path());
   std::ofstream out(path);
+  std::ofstream topology_out(topology_path);
+  std::ofstream node_out(node_path);
+  std::ofstream branch_out(branch_path);
+  if (!out || !topology_out || !node_out || !branch_out) {
+    throw std::runtime_error("unable to open converter-mode output files");
+  }
   out << "case,mode,converged,gfl_count,gfm_count,legacy_count,variables,"
          "equalities,inequalities,eliminated,oracle_rows,total_rows,iterations,"
          "runtime_ms,objective,primal_residual,dual_residual,complementarity,"
          "max_vuf,max_converter_current_vuf,max_converter_current_loading,"
          "max_dynamic_equilibrium_residual,status\n";
   out << std::setprecision(12);
+  topology_out << "case,from_bus,to_bus,phases,element\n";
+  for (const auto& edge : figure_metadata.edges) {
+    topology_out << input.label << ',' << edge.from_bus << ',' << edge.to_bus
+                 << ',' << edge.phases << ',' << edge.element << '\n';
+  }
+  node_out << "case,mode,converged,bus,phase,voltage_pu,voltage_vuf_pct,"
+              "is_reference,converter_id,converter_control,p_mw,q_mvar,"
+              "current_pu,converter_current_vuf_pct\n";
+  branch_out << "case,mode,from_bus,to_bus,element,p_a_mw,p_b_mw,p_c_mw,"
+                "p_total_mw,sum_abs_phase_p_mw\n";
+  node_out << std::setprecision(12);
+  branch_out << std::setprecision(12);
   for (const auto& variant : variants) {
     const auto solved = solve_three_phase_hybrid_opf(variant.problem, options);
     int gfl = 0;
@@ -949,6 +1205,8 @@ int run_converter_mode_suite(const Input& input, SolverBackend backend) {
         << solved.max_converter_current_loading << ','
         << solved.max_dynamic_equilibrium_residual << ",\""
         << solved.status << "\"\n" << std::flush;
+    write_physical_figure_rows(variant.problem, solved, figure_metadata,
+                               variant.label, node_out, branch_out);
     std::cout << input.label << '/' << variant.label
               << ": converged=" << solved.converged
               << ", runtime_ms=" << solved.runtime_ms
@@ -956,6 +1214,9 @@ int run_converter_mode_suite(const Input& input, SolverBackend backend) {
               << solved.max_dynamic_equilibrium_residual << '\n';
   }
   std::cout << "Wrote " << path << '\n';
+  std::cout << "Wrote " << topology_path << '\n';
+  std::cout << "Wrote " << node_path << '\n';
+  std::cout << "Wrote " << branch_path << '\n';
   return 0;
 }
 
@@ -1061,14 +1322,14 @@ int run_sensitivity_suite(const Input& input,
   out << std::setprecision(12);
 
   for (int repeat = 1; repeat <= repeats; ++repeat) {
-    const auto certified_base = solve_three_phase_hybrid_opf(base, options);
+    const auto base_result = solve_three_phase_hybrid_opf(base, options);
     for (std::size_t index = 0; index < scenarios.size(); ++index) {
       ThreePhaseHybridOPFResult solved;
       if (index == 0) {
-        solved = certified_base;
+        solved = base_result;
       } else {
         solved = solve_three_phase_hybrid_opf_branches(
-            base, certified_base, {scenarios[index].problem}, options).front();
+            base, base_result, {scenarios[index].problem}, options).front();
       }
       ThreePhaseHybridOPFOptions reference_options = options;
       reference_options.use_constraint_oracle = false;
@@ -1207,7 +1468,16 @@ Audit run_case(const Input& input,
     if (run_continuation) {
       std::cerr << '[' << input.label << "] continuation GR-IPM: done in "
                 << audit.continuation.runtime_ms / 1000.0 << " s, status="
-                << audit.continuation.status << "\n" << std::flush;
+                << audit.continuation.status << ", phase2-start="
+                << audit.continuation.phase_two_start_requested << '/'
+                << audit.continuation.phase_two_start_accepted
+                << ", centrality=" << audit.continuation.phase_one_centrality
+                << ", mu=" << audit.continuation.phase_one_barrier_mu;
+      if (!audit.continuation.phase_two_start_rejection_reason.empty()) {
+        std::cerr << " ("
+                  << audit.continuation.phase_two_start_rejection_reason << ')';
+      }
+      std::cerr << "\n" << std::flush;
     }
     if (!solve_full) return audit;
     ThreePhaseHybridOPFCase full_case = c;
@@ -1684,11 +1954,341 @@ int run_exp2_suite(const Input& input, SolverBackend backend) {
   return 0;
 }
 
+int run_crosssolver_suite(const std::vector<Input>& selected) {
+  // The acceptance threshold matches the OPF feasibility tolerance used in the
+  // manuscript validation protocol; see docs/modules/optimal_power_flow/
+  // chapters/three_phase.tex, "Independent solver cross-check".
+  constexpr double kAgreementTolerance = 1e-6;
+  constexpr double kSolverTolerance = 1e-6;
+  const fs::path path = project_root() / "output" / "benchmarks" /
+      "paper_native_ipm_ipopt_crosscheck.csv";
+  fs::create_directories(path.parent_path());
+  std::ofstream out(path);
+  out << "case,native_converged,ipopt_cold_converged,ipopt_verification_converged,"
+         "native_solver,ipopt_solver,"
+         "native_ipopt_initialization,native_objective,ipopt_objective,"
+         "ipopt_verification_objective,cold_objective_relative_difference,"
+         "cold_voltage_max_difference_pu,verification_objective_relative_difference,"
+         "verification_voltage_max_difference_pu,native_primal_residual,"
+         "ipopt_primal_residual,ipopt_verification_primal_residual,"
+         "native_dual_residual,ipopt_dual_residual,native_complementarity,"
+         "ipopt_complementarity,"
+         "native_screen_rows,ipopt_screen_rows,common_enforced_rows,total_rows,"
+         "native_max_omitted_inequality,ipopt_max_omitted_inequality,"
+         "passes,native_status,ipopt_status,ipopt_verification_status\n";
+  out << std::setprecision(12);
+
+  bool all_cases_pass = true;
+  for (const auto& input : selected) {
+    ThreePhaseHybridOPFResult native;
+    ThreePhaseHybridOPFResult ipopt;
+    ThreePhaseHybridOPFResult ipopt_verification;
+    int native_screen_rows = 0;
+    int ipopt_screen_rows = 0;
+    int common_enforced_rows = 0;
+    double objective_difference = std::numeric_limits<double>::infinity();
+    double voltage_difference = std::numeric_limits<double>::infinity();
+    double verification_objective_difference =
+        std::numeric_limits<double>::infinity();
+    double verification_voltage_difference =
+        std::numeric_limits<double>::infinity();
+    try {
+      const ThreePhaseHybridOPFCase problem = hybridize(input);
+      ThreePhaseHybridOPFOptions native_options;
+      native_options.backend = SolverBackend::NativeIPM;
+      // This is the independence condition for the external-solver check.
+      // The Native solve must not call the optional Ipopt Phase-I initializer.
+      native_options.warm_start_with_ipopt = false;
+      native_options.variant = ModelVariant::GraphReduced;
+      native_options.max_iterations = 1000;
+      native_options.tolerance = kSolverTolerance;
+      native_options.use_constraint_oracle = true;
+      native_options.reduction_options.max_front = 12;
+      native_options.reduction_options.max_nnz_ratio = 2.0;
+
+      ThreePhaseHybridOPFOptions ipopt_options = native_options;
+      ipopt_options.backend = SolverBackend::Ipopt;
+
+      const ThreePhaseHybridOPFResult native_screen =
+          solve_three_phase_hybrid_opf(problem, native_options);
+      const ThreePhaseHybridOPFResult ipopt_screen =
+          solve_three_phase_hybrid_opf(problem, ipopt_options);
+      native_screen_rows = native_screen.enforced_inequalities;
+      ipopt_screen_rows = ipopt_screen.enforced_inequalities;
+      if (!native_screen.converged || !ipopt_screen.converged) {
+        native = native_screen;
+        ipopt = ipopt_screen;
+      } else {
+        // Use the union of the independently screened Native and Ipopt rows
+        // as one fixed restricted NLP. Both final solves also evaluate every
+        // omitted physical inequality, so screening cannot hide a violation.
+        std::vector<int> common_rows = native_screen.enforced_inequality_rows;
+        common_rows.insert(common_rows.end(),
+                           ipopt_screen.enforced_inequality_rows.begin(),
+                           ipopt_screen.enforced_inequality_rows.end());
+        std::sort(common_rows.begin(), common_rows.end());
+        common_rows.erase(std::unique(common_rows.begin(), common_rows.end()),
+                          common_rows.end());
+        common_enforced_rows = static_cast<int>(common_rows.size());
+        native_options.use_constraint_oracle = false;
+        native_options.enforced_inequality_rows = common_rows;
+        ipopt_options.use_constraint_oracle = false;
+        ipopt_options.enforced_inequality_rows = common_rows;
+        native = solve_three_phase_hybrid_opf(problem, native_options);
+        ipopt = solve_three_phase_hybrid_opf(problem, ipopt_options);
+        if (native.converged) {
+          // External verification of the Native local solution: the current
+          // Ipopt adapter receives only the Native primal point. It receives no
+          // equality/inequality multipliers or nonlinear slacks and then runs
+          // Ipopt to its own convergence test on the identical restricted NLP.
+          ipopt_options.primal_start = native.primal;
+          ipopt_verification =
+              solve_three_phase_hybrid_opf(problem, ipopt_options);
+        }
+      }
+      if (std::isfinite(native.objective) && std::isfinite(ipopt.objective)) {
+        objective_difference = std::abs(native.objective - ipopt.objective) /
+            std::max(1.0, std::abs(ipopt.objective));
+      }
+      if (native.full_voltage.size() > 0 &&
+          native.full_voltage.size() == ipopt.full_voltage.size()) {
+        voltage_difference = max_voltage_difference(
+            native.full_voltage, ipopt.full_voltage);
+      }
+      if (std::isfinite(native.objective) &&
+          std::isfinite(ipopt_verification.objective)) {
+        verification_objective_difference =
+            std::abs(native.objective - ipopt_verification.objective) /
+            std::max(1.0, std::abs(ipopt_verification.objective));
+      }
+      if (native.full_voltage.size() > 0 &&
+          native.full_voltage.size() == ipopt_verification.full_voltage.size()) {
+        verification_voltage_difference = max_voltage_difference(
+            native.full_voltage, ipopt_verification.full_voltage);
+      }
+    } catch (const std::exception& error) {
+      native.status = std::string("cross-solver setup failed: ") + error.what();
+    }
+
+    const bool passes = native.converged && ipopt_verification.converged &&
+        native.primal_residual <= kAgreementTolerance &&
+        ipopt_verification.primal_residual <= kAgreementTolerance &&
+        native.max_omitted_inequality <= kAgreementTolerance &&
+        ipopt_verification.max_omitted_inequality <= kAgreementTolerance &&
+        verification_objective_difference <= kAgreementTolerance &&
+        verification_voltage_difference <= kAgreementTolerance;
+    all_cases_pass = all_cases_pass && passes;
+    out << input.label << ',' << (native.converged ? "yes" : "no") << ','
+        << (ipopt.converged ? "yes" : "no") << ','
+        << (ipopt_verification.converged ? "yes" : "no") << ",\""
+        << native.solver
+        << "\",\"" << ipopt.solver << "\",no," << native.objective << ','
+        << ipopt.objective << ',' << ipopt_verification.objective << ','
+        << objective_difference << ',' << voltage_difference << ','
+        << verification_objective_difference << ','
+        << verification_voltage_difference << ',' << native.primal_residual << ','
+        << ipopt.primal_residual << ',' << ipopt_verification.primal_residual
+        << ',' << native.dual_residual << ','
+        << ipopt.dual_residual << ',' << native.complementarity << ','
+        << ipopt.complementarity << ',' << native_screen_rows << ','
+        << ipopt_screen_rows << ',' << common_enforced_rows << ','
+        << native.inequalities << ','
+        << native.max_omitted_inequality << ','
+        << ipopt.max_omitted_inequality << ',' << (passes ? "yes" : "no")
+        << ",\"" << native.status << "\",\"" << ipopt.status << "\",\""
+        << ipopt_verification.status << "\"\n"
+        << std::flush;
+    std::cout << input.label << " CROSSSOLVER: native=" << native.converged
+              << ", ipopt=" << ipopt.converged
+              << ", cold_objective/voltage_difference="
+              << objective_difference << '/' << voltage_difference
+              << ", verification_objective/voltage_difference="
+              << verification_objective_difference << '/'
+              << verification_voltage_difference << ", primal_residuals="
+              << native.primal_residual << '/' << ipopt.primal_residual << '/'
+              << ipopt_verification.primal_residual << ", screen/common_rows="
+              << native_screen_rows << '/' << ipopt_screen_rows << '/'
+              << common_enforced_rows << ", passes=" << passes << '\n'
+              << std::flush;
+  }
+  std::cout << "CROSSSOLVER four-case agreement=" << all_cases_pass
+            << "\nWrote " << path << '\n';
+  return all_cases_pass ? 0 : 1;
+}
+
+int run_parametric_warmbench_suite(const std::vector<Input>& selected,
+                                   SolverBackend backend,
+                                   int repeats) {
+  constexpr double kEquivalenceTolerance = 1e-6;
+  const double minimum_case_speedup =
+      backend == SolverBackend::NativeIPM ? 1.05 : 1.02;
+  const double minimum_geometric_mean_speedup =
+      backend == SolverBackend::NativeIPM ? 1.20 : 1.02;
+  const fs::path path = project_root() / "output" / "benchmarks" /
+      (backend == SolverBackend::NativeIPM
+           ? "paper_native_ipm_parametric_warmbench.csv"
+           : "paper_ipopt_multiplier_warmbench.csv");
+  fs::create_directories(path.parent_path());
+  std::ofstream out(path);
+  out << "case,repeat,variant,converged,runtime_ms,iterations,"
+         "factorizations,enforced_rows,total_rows,phase2_start_accepted,"
+         "primal_residual,dual_residual,complementarity,objective,"
+         "pair_objective_relative_error,pair_voltage_error_pu,status\n";
+  out << std::setprecision(12);
+
+  const auto median = [](std::vector<double> values) {
+    std::sort(values.begin(), values.end());
+    return values[values.size() / 2];
+  };
+  bool all_cases_pass = true;
+  double log_speedup_sum = 0.0;
+  int passed_cases = 0;
+  for (const auto& input : selected) {
+    const ThreePhaseHybridOPFCase base = hybridize(input);
+    ThreePhaseHybridOPFOptions options;
+    options.backend = backend;
+    options.warm_start_with_ipopt = false;
+    options.variant = ModelVariant::GraphReduced;
+    options.max_iterations = 500;
+    options.tolerance = kEquivalenceTolerance;
+    options.use_constraint_oracle = true;
+    options.native_primary_max_iterations_before_restoration = 0;
+    options.reduction_options.max_front = 12;
+    options.reduction_options.max_nnz_ratio = 2.0;
+    const ThreePhaseHybridOPFResult base_result =
+        solve_three_phase_hybrid_opf(base, options);
+    if (!base_result.converged) {
+      std::cerr << '[' << input.label
+                << "] PARAMBENCH failed: base OPF did not converge: "
+                << base_result.status << '\n';
+      all_cases_pass = false;
+      continue;
+    }
+
+    ThreePhaseHybridOPFCase perturbed = base;
+    perturbed.p_load_pu *= 1.001;
+    perturbed.q_load_pu *= 1.001;
+    perturbed.p_dc_load_pu *= 1.001;
+    std::vector<double> candidate_times;
+    std::vector<double> reference_times;
+    std::vector<double> candidate_factors;
+    std::vector<double> reference_factors;
+    std::vector<double> candidate_iterations;
+    std::vector<double> reference_iterations;
+    bool case_passes = true;
+    const auto run_branch = [&](ParametricWarmStartMode mode) {
+      return solve_three_phase_hybrid_opf_branches(
+          base, base_result, {perturbed}, options, mode).front();
+    };
+    for (int repeat = 0; repeat < repeats; ++repeat) {
+      ThreePhaseHybridOPFResult candidate;
+      ThreePhaseHybridOPFResult reference;
+      if (repeat % 2 == 0) {
+        candidate = run_branch(ParametricWarmStartMode::PrimalDual);
+        reference = run_branch(ParametricWarmStartMode::PrimalOnly);
+      } else {
+        reference = run_branch(ParametricWarmStartMode::PrimalOnly);
+        candidate = run_branch(ParametricWarmStartMode::PrimalDual);
+      }
+      const double objective_error =
+          std::abs(candidate.objective - reference.objective) /
+          std::max(1.0, std::abs(reference.objective));
+      const double voltage_error = max_voltage_difference(
+          candidate.full_voltage, reference.full_voltage);
+      const auto satisfies_tolerances = [=](
+          const ThreePhaseHybridOPFResult& result) {
+        return result.converged && result.primal_residual <=
+                   kEquivalenceTolerance &&
+               result.dual_residual <= kEquivalenceTolerance &&
+               result.complementarity <= kEquivalenceTolerance;
+      };
+      const bool pair_passes = satisfies_tolerances(candidate) &&
+          satisfies_tolerances(reference) &&
+          objective_error <= kEquivalenceTolerance &&
+          voltage_error <= kEquivalenceTolerance &&
+          candidate.enforced_inequality_rows ==
+              reference.enforced_inequality_rows &&
+          (backend != SolverBackend::Ipopt ||
+           (candidate.primal_dual_warm_start_used &&
+            !reference.primal_dual_warm_start_used));
+      case_passes = case_passes && pair_passes;
+      candidate_times.push_back(candidate.runtime_ms);
+      reference_times.push_back(reference.runtime_ms);
+      candidate_factors.push_back(candidate.phase_two_total_factorizations);
+      reference_factors.push_back(reference.phase_two_total_factorizations);
+      candidate_iterations.push_back(candidate.iterations);
+      reference_iterations.push_back(reference.iterations);
+      const auto write = [&](const char* variant,
+                             const ThreePhaseHybridOPFResult& result) {
+        out << input.label << ',' << repeat + 1 << ',' << variant << ','
+            << (result.converged ? "yes" : "no") << ','
+            << result.runtime_ms << ',' << result.iterations << ','
+            << result.phase_two_total_factorizations << ','
+            << result.enforced_inequalities << ',' << result.inequalities << ','
+            << (result.primal_dual_warm_start_used ||
+                        result.phase_two_start_accepted ? "yes" : "no") << ','
+            << result.primal_residual << ',' << result.dual_residual << ','
+            << result.complementarity << ',' << result.objective << ','
+            << objective_error << ',' << voltage_error << ",\""
+            << result.status << "\"\n";
+      };
+      write("primal-dual", candidate);
+      write("primal-only", reference);
+      out.flush();
+      std::cerr << '[' << input.label << "] PARAMBENCH rep " << repeat + 1
+                << '/' << repeats << ": primal-dual="
+                << candidate.runtime_ms << "ms/"
+                << candidate.iterations << "iter, primal-only="
+                << reference.runtime_ms << "ms/" << reference.iterations
+                << "iter, passes=" << pair_passes << '\n';
+    }
+    const double candidate_ms = median(candidate_times);
+    const double reference_ms = median(reference_times);
+    const double candidate_factorizations = median(candidate_factors);
+    const double reference_factorizations = median(reference_factors);
+    const double candidate_iteration_count = median(candidate_iterations);
+    const double reference_iteration_count = median(reference_iterations);
+    const double speedup = reference_ms / std::max(1e-12, candidate_ms);
+    // Runtime is the performance endpoint. Factorization counts remain a
+    // diagnostic because constraint-generation rounds and terminal KKT
+    // certification can trade more small sparse solves for less wall time.
+    case_passes = case_passes && speedup >= minimum_case_speedup;
+    all_cases_pass = all_cases_pass && case_passes;
+    if (case_passes) {
+      log_speedup_sum += std::log(speedup);
+      ++passed_cases;
+    }
+    std::cout << input.label << " PARAMBENCH: base="
+              << base_result.runtime_ms << "ms (excluded), primal-dual="
+              << candidate_ms << "ms/" << candidate_iteration_count
+              << "iter/" << candidate_factorizations
+              << "fact, primal-only=" << reference_ms << "ms/"
+              << reference_iteration_count << "iter/"
+              << reference_factorizations << "fact, speedup=" << speedup
+              << "x, passes=" << case_passes << '\n';
+  }
+  const double geometric_mean_speedup =
+      passed_cases == static_cast<int>(selected.size())
+          ? std::exp(log_speedup_sum / std::max(1, passed_cases)) : 0.0;
+  all_cases_pass = all_cases_pass &&
+      passed_cases == static_cast<int>(selected.size()) &&
+      geometric_mean_speedup >= minimum_geometric_mean_speedup;
+  std::cout << (backend == SolverBackend::NativeIPM ? "NATIVE" : "IPOPT")
+            << " PARAMBENCH four-case geometric-mean speedup="
+            << geometric_mean_speedup << "x, passes=" << all_cases_pass
+            << "\nWrote " << path << '\n';
+  return all_cases_pass ? 0 : 1;
+}
+
 // Median-of-N, same-process harness. Interleaves full-all and reduced-generation
 // solves so multiplicative machine-state drift cancels within each repeat, then
 // reports medians. This is the clean comparison the warm-start work is validated
 // against (single-sample cross-run numbers vary ~2.6x from thermal state).
 int run_warmbench_suite(const Input& input, SolverBackend backend, int repeats) {
+  if (backend != SolverBackend::NativeIPM) {
+    std::cerr << "warmbench mode requires the native backend\n";
+    return 2;
+  }
   const ThreePhaseHybridOPFCase base = hybridize(input);
   ThreePhaseHybridOPFOptions full_opts;
   full_opts.backend = backend;
@@ -1701,6 +2301,9 @@ int run_warmbench_suite(const Input& input, SolverBackend backend, int repeats) 
   gen_opts.use_constraint_oracle = true;
   gen_opts.reduction_options.max_front = 12;
   gen_opts.reduction_options.max_nnz_ratio = 2.0;
+  ThreePhaseHybridOPFOptions legacy_opts = gen_opts;
+  legacy_opts.native_primary_max_iterations_before_restoration = 0;
+  legacy_opts.native_restoration_max_iterations = 200;
 
   // Single-round ceiling: one reduced solve enforcing exactly the active set the
   // oracle discovers, with no rounds. This is the best case of A (single-round
@@ -1738,23 +2341,67 @@ int run_warmbench_suite(const Input& input, SolverBackend backend, int repeats) 
   }
 
   std::vector<double> full_times;
+  std::vector<double> legacy_times;
   std::vector<double> gen_times;
   std::vector<double> oneshot_times;
   ThreePhaseHybridOPFResult full_res;
+  ThreePhaseHybridOPFResult legacy_res;
   ThreePhaseHybridOPFResult gen_res;
   ThreePhaseHybridOPFResult oneshot_res;
+  bool all_full_converged = true;
+  bool all_legacy_converged = true;
+  bool all_bounded_converged = true;
+  bool all_oneshot_converged = true;
+  const fs::path path = project_root() / "output" / "benchmarks" /
+      ("paper_native_ipm_warmbench_" + input.label + ".csv");
+  fs::create_directories(path.parent_path());
+  std::ofstream out(path);
+  out << "case,repeat,variant,converged,runtime_ms,iterations,oracle_rounds,"
+         "enforced_rows,total_rows,initial_attempt_iterations,"
+         "initial_attempt_factorizations,"
+         "restoration_factorizations,retry_factorizations,total_factorizations,"
+         "primal_residual,dual_residual,complementarity,objective\n";
+  out << std::setprecision(12);
+  const auto write_result = [&](int repeat, const char* variant,
+                                const ThreePhaseHybridOPFResult& result) {
+    out << input.label << ',' << repeat << ',' << variant << ','
+        << (result.converged ? "yes" : "no") << ',' << result.runtime_ms << ','
+        << result.iterations << ',' << result.constraint_oracle_rounds << ','
+        << result.enforced_inequalities << ',' << result.inequalities << ','
+        << result.phase_two_initial_attempt_iterations << ','
+        << result.phase_two_initial_attempt_factorizations << ','
+        << result.phase_two_restoration_factorizations << ','
+        << result.phase_two_retry_factorizations << ','
+        << result.phase_two_total_factorizations << ','
+        << result.primal_residual << ',' << result.dual_residual << ','
+        << result.complementarity << ',' << result.objective << '\n';
+  };
   for (int i = 0; i < repeats; ++i) {
     full_res = solve_three_phase_hybrid_opf(base, full_opts);
+    all_full_converged = all_full_converged && full_res.converged;
     full_times.push_back(full_res.runtime_ms);
+    legacy_res = solve_three_phase_hybrid_opf(base, legacy_opts);
+    all_legacy_converged = all_legacy_converged && legacy_res.converged;
+    legacy_times.push_back(legacy_res.runtime_ms);
     gen_res = solve_three_phase_hybrid_opf(base, gen_opts);
+    all_bounded_converged = all_bounded_converged && gen_res.converged;
     gen_times.push_back(gen_res.runtime_ms);
     oneshot_res = solve_three_phase_hybrid_opf(base, oneshot_opts);
+    all_oneshot_converged = all_oneshot_converged && oneshot_res.converged;
     oneshot_times.push_back(oneshot_res.runtime_ms);
+    write_result(i + 1, "full-bounded", full_res);
+    write_result(i + 1, "reduced-legacy", legacy_res);
+    write_result(i + 1, "reduced-bounded", gen_res);
+    write_result(i + 1, "reduced-oneshot", oneshot_res);
+    out.flush();
     std::cerr << '[' << input.label << "] rep " << (i + 1) << '/' << repeats
               << ": full=" << full_res.runtime_ms << "ms(it="
-              << full_res.iterations << "), gen=" << gen_res.runtime_ms
+              << full_res.iterations << "), legacy=" << legacy_res.runtime_ms
+              << "ms(fact=" << legacy_res.phase_two_total_factorizations
+              << "), gen=" << gen_res.runtime_ms
               << "ms(rounds=" << gen_res.constraint_oracle_rounds
-              << ",it=" << gen_res.iterations << "), 1shot="
+              << ",it=" << gen_res.iterations << ",fact="
+              << gen_res.phase_two_total_factorizations << "), 1shot="
               << oneshot_res.runtime_ms << "ms(it=" << oneshot_res.iterations
               << ")\n" << std::flush;
   }
@@ -1764,8 +2411,11 @@ int run_warmbench_suite(const Input& input, SolverBackend backend, int repeats) 
     return v[v.size() / 2];
   };
   const double full_ms = median(full_times);
+  const double legacy_ms = median(legacy_times);
   const double gen_ms = median(gen_times);
   const double oneshot_ms = median(oneshot_times);
+  const bool comparison_passes =
+      all_legacy_converged && all_bounded_converged;
   std::cout << input.label << " WARMBENCH (median of " << repeats << "): "
             << "full-all=" << full_ms << "ms (vars=" << full_res.variables
             << ", enf=" << full_res.enforced_inequalities << '/'
@@ -1777,11 +2427,28 @@ int run_warmbench_suite(const Input& input, SolverBackend backend, int repeats) 
             << gen_res.constraint_oracle_rounds << "); reduced-1shot="
             << oneshot_ms << "ms (enf=" << oneshot_res.enforced_inequalities
             << ", JhNnz=" << oneshot_res.inequality_jacobian_nonzeros
-            << ", conv=" << oneshot_res.converged << "); speedup full/gen="
-            << (gen_ms > 0.0 ? full_ms / gen_ms : 0.0) << ", full/1shot="
-            << (oneshot_ms > 0.0 ? full_ms / oneshot_ms : 0.0) << "\n"
-            << std::flush;
-  return 0;
+            << ", conv=" << oneshot_res.converged << "); legacy-gen="
+            << legacy_ms << "ms; speedup legacy/gen=";
+  if (comparison_passes && gen_ms > 0.0) {
+    std::cout << legacy_ms / gen_ms;
+  } else {
+    std::cout << "not-comparable";
+  }
+  std::cout << ", full/gen=";
+  if (all_full_converged && all_bounded_converged && gen_ms > 0.0) {
+    std::cout << full_ms / gen_ms;
+  } else {
+    std::cout << "not-comparable";
+  }
+  std::cout << ", full/1shot=";
+  if (all_full_converged && all_oneshot_converged && oneshot_ms > 0.0) {
+    std::cout << full_ms / oneshot_ms;
+  } else {
+    std::cout << "not-comparable";
+  }
+  std::cout << '\n' << std::flush;
+  std::cout << "Wrote " << path << '\n';
+  return comparison_passes ? 0 : 1;
 }
 
 }  // namespace
@@ -1820,6 +2487,9 @@ int main(int argc, char** argv) {
   const bool run_exp1 = argc > 2 && std::string(argv[2]) == "exp1";
   const bool run_exp2 = argc > 2 && std::string(argv[2]) == "exp2";
   const bool run_warmbench = argc > 2 && std::string(argv[2]) == "warmbench";
+  const bool run_parambench = argc > 2 && std::string(argv[2]) == "parambench";
+  const bool run_crosssolver =
+      argc > 2 && std::string(argv[2]) == "crosssolver";
   bool use_native = false;
   bool use_constraint_oracle = false;
   bool verbose = true;
@@ -1868,6 +2538,12 @@ int main(int argc, char** argv) {
       return 2;
     }
     return run_warmbench_suite(selected.front(), backend, 5);
+  }
+  if (run_parambench) {
+    return run_parametric_warmbench_suite(selected, backend, 5);
+  }
+  if (run_crosssolver) {
+    return run_crosssolver_suite(selected);
   }
 
   std::vector<Audit> audits;

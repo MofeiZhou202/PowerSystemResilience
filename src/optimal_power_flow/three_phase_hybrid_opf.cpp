@@ -1973,6 +1973,25 @@ void initialize_primal_dual_start(const engine::NLPModel& nlp,
         std::max(1, nonlinear_count);
     options.mu_init = std::clamp(recovered_barrier,
                                  options.mu_min, 0.1);
+    // Project only complementarity outliers into the accepted central
+    // neighborhood after slacks are reconstructed at the perturbed primal
+    // point. This is the componentwise neighborhood
+    // |s_i z_i / mu - 1| <= eta from the primal-dual path definition; duals
+    // already inside it are retained exactly. Waechter--Biegler (2006),
+    // Algorithm 1 and Section 2.2.
+    // Keep a 10% interior margin so the subsequent independent audit cannot
+    // reject a boundary value because of one rounding ulp.
+    const double centrality_tolerance = 0.9 *
+        std::max(0.0, options.central_warm_start_centrality_tolerance);
+    for (int i = 0; i < nonlinear_count; ++i) {
+      const double central_dual = options.mu_init / options.slack_start[i];
+      const double lower = std::max(
+          1e-12, (1.0 - centrality_tolerance) * central_dual);
+      const double upper =
+          (1.0 + centrality_tolerance) * central_dual;
+      options.inequality_dual_start[i] = std::clamp(
+          options.inequality_dual_start[i], lower, upper);
+    }
     if (inequality_count > nonlinear_count) {
       options.inequality_dual_start.tail(
           inequality_count - nonlinear_count) =
@@ -2746,6 +2765,10 @@ ThreePhaseHybridOPFResult solve_three_phase_hybrid_opf_impl(
             latest.inequality_slack.size() >= screening_data->layout.nineq
                 ? latest.inequality_slack.head(screening_data->layout.nineq)
                 : Eigen::VectorXd{};
+        round_options.variable_lower_bound_dual_start =
+            latest.variable_lower_bound_dual;
+        round_options.variable_upper_bound_dual_start =
+            latest.variable_upper_bound_dual;
       }
       log_stage("constraint oracle: round=" + std::to_string(round + 1) +
                 ", rows=" + std::to_string(enforced_rows.size()));
@@ -3031,6 +3054,26 @@ ThreePhaseHybridOPFResult solve_three_phase_hybrid_opf_impl(
     }
     engine::IPMOptions ipm_options;
     ipm_options.max_iter = options.max_iterations;
+    // Graph-reduced cold starts can follow an infeasible central path for
+    // hundreds of factorizations even though the existing restoration phase
+    // produces a rapidly convergent primal-dual retry. Trigger restoration
+    // after bounded primary work, give restoration an independent work cap,
+    // and preserve the retry's full user-requested budget. Waechter--Biegler (2006),
+    // Sections 2.4 and 3.3; derivation and measurements are documented in
+    // docs/modules/optimal_power_flow/chapters/three_phase.tex.
+    const bool bound_reduced_restoration =
+        options.variant == ModelVariant::GraphReduced;
+    ipm_options.primary_max_iter_before_restoration =
+        bound_reduced_restoration &&
+                options.native_primary_max_iterations_before_restoration > 0
+        ? std::min(options.max_iterations,
+                   options.native_primary_max_iterations_before_restoration)
+        : 0;
+    ipm_options.restoration_max_iter = std::min(
+        options.max_iterations,
+        bound_reduced_restoration
+        ? std::max(1, options.native_restoration_max_iterations)
+        : 200);
     ipm_options.tol_primal = options.tolerance;
     ipm_options.tol_dual = options.tolerance;
     ipm_options.tol_complementarity = options.tolerance;
@@ -3132,13 +3175,48 @@ ThreePhaseHybridOPFResult solve_three_phase_hybrid_opf_impl(
     }
     log_stage("Phase II NativeIPM: done (status=" + solved.stats.status + ")");
   } else {
+    Eigen::VectorXd selected_inequality_dual;
+    const int enforced_count =
+        static_cast<int>(data->enforced_inequality_rows.size());
+    if (options.nonlinear_inequality_dual_start.size() == data->layout.nineq) {
+      selected_inequality_dual = select_inequality_rows(
+          options.nonlinear_inequality_dual_start,
+          data->enforced_inequality_rows);
+    } else if (options.nonlinear_inequality_dual_start.size() == enforced_count) {
+      selected_inequality_dual = options.nonlinear_inequality_dual_start;
+    }
+    const bool complete_multiplier_start =
+        options.equality_dual_start.size() == data->layout.neq &&
+        selected_inequality_dual.size() == enforced_count &&
+        options.variable_lower_bound_dual_start.size() == data->layout.nvar &&
+        options.variable_upper_bound_dual_start.size() == data->layout.nvar &&
+        options.equality_dual_start.allFinite() &&
+        selected_inequality_dual.allFinite() &&
+        options.variable_lower_bound_dual_start.allFinite() &&
+        options.variable_upper_bound_dual_start.allFinite() &&
+        (selected_inequality_dual.array() >= 0.0).all() &&
+        (options.variable_lower_bound_dual_start.array() >= 0.0).all() &&
+        (options.variable_upper_bound_dual_start.array() >= 0.0).all();
+    if (complete_multiplier_start) {
+      // MIPSolvers uses [inequalities | equalities]; its Ipopt TNLP bridge
+      // performs the row-order conversion and passes z_L/z_U. Ipopt rebuilds
+      // its internal inequality slacks. Waechter--Biegler (2006), Sec. 3.1.
+      nlp.constraint_dual_start.resize(enforced_count + data->layout.neq);
+      nlp.constraint_dual_start << selected_inequality_dual,
+          options.equality_dual_start;
+      nlp.box_dual_lb_start = options.variable_lower_bound_dual_start;
+      nlp.box_dual_ub_start = options.variable_upper_bound_dual_start;
+      nlp.solver_options.primal_dual_warm_start = true;
+      nlp.solver_options.warm_start_push = 1e-8;
+    }
     engine::IpoptAdapter ipopt;
     solved = ipopt.solve_nlp(nlp);
   }
   const double runtime_ms = std::chrono::duration<double, std::milli>(
       std::chrono::steady_clock::now() - start).count();
 
-  if (detail.lambda_eq.size() != data->layout.neq &&
+  if (options.backend == SolverBackend::NativeIPM &&
+      detail.lambda_eq.size() != data->layout.neq &&
       solved.x.size() == data->layout.nvar && solved.x.allFinite()) {
     engine::NLPModel recovery_nlp = nlp;
     recovery_nlp.x0 = solved.x;
@@ -3209,6 +3287,14 @@ ThreePhaseHybridOPFResult solve_three_phase_hybrid_opf_impl(
   result.phase_two_start_rejection_reason =
       detail.central_warm_start_rejection_reason;
   result.phase_two_linear_solver_backend = detail.linear_solver_backend;
+  result.phase_two_initial_attempt_iterations =
+      detail.initial_attempt_iterations;
+  result.phase_two_initial_attempt_factorizations =
+      detail.initial_attempt_factorizations;
+  result.phase_two_total_factorizations = detail.numeric_factorizations;
+  result.phase_two_restoration_factorizations =
+      detail.restoration_factorizations;
+  result.phase_two_retry_factorizations = detail.retry_factorizations;
   Eigen::VectorXd initial_g;
   Eigen::VectorXd initial_h;
   evaluate_equalities(*data, nlp.x0, initial_g);
@@ -3235,6 +3321,18 @@ ThreePhaseHybridOPFResult solve_three_phase_hybrid_opf_impl(
       ? solved.stats.unscaled_complementarity
       : solved.stats.complementarity;
   result.primal = solved.x;
+  result.primal_dual_warm_start_used = solved.stats.warm_start_used;
+  result.variable_lower_bound_dual = solved.box_dual_lb;
+  result.variable_upper_bound_dual = solved.box_dual_ub;
+  if (options.backend == SolverBackend::Ipopt &&
+      solved.constraint_duals.size() ==
+          static_cast<int>(data->enforced_inequality_rows.size()) +
+              data->layout.neq) {
+    const int enforced_count =
+        static_cast<int>(data->enforced_inequality_rows.size());
+    detail.mu_ineq = solved.constraint_duals.head(enforced_count);
+    detail.lambda_eq = solved.constraint_duals.tail(data->layout.neq);
+  }
   result.equality_dual = detail.lambda_eq;
   const int enforced_count =
       static_cast<int>(data->enforced_inequality_rows.size());
@@ -3578,6 +3676,10 @@ std::vector<ThreePhaseHybridOPFResult> solve_three_phase_hybrid_opf_sequence(
         step_options.nonlinear_slack_start =
             previous.inequality_slack.head(previous.inequalities);
       }
+      step_options.variable_lower_bound_dual_start =
+          previous.variable_lower_bound_dual;
+      step_options.variable_upper_bound_dual_start =
+          previous.variable_upper_bound_dual;
     }
     results.push_back(solve_three_phase_hybrid_opf_impl(
         problem, step_options, step_data));
@@ -3588,12 +3690,13 @@ std::vector<ThreePhaseHybridOPFResult> solve_three_phase_hybrid_opf_sequence(
 
 std::vector<ThreePhaseHybridOPFResult> solve_three_phase_hybrid_opf_branches(
     const ThreePhaseHybridOPFCase& base_problem,
-    const ThreePhaseHybridOPFResult& certified_base,
+    const ThreePhaseHybridOPFResult& base_result,
     const std::vector<ThreePhaseHybridOPFCase>& perturbed_problems,
-    const ThreePhaseHybridOPFOptions& options) {
-  if (!certified_base.converged) {
+    const ThreePhaseHybridOPFOptions& options,
+    ParametricWarmStartMode warm_start_mode) {
+  if (!base_result.converged) {
     throw std::invalid_argument(
-        "parametric OPF branches require a converged certified base point");
+        "parametric OPF branches require a converged base OPF solution");
   }
   ThreePhaseHybridOPFOptions preparation_options = options;
   preparation_options.use_constraint_oracle = false;
@@ -3622,18 +3725,27 @@ std::vector<ThreePhaseHybridOPFResult> solve_three_phase_hybrid_opf_branches(
     }
     ThreePhaseHybridOPFOptions step_options = options;
     step_options.warm_start_with_ipopt = false;
-    step_options.oracle_seed_rows = certified_base.enforced_inequality_rows;
-    step_options.primal_start = certified_base.primal;
-    step_options.equality_dual_start = certified_base.equality_dual;
-    if (certified_base.inequality_dual.size() >=
-        certified_base.inequalities) {
-      step_options.nonlinear_inequality_dual_start =
-          certified_base.inequality_dual.head(certified_base.inequalities);
-    }
-    if (certified_base.inequality_slack.size() >=
-        certified_base.inequalities) {
-      step_options.nonlinear_slack_start =
-          certified_base.inequality_slack.head(certified_base.inequalities);
+    step_options.oracle_seed_rows = base_result.enforced_inequality_rows;
+    step_options.primal_start = base_result.primal;
+    if (warm_start_mode == ParametricWarmStartMode::PrimalDual) {
+      step_options.equality_dual_start = base_result.equality_dual;
+      if (base_result.inequality_dual.size() >= base_result.inequalities) {
+        step_options.nonlinear_inequality_dual_start =
+            base_result.inequality_dual.head(base_result.inequalities);
+      }
+      if (base_result.inequality_slack.size() >= base_result.inequalities) {
+        step_options.nonlinear_slack_start =
+            base_result.inequality_slack.head(base_result.inequalities);
+      }
+      step_options.variable_lower_bound_dual_start =
+          base_result.variable_lower_bound_dual;
+      step_options.variable_upper_bound_dual_start =
+          base_result.variable_upper_bound_dual;
+    } else {
+      // A primal-only adapter must not be credited with a newly factorized
+      // Phase-I dual fit. Leave the supplied primal point in nlp.x0 and let
+      // the backend initialize its ordinary dual/slack state.
+      step_options.phase_one_max_factorizations = 0;
     }
     results.push_back(solve_three_phase_hybrid_opf_impl(
         problem, step_options, step_data));

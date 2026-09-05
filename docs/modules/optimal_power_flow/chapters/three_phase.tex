@@ -401,7 +401,7 @@ V_{\mathrm{full}} = R\,V_{\mathrm{model}}
 \srcpath{solve\_three\_phase\_hybrid\_opf\_impl}（src/optimal\_power\_flow/three\_phase\_hybrid\_opf.cpp:solve\_three\_phase\_hybrid\_opf\_impl）的步骤为：
 数据校验与模型装配 $\to$ \fld{engine::NLPModel} 回调装配 $\to$ 初值构造
 $\to$（NativeIPM 路径 Phase I）有预算的原始可行性恢复
-$\to$ 对偶/松弛初始化 $\to$（Phase II）MIPSolvers Native IPM
+$\to$ 对偶/松弛初始化 $\to$（Phase II）MIPSolvers Native IPM 或 Ipopt
 $\to$ 结果归因与 KKT 审计。这里的 Phase I/II 是“可行原--对偶状态构造/最优性
 求解”的接口分层，不是平衡 AC OPF 的 $t=0\to1$ 目标同伦。求解器容差统一取自
 \fld{options.tolerance}，acceptable 级别放宽 10 倍（src/optimal\_power\_flow/three\_phase\_hybrid\_opf.cpp:solve\_three\_phase\_hybrid\_opf\_impl）。
@@ -436,19 +436,53 @@ $\eta_a\mu_0$ 时以零分解退出 Phase I；否则恢复到
 $\epsilon_p=\max(\mathrm{tol},\eta_p\mu_0)$。slack floor 使用剩余 primal
 corridor 的一半，并令 $\nu_i=\mu_0/s_i$，同时控制扰动 primal residual、乘子
 尺度和中心性。Phase I 在原始 pu 坐标下重新审计，并请求 MIPSolvers 独立的
-\fld{central\_warm\_start} 契约；它不同于最终可行的
-\fld{primal\_feasible\_start}。只有完整 primal/dual/slack、原坐标与扰动 primal
+\fld{central\_warm\_start} 初值检查；它不同于最终可行的
+\fld{primal\_feasible\_start}。只有 primal、dual 和 slack 初值齐全，且原坐标与扰动 primal
 residual、中心性及乘子尺度全部通过才保留 $x_0$，否则自动回到普通冷初始化。
 审计请求/接受状态和实际稀疏线性求解
 后端分别由 \fld{phase\_two\_start\_requested}、
 \fld{phase\_two\_start\_accepted} 与
 \fld{phase\_two\_linear\_solver\_backend} 返回。
+
+图降阶冷启动另采用有界的 filter--restoration 调度。首次 filter-IPM 尝试默认至多
+20 次迭代；未收敛时立即进入最多 100 次迭代的可行性恢复，然后以恢复出的完整
+$(x,\lambda,\nu,s)$ 状态重试原 NLP。只有首次尝试和恢复阶段受这两个独立上限
+约束，最终重试仍保留 \fld{max\_iterations} 的完整预算。该调度把 restoration
+作为 Wächter--Biegler（2006，第 2.4、3.3 节）的全局化阶段，而非耗尽主迭代预算
+后的末端处理；仅 \fld{ModelVariant::GraphReduced} 启用，\fld{Full} 保持
+原有调度。若首次上限到达时原问题已满足 primal 容差，则不进入 restoration，而以
+同一原--对偶--松弛状态和剩余预算继续切向/中心路径。令
+\fld{native\_primary\_max\_iterations\_before\_restoration}$\le0$
+可关闭提前恢复；把恢复上限设为 200 可复现实验中的旧调度。20/100 是 H123
+Release 计算结果确定的工程默认值，不构成对任意规模或条件数的最优性声明。
+
+当 \fld{NewtonFormulation::Auto} 的显式凝聚 KKT 无法取得所需惯性时，NativeIPM
+可退回代数等价的增广系统。为避免 $-SM^{-1}$ 对角块把 slack/乘子尺度差直接暴露
+给稀疏枢轴，实际分解采用合同变换
+$T=\operatorname{diag}(I,I,\sqrt{M/S})$；不等式块变为 $-I$，耦合块变为
+$\sqrt{M/S}J_h$，Sylvester 惯性和 Newton 方向保持不变。MUMPS 同时启用对称自动
+缩放。强制 \fld{Condensed} 时不改用增广系统，最终 KKT 容差也不放宽。
+
+参数分支接口以 \fld{ParametricWarmStartMode} 显式区分两种初值设置：
+\fld{PrimalOnly} 只复用 $x$；\fld{PrimalDual} 对 NativeIPM 复用
+$(x,\lambda,\nu,s)$，对 Ipopt 复用 $(x,\lambda,\nu,z_L,z_U)$。其中 $z_L,z_U$
+为变量下、上界乘子。NativeIPM 在扰动点重建 slack，仅把越出中心邻域的非线性
+不等式乘子投影到配置阈值的 90\% 内部；独立 Phase-II 审计仍决定是否接受整个
+状态。Ipopt 由其内部初值过程重建不等式 slack。
+
 \fld{SolverBackend::Ipopt} 直接把同一 NLP 交给
-\srcpath{engine::IpoptAdapter}（src/optimal\_power\_flow/three\_phase\_hybrid\_opf.cpp:solve\_three\_phase\_hybrid\_opf\_impl）。\textbf{门控说明}：Ipopt
+\srcpath{engine::IpoptAdapter}（src/optimal\_power\_flow/three\_phase\_hybrid\_opf.cpp:solve\_three\_phase\_hybrid\_opf\_impl）。\textbf{可用性说明}：Ipopt
 后端依赖嵌入式 Ipopt（宏 \srcpath{HACDCPF\_HAVE\_IPOPT}）；未编译时适配器不抛错，
 而是返回 \fld{Unavailable:} 前缀的失败状态（
 \srcpath{MIPSolvers/src/engine/solver/external/adapters.cpp:IpoptAdapter::available}），结果即
-不收敛。默认后端为 Ipopt（\srcpath{include/hacdcpf/optimal\_power\_flow/three\_phase\_hybrid\_opf.hpp:ThreePhaseHybridOPFOptions}）。
+不收敛。\fld{IpoptAdapter::get\_starting\_point} 在
+\fld{primal\_dual\_warm\_start=true} 时把公共顺序
+$[\nu\mid\lambda]$ 转换为 TNLP 顺序 $[\lambda\mid\nu]$，同时传入变量界乘子
+$z_L,z_U$；任一向量缺失、维度错误、含非有限值或应非负的乘子为负时均显式拒绝，
+不静默退回原始变量初值。适配器设置 \fld{warm\_start\_init\_point=yes}，并把
+bound/slack/multiplier push 设为 $10^{-8}$。Ipopt 自行重建内部 slack，因此不直接
+接收 NativeIPM 的 \fld{nonlinear\_slack\_start}。默认后端为 Ipopt
+（\srcpath{include/hacdcpf/optimal\_power\_flow/three\_phase\_hybrid\_opf.hpp:ThreePhaseHybridOPFOptions}）。
 
 \subsubsection*{对偶初始化与拉格朗日黑塞}
 NativeIPM 路径的对偶初值由 \srcpath{initialize\_primal\_dual\_start} 构造：
@@ -457,7 +491,7 @@ NativeIPM 路径的对偶初值由 \srcpath{initialize\_primal\_dual\_start} 构
 $\mu/s$ 恢复（:initialize\_primal\_dual\_start）；等式乘子优先利用
 \fld{equality\_free\_columns} 划分做基解（仅当 $n_{\mathrm{var}}-n_{\mathrm{eq}}=n_c$
 时以每台换流器首相 $q^{ac}$ 为自由列），否则对稳态方程做一次 SparseQR
-最小二乘恢复。求解器未返回等式对偶时（如 Ipopt 路径），在同一解点上重跑一次
+最小二乘恢复。求解器未返回等式对偶时，在同一解点上重跑一次
 该初始化并仅当对偶残差不超过 $10^{-6}$ 时采纳（src/optimal\_power\_flow/three\_phase\_hybrid\_opf.cpp:solve\_three\_phase\_hybrid\_opf\_impl）。
 
 Phase I 的可行点通常不是最优点，因此完整 stationarity
@@ -665,6 +699,8 @@ $t_g\ge 2c_2'p_0p-c_2'p_0^2$ 在 $[p_{\min},p_{\max}]$ 上均匀布点低估
 \fld{backend} & — & — & Ipopt/\allowbreak NativeIPM & Ipopt & NLP 后端；Ipopt 受嵌入式编译门控\\
 \fld{reduction\_options} & — & — & — & 见下 & 图降阶参数 \fld{SparseKronOptions}：\fld{max\_front}=12、\fld{max\_nnz\_ratio}=2.0、\fld{pivot\_tolerance}=$10^{-12}$、\fld{drop\_tolerance}=$10^{-13}$\\
 \fld{max\_iterations} & — & — & $\ge 1$ & 300 & 内点最大迭代数\\
+\fld{native\_primary\_max\_iterations\_before\_restoration} & — & — & 整数 & 20 & 仅 GraphReduced NativeIPM：首次 filter 尝试上限；$\le0$ 关闭提前恢复\\
+\fld{native\_restoration\_max\_iterations} & — & — & $\ge1$ & 100 & 仅 GraphReduced NativeIPM：可行性恢复上限；最终重试仍用 \fld{max\_iterations}\\
 \fld{tolerance} & $\mathrm{tol}$ & — & $>0$ & $10^{-7}$ & 收敛容差；acceptable 级别放宽 10 倍\\
 \fld{phase\_one\_time\_limit\_ms} & — & ms & — & 5000 & Phase I 协作式软截止；$\le0$ 表示无限墙钟预算\\
 \fld{phase\_one\_max\_iterations} & — & — & $\ge0$ & 12 & Phase I Newton 迭代硬上限\\
@@ -688,6 +724,7 @@ $t_g\ge 2c_2'p_0p-c_2'p_0^2$ 在 $[p_{\min},p_{\max}]$ 上均匀布点低估
 \fld{equality\_dual\_start} & $\lambda_0$ & — & — & 空 & 等式对偶种子；NaN 行表示待恢复\\
 \fld{nonlinear\_inequality\_dual\_start} & $\nu_0$ & — & — & 空 & 非线性不等式对偶种子（全量或强制行两种长度皆可）\\
 \fld{nonlinear\_slack\_start} & $s_0$ & — & — & 空 & 非线性不等式松弛种子\\
+\fld{variable\_lower\_bound\_dual\_start} / \fld{variable\_upper\_bound\_dual\_start} & $z_L/z_U$ & — & $\ge0$ & 空 & Ipopt 变量下、上界乘子种子；必须与变量维度一致\\
 \end{paramtable}
 
 \subsubsection*{求解结果 \fld{ThreePhaseHybridOPFResult}}
@@ -717,6 +754,8 @@ $t_g\ge 2c_2'p_0p-c_2'p_0^2$ 在 $[p_{\min},p_{\max}]$ 上均匀布点低估
 \fld{phase\_two\_start\_requested} / \fld{phase\_two\_start\_accepted} & — & — & true/false & false & Phase II 是否请求并通过独立 central warm-start 审计保留起点\\
 \fld{phase\_two\_start\_rejection\_reason} & — & — & — & 空 & central 合同未接受原因\\
 \fld{phase\_two\_linear\_solver\_backend} & — & — & — & unselected & Phase II 实际 KKT 后端；零迭代时可保持 unselected\\
+\fld{phase\_two\_initial\_attempt\_iterations} / \fld{phase\_two\_initial\_attempt\_factorizations} & — & — & — & 0 & 首次 filter 尝试的迭代数/数值分解数\\
+\fld{phase\_two\_restoration\_factorizations} / \fld{phase\_two\_retry\_factorizations} / \fld{phase\_two\_total\_factorizations} & — & — & — & 0 & restoration、最终重试及完整 Phase-II 链的数值分解数；预言机多轮时为末轮受限求解口径\\
 \fld{initial\_worst\_equality} / \fld{initial\_worst\_inequality} & — & — & — & $-1$ & 初值最差等式/不等式行号\\
 \fld{primal\_residual} / \fld{dual\_residual} / \fld{complementarity} & — & — & — & 0 & 解点 KKT 残差（解点重评估口径）\\
 \fld{max\_voltage\_violation} & — & pu & — & 0 & 电压幅值窗口最大越限\\
@@ -728,6 +767,8 @@ $t_g\ge 2c_2'p_0p-c_2'p_0^2$ 在 $[p_{\min},p_{\max}]$ 上均匀布点低估
 \fld{max\_equality\_jacobian\_error} / \fld{max\_inequality\_jacobian\_error} / \fld{max\_lagrangian\_hessian\_error} & — & — & — & 0 & 差分导数校核误差（\fld{verify\_derivatives} 开启时）\\
 \fld{primal} & $x$ & — & — & 空 & 原始解向量（模型布局）\\
 \fld{equality\_dual} / \fld{inequality\_dual} / \fld{inequality\_slack} & $\lambda/\nu/s$ & — & — & 空 & 对偶与松弛（不等式部分已扩展回全量行）\\
+\fld{variable\_lower\_bound\_dual} / \fld{variable\_upper\_bound\_dual} & $z_L/z_U$ & — & $\ge0$ & 空 & 求解器返回的变量下、上界乘子；当前由 Ipopt 提供\\
+\fld{primal\_dual\_warm\_start\_used} & — & — & true/false & false & 求解器是否实际启用完整乘子热启动\\
 \fld{full\_voltage} & $V_{\mathrm{full}}$ & pu & — & 空 & 恢复后的全节点复电压\\
 \fld{dc\_voltage} & $u$ & pu & — & 空 & 直流节点电压\\
 \fld{generator\_active\_power\_pu} / \fld{generator\_reactive\_power\_pu} & $p_g/q_g$ & pu & — & 空 & 分相机组出力\\
@@ -835,11 +876,73 @@ $\eta=0.98$、$s_{\max}=0.25$（:make\_small\_hybrid\_case）。除注明外各�
 但不属于默认 ctest 套件。截至当前代码，模块尚无 OpenDSS 等外部工具的 OPF 级
 对照算例（潮流层对照不属于本章范围）。
 
+NativeIPM 原始--对偶--松弛初值复用的固定验证命令为
+\srcpath{./build/macos-release/phase\_hybrid\_opf\_benchmark all parambench native quiet}。
+每例先求一个已收敛的基准 OPF 解（耗时从双方排除），再对 $+0.1\%$ 负荷扰动交错运行五次
+\fld{PrimalDual} 与 \fld{PrimalOnly}；双方使用同一预装配图、同一不等式行集和
+500 次总迭代上限，并关闭提前 restoration 上限以单独比较初值的影响。比较要求双方
+每次均收敛，目标相对误差、恢复电压误差和三项 KKT 残差均不超过 $10^{-6}$，且
+每例中位加速不低于 $1.05\times$，四例几何平均加速不低于 $1.20\times$。数值
+分解次数仅作诊断，不作为性能准入条件，因为约束生成、细化与末端 KKT 认证可能增加
+分解次数而仍缩短总计算时间。实测 H13/H34/H123/H8500 的中位时间分别由
+10.067/20.163/35.359/1443.491~ms 降至
+1.778/7.081/25.570/970.395~ms，对应 $5.661/2.848/1.383/1.488\times$；中位
+分解数分别为 4/47、7/27、20/30、131/100，几何平均加速为 $2.400\times$。
+全表最大目标相对误差 $5.73\times10^{-9}$、电压误差 $1.52\times10^{-8}$~p.u.，
+最大 primal/dual/互补残差分别为 $1.35\times10^{-10}$、$8.40\times10^{-7}$、
+$1.85\times10^{-7}$。原始证据为
+\srcpath{output/benchmarks/paper\_native\_ipm\_parametric\_warmbench.csv}。
+运行环境是 Apple M4 Max、macOS 26.5.2、AppleClang 21、arm64，脏工作树 HySim
+\srcpath{ef5f1f6b} 与 MIPSolvers \srcpath{a5d614b7}；该结果不替代干净提交基线。
+
+Ipopt 的同口径命令去掉 \srcpath{native} 参数，即
+\srcpath{./build/macos-release/phase\_hybrid\_opf\_benchmark all parambench quiet}。
+原始--对偶相对原始变量初值的中位迭代数在 H13/H34/H123/H8500 上分别由
+7/5/7/23 降至 3/2/2/6，中位时间由
+3.522/7.178/12.664/743.846~ms 降至 2.064/4.400/6.451/274.799~ms，对应
+$1.707/1.632/1.963/2.707\times$，四例几何平均为 $1.961\times$。全表最大目标
+相对误差、电压误差和 primal/dual/互补残差分别为 $4.44\times10^{-9}$、
+$1.31\times10^{-8}$~p.u.、$1.00\times10^{-8}$、$9.98\times10^{-7}$ 与
+$2.80\times10^{-9}$。原始证据为
+\srcpath{output/benchmarks/paper\_ipopt\_multiplier\_warmbench.csv}；机器与脏工作树
+边界同上。
+
+独立求解器交叉验证命令为
+\srcpath{./build/macos-release/phase\_hybrid\_opf\_benchmark all crosssolver quiet}。
+NativeIPM 与 Ipopt 先独立完成约束筛选，再以二者行集并集构造同一个固定受限 NLP；
+两次最终求解均检查全部遗漏物理不等式，且 NativeIPM 明确禁止调用可选 Ipopt 初值。
+四例的两种求解器均收敛并满足 KKT 与物理可行性。H13/H34/H123 的目标与逐点电压
+差均通过预先固定的 $10^{-6}$ 一致性判据；H8500 的目标相对差为
+$1.915\times10^{-6}$、最大电压差为 $5.994\times10^{-5}$~p.u.，因此只能记录为
+非凸 OPF 的邻近 KKT 点，不能表述成逐点一致。原始证据为
+\srcpath{output/benchmarks/paper\_native\_ipm\_ipopt\_crosscheck.csv}。
+
+论文主文仅以 Ipopt 作为非线性 OPF 求解器。Section~IV 依次说明受限 OPF 计算、约束
+更新和 Ipopt 乘子初始化，并把三个步骤合并为 Algorithm~1。每次受限计算仅施加当前
+选中的恢复约束；求解后利用 Section~III 的精确电压恢复关系检查全部遗漏约束，并把
+接近限值或违反限值的约束加入下一次计算。从第 $k$ 次到第 $k+1$ 次迭代，第 $k$ 次
+受限 OPF 的原始变量以及等式、不等式和变量上下界乘子用于初始化 Ipopt；新增约束
+行的乘子置零，Ipopt 按 TNLP 接口重建内部 slack。Case~3 对比相同原始变量初值下有、
+无乘子初值的 Ipopt 结果；三面板计算性能图展示不等式 Jacobian 密度、五次计算时间及
+中位数、四例加速比与迭代数下降。NativeIPM 初值测试和两种求解器的独立解质量检查
+仍作为工程验证证据保留，但不写入该论文主文。
+
+Case~1 的物理图由 \srcpath{H123 controls} 模式生成的三份数据构造：
+\srcpath{paper\_converter\_topology\_H123.csv} 保留馈线、变压器和相别拓扑，
+\srcpath{paper\_converter\_node\_results\_H123.csv} 给出各相电压、VSC 相功率、相电流
+及换流器电流 VUF，
+\srcpath{paper\_converter\_branch\_results\_H123.csv} 给出线路各相及三相有功功率。
+正文只采用已经收敛的 all-GFM 与 mixed GFL/GFM 两组 Ipopt 结果；未收敛的
+equal-phase 与 all-GFL 行保留为审计记录，不作为论文数值结论。mixed 配置下 VSC~1、4
+为 GFM，VSC~2、3 为 GFL；图中同时标出四台 VSC 的物理母线、直流负荷连接和线路潮流。
+MATLAB 读取拓扑与支路 CSV 时显式把母线列设为字符串，以保留 \srcpath{25r} 等辅助
+母线标识及其物理连接；\srcpath{300\_open} 与 \srcpath{94\_open} 仍按原始开关状态断开。
+
 \subsection{边界与局限}\label{subsec:tp-limit}
 
 \begin{itemize}
   \item \textbf{活跃研发}：模块接口与覆盖范围仍在演进；默认后端 Ipopt 受嵌入式
-        编译门控，未编译时仅返回 \fld{Unavailable:} 状态（
+        编译条件限制，未编译时仅返回 \fld{Unavailable:} 状态（
         \srcpath{MIPSolvers/src/engine/solver/external/adapters.cpp:IpoptAdapter::available}）。
   \item \textbf{网络覆盖}：adapter 不支持 DC/DC 变换器、能量路由器与可控 DC 静态
         发电机（遇之抛错，src/optimal\_power\_flow/three\_phase\_hybrid\_adapter.cpp:build\_three\_phase\_hybrid\_model、391--395）；DC 支路仅电阻型；

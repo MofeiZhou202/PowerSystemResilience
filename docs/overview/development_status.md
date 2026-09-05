@@ -1,10 +1,223 @@
 # Development Status
 
-Updated: 2026-08-30
+Updated: 2026-09-05
 
 This is the living handoff for verified build state and active engineering work.
 Update it in place; do not create dated copies. Source, registered tests, and
 the current Git worktrees remain authoritative.
+
+## Cyber-dynamic safe-restoration source audit bundle (2026-09-05)
+
+The paper workspace now contains a source-backed audit bundle under
+`docs/latex/paper/cyber_dynamic_safe_restoration/code/`. Its declared scope
+expands to 147 files (3.5 MiB) while preserving repository-relative paths. The
+bundle includes both paper drivers, complete dynamics and resilience modules,
+hybrid component contracts, authored case builders, network reconfiguration,
+certificate/resilience regressions, PSD and GridLAB-D validation code, build
+registration, and the canonical runtime contract. `FILESET.tsv` declares the
+scope, `MANIFEST.tsv` records SHA-256 hashes, `TRACEABILITY.md` maps manuscript
+claims to symbols, and `PROVENANCE.txt` records both repository states.
+
+`python3 .../code/audit_bundle.py verify` passes for all 147 source-backed
+snapshot files. The `macos-release` targets
+`cyber_dynamic_safe_restoration_small` and
+`cyber_dynamic_safe_restoration_scale` rebuild successfully. The focused
+`test_transient_dynamics '[resilience][certificate]'` regression passes 11
+cases and 110 assertions. The numerical paper drivers were not executed during
+this extraction because they overwrite the retained result directories; the
+existing small, scale, PSD, and GridLAB-D artifacts were not regenerated or
+reclassified.
+
+This is an audit snapshot, not a standalone fork: root-project build support
+and the sibling MIPSolvers repository remain external. The build above used
+MIPSolvers `e003dbb11ae29b99e04cbcb1d70c2da02118d4dd`, while
+`cmake/Dependencies.cmake` still records
+`a39812aa5941691b44e8379a8e0b7d42ccdde955`; this mismatch remains an explicit
+reproducibility limitation rather than a clean-pin publication baseline.
+
+## Three-phase graph-reduced Native IPM and Ipopt warm starts (2026-09-04)
+
+The Native phase-hybrid path now converges for H13, H34, H123, and H8500 under the
+current line-limit setup. MIPSolvers enables MUMPS symmetric automatic scaling,
+uses the congruence-scaled augmented inequality block `-I`, and in `Auto` mode
+can fall back from exhausted condensed inertia correction to the algebraically
+equivalent augmented Newton system. Forced `Condensed` behavior and all final
+KKT tolerances are unchanged. The graph-reduced 20/100 early-restoration policy
+also resumes the same primal-dual state with the remaining user budget when its
+first cap is reached at an already primal-feasible point; restoration remains
+reserved for a nonzero normal residual.
+
+`ParametricWarmStartMode` defines the two initial-point methods used in the
+comparison. `PrimalDual` uses the primal variables, equality multipliers, and
+full-row inequality multipliers from a converged base OPF. Native IPM also uses
+the saved slack variables, reconstructs them at the perturbed point, and projects
+only multipliers outside 90% of the configured central neighborhood before the
+independent Phase-II check. Ipopt instead receives variable lower- and upper-bound
+multipliers through its TNLP callback and reconstructs its internal slacks.
+`PrimalOnly` supplies the identical primal point without these multiplier data.
+The MIPSolvers adapter converts the public `[inequalities | equalities]` order to
+Ipopt's `[equalities | inequalities]` order, enables `warm_start_init_point`, and
+rejects incomplete or invalid complete starts instead of silently reverting.
+
+The fixed Release verification command is
+`./build/macos-release/phase_hybrid_opf_benchmark all parambench native quiet`.
+For each case it excludes one converged base OPF, applies a `+0.1%`
+load perturbation, and alternates five primal-dual-slack/primal-only pairs on the
+same graph-reduced model and enforced row set. Both sides use a 500-iteration limit
+with the early restoration cap disabled. Every repeat must converge with
+objective relative error, recovered-voltage error, and primal/dual/
+complementarity residuals at most `1e-6`; each case also requires at least
+`1.05x` median speedup, while the four-case result requires at least `1.20x`
+geometric-mean speedup. Factorization count is retained as a diagnostic, not as
+an acceptance criterion, because constraint generation, refinement, and terminal
+KKT certification can add factorizations while reducing total runtime.
+
+All four cases pass. Median primal-dual-slack versus primal-only results are H13
+`1.778/10.067 ms` and `4/47` factorizations (`5.661x`), H34
+`7.081/20.163 ms` and `7/27` (`2.848x`), H123 `25.570/35.359 ms` and
+`20/30` (`1.383x`), and H8500 `970.395/1443.491 ms` and `131/100`
+(`1.488x`). The geometric mean of the four speedups is `2.400x`. Across all 40
+solve rows, maxima are `5.73e-9` objective relative error, `1.52e-8` p.u.
+recovered-voltage error, and `1.35e-10/8.40e-7/1.85e-7`
+primal/dual/complementarity residuals. Evidence
+is `output/benchmarks/paper_native_ipm_parametric_warmbench.csv`, produced on
+Apple M4 Max, macOS 26.5.2, AppleClang 21, arm64, dirty HySim `ef5f1f6b` and
+MIPSolvers `a5d614b7`. This host differs from the paper's AMD case-study host,
+and the result is not a clean-pin release baseline.
+
+The Ipopt comparison uses
+`./build/macos-release/phase_hybrid_opf_benchmark all parambench quiet` with the
+same load perturbation, generated row sets, convergence checks, and five
+alternating pairs. Median primal-dual versus primal-only results are H13
+`2.064/3.522 ms` and `3/7` iterations (`1.707x`), H34 `4.400/7.178 ms`
+and `2/5` (`1.632x`), H123 `6.451/12.664 ms` and `2/7` (`1.963x`), and
+H8500 `274.799/743.846 ms` and `6/23` (`2.707x`). All four pass the fixed
+`1.02x` per-case and geometric-mean gates; the geometric mean is `1.961x`.
+Across all 40 rows, maxima are `4.44e-9` objective relative error, `1.31e-8`
+p.u. recovered-voltage error, and `1.00e-8/9.98e-7/2.80e-9`
+primal/dual/complementarity residuals. Evidence is
+`output/benchmarks/paper_ipopt_multiplier_warmbench.csv` on the same dirty-worktree
+Apple M4 Max environment.
+
+The independent solver check is
+`./build/macos-release/phase_hybrid_opf_benchmark all crosssolver quiet`. Native
+IPM and Ipopt first screen rows independently; their row-set union then defines
+the identical restricted NLP used by both final solves, and every omitted
+physical inequality is evaluated. Native is forbidden from calling the optional
+Ipopt initializer. Both solvers converge and satisfy KKT/physical feasibility on
+all four cases. H13/H34/H123 meet the fixed `1e-6` objective and pointwise-voltage
+agreement criterion. H8500 does not: its objective relative difference is
+`1.915e-6` and voltage maximum difference is `5.994e-5` p.u.; the two nonconvex
+solves are therefore recorded as nearby KKT points, not pointwise-identical
+solutions. Evidence is
+`output/benchmarks/paper_native_ipm_ipopt_crosscheck.csv`.
+
+The English manuscript reports Ipopt 3.14.20 as its only nonlinear OPF solver.
+Its title now uses `Constraint Generation` consistently with the method described
+in the body. The abstract follows the problem--model--solution--verification order
+of the reference draft and remains below 200 words. A four-part Nomenclature based
+on the reference draft's IEEEdescription structure now precedes Section I and
+defines the acronyms, sets and indices, parameters, variables, mappings, and KKT
+multipliers used in the paper. The former Discussion section has been removed.
+The full-width comparison table has been
+restored between the Motivation and Literature Review to distinguish phase-domain
+modeling, AC/DC coupling, converter models, reduction, and solution methods.
+Repeated symbol descriptions in the body have been consolidated into the
+Nomenclature. Section I.B now progresses from
+unbalanced phase-domain OPF to hybrid AC/DC modeling, converter controls, Kron
+reduction, and KKT computation; each cited work is assigned a specific method or
+scope rather than being grouped under one generic claim. Section I retains
+Motivation, Literature Review, and three concise Contributions, uses passive
+constructions throughout its prose, and occupies less than two text pages before
+Section II begins on page 3. Normalized display/float spacing and the naturally
+balanced IEEEtran bibliography keep the manuscript at ten fully used pages.
+Section IV presents one constraint-generation iteration: after restricted OPF
+iteration `k`, the exact recovery relation from Section III identifies the rows
+added at iteration `k+1`; the primal variables and multipliers from iteration
+`k` initialize Ipopt for that next restricted OPF, with zero multipliers for new
+rows. Restricted OPF calculation, constraint update, and Ipopt multiplier
+initialization are combined in one Algorithm 1. The three case studies correspond
+directly to the converter model, exact passive-phase reduction and recovery,
+and computational performance. Case 1 now uses the physical H123 topology and
+the converged all-GFM and mixed GFL/GFM Ipopt results. The mixed configuration
+places GFM VSCs at buses 53 and 21 and GFL VSCs at buses 135 and 150; the figure
+reports the resulting line active-power distribution, VSC phase active powers,
+and converter-current VUF. The `controls` benchmark exports the topology, node,
+and branch evidence to `paper_converter_topology_H123.csv`,
+`paper_converter_node_results_H123.csv`, and
+`paper_converter_branch_results_H123.csv`. Nonconverged equal-phase and all-GFL
+rows remain in the audit CSV but are not plotted or cited as numerical evidence.
+The compact performance figure is Ipopt-only and retains three panels:
+inequality-Jacobian density, all five calculation times with medians, and the
+four-case speedups with iteration reductions. Figure 1 uses the restored
+three-panel TikZ/LaTeX version. Figures 2 and 3 are generated with MATLAB R2025b
+at their final double-column sizes. Figure 2 uses a 9/8/7-pt Times New Roman
+hierarchy for panel letters, titles/main labels, and numeric/detail labels;
+Figure 3 retains 10-pt Times New Roman text. Their editable PDF/SVG, 600-dpi
+PNG/TIFF, MATLAB source, and source-data CSVs are retained beside the manuscript.
+Figures 1--3 place each combined panel label and title below its corresponding
+panel, centered in black Times New Roman. Figure 3(c) vertically centers each
+iteration-count transition within its bar so both the initial and final IPOPT
+iteration counts remain visible for all four cases.
+The H123 bus columns are forced to string during MATLAB import so auxiliary bus
+names such as `25r` retain their transformer and feeder connections; only the
+authored open-switch links at `300_open` and `94_open` remain open.
+
+The Abstract, Section I.B, and Contribution 3 describe multiplier transfer in
+words: the current restricted OPF solution initializes the subsequent IPOPT
+calculation after a constraint update. The explicit `k`-to-`k+1` notation is
+reserved for the mathematical development in Section IV.
+
+Float declarations have been reordered to keep every figure and table near its
+first formal reference. Table I is now cited explicitly at the end of the
+Motivation. Figure 2 is declared before Case 1 so that the double-column float can
+be placed on the immediately following page, Table II remains inside Case 2, and
+Figure 3 is declared immediately before Case 3.
+
+The manuscript no longer exposes internal solver options, callback/interface
+names, or local program identifiers. The Case Description reports only IPOPT
+3.14.20 and the public calculation environment. A fresh four-feeder OPF/PF check
+was run with the Release benchmark; all OPF and PF calculations converge, with
+maximum AC-voltage and converter-total-power differences of `7.88842665086e-7`
+p.u. and `2.05967849381e-10` p.u. Evidence is
+`output/benchmarks/paper_opf_pf_crosscheck.csv`, and the rounded manuscript values
+are `7.89e-7` and `2.06e-10` p.u.
+
+The GFM internal voltage is denoted by `v^{int}` and its phase value by
+`v_phi^{int}` throughout the Nomenclature and converter equations. The symbol
+`mathcal E` is reserved exclusively for the AC-line, DC-branch, and
+converter-coupling edge sets; the unused `cE` macro has been removed.
+
+Table II, Case 2, and the Conclusion now use the values in
+`phase_hybrid_opf_case_audit_cold_oracle.csv` rather than an earlier manually
+summarized table: the four-case maxima are `5.27725230529e-9` in relative
+objective difference and `6.07869213013e-9` p.u. in recovered voltage, reported
+as `5.3e-9` and `6.1e-9` in the manuscript.
+
+The public release folder is
+`docs/latex/paper/Graph Reduction for Parametric Unbalanced Hybrid AC-DC Optimal Power Flow/public_case_study_data/`.
+It contains the four OpenDSS feeder inputs, explicit case and common parameter
+tables, the benchmark-driver snapshot, Case 1--3 CSV outputs, the derived LaTeX
+table, self-contained MATLAB R2025b programs and source data for Figs. 2--3,
+vector/raster figure exports, provenance limitations, and per-file SHA-256
+checksums. Nonconverged converter-control rows and diagnostic limit-omission rows
+are retained but explicitly excluded from validation claims. Native-IPM outputs
+are not included as manuscript evidence. Both copied MATLAB programs execute
+successfully using only paths within the public folder.
+
+Focused verification passes MIPSolvers augmented equivalence at 1 case/17
+assertions, restoration budgeting at 1 case/4 assertions, the Native parametric
+branch test at 1 case/11 assertions, and the complete HySim phase-hybrid target
+at 15 cases/191 assertions. The MIPSolvers `test_engine_api` target passes
+19 cases/92 assertions, including the Ipopt row-order, bound-multiplier, and
+complete-start checks; `test_ipopt_parameter_stability` passes 7 cases/515
+assertions. Full MIPSolvers `test_numerical_stability` passes
+27 cases/495 assertions; `test_ipm_solver`, including the terminal active-set
+crossover regression, passes 37 cases/263 assertions.
+The English manuscript rebuilds to 10 fully used pages with no overfull boxes or
+undefined references/citations. The OPF manual rebuilds to 180 pages; its
+pre-existing long-source-identifier overfull boxes and font-substitution warnings
+remain.
 
 ## N-k DAE restoration-entry compression pilot (2026-08-30)
 

@@ -3375,7 +3375,7 @@ ACOPFResult solve_with_parity_ipm(
       out.lmp_valid = false;
       out.lmp_validity_reason =
           backend_label.find("ipopt") != std::string::npos
-              ? "The embedded Ipopt adapter does not return constraint multipliers; LMPs are unavailable."
+              ? "The AC OPF Ipopt result mapping does not publish constraint multipliers; LMPs are unavailable."
               : "The selected solve path did not return a complete equality-dual vector; LMPs are unavailable.";
     }
 
