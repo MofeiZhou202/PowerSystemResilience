@@ -8,6 +8,25 @@ the current Git worktrees remain authoritative.
 
 ## Southern Market Execution and Boundary GUI
 
+Local/online documentation synchronization: the user tutorial now explains chronological
+SCED end-of-day carry, daily authored SOC targets, failed-day behavior and the distinction
+between rolling daily optimization and a joint weekly optimum. The execution contract
+maps state fields/units/indices to apply/carry_from/step_market_operation. The tutorial's
+outdated single-thread-only pricing statement now reflects the large Gurobi8-thread policy.
+The existing market LaTeX execution chapter and62-page PDF include carry equations,
+SCED-to-LMP reuse, full-dual gates and the previously measured five-run acceptance.
+No numerical code or benchmark result was changed in this documentation pass.
+
+Online help manifest points to docs/README.md as the canonical root and directly indexes
+the execution contract and performance record, with carry/SOC/performance search tags.
+43 manifest paths and84 relative Markdown links in the five market/navigation documents
+pass; two stale LaTeX-guide references now target the existing manual documentation.
+Port8107 serves those Markdown sources byte-for-byte from docs/. Playwright verifies
+search/internal navigation and1440x1000/390x844 views without browser errors; PDF new
+pages rendered and visually checked. Evidence: output/market-docs-sync/. Port8097 was
+not listening during this check; no old process or market task was replaced. Existing
+open help tabs may cache prior content until the page is refreshed.
+
 SCED-to-LMP ordered-matrix reuse is now validated on the unchanged2000/1320-generator
 fixture. Serial browser protocol: five fresh-server first runs plus five same-session
 repeats per version. Baseline maxima61.292012/61.407915s; candidate maxima

@@ -6,6 +6,9 @@
 “性能”。[跨日状态契约](southern_execution_contract.md)明确机组连续
 开停机时间、储能能量、水位和下泄历史取前一天SCED第96点末态；每日SOC终值仍按申报
 生效。用户操作见[周月教程](../../guides/market_simulation_workflow.zh.md)。
+可下载的[PDF主手册](market_manual.pdf)及其`chapters/southern_execution.tex`已同步
+跨日状态公式、矩阵复用、定价一致性与本次性能验收；PDF共62页，在线/本地校验记录
+见[开发状态](../../overview/development_status.md)。
 
 [市场求解性能](performance.md)：IEEE118 水量、储能与机组组合的消融计时，
 零成本开停机/储能小时方向投影、同日恢复实验有界并行及完整周任务的浏览器计时。
