@@ -15,6 +15,9 @@
       Eigen::VectorXd eq_act = base_lp.Aeq * xj;
       const int max_flips = std::max(0, opt.feasibility_jump_max_flips);
       for (int flip = 0; flip < max_flips; ++flip) {
+        // Optional root work must leave the existing finalization reserve.
+        // Budget contract: docs/solvers.md, Fixed-Integer Root Repair Kernel and Budget.
+        if (bc_optional_root_budget_expired()) return false;
         double best_gain = 1e-9;
         int best_j = -1;
         double best_delta = 0.0;

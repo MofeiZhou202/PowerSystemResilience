@@ -1445,7 +1445,14 @@
 		        std::isfinite(root.bound) &&
 		        incumbent_obj - root.bound <=
 		            1e-9 * std::max(1.0, std::abs(incumbent_obj));
-		    if (root_incumbent_fixed_point_hook && !exact_root_certificate) {
+        // Audited primal + rigorous root bound already certify the requested
+        // relative gap. docs/solvers.md, Fixed-Integer Root Repair Kernel and Budget.
+        const bool requested_root_certificate =
+            !opt.auto_highs_root_pipeline && !opt.require_tree_exhaustion_certificate &&
+            std::isfinite(root.bound) && std::isfinite(opt.gap_tol) && opt.gap_tol >= 0.0 &&
+            std::max(0.0, incumbent_obj-root.bound) /
+                std::max(1.0, std::abs(incumbent_obj)) <= opt.gap_tol;
+		    if (root_incumbent_fixed_point_hook && !exact_root_certificate && !requested_root_certificate) {
 		      root_incumbent_fixed_point_hook(source);
 		    }
 		    return true;
@@ -1545,7 +1552,9 @@
     }
   };
 
-  bool root_primal_polish_complete = !requested_vendored_highs_lp;
+  // A disabled root pipeline has no pending polishing obligation; same gap
+  // certificate contract as above, independent of the selected LP kernel.
+  bool root_primal_polish_complete = !requested_vendored_highs_lp || !opt.auto_highs_root_pipeline;
   auto root_proof_tail_polish_required = [&]() -> bool {
     return requested_vendored_highs_lp && opt.auto_highs_root_pipeline &&
            opt.require_tree_exhaustion_certificate &&
@@ -2506,7 +2515,7 @@
 
   auto try_fixed_integer_repair = [&](const char* source,
                                       Eigen::VectorXd xr) -> bool {
-    if (xr.size() != n) return false;
+    if (xr.size() != n || bc_optional_root_budget_expired()) return false;
     for (int i = 0; i < n; ++i) {
       xr[i] = std::min(root.ub[i], std::max(root.lb[i], xr[i]));
       if (is_integer_type(base_lp.vars[i])) {
@@ -2587,7 +2596,31 @@
     const int total_cons = static_cast<int>(base_lp.A.rows() + base_lp.Aeq.rows());
     const bool highs_style_fixed_integer_repair =
         opt.auto_highs_root_pipeline && opt.use_linesearch_rounding;
-    if (total_cons > 10000 &&
+    if (bc_optional_root_budget_expired()) return false;
+    if (opt.use_simplex_lp_nodes && bc_vendored_highs_lp_kernel_enabled(opt)) {
+      // Same fixed-integer LP, same selected kernel, remaining wall budget.
+      // Derivation: docs/solvers.md, Fixed-Integer Root Repair Kernel and Budget.
+      LPModel repair_lp = base_lp;
+      for (int i = 0; i < n; ++i) {
+        repair_lp.vars[i].lb = repair_lb[i];
+        repair_lp.vars[i].ub = repair_ub[i];
+      }
+      if (bc_optional_root_budget_expired()) return false;
+      BCOptions repair_opt = opt;
+      const double remaining = bc_remaining_sec() - bc_post_root_finalize_reserve_sec;
+      if (remaining <= 0.0) return false;
+      repair_opt.time_limit_sec = std::isfinite(remaining) ? remaining : 0.0;
+      auto repair_res = solve_lp_relaxation(repair_lp, &xr, nullptr, repair_opt);
+      ++out.bc_stats.lp_solves;
+      repair_ok = repair_res.primal.stats.success && repair_res.primal.x.size() == n;
+      if (repair_ok) repaired = std::move(repair_res.primal.x);
+      if (opt.verbose || trace_bc_timeline) {
+        fmt::print(stderr,
+                   "[B&C-ROOT-REPAIR-LP] source={} kernel=highs budget={:.3f}s "
+                   "status={} success={}\n", source, repair_opt.time_limit_sec,
+                   repair_res.primal.stats.status, repair_ok ? 1 : 0);
+      }
+    } else if (total_cons > 10000 &&
         (opt.use_ipm_root || highs_style_fixed_integer_repair)) {
       NativeIPMLPAdapter* repair_ipm =
           ensure_root_heur_ipm(highs_style_fixed_integer_repair);
@@ -2675,6 +2708,7 @@
   auto t_pp_c = std::chrono::steady_clock::now();
 
 	  auto run_feasibility_jump = [&]() -> bool {
+	    if (bc_optional_root_budget_expired()) return false;
 	    if (!opt.enable_feasibility_jump ||
 	        has_incumbent || root.x_relax.size() != n) {
 	      trace_root_primal_gate(
@@ -2717,7 +2751,7 @@
 
 	    const int attempts = std::max(1, opt.feasibility_jump_repair_attempts);
 	    for (int attempt = 0; attempt < attempts; ++attempt) {
-	      if (has_incumbent) break;
+	      if (has_incumbent || bc_optional_root_budget_expired()) break;
 	      Eigen::VectorXd xj = root.x_relax;
       for (int j = 0; j < n; ++j) {
         if (!is_integer_type(base_lp.vars[j])) continue;

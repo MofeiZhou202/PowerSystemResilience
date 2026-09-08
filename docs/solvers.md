@@ -1,9 +1,81 @@
 # 求解器实现与算法审查手册
 
+## Inexact Relaxation Experiments
+
+`GurobiAdapter::solve_relaxation_lp` selects Method2/Crossover0 and an explicit
+BarConvTol in [1e-8,1e-2], on a fresh adapter. This result is only a candidate
+multiplier/primal vector: callers must independently certify a lower bound and
+audit a repaired integer solution. `Optimal` refers to that requested barrier
+tolerance; it must never certify pricing or original-unit feasibility.
+LP `ObjBound` is not extracted: successful attribute access can return the
+unavailable sentinel -1e100 after no-crossover barrier. DualVio/ConstrVio are
+reported for inspection, not substituted for original-unit residuals.
+
+Rationale and fixed validation protocol: HySim `docs/modules/market/performance.md`,
+2000-node goal. Weak duality L<=z*<=U permits closure at the existing requested
+MIP gap after an independently audited repair. Sparse factorization dominates;
+early barrier termination predicted20 s versus45.8 s and measured19.979 s at
+8 threads, with original repaired residual1.06582e-10 and certified gap0.064%.
+No solver guarantee is inferred from a finite primal objective alone.
+
+Ordering/dualization experiments were rejected: explicit BarOrder1 duplicated
+the automatic choice, and PreDual1 increased factor work to8.190e12 and timed
+out after54.29s/five iterations. Neither override remains in the adapter.
+Fixed-integer repair uses the ordinary strict solve_lp entry. See HySim's
+performance.md for exact inputs and failed predictions.
+
+For million-column Gurobi pricing, the versioned policy selects fixed8-thread
+barrier without crossover; smaller LPs retain single-thread dual simplex.
+Both use two fresh solves with an exact full-dual equality gate in the market
+caller. Prediction: two concurrent pricing solves <=16 s versus21.8 s sequential;
+this is a deterministic representative policy change, not proof of mathematical
+dual uniqueness. Exact model/dual repeats and full market audits remain required.
+
+## Deterministic Pricing
+
+Dedicated nonvirtual `solve_pricing_lp` methods retain adapter object layout and
+leave generic solve_lp/solve_milp semantics unchanged. HiGHS pricing requires the
+embedded backend, resets the global scheduler, uses fresh model state, threads=1,
+solver=simplex, simplex_strategy=1, parallel=off, presolve=on, random_seed=0 and
+the supplied positive finite time limit. Gurobi pricing resets environment
+parameters (including gurobi.env overrides), uses Method=1/Threads=1 below one
+million columns and Method=2/Threads=8/Crossover=0 above that threshold, default
+Seed=0/presolve, OptimalityTol=1e-8 and the instance time limit. Configured sparse
+LP import retains FeasibilityTol=1e-8. There is no solver substitution or objective
+perturbation. Parameter failures reject the solve.
+
+Rationale: Method=-1 concurrent LP can return different optimal row duals for a
+degenerate ordered LP depending on the winning algorithm. Single-thread dual
+simplex selects a repeatable representative for the same backend/version/platform,
+not a mathematically unique dual across solvers. References: Gurobi parameter
+reference Method/Threads/Seed; HiGHS options simplex_strategy/parallel/random_seed.
+HySim's market caller independently resolves the same LP and enforces exact full
+row-dual identity plus original-unit feasibility/objective gates; benchmark and
+regressions are in its docs/modules/market/performance.md. Generic adapter users
+do not automatically receive that caller-level verification.
+
 > 对应工作树：2026-08-05。本文描述实际编译的 `src/engine` 实现，不把历史
 > 计划视为已实现能力。源码中的 `AUDIT-NAV` 注释是本文的反向入口。
 
 ## 1. 范围与结论
+
+### Gurobi timing
+
+`last_gurobi_solve_timing()` 返回调用线程最近 `solve_milp` 的阶段 wall 秒数，
+包括显式 options 的 `solve_lp`（转调相同稀疏入口）。模型导入从入口到 GRBoptimize
+之前，optimize 包含延迟更新、预处理、根松弛与搜索，结果提取包含属性/对偶读取和
+模型释放。尚未到达的阶段为 null；默认 LP/QP 不提供该计时。每次 MILP 入口重置，
+两个并发市场恢复 worker 不共享记录。环境构造不在此范围，由调用方另行计时。
+仅增加线程局部记录与自由 getter，不改变 Adapter、Options 或 SolveResult 布局。
+计时 O(1)，不修改模型、选项或回调，预期可测开销 <0.1%；不承诺因此提速。
+验证由下游 `[recovery_policy]` 检查三阶段非负、未测阶段 null、阶段和不超外层 wall；
+完整市场回归与七日证据见下游 performance.md。独立 MIPSolvers 全量回归未在本轮执行。
+下游本轮 Release 66 用例/29262 断言和 GUI/API 通过；七日内部优化合计30.2689 s、
+导入1.0813 s、环境0.0132 s。ASan构建未链接Gurobi，不作为本适配器的sanitizer证据。
+价格复现另有失败门槛：同一LP fingerprint 0x0819db94，由auto并发障碍法和
+dual_simplex得到不同最优对偶（最大6.64876 CNY/MWh），目标差4.47e-8、原残差均合格。
+同一Build单独重算精确复现两组价格，见下游 recovery-lmp-repeat；计时不改变默认Method，
+也不提供唯一/规范化对偶价格选择，不应把不同条件价格误报成调度或守恒不一致。
 
 ### Gurobi 请求级参数与稀疏连续模型
 
@@ -465,6 +537,20 @@ MILP、预处理、数值稳定性、NETLIB、SCUC、AML 和 L2O。实际构建�
 
 ## 12. 已知限制
 
+Gurobi 的逐实例 `GurobiOptions.method` 对应原生 `Method`（-1..5，默认 -1），
+在构造时校验并应用于模型环境。显式选 2 使用专用障碍法，避免大 LP 的并发算法
+分摊线程；选 1 使用对偶单纯形。不改变稀疏矩阵、目标、对偶行映射或可行性容差。
+本次性能假设与验收记录在相邻 HySim 的
+`docs/modules/market/southern_execution_contract.md`：2000 节点 / 98 点 / 4线程，
+默认并发根节点的障碍法仅1线程，预测专用障碍法根 LP 耗时减少30%，待实测闭环。
+适配器手算 LP 的 Method 1/2 均得到目标10、区间行对偶1、等式行对偶2（50项
+Gurobi专项断言通过）；这不构成大规模性能或其他求解器回归的证明。
+
+`GurobiOptions.crossover` 对应原生 Crossover（-1..4，默认-1）；纯障碍法 LP
+可选0跳过基恢复，保留最优X/Pi用于原/对偶审计，不用于需要单纯形基的调用方。
+模型及行映射不变；固定验收为无 crossover 工作且手算区间/等式对偶仍为1/2。
+HySim的整数根节点继续保留默认基恢复，只有纯LP定价与初解启用0。
+
 - 原生对偶单纯形已有广泛单元测试，但冷启动、极端退化和大型 NETLIB 的覆盖
   仍需在每个平台独立运行；默认 LP kernel 可能是 HiGHS。
 - PDLP 是中等精度一阶法，不提供 basis；不能用于要求严格节点证明的场景。
@@ -473,3 +559,72 @@ MILP、预处理、数值稳定性、NETLIB、SCUC、AML 和 L2O。实际构建�
 - 原生 B&C 依赖 HiGHS 库编译其主要实现；MINLP 非凸全局性没有保证。
 - 性能结论强依赖编译器、BLAS、稀疏后端、线程和数据集。本文不引用已删除的
   历史快照；只有 `testing.md` 中带复现环境的数据可作为当前证据。
+
+### Fixed-Integer Root Repair Kernel and Budget
+
+Rationale before implementation: for integer preferences z, domain propagation
+produces local bounds l(z),u(z). Repair solves the unchanged LP
+`min c'x : A*x<=b, Aeq*x=beq, l(z)<=x<=u(z)`; switching the LP kernel does not
+alter that subproblem. Acceptance still audits every bound/row and integrality
+before adoption, and local domain bounds are restored on every exit. A failed
+repair never proves infeasibility of the original MILP.
+
+HySim IEEE118 profiling found an automatic `use_ipm_root` size flag dispatching
+fixed-integer repair into NativeIPM even though the selected node kernel was
+HiGHS. Its cached IPM had no remaining wall budget;1368/1465 main-thread samples
+were in NativeIPMLPAdapter, with about2.2GB footprint. The repair dispatcher must
+honor the same vendored-HiGHS condition as solve_lp_relaxation, passing the
+remaining global budget less the existing finalization reserve. This uses a
+local sparse LP copy (O(nnz+n) memory/traffic), then the existing HiGHS LP path
+with its internal remaining-time checks. Other LP kernels retain their current
+dispatch. Preference attempts and flip loops check the optional-root deadline.
+Checks cannot preempt an in-progress sparse factorization or domain traversal.
+
+Prediction: on this118 fixture fixed-integer LP repair below3s and full market
+pipeline below15s (at least50% reduction relative to the prior roughly37s
+failure), with a verified incumbent within the30s request. This assumes fixed
+integer preferences have a feasible continuous completion; failure is evidence
+to revisit that assumption, not justification to relax model constraints.
+References: the LP above; solve_lp_relaxation in bc_relaxation.cpp;
+try_fixed_integer_repair in bc_run/06_root_heuristics_a.inc; existing root
+deadline/finalization reserve in bc_run/01_setup_presolve_root_build.inc.
+Validation: HySim [native_repair] for the full11898-point chain at gap0.01,
+original residual<=1e-6 and objective within1% of the verified17413231.016942CNY
+incumbent; root-cut/market regression, focused ASan/UBSan, native B&C regression,
+and sequential default/enhanced30s runs with120s external watchdog. Exact
+commands, build provenance and measured results are recorded in HySim's
+southern_execution_contract.md under Native Fixed-Integer Repair Debug.
+
+First measurement exposed a second implementation mismatch: repair took0.397s
+and produced an audited incumbent at2.435s, but the full chain took45.103s.
+The root polish flag was initialized incomplete for every HiGHS LP kernel,
+even with auto_highs_root_pipeline=false; it blocked root_gap_closed until late
+root processing. Incumbent closure also skipped its expensive fixed-point hook
+only for near-exact equality, ignoring an already-satisfied requested MIP gap.
+Thus repair prediction held, but the pipeline prediction failed due to control
+flow, not an infeasible integer preference. Correction: mark polish complete
+when that pipeline is disabled, and bypass optional incumbent closure in this
+mode when a validated incumbent U and rigorous root bound L satisfy
+`max(0,U-L)/max(1,abs(U)) <= gap_tol`, unless explicit tree exhaustion is required.
+The full HiGHS root pipeline and strict tree-exhaustion mode retain their rules.
+The original below15s/full-feasibility acceptance target is unchanged.
+
+After both corrections HySim's first Release full chain was6.401s (SCUC3.532s),
+with objective17413261.53763228, audited gap1.75273e-6 and valid pricing. This
+measurement overlapped compilation; controlled alternating profiles are stored
+separately under HySim `output/market-operation/native-repair-fixed/` and
+reported in its execution contract. Current-source native B&C regression
+passes35 cases/490 assertions; HySim Southern passes41/22597, and explicit
+Native IEEE118 GUI/API E2E passes seven stress days plus forecast-resolution
+experiments. The unoptimized ASan/UBSan cache times out at the30s Release budget;
+an explicit180s test-only budget is used for instrumentation validation. No
+2000-node Native performance conclusion follows from this118-node repair.
+
+Final isolated HySim alternating default/enhanced/enhanced/default full-chain
+times6.2894/6.3867/6.2885/6.2757s (SCUC3.485..3.585s) satisfy the original below15s
+prediction; all original/reconstructed residuals<=1e-6, gap1.7527268e-6,
+1 incumbent,3 SCUC LP solves and0 cuts/nodes. This is repair/termination speedup,
+not a cut-strengthening result. Explicit180s-per-solve ASan/UBSan validation
+passes2 cases/62 assertions with leak detection disabled and no sanitizer
+report; the failed30s and successful180s logs are both retained in HySim's
+`native-repair-fixed/` artifacts. No full CTest or pinned-dependency build claim.
