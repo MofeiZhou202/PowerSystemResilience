@@ -32,7 +32,7 @@ try {
   await page.goto(`${base}/xjtu/`, { waitUntil: 'domcontentloaded' });
   await page.waitForFunction(() => typeof App !== 'undefined');
   await page.evaluate(() => App.setActiveModule('marketBoundary'));
-  await page.locator('#btnSouthernOpen').click();
+  await page.locator('#southernLoad').click();
   await page.locator('#southernExample').click();
   await page.waitForFunction(() => document.querySelector('#southernCategory option[value="reservoirs"]'));
   let state = await get();
@@ -45,8 +45,24 @@ try {
   const stale = await post('/api/session/southern_market', { action: 'save', revision: state.revision - 1, boundary: state.boundary });
   assert.equal(stale.status, 409);
 
-  await page.locator('#btnSouthernRun').click();
-  await page.waitForFunction(() => document.querySelector('#southernToolbarStatus').textContent.includes('converged'));
+  await page.locator('#southernCategory').selectOption('execution');
+  await page.locator('[data-southern-path="execution/solver"]').selectOption('native');
+  await page.locator('[data-southern-path="execution/native_root_cuts"]').selectOption('enhanced');
+  await page.locator('[data-southern-path="execution/row_presolve"]').selectOption('enabled');
+  await page.locator('#southernSave').click();
+  await page.waitForFunction(()=>document.querySelector('#southernStatus').textContent.includes('边界已保存'));
+  await page.locator('#southernLoad').click();
+  await page.waitForFunction(()=>document.querySelector('#southernStatus').textContent.includes('已载入边界'));
+  assert.equal(await page.locator('[data-southern-path="execution/row_presolve"]').inputValue(),'enabled');
+  assert.equal(await page.locator('[data-southern-path="execution/native_root_cuts"]').inputValue(),'enhanced');
+
+  await page.locator('#southernRunSaved').click();
+  await page.waitForFunction(() => document.querySelector('#southernStatus').textContent.includes('converged'));
+  const pruned=(await get()).latest;
+  assert.equal(pruned.scuc.native_diagnostics.profile,'enhanced');
+  assert.equal(pruned.scuc.native_diagnostics.requested_cuts_per_round,100);
+  assert.ok(pruned.scuc.model_size.constraints_removed>0);
+  assert.equal(pruned.lmp.model_size.constraints_removed,0);
   await page.locator('#southernBaseline').click();
   await page.waitForFunction(() => document.querySelector('#southernStatus').textContent.includes('已有基准'));
   await page.locator('#southernBoundaryView').click();
@@ -59,7 +75,7 @@ try {
   await page.locator('#southernLoad').click();
   await page.waitForFunction(() => document.querySelector('#southernStatus').textContent.includes('已载入边界'));
   assert.equal(await page.locator('[data-southern-path="areas/0/load_mw/0"]').inputValue(), '101');
-  await page.locator('#btnSouthernRun').click();
+  await page.locator('#southernRunSaved').click();
   await page.waitForFunction(() => document.querySelector('#southernResults').textContent.includes('边界情景'));
   state = await get();
   assert.equal(state.latest.comparison.comparable, true);
@@ -88,13 +104,14 @@ try {
   await page.reload({ waitUntil: 'domcontentloaded' });
   await page.waitForFunction(() => typeof App !== 'undefined');
   await page.evaluate(() => App.setActiveModule('marketBoundary'));
-  await page.locator('#btnSouthernOpen').click();
+  await page.locator('#southernLoad').click();
   await page.waitForFunction(() => document.querySelector('#southernStatus').textContent.includes('已有基准'));
   const loaded = await post('/api/session/load_builtin', { case: 'market_5bus_acdc_toy' });
   assert.equal(loaded.status, 200, JSON.stringify(loaded.data));
   assert.equal((await get()).boundary, null);
   await page.setViewportSize({ width: 1440, height: 1000 });
   await page.goto(`${base}/xjtu/#southern-market`, { waitUntil: 'load' });
+  await page.reload({ waitUntil: 'load' });
   await page.locator('#southernLoadCase').waitFor({ state: 'visible' });
   await page.locator('#southernCase').selectOption('demo');
   await page.locator('#southernLoadCase').click();
@@ -109,13 +126,15 @@ try {
   await page.locator('[data-southern-path="storage/0/discharge_price"]').fill('65');
   await page.locator('[data-southern-path="storage/0/discharge_price"]').blur();
   await page.evaluate(() => App.setActiveModule('marketBehavior'));
+  assert.equal(await page.locator('#southernMarketWorkspace').isVisible(), false);
+  await page.evaluate(() => App.setActiveModule('marketBoundary'));
   assert.equal(await page.locator('[data-southern-path="storage/0/discharge_price"]').inputValue(), '65');
   await page.locator('#southernSave').click();
   await page.waitForFunction(() => document.querySelector('#southernStatus').textContent.includes('边界已保存'));
   assert.equal((await get()).boundary.storage[0].discharge_price, 65);
   await page.screenshot({ path: path.join(root, 'output/southern-market/demo-boundary.png') });
   await page.locator('#southernRunSaved').click();
-  await page.waitForFunction(() => document.querySelector('#southernToolbarStatus').textContent.includes('schedule_only'), { timeout: 120000 });
+  await page.waitForFunction(() => document.querySelector('#southernStatus').textContent.includes('schedule_only'), null, { timeout: 120000 });
   await page.getByLabel('结果类别', { exact: true }).selectOption('branches');
   assert.ok((await page.locator('#southernResults').textContent()).includes('有功越限 MW'));
   await page.screenshot({ path: path.join(root, 'output/southern-market/demo-results.png') });

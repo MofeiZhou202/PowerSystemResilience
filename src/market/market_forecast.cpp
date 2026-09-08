@@ -65,7 +65,8 @@ J market_forecast_defaults() {
   const year_month_day day{floor<days>(system_clock::now()) + days{1}};
   std::ostringstream date; date << std::setfill('0') << std::setw(4) << int(day.year()) << '-' << std::setw(2) << unsigned(day.month()) << '-' << std::setw(2) << unsigned(day.day());
   J result = {{"mode", "probabilistic"}, {"sample_count", 8}, {"seed", 20250905}, {"temporal_rho", 0.5},
-    {"operation", {{"horizon", "week"}, {"start_date", date.str()}, {"penalty_per_mwh", 100000}, {"explain", true}, {"days", J::array()}}},
+    {"operation", {{"horizon", "week"}, {"start_date", date.str()}, {"penalty_per_mwh", 100000}, {"explain", true},
+      {"explain_trigger","anomaly"},{"recovery_pricing","dispatch_only"}, {"days", J::array()}}},
     {"marginals", J::array()}, {"correlation", J::array()}};
   for (size_t k = 0; k < factors.size(); ++k) {
     result["marginals"].push_back({{"factor", factors[k]}, {"distribution", k == 6 ? "fixed" : "uniform"},
@@ -156,10 +157,74 @@ J make_market_forecast(const J& boundary, const J& config) {
   return job;
 }
 
+J make_market_study(const J& boundary, const J& config) {
+  keys(config, {"mode", "operation", "inflow_scales", "bid_scales", "faults"});
+  check(!config.contains("mode") || config.at("mode") == "study", "study mode must be study");
+  check(!config.at("operation").contains("reference_days"), "study derives reference_days from the common authored baseline");
+  auto prototype = make_market_operation(boundary, config.at("operation"));
+  // Persist resolved solver defaults so exported configurations replay exactly.
+  prototype["base"]["execution"].update(prototype.at("config").at("solver_options"));
+  const int days = prototype.at("total_days");
+  for (const auto* field : {"inflow_scales", "bid_scales"}) {
+    check(config.at(field).is_array() && !config.at(field).empty(), std::string(field)+" requires values");
+    std::set<double> seen;
+    for (const auto& value : config.at(field)) check(seen.insert(numeric(value, 0, 10, field)).second, "duplicate study multiplier");
+  }
+  check(config.at("faults").is_array() && !config.at("faults").empty(), "fault profiles required");
+  check(config.at("faults").size()*config.at("inflow_scales").size()*config.at("bid_scales").size() <= 64, "study limited to 64 scenarios");
+  std::set<std::string> names;
+  for (const auto& f : config.at("faults")) {
+    keys(f, {"name", "generator_outages", "branch_outages", "first_day", "last_day", "first_slot", "last_slot"});
+    check(f.at("name").is_string() && !f.at("name").get_ref<const std::string&>().empty() && f.at("name").get_ref<const std::string&>().size() <= 256, "fault name required (max 256 bytes)");
+    check(names.insert(f.at("name")).second, "duplicate fault name");
+    for (const auto* k : {"first_day", "last_day", "first_slot", "last_slot"}) {
+      check(f.at(k).is_number_integer(), std::string(k)+" must be integer");
+      numeric(f.at(k), 0, std::string(k).find("day") != std::string::npos ? days-1 : 95, k);
+    }
+    check(f.at("first_day") <= f.at("last_day") && f.at("first_slot") <= f.at("last_slot"), "reversed fault interval");
+  }
+  J normalized = config; normalized["operation"] = prototype.at("config"); normalized["mode"] = "study";
+  J job = {{"status", "ready"}, {"config", normalized}, {"base", prototype.at("base")}, {"scenarios", J::array()},
+    {"next_scenario", 0}, {"finished_scenarios", 0}, {"completed_days", 0}, {"statistics", nullptr},
+    {"forecast_days", days+1}, {"sampler", "deterministic-cartesian-product-v1"},
+    {"limitations", {"确定性故障×来水×报价组合，不赋予发生概率。每个场景从相同初态独立滚动。", "来水/发电及储能报价倍数叠加基准；未改动可控负荷补偿报价。报价为合成假设。", "故障区间逐日重复，区间外恢复基准可用性；不是随机故障过程或全量N-1认证。", "交流复核不修正出清计划；研究账本不是正式结算，不包含实时偏差、合约、辅助服务或费用分摊。"}}};
+  // Cartesian experiment: execution contract, Fault/Inflow Study. Each scenario
+  // owns its carry; only the immutable authored boundary is shared.
+  for (const auto& fault : config.at("faults")) for (const auto& water : config.at("inflow_scales")) for (const auto& bid : config.at("bid_scales")) {
+    J operation = prototype.at("config");
+    operation["reference_days"] = operation.at("days");
+    for (int d = 0; d <= days; ++d) {
+      auto& change = operation["days"][d];
+      change["inflow_scale"] = change.at("inflow_scale").get<double>()*water.get<double>();
+      change["generator_bid_scale"] = change.at("generator_bid_scale").get<double>()*bid.get<double>();
+      // Availability overrides leave full-day inflow and quote multipliers intact.
+      if (d < fault.at("first_day").get<int>() || d > fault.at("last_day").get<int>()) continue;
+      for (const auto& [table, field] : {std::pair{"generators", "generator_outages"}, std::pair{"branches", "branch_outages"}}) {
+        check(fault.at(field).is_array(), "fault IDs must be arrays");
+        std::set<int> seen;
+        for (const auto& id : fault.at(field)) {
+          check(id.is_number_integer() && seen.insert(id.get<int>()).second, "fault IDs must be unique integers");
+          if (!change.contains("boundary_overrides")) change["boundary_overrides"] = J::array();
+          change["boundary_overrides"].push_back({{"table", table}, {"id", id}, {"field", "available"},
+            {"first_slot", fault.at("first_slot")}, {"last_slot", fault.at("last_slot")}, {"value", 0}, {"reason", fault.at("name")}});
+        }
+      }
+    }
+    J scenario = make_market_operation(boundary, operation); scenario.erase("base");
+    scenario["id"] = job["scenarios"].size(); scenario["fault"] = fault;
+    scenario["inflow_scale"] = water; scenario["bid_scale"] = bid;
+    scenario["name"] = fault.at("name").get<std::string>()+" / Q x"+water.dump()+" / bid x"+bid.dump();
+    job["scenarios"].push_back(std::move(scenario));
+  }
+  job["total_days"] = days*job["scenarios"].size();
+  return job;
+}
+
 J market_forecast_statistics(const J& job) {
   const int total = static_cast<int>(job.at("scenarios").size());
   check(total > 0, "statistics requires scenarios");
   const bool probability = job.at("config").at("mode") == "probabilistic";
+  const int calendar_days = job.at("scenarios")[0].at("total_days");
   J out = {{"mode", job.at("config").at("mode")}, {"total_scenarios", total}, {"complete_scenarios", 0},
     {"complete_scenarios_with_limit",0}, {"complete_scenarios_unproven",0},
     {"failed_scenarios", 0}, {"periods", J::array()}, {"nodes", J::array()}, {"lines", J::array()}, {"correlations", J::array()}};
@@ -193,7 +258,7 @@ J market_forecast_statistics(const J& job) {
   out["week_surplus_mwh"] = summary(surplus_energy, total, false);
   out["week_overload_mwh"] = summary(line_energy, total, false);
   // Per-slot trials are across independent weekly scenarios, never pooled over time.
-  for (int d = 0; d < 7; ++d) for (int t = 0; t < 96; ++t) {
+  for (int d = 0; d < calendar_days; ++d) for (int t = 0; t < 96; ++t) {
     std::vector<double> dp, dij;
     for (const auto& scenario : job.at("scenarios")) {
       if (scenario.at("days").size() <= static_cast<size_t>(d) || !scenario.at("days")[d].at("valid").get<bool>()) continue;
@@ -225,12 +290,22 @@ J market_forecast_statistics(const J& job) {
   for (const auto& factor : factors) {
     std::vector<double> input;
     for (const J* scenario : complete) {
-      double mean = 0; for (int d = 0; d < 7; ++d) mean += scenario->at("config").at("days")[d].at(factor).get<double>()/7;
+      double mean = 0; for (int d = 0; d < calendar_days; ++d) mean += scenario->at("config").at("days")[d].at(factor).get<double>()/calendar_days;
       input.push_back(mean);
     }
     out["correlations"].push_back({{"factor", factor}, {"valid_count", input.size()}, {"deficit_energy_pearson", pearson(input, deficit_energy)}, {"overload_integral_pearson", pearson(input, line_energy)}});
   }
   return out;
+}
+
+J explain_market_forecast_day(const J& previous, int scenario, int day, const std::string& pricing) {
+  check(scenario >= 0 && scenario < static_cast<int>(previous.at("scenarios").size()), "invalid explanation scenario");
+  check(previous.at("status") != "stale" && previous.at("status") != "cancelled", "job cannot be explained");
+  J job = previous;
+  J operation = job.at("scenarios").at(scenario); operation["base"] = job.at("base");
+  operation = explain_market_operation_day(operation, day, pricing); operation.erase("base");
+  job["scenarios"][scenario] = std::move(operation);
+  return job;
 }
 
 J step_market_forecast(const J& previous) {

@@ -1,6 +1,7 @@
 /* Backend schema is authoritative for every Southern boundary control. */
 (() => {
   'use strict';
+  const marketCanvas = window.HySimMarketCanvas.forOwner("marketBoundary");
   const $ = id => document.getElementById(id);
   const state = { schema: null, boundary: null, revision: 0, latest: null, baseline: null, dirty: false, busy: false };
   function view(results) {
@@ -12,12 +13,9 @@
     if (!results && typeof Plotly !== 'undefined') Plotly.purge($('southernChart'));
   }
   const text = (tag, content) => { const el = document.createElement(tag); el.textContent = String(content); return el; };
-  const status = message => { $('southernStatus').textContent = message; $('southernToolbarStatus').textContent = message; window.HySimMarketCanvas.progress(message, false); };
+  const status = message => { $('southernStatus').textContent = message; marketCanvas.progress(message, false); };
   async function api(path, body) {
-    const response = await fetch(path, body ? { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) } : {});
-    const result = await response.json();
-    if (!response.ok) throw new Error(result.error || `HTTP ${response.status}`);
-    return result;
+    return window.HySimMarketActivity.request(path, body, { owner: 'marketBoundary' });
   }
   function pathGet(path) { return path.reduce((v, k) => v[k], state.boundary); }
   function pathSet(path, value) {
@@ -127,8 +125,14 @@
     } else target.append(renderValue(schema, [key], state.boundary[key]));
   }
   function render() {
-    if(state.boundary) { state.boundary.execution.solver ??= 'highs'; state.boundary.execution.threads ??= 0; }
-    window.HySimMarketCanvas.setBoundary(state.boundary, state.revision);
+    const mixedOption=$('southernCase').querySelector('option[value="ieee118_mixed"]');
+    mixedOption.disabled=!state.case_profiles?.includes('ieee118_mixed');
+    if(state.boundary) { state.boundary.execution.solver ??= 'highs'; state.boundary.execution.threads ??= 0; state.boundary.execution.row_presolve ??= 'none'; }
+    if(state.boundary && state.schema?.properties.execution.properties.native_root_cuts)
+      state.boundary.execution.native_root_cuts ??= state.schema.properties.execution.properties.native_root_cuts.default;
+    if(state.boundary && state.schema?.properties.execution.properties.large_mip_strategy)
+      state.boundary.execution.large_mip_strategy ??= 'auto';
+    marketCanvas.setBoundary(state.boundary, state.revision);
     const category = $('southernCategory'); const current = category.value; category.replaceChildren();
     if (!state.schema || !state.boundary) { $('southernEditor').replaceChildren(); return; }
     Object.entries(state.schema.properties).forEach(([key, schema]) => {
@@ -191,17 +195,17 @@
     const period = document.createElement('input'); period.className = 'southern-input'; period.type = 'number'; period.min = '1'; period.max = '98'; period.value = '1'; period.step = '1'; period.setAttribute('aria-label', '结果时点');
     const detail = document.createElement('div');
     const fieldLabels = { id: 'ID', name: '名称', bus: '母线', power_mw: '出力 MW', online: '开机', start: '启动', stop: '停机', hot_start: '热态启动',
-      warm_start: '温态启动', cold_start: '冷态启动', trajectory_mw: '启停轨迹 MW', renewable_deviation_mw: '新能源偏差 MW',
+      warm_start: '温态启动', cold_start: '冷态启动', trajectory_mw: '启停轨迹 MW', renewable_deviation_mw: '新能源偏差 MW', primary_reserve_mw: '一次调频备用 MW',
       discharge_mw: '放电 MW', charge_mw: '充电 MW', energy_mwh: '能量 MWh', slack_plus_mw: '正松弛 MW', slack_minus_mw: '负松弛 MW',
       up: '上调', down: '下调', overload_mw: '有功越限 MW', node_imbalance_mw: '节点平衡残差 MW', reduction_mw: '负荷削减 MW', kind: '类型', level_m: '水位 m', spill_m3_s: '泄洪 m³/s', release_m3_s: '下泄 m³/s', priority_shortfall_mwh: '优先电量缺口 MWh', lmp_per_mwh: '电价 元/MWh' };
     const draw = () => {
       const rows = result[stage.value]?.[category.value] || []; const t = Math.max(0, Math.min(97, Number(period.value) - 1));
-      window.HySimMarketCanvas.southern(state.boundary, result, stage.value, t);
+      marketCanvas.southern(state.boundary, result, stage.value, t);
       detail.replaceChildren(); if (!rows.length) { detail.append(text('p', '该类别无交易单元')); return; }
       const fields = Object.keys(rows[0]);
       detail.append(table(fields.map(f => fieldLabels[f] || f), rows.map(row => fields.map(f => {
         const v = Array.isArray(row[f]) ? row[f][t] : row[f];
-        if (f === 'id' && ['buses','branches','generators','storage','controllable_loads','reservoirs','dc_links'].includes(category.value)) return window.HySimMarketCanvas.link(category.value, v);
+        if (f === 'id' && ['buses','branches','generators','storage','controllable_loads','reservoirs','dc_links'].includes(category.value)) return marketCanvas.link(category.value, v);
         return typeof v === 'number' ? Number(v.toFixed(6)) : v;
       }))));
     };
@@ -217,12 +221,22 @@
     target.append(audit);
     if (result.lmp?.prices_valid && !$('southernChart').hidden && typeof Plotly !== 'undefined') {
       const style = getComputedStyle(document.documentElement);
-      const traces = result.lmp.buses.length > 80 ? result.lmp.buses.slice(0, 80) : result.lmp.buses;
-      Plotly.newPlot($('southernChart'), traces.map(b => ({ name: `${b.id} ${b.name}`, x: Array.from({ length: 96 }, (_, i) => i / 4), y: b.lmp_per_mwh.slice(0, 96), mode: 'lines', type: 'scatter' })),
-        { title: '运行日节点电价', font: { color: style.getPropertyValue('--ink').trim(), size: 11 },
+      const buses = result.lmp.buses, x = Array.from({ length: 96 }, (_, i) => i / 4);
+      const ordered = x.map((_,t) => buses.map(b=>b.lmp_per_mwh[t]).filter(Number.isFinite).sort((a,b)=>a-b));
+      const pick = q => ordered.map(v=>v.length ? v[Math.max(0,Math.ceil(q*v.length)-1)] : null);
+      const bus = document.createElement('select'); bus.id='southernPriceBus';bus.setAttribute('aria-label','电价曲线节点');
+      buses.forEach(b=>{const o=text('option',`${b.id} ${b.name}`);o.value=b.id;bus.append(o);});
+      const label=text('label','电价曲线节点');label.append(bus);target.append(label);
+      const drawPrices = () => Plotly.react($('southernChart'), [
+        {x,y:pick(0),name:'全部节点最低价',mode:'lines',line:{width:0},hoverinfo:'skip'},
+        {x,y:pick(1),name:'全部节点价格范围',mode:'lines',fill:'tonexty',fillcolor:'rgba(33,156,166,0.14)',line:{width:0}},
+        {x,y:ordered.map(v=>v.length ? (v[Math.floor((v.length-1)/2)]+v[Math.floor(v.length/2)])/2 : null),name:'节点中位价',mode:'lines',line:{color:'#219ca6',width:2}},
+        {x,y:buses.find(b=>String(b.id)===bus.value)?.lmp_per_mwh.slice(0,96),name:`节点 ${bus.value}`,mode:'lines',line:{color:'#d99b32',width:2}}
+      ], { title: `运行日节点电价 · ${buses.length} 节点`, font: { color: style.getPropertyValue('--ink').trim(), size: 11 },
           xaxis: { title: '小时', gridcolor: style.getPropertyValue('--border').trim() },
           yaxis: { title: '元 / MWh', gridcolor: style.getPropertyValue('--border').trim() },
-          margin: { t: 40, l: 65, r: 20, b: 45 }, paper_bgcolor: 'transparent', plot_bgcolor: 'transparent' }, { responsive: true });
+          legend:{orientation:'h',y:-.25},margin: { t: 40, l: 65, r: 20, b: 70 }, paper_bgcolor: 'transparent', plot_bgcolor: 'transparent' }, { responsive: true });
+      bus.onchange=drawPrices;drawPrices();
     }
   }
   async function load() {
@@ -260,9 +274,8 @@
       try { await fn(); } catch (e) { status(e.message); } finally { state.busy = false; }
     });
   }
-  bind('btnSouthernOpen', async () => { await load(); $('southernMarketWorkspace').scrollIntoView({ block: 'nearest' }); });
   bind('southernBoundaryView', () => view(false)); bind('southernResultView', () => { view(true); renderResults(state.latest); });
-  bind('btnSouthernRun', run); bind('southernLoad', load);
+  bind('southernLoad', load);
   bind('southernRunSaved', run);
   bind('southernExample', async () => { if (!state.schema) await load(); await action('example'); });
   bind('southernLoadCase', async () => {
@@ -311,7 +324,7 @@
       if (position == null || position < 0) return;
       view(false); $('southernCategory').value = type; renderEntities();
       $('southernEntity').value = position; renderEditor();
-      window.HySimMarketCanvas.select(`${type}:${id}`);
+      marketCanvas.select(`${type}:${id}`);
     } catch (e) { status(e.message); }
   });
   const openDirect = () => {

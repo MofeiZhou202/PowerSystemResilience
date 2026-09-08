@@ -59,6 +59,14 @@ if(UNIX)
   add_executable(run_southern_market_benchmark run_southern_market_benchmark.cpp)
   target_link_libraries(run_southern_market_benchmark PRIVATE hacdcpf)
   target_compile_definitions(run_southern_market_benchmark PRIVATE HACDCPF_TEST_DATA_DIR="${CMAKE_SOURCE_DIR}/data")
+  hacdcpf_copy_opendss_runtime(run_southern_market_benchmark)
+  option(HACDCPF_ENABLE_MARKET_SCALE_TESTS "Run licensed Gurobi 2000-bus market benchmarks" OFF)
+  if(HACDCPF_ENABLE_MARKET_SCALE_TESTS)
+    add_test(NAME southern_market_2000_benchmark COMMAND run_southern_market_benchmark
+      2000 "${CMAKE_BINARY_DIR}/market-performance-2000.json" 600 compact)
+    set_tests_properties(southern_market_2000_benchmark PROPERTIES
+      LABELS "market;performance;gurobi" TIMEOUT 2400 RUN_SERIAL TRUE)
+  endif()
 endif()
 hacdcpf_add_test(test_market_forecast test_market_forecast.cpp)
 hacdcpf_add_test(test_integrated_energy_campus test_integrated_energy_campus.cpp)
@@ -737,6 +745,16 @@ if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/run_gui_server.cpp")
 
   find_package(Python3 COMPONENTS Interpreter QUIET)
   if(Python3_Interpreter_FOUND)
+    add_test(NAME market_bid_empirical_unit
+      COMMAND "${Python3_EXECUTABLE}"
+              "${CMAKE_SOURCE_DIR}/tests/test_market_bid_empirical.py")
+    set_tests_properties(market_bid_empirical_unit PROPERTIES
+      LABELS "market;empirical" TIMEOUT 30)
+    add_test(NAME market_independent_audit_unit
+      COMMAND "${Python3_EXECUTABLE}"
+              "${CMAKE_SOURCE_DIR}/tests/test_market_independent_audit.py")
+    set_tests_properties(market_independent_audit_unit PROPERTIES
+      LABELS "market;empirical" TIMEOUT 30)
     add_test(NAME runtime_api_v1_e2e
       COMMAND "${Python3_EXECUTABLE}"
               "${CMAKE_SOURCE_DIR}/tools/runtime_api_v1_e2e.py"
@@ -889,12 +907,36 @@ if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/run_gui_server.cpp")
                 --server "$<TARGET_FILE:run_gui_server>")
       set_tests_properties(market_gui_e2e PROPERTIES
         LABELS "gui;e2e;browser;market" TIMEOUT 180)
+      add_test(NAME market_workflow_e2e
+        COMMAND "${HACDCPF_NODE_EXECUTABLE}"
+                "${CMAKE_SOURCE_DIR}/tests/e2e/market_workflow_e2e.mjs"
+                --server "$<TARGET_FILE:run_gui_server>")
+      set_tests_properties(market_workflow_e2e PROPERTIES
+        LABELS "gui;e2e;browser;market" TIMEOUT 240)
+      add_test(NAME market_activity_e2e
+        COMMAND "${HACDCPF_NODE_EXECUTABLE}"
+                "${CMAKE_SOURCE_DIR}/tests/e2e/market_activity_e2e.mjs"
+                --server "$<TARGET_FILE:run_gui_server>")
+      set_tests_properties(market_activity_e2e PROPERTIES
+        LABELS "gui;e2e;browser;market" TIMEOUT 180)
       add_test(NAME southern_market_e2e
         COMMAND "${HACDCPF_NODE_EXECUTABLE}"
                 "${CMAKE_SOURCE_DIR}/tests/e2e/southern_market_e2e.mjs"
                 --server "$<TARGET_FILE:run_gui_server>")
       set_tests_properties(southern_market_e2e PROPERTIES
         LABELS "gui;e2e;browser;market" TIMEOUT 180)
+      add_test(NAME yunnan_ancillary_e2e
+        COMMAND "${HACDCPF_NODE_EXECUTABLE}"
+                "${CMAKE_SOURCE_DIR}/tests/e2e/yunnan_ancillary_e2e.mjs"
+                --server "$<TARGET_FILE:run_gui_server>")
+      set_tests_properties(yunnan_ancillary_e2e PROPERTIES
+        LABELS "gui;e2e;browser;market" TIMEOUT 240)
+      add_test(NAME southern_realtime_e2e
+        COMMAND "${HACDCPF_NODE_EXECUTABLE}"
+                "${CMAKE_SOURCE_DIR}/tests/e2e/southern_realtime_e2e.mjs"
+                --server "$<TARGET_FILE:run_gui_server>")
+      set_tests_properties(southern_realtime_e2e PROPERTIES
+        LABELS "gui;e2e;browser;market" TIMEOUT 300)
       add_test(NAME market_operation_e2e
         COMMAND "${HACDCPF_NODE_EXECUTABLE}"
                 "${CMAKE_SOURCE_DIR}/tests/e2e/market_operation_e2e.mjs"
@@ -907,6 +949,49 @@ if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/run_gui_server.cpp")
                 --server "$<TARGET_FILE:run_gui_server>")
       set_tests_properties(market_forecast_e2e PROPERTIES
         LABELS "gui;e2e;browser;market" TIMEOUT 300)
+      add_test(NAME market_ieee118_e2e
+        COMMAND "${HACDCPF_NODE_EXECUTABLE}"
+                "${CMAKE_SOURCE_DIR}/tests/e2e/market_ieee118_e2e.mjs"
+                --server "$<TARGET_FILE:run_gui_server>")
+      set_tests_properties(market_ieee118_e2e PROPERTIES
+        LABELS "gui;e2e;browser;market;system" TIMEOUT 1800 RUN_SERIAL TRUE)
+      add_test(NAME market_ieee118_row_presolve_e2e
+        COMMAND "${HACDCPF_NODE_EXECUTABLE}"
+                "${CMAKE_SOURCE_DIR}/tests/e2e/market_ieee118_e2e.mjs"
+                --server "$<TARGET_FILE:run_gui_server>" --row-presolve)
+      set_tests_properties(market_ieee118_row_presolve_e2e PROPERTIES
+        LABELS "gui;e2e;browser;market;system" TIMEOUT 1800 RUN_SERIAL TRUE)
+      add_test(NAME market_ieee118_native_e2e
+        COMMAND "${HACDCPF_NODE_EXECUTABLE}"
+                "${CMAKE_SOURCE_DIR}/tests/e2e/market_ieee118_e2e.mjs"
+                --server "$<TARGET_FILE:run_gui_server>" --solver native)
+      set_tests_properties(market_ieee118_native_e2e PROPERTIES
+        LABELS "gui;e2e;browser;market;system;native" TIMEOUT 1800 RUN_SERIAL TRUE)
+      add_test(NAME market_ieee118_mixed_e2e
+        COMMAND "${HACDCPF_NODE_EXECUTABLE}" "${CMAKE_SOURCE_DIR}/tests/e2e/market_ieee118_e2e.mjs"
+                --server "$<TARGET_FILE:run_gui_server>" --mixed)
+      set_tests_properties(market_ieee118_mixed_e2e PROPERTIES
+        LABELS "gui;e2e;browser;market;system" TIMEOUT 1800 RUN_SERIAL TRUE)
+      add_test(NAME market_canvas_layout_e2e
+        COMMAND "${HACDCPF_NODE_EXECUTABLE}" "${CMAKE_SOURCE_DIR}/tests/e2e/market_canvas_layout_e2e.mjs"
+                --server "$<TARGET_FILE:run_gui_server>")
+      set_tests_properties(market_canvas_layout_e2e PROPERTIES
+        LABELS "gui;e2e;browser;market" TIMEOUT 180 RUN_SERIAL TRUE)
+      add_test(NAME market_ieee118_resources_e2e
+        COMMAND "${HACDCPF_NODE_EXECUTABLE}" "${CMAKE_SOURCE_DIR}/tests/e2e/market_ieee118_resources_e2e.mjs"
+                --server "$<TARGET_FILE:run_gui_server>")
+      set_tests_properties(market_ieee118_resources_e2e PROPERTIES
+        LABELS "gui;e2e;market;system" TIMEOUT 3600 RUN_SERIAL TRUE)
+      add_test(NAME market_study_e2e
+        COMMAND "${HACDCPF_NODE_EXECUTABLE}" "${CMAKE_SOURCE_DIR}/tests/e2e/market_study_e2e.mjs"
+                --server "$<TARGET_FILE:run_gui_server>")
+      set_tests_properties(market_study_e2e PROPERTIES
+        LABELS "gui;e2e;browser;market;system" TIMEOUT 1800 RUN_SERIAL TRUE)
+      add_test(NAME market_ieee118_generic_e2e
+        COMMAND "${HACDCPF_NODE_EXECUTABLE}" "${CMAKE_SOURCE_DIR}/tests/e2e/market_gui_e2e.mjs"
+                --server "$<TARGET_FILE:run_gui_server>" --builtin market_ieee118)
+      set_tests_properties(market_ieee118_generic_e2e PROPERTIES
+        LABELS "gui;e2e;browser;market;system" TIMEOUT 1800 RUN_SERIAL TRUE)
     endif()
 
     add_test(NAME rpo_gui_e2e

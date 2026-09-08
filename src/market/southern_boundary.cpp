@@ -221,9 +221,17 @@ J southern_market_schema() {
   auto& required = schema["required"];
   schema["properties"]["execution"]["properties"]["balance_policy"] = choice("节点平衡策略", {"strict", "diagnostic"});
   schema["properties"]["execution"]["properties"]["balance_penalty_per_mwh"] = number("诊断缺额/富余罚价", "CNY/MWh", 1, 1e7);
-  schema["properties"]["execution"]["properties"]["solver"] = choice("市场求解器", {"highs", "gurobi"});
+  schema["properties"]["execution"]["properties"]["solver"] = choice("市场求解器", {"highs", "gurobi", "native"});
   schema["properties"]["execution"]["properties"]["threads"] = integer("Gurobi线程数（0自动；HiGHS须0）",0,128);
   schema["properties"]["execution"]["properties"]["formulation"] = choice("等价建模形式", {"compact", "reference"});
+  schema["properties"]["execution"]["properties"]["gurobi_method"] = choice("Gurobi 调度算法（定价使用固定策略）", {"auto", "solver_default", "barrier", "dual_simplex"});
+  schema["properties"]["execution"]["properties"]["large_mip_strategy"] = choice("大型整数模型求解", {"auto", "reference", "certified_repair"});
+  schema["properties"]["execution"]["properties"]["reservoir_scaling"] = choice("水位数值尺度", {"auto", "original"});
+  schema["properties"]["execution"]["properties"]["mip_start"] = choice("可行初解", {"auto", "enabled", "none"});
+  schema["properties"]["execution"]["properties"]["row_presolve"] = choice("边界冗余约束裁剪", {"none", "enabled"});
+  schema["properties"]["execution"]["properties"]["assembly_mode"] = choice("模型装配路径", {"cached", "reference", "verify"});
+  schema["properties"]["execution"]["properties"]["native_root_cuts"] = choice("Native 根节点割策略（enhanced 为实验）", {"default", "enhanced"});
+  schema["properties"]["execution"]["properties"]["native_root_cuts"]["default"] = "default";
   required.erase(std::remove(required.begin(), required.end(), J("controllable_loads")), required.end());
   auto& bus_properties = schema["properties"]["buses"]["items"]["properties"];
   bus_properties["gs_mw"] = number("并联电导额定损耗", "MW", 0);
@@ -285,6 +293,23 @@ J validate_southern_market(const J& boundary) {
   if (!effective["execution"].contains("solver")) effective["execution"]["solver"] = "highs";
   if (!effective["execution"].contains("threads")) effective["execution"]["threads"] = 0;
   if (!effective["execution"].contains("formulation")) effective["execution"]["formulation"] = "compact";
+  if (!effective["execution"].contains("gurobi_method")) effective["execution"]["gurobi_method"] = "auto";
+  if (!effective["execution"].contains("reservoir_scaling")) effective["execution"]["reservoir_scaling"] = "auto";
+  if (!effective["execution"].contains("mip_start")) effective["execution"]["mip_start"] = "auto";
+  if (!effective["execution"].contains("large_mip_strategy")) effective["execution"]["large_mip_strategy"] = "auto";
+  require(effective["execution"]["large_mip_strategy"]!="certified_repair" ||
+    (effective["execution"]["solver"]=="gurobi" && effective["execution"]["formulation"]=="compact" &&
+      effective["execution"]["mip_gap"].get<double>()>0),"execution","certified_repair requires compact Gurobi with positive mip_gap");
+  if (!effective["execution"].contains("row_presolve")) effective["execution"]["row_presolve"] = "none";
+  if (!effective["execution"].contains("native_root_cuts")) effective["execution"]["native_root_cuts"] = "default";
+  require(effective["execution"]["solver"] == "native" || effective["execution"]["native_root_cuts"] == "default",
+    "execution", "enhanced native_root_cuts requires native solver");
+  require(effective["execution"]["row_presolve"] != "enabled" || effective["execution"]["formulation"] == "compact",
+    "execution", "row_presolve requires compact formulation");
+  require(effective["execution"]["solver"] == "gurobi" || effective["execution"]["mip_start"] != "enabled",
+    "execution", "explicit mip_start requires gurobi");
+  require(effective["execution"]["solver"] == "gurobi" || effective["execution"]["gurobi_method"] == "auto",
+    "execution", "explicit gurobi_method requires gurobi");
   require(effective["execution"]["solver"] == "gurobi" || effective["execution"]["threads"] == 0,
     "execution", "nonzero threads currently requires gurobi");
   if (!effective.contains("controllable_loads")) effective["controllable_loads"] = J::array();
@@ -458,12 +483,18 @@ J make_southern_market_example() {
   j["execution"] = {{"interpretation", "explicit-time-incremental-bids-si-water-v1"}, {"priority_policy", "hard"},
     {"lmp_storage_policy", "power_neighborhood_only"}, {"lmp_renewable_priority", "omit_unlisted"},
     {"penalties", {10000, 1000, 1000, 10000}}, {"pricing_penalties", {12000, 1200, 1200, 12000}},
-    {"price_delta", 0.05}, {"time_limit_sec", 120}, {"mip_gap", 0}, {"solver","highs"}, {"threads",0}, {"ac_security", "required"}, {"security_iterations", 4}};
+    {"price_delta", 0.05}, {"time_limit_sec", 120}, {"mip_gap", 0.01}, {"solver","highs"}, {"threads",0}, {"ac_security", "required"}, {"security_iterations", 4}};
   validate_southern_market(j);
   return j;
 }
 
 J southern_market_from_system(const HybridPowerSystem& system, bool augment_research_resources) {
+  return southern_market_from_system(system, augment_research_resources, -1);
+}
+
+J southern_market_from_system(const HybridPowerSystem& system, bool augment_research_resources, int thermal_limit) {
+  require(thermal_limit >= -1, "thermal_limit", "must be -1 (all) or a nonnegative count");
+  require(thermal_limit == -1 || augment_research_resources, "thermal_limit", "thermal reduction requires an explicit synthetic research case");
   // Conversion is deliberately limited to explicit AC buses, branches, loads,
   // and generators. Missing market declarations must remain visible inputs.
   require(system.dc.buses.empty() && system.vsc_converters.empty() && system.lcc_converters.empty(), "system", "hybrid assets require explicit Southern gateway/boundary authoring");
@@ -507,13 +538,27 @@ J southern_market_from_system(const HybridPowerSystem& system, bool augment_rese
     row["qmin_mvar"] = g.qmin_mvar; row["qmax_mvar"] = g.qmax_mvar; row["voltage_pu"] = g.vg_pu;
     j["generators"].push_back(row);
   }
+  // Synthetic fleet change, not an equivalent aggregation. Preserve stable IDs
+  // and full capacity of selected units; see reduced-fleet execution contract.
+  const J imported_generators = j["generators"];
+  if (thermal_limit >= 0) {
+    auto ranked = j["generators"].get<std::vector<J>>();
+    std::stable_sort(ranked.begin(), ranked.end(), [](const J& a, const J& b) {
+      const double pa = a.at("pmax_mw")[0], pb = b.at("pmax_mw")[0];
+      return pa != pb ? pa > pb : a.at("id").get<int>() < b.at("id").get<int>();
+    });
+    std::set<int> kept;
+    for (size_t i = 0; i < std::min(ranked.size(), static_cast<size_t>(thermal_limit)); ++i) kept.insert(ranked[i].at("id").get<int>());
+    auto& rows = j["generators"];
+    rows.erase(std::remove_if(rows.begin(), rows.end(), [&](const J& g) { return !kept.count(g.at("id")); }), rows.end());
+  }
   if (augment_research_resources) {
   require(!j["buses"].empty(), "system", "research case requires active buses");
   // Large-system research augmentation: preserve every imported unit and add
   // explicitly synthetic renewable/hydro units to exercise the full market
   // boundary. Stable IDs are outside the source case's authored range.
   const std::vector<int> bus_ids = [&] { std::vector<int> ids; for (const auto& b : j["buses"]) ids.push_back(b.at("id")); return ids; }();
-  const int next_gen = j["generators"].empty() ? 1 : (*std::max_element(j["generators"].begin(), j["generators"].end(), [](const J& a, const J& b) { return a.at("id") < b.at("id"); })).at("id").get<int>() + 1;
+  const int next_gen = imported_generators.empty() ? 1 : (*std::max_element(imported_generators.begin(), imported_generators.end(), [](const J& a, const J& b) { return a.at("id") < b.at("id"); })).at("id").get<int>() + 1;
   const bool large = j["buses"].size() >= 2000;
   const int add_wind = large ? 240 : 1, add_solar = large ? 240 : 1, add_hydro = large ? 720 : 4;
   for (int k = 0; k < add_wind + add_solar + add_hydro; ++k) {
@@ -568,6 +613,12 @@ J southern_market_from_system(const HybridPowerSystem& system, bool augment_rese
   }
   j["name"] = large ? "ACTIVSg2000 水电扩展研究边界" : "南方多资源两节点演示";
   j["source"] = "Synthetic market boundary and offers; not Southern grid data. Shared reservoir / cascade extension.";
+  if (thermal_limit >= 0) {
+    const size_t retained = j["generators"].size() - add_wind - add_solar - add_hydro;
+    j["name"] = "ACTIVSg2000 水电主导 / 火电 " + std::to_string(retained) + " 台";
+    j["source"] = j["source"].get<std::string>() + " Thermal fleet reduced from " + std::to_string(imported_generators.size()) +
+      " to " + std::to_string(retained) + " by descending nameplate capacity, ID tie-break. Omitted units removed, not aggregated; demand unchanged.";
+  }
   j["execution"]["ac_security"] = "schedule_only";
   }
   for (const auto& b : system.ac.branches) {
@@ -596,5 +647,174 @@ J make_southern_market_demo() {
   line.x_pu = 0.1; line.r_pu = 0.01; line.rate_a_mva = 80; line.tap = 1;
   system.ac.branches.push_back(line);
   return southern_market_from_system(system, true);
+}
+
+J make_southern_market_ieee118(const HybridPowerSystem& system) {
+  require(system.ac.buses.size() == 118 && system.ac.branches.size() == 186 &&
+    system.ac.generators.size() == 54, "ieee118", "requires the 118-bus / 186-branch / 54-generator MATPOWER case118 network");
+  HybridPowerSystem network = system;
+  // MATPOWER creates fixed Transformer2W metadata alongside the exact pi branch.
+  // Only matching aliases can be collapsed; retain the branch tap/shift/r/x.
+  for (const auto& transformer : network.ac.transformers_2w) {
+    const auto line = std::find_if(network.ac.branches.begin(),network.ac.branches.end(),
+      [&](const auto& b) { return b.index == transformer.source_branch_idx; });
+    require(line != network.ac.branches.end(), "ieee118", "transformer must reference its original AC branch");
+    const auto same = [](double a, double b) { return std::abs(a-b) <= 1e-9*std::max({1.0,std::abs(a),std::abs(b)}); };
+    require(transformer.hv_bus == line->from_bus && transformer.lv_bus == line->to_bus &&
+      transformer.in_service == line->in_service && transformer.tap_step_percent == 0 &&
+      transformer.tap_min == 0 && transformer.tap_max == 0 && transformer.tap_pos == 0 &&
+      same(transformer.shift_deg,line->shift_deg) &&
+      same(transformer.vkr_percent,line->r_pu*transformer.sn_mva/system.base_mva*100) &&
+      same(transformer.vk_percent,std::hypot(line->r_pu,line->x_pu)*transformer.sn_mva/system.base_mva*100),
+      "ieee118", "only unchanged fixed branch-backed transformer metadata is supported");
+  }
+  network.ac.transformers_2w.clear();
+  J j = southern_market_from_system(network, true);
+  j["name"] = "IEEE 118 多资源市场测试（合成边界）";
+  j["source"] = "MATPOWER case118 / IEEE CDF network; synthetic energy offers, commitment history, wind/solar, hydro, storage, demand response and 200 MW line limits. Original generator records, including synchronous condensers, use synthetic dispatchable capability assumptions; not actual plant classifications or Southern grid data.";
+  // Fixture contract: IEEE 118 system validation in southern_execution_contract.md.
+  // Source case118 omits usable thermal ratings. These are declared stress-test
+  // limits, not inferred AC ampacities; network r/x/tap/shift and IDs are retained.
+  for (auto& line : j["branches"]) {
+    line["source"] = "IEEE 118 electrical parameters; synthetic symmetric 200 MW / 200 MVA research limit";
+    line["min_mw"] = constant(-200); line["max_mw"] = constant(200); line["rate_mva"] = constant(200);
+  }
+  for (auto& g : j["generators"]) if (g["kind"] != "thermal")
+    g["source"] = "synthetic multi-resource augmentation on IEEE 118 network";
+  for (auto& load : j["controllable_loads"])
+    load["source"] = "synthetic 20 MW compensated interruption on IEEE 118 network";
+  auto& reservoir = j["reservoirs"][0];
+  const J members = reservoir["generators"];
+  reservoir["generators"] = {members[0],members[1]};
+  reservoir["name"] = "Synthetic IEEE 118 upstream reservoir";
+  reservoir["source"] = "synthetic two-unit reservoir in a two-reservoir cascade";
+  reservoir["max_mwh"] = 360*24;
+  J downstream = reservoir;
+  downstream["id"] = 2; downstream["upstream"] = 1;
+  downstream["name"] = "Synthetic IEEE 118 downstream reservoir";
+  downstream["generators"] = {members[2],members[3]};
+  j["reservoirs"].push_back(downstream);
+  j["execution"]["ac_security"] = "schedule_only";
+  return validate_southern_market(j);
+}
+
+J make_southern_market_ieee118_mixed(const HybridPowerSystem& system) {
+  J j = make_southern_market_ieee118(system);
+  const J wind = j["generators"][54], solar = j["generators"][55];
+  const J reservoir = j["reservoirs"][0], storage = j["storage"][0], load = j["controllable_loads"][0];
+  j["generators"].erase(j["generators"].begin()+54,j["generators"].end());
+  j["reservoirs"] = J::array(); j["storage"] = J::array(); j["controllable_loads"] = J::array();
+  std::vector<int> ids;
+  for (const auto& g : j["generators"]) ids.push_back(g.at("id"));
+  std::sort(ids.begin(),ids.end());
+  std::map<int,size_t> rank;
+  for (size_t k=0;k<ids.size();++k) rank[ids[k]]=k;
+  std::vector<int> hydro;
+  std::map<int,double> capacity;
+  // Synthetic fleet contract, southern_execution_contract.md, Mixed IEEE118.
+  // Stable-ID rank assigns 2 hydro / 1 thermal without altering source Pmax.
+  for (auto& g : j["generators"]) {
+    const int id=g.at("id"); const size_t k=rank.at(id); const bool water=k%3!=2;
+    const double cap=g["pmax_mw"][0]; capacity[id]=cap;
+    g["kind"]=water?"hydro":"thermal";
+    g["name"]=std::string("IEEE118 ")+(water?"hydro ":"thermal ")+std::to_string(id);
+    g["source"]="synthetic fuel assignment; original IEEE118 ID, bus and P/Q capabilities retained, including condenser research assumptions";
+    g["min_up_minutes"]=water?0:60; g["min_down_minutes"]=water?0:60;
+    g["ramp_up_mw_min"]=cap/(water?5:30); g["ramp_down_mw_min"]=cap/(water?5:30);
+    g["startup_cost"]=water?J{0,0,0}:J{500,500,500};
+    const double price=water?35+3*(k%6):180+3*k;
+    g["segments"]={{{"quantity_mw",cap*.4},{"price_per_mwh",price}},
+      {{"quantity_mw",cap*.35},{"price_per_mwh",price+(water?10:40)}},
+      {{"quantity_mw",cap*.25},{"price_per_mwh",price+(water?20:100)}}};
+    if(water)hydro.push_back(id);
+  }
+  std::sort(hydro.begin(),hydro.end());
+  for(int k=0;k<12;++k) {
+    J h=reservoir; J members=J::array(); double cap=0;
+    for(int m=0;m<3;++m){const int id=hydro.at(3*k+m);members.push_back(id);cap+=capacity.at(id);}
+    h["id"]=k+1;h["generators"]=members;h["upstream"]=k%3?k:-1;
+    h["name"]="IEEE118 basin "+std::to_string(k/3+1)+" reservoir "+std::to_string(k+1);
+    h["source"]="synthetic constant-area shared reservoir; four independent three-reservoir cascades";
+    h["area_m2"]=1e7;h["physical_min_m"]=95;h["physical_max_m"]=105;
+    h["min_level_m"]=constant(95);h["max_level_m"]=constant(105);
+    h["inflow_m3_s"]=constant(cap*(k%3?.15:.5));h["max_mwh"]=cap*24*.75;
+    j["reservoirs"].push_back(std::move(h));
+  }
+  const int resource_buses[]={8,26,49,65,89,100};
+  const int load_buses[]={1,15,54,59,80,90};
+  for(int k=0;k<12;++k) {
+    const bool is_wind=k<6; const double cap=is_wind?80:100;
+    J g=is_wind?wind:solar; const int id=ids.back()+1+k;
+    g["id"]=id;g["bus"]=resource_buses[k%6];
+    g["name"]=std::string("IEEE118 ")+(is_wind?"wind ":"solar ")+std::to_string(id);
+    g["pmax_mw"]=constant(cap);g["max_curtailment_mw"]=constant(cap);
+    g["segments"]={{{"quantity_mw",cap},{"price_per_mwh",is_wind?5:8}}};
+    for(int t=0;t<kT;++t) {
+      const double hour=j["periods"][t]["start_minute"].get<double>()/60;
+      g["forecast_mw"][t]=cap*(is_wind?.45+.15*std::cos(2*std::acos(-1)*hour/24+k*.4)
+        :std::max(0.0,std::sin(std::acos(-1)*(std::fmod(hour,24)-6)/12)));
+    }
+    j["generators"].push_back(std::move(g));
+  }
+  for(int k=0;k<6;++k) {
+    J s=storage;s["id"]=k+1;s["bus"]=resource_buses[k];
+    s["name"]="IEEE118 storage "+std::to_string(k+1);s["source"]="synthetic 20 MW / 80 MWh, 0.9 charge/discharge efficiency";
+    j["storage"].push_back(std::move(s));
+    J d=load;d["id"]=k+1;d["bus"]=load_buses[k];
+    d["name"]="IEEE118 controllable load "+std::to_string(k+1);
+    d["compensation_per_mwh"]=constant(400+20*k);d["max_day_reduction_mwh"]=80;
+    j["controllable_loads"].push_back(std::move(d));
+  }
+  // A zero-mean sinusoid preserves original daily demand energy at 96 points.
+  for(const auto* table:{"areas","buses"})for(auto& row:j[table])for(int t=0;t<kT;++t) {
+    const double hour=j["periods"][t]["start_minute"].get<double>()/60;
+    const double factor=1+.15*std::sin(2*std::acos(-1)*(hour-7)/24);
+    row["load_mw"][t]=row["load_mw"][t].get<double>()*factor;
+    if(row.contains("q_load_mvar"))row["q_load_mvar"][t]=row["q_load_mvar"][t].get<double>()*factor;
+  }
+  j["name"]="IEEE 118 水火风光储与可控负荷（合成边界）";
+  j["source"]="IEEE118-mixed-v1: MATPOWER electrical network; synthetic 36 hydro + 18 thermal, 6 wind + 6 solar, 12 shared reservoirs in 4 cascades, 6 storage and 6 compensated loads. Source generator capabilities and IDs retained; fuel assignments, bids, load shape, inflows and 200 MW line limits are research assumptions, not actual Southern market data.";
+  return validate_southern_market(j);
+}
+
+HybridPowerSystem make_ieee118_market_system(const HybridPowerSystem& system) {
+  const J boundary=make_southern_market_ieee118_mixed(system);
+  HybridPowerSystem result=system;result.name="IEEE118 mixed market (synthetic)";
+  // Static engineering snapshot only. Reservoir states and compensated response
+  // are governed by the companion Southern boundary, not generic market SCED.
+  result.ac.transformers_2w.clear();
+  for(auto& bus:result.ac.buses)for(const auto& row:boundary["buses"])if(row["id"]==bus.index){
+    bus.pd_mw=row["load_mw"][0];bus.qd_mvar=row["q_load_mvar"][0];
+  }
+  for(auto& branch:result.ac.branches)branch.rate_a_mva=200;
+  std::map<int,Generator> originals;for(const auto& g:system.ac.generators)originals[g.index]=g;
+  result.ac.generators.clear();
+  for(const auto& row:boundary["generators"]) {
+    const int id=row["id"];Generator g=originals.count(id)?originals.at(id):Generator{};
+    g.index=id;g.bus=row["bus"];g.name=row["name"];g.pmin_mw=row["pmin_mw"][0];g.pmax_mw=row["pmax_mw"][0];
+    const std::string kind=row["kind"];
+    g.fuel_type=kind=="hydro"?FuelType::Hydro:kind=="thermal"?FuelType::Coal:kind=="wind"?FuelType::Wind:FuelType::Solar;
+    if(kind=="wind"||kind=="solar"){g.pmax_mw=row["forecast_mw"][0];g.pg_mw=0;}
+    g.cost_c2=0;g.cost_c1=row["segments"][0]["price_per_mwh"];g.cost_c0=0;
+    g.startup_cost=row["startup_cost"][0];g.min_up_time_hr=row["min_up_minutes"].get<double>()/60;
+    g.min_dn_time_hr=row["min_down_minutes"].get<double>()/60;
+    g.ramp_up_mw_min=row["ramp_up_mw_min"];g.ramp_dn_mw_min=row["ramp_down_mw_min"];
+    result.ac.generators.push_back(std::move(g));
+  }
+  for(const auto& row:boundary["storage"]) {
+    Storage s;s.index=row["id"];s.bus=row["bus"];s.name=row["name"];
+    s.p_rated_mw=s.pmax_mw=row["discharge_max_mw"];s.pmin_mw=-row["charge_max_mw"].get<double>();
+    s.e_rated_mwh=row["rated_mwh"];s.e_mwh=row["initial_mwh"];s.soc_init=s.e_mwh/s.e_rated_mwh;
+    s.eta_charge=s.eta_discharge=std::sqrt(row["roundtrip_efficiency"].get<double>());
+    s.charge_bid_price=row["charge_price"];s.discharge_bid_price=row["discharge_price"];
+    result.ac.storage.push_back(std::move(s));
+  }
+  for(const auto& row:boundary["controllable_loads"]) {
+    FlexibleLoad d;d.index=row["id"];d.bus=row["bus"];d.name=row["name"];
+    d.p_mw=d.flex_down_mw=row["max_reduction_mw"][0];d.flex_duration_h=4;
+    for(auto& bus:result.ac.buses)if(bus.index==d.bus)bus.pd_mw-=d.p_mw;
+    result.ac.flexible_loads.push_back(std::move(d));
+  }
+  return result;
 }
 }  // namespace hacdcpf::market

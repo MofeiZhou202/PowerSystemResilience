@@ -562,7 +562,7 @@
     return !!modal && modal.style.display !== 'none';
   }
 
-  function open() {
+  function open(requestedPath) {
     if (!modal || isOpen()) return;
     lastFocus = document.activeElement;
     modal.style.display = 'flex';
@@ -571,7 +571,9 @@
       .then(() => {
         renderNav('');
         searchEl.value = '';
-        if (!activePath) {
+        if (typeof requestedPath === 'string' && requestedPath) {
+          openDoc(requestedPath);
+        } else if (!activePath) {
           const path = defaultDocPath();
           if (path) openDoc(path);
         } else {

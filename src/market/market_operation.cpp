@@ -3,11 +3,13 @@
 #include <algorithm>
 #include <chrono>
 #include <cmath>
+#include <future>
 #include <map>
 #include <set>
 #include <stdexcept>
 #include <string>
 #include <tuple>
+#include <thread>
 
 namespace hacdcpf::market {
 namespace {
@@ -146,13 +148,72 @@ J carry_from(const J& input, const J& sced) {
 J summarize(const J& result) {
   J day = {{"status", result.at("status")}, {"valid", result.value("schedule_feasible", false)},
     {"diagnostic_prices_valid", result.value("prices_valid", false)}, {"runtime_sec", result.at("runtime_sec")},
+    {"validation_sec", result.value("validation_sec",J(nullptr))},
     {"stages", J::object()}, {"periods", J::array()}, {"nodes", J::array()}, {"lines", J::array()}};
   for (const auto* stage : {"scuc", "sced", "lmp"}) if (result.contains(stage)) {
-    for (const auto* field : {"solver", "requested_solver", "requested_time_limit_sec", "requested_mip_gap", "requested_threads", "solver_status", "mip_gap", "max_residual", "objective", "optimality_proven", "solution_quality", "limit_reached", "variables", "binary_variables", "runtime_sec", "assembly_sec", "audit_sec", "nonzeros", "formulation", "compact_units", "reconstructed_max_residual"})
+    for (const auto* field : {"solver", "requested_solver", "requested_time_limit_sec", "requested_mip_gap", "requested_threads", "solver_status", "mip_gap", "max_residual", "objective", "optimality_proven", "solution_quality", "limit_reached", "variables", "binary_variables", "runtime_sec", "assembly_sec", "audit_sec", "nonzeros", "formulation", "compact_units", "compact_storage", "projected_commitment_units", "reconstructed_max_residual", "lp_algorithm", "reservoir_scaling", "primal_start", "model_size", "native_diagnostics"})
+      day["stages"][stage][field] = result.at(stage).value(field, J(nullptr));
+    for (const auto* field : {"solve_wall_sec", "solution_export_sec", "assembly_template", "solver_timing", "price_consistency", "gap_certificate"})
       day["stages"][stage][field] = result.at(stage).value(field, J(nullptr));
   }
   if (!day["valid"].get<bool>()) { day["error"] = result.value("error", std::string("No feasible diagnostic schedule")); return day; }
   const auto& b = result.at("effective_boundary"); const auto& s = result.at("sced");
+  // Compact realized-day resource series, authored IDs and original units.
+  // Keep D+1 representatives out of displayed execution history (Mixed IEEE118).
+  day["resources"] = J::object();
+  const std::map<std::string,std::vector<std::string>> resource_fields = {
+    {"generators",{"power_mw","online","primary_reserve_mw"}}, {"storage",{"discharge_mw","charge_mw","energy_mwh"}},
+    {"reservoirs",{"level_m","spill_m3_s","release_m3_s"}}, {"controllable_loads",{"reduction_mw"}}};
+  for(const auto& [table,fields]:resource_fields) {
+    day["resources"][table]=J::array();
+    for(const auto& source:s.at(table)) {
+      J row={{"id",source.at("id")},{"name",source.at("name")}};
+      for(const auto& field:fields)row[field]=J(source.at(field).begin(),source.at(field).begin()+96);
+      day["resources"][table].push_back(std::move(row));
+    }
+  }
+  // Weekly Plan Results in southern_execution_contract.md: SCED 2.6.3.2--4.
+  // Signed reserve contributions are constraint terms, not reserve awards.
+  const auto generator_inputs = index(b.at("generators"));
+  const auto bus_inputs = index(b.at("buses"));
+  for (auto& g : day["resources"]["generators"]) {
+    const auto& input = *generator_inputs.at(g.at("id"));
+    g["kind"] = input.at("kind"); g["bus"] = input.at("bus");
+    g["area"] = bus_inputs.at(input.at("bus"))->at("area");
+    const bool renewable = input.at("kind") == "wind" || input.at("kind") == "solar" || input.at("kind") == "renewable";
+    for (const auto* field : {"reserve_up_contribution_mw", "reserve_down_contribution_mw", "renewable_available_mw", "curtailment_mw", "utilization_percent"}) g[field] = J::array();
+    for (int t = 0; t < 96; ++t) {
+      const double p = slot(g,"power_mw",t), u = slot(g,"online",t);
+      g["reserve_up_contribution_mw"].push_back((slot(input,"reserve_up_eligible",t) != 0 ? (slot(input,"pmax_mw",t)-slot(input,"regulation_up_mw",t))*u : 0)-p);
+      g["reserve_down_contribution_mw"].push_back(p-(slot(input,"reserve_down_eligible",t) != 0 ? (slot(input,"pmin_mw",t)+slot(input,"regulation_down_mw",t))*u : 0));
+      const double available = renewable ? std::min(slot(input,"pmax_mw",t),slot(input,"forecast_mw",t))*slot(input,"available",t)*(1-slot(input,"must_off",t)) : 0;
+      g["renewable_available_mw"].push_back(renewable ? J(available) : J(nullptr));
+      g["curtailment_mw"].push_back(renewable ? J(std::max(0.0,available-p)) : J(nullptr));
+      g["utilization_percent"].push_back(available > 0 ? J(100*p/available) : J(nullptr));
+    }
+  }
+  day["resources"]["areas"] = J::array();
+  const auto storage_inputs = index(b.at("storage"));
+  for (const auto& input : b.at("areas")) {
+    J a = {{"id",input.at("id")},{"name",input.at("name")}};
+    for (const auto* field : {"reserve_up_mw","reserve_down_mw","reserve_up_required_mw","reserve_down_required_mw","reserve_up_margin_mw","reserve_down_margin_mw"}) a[field] = J::array();
+    for (int t = 0; t < 96; ++t) {
+      double up = 0, down = 0;
+      for (const auto& g : day["resources"]["generators"]) if (g.at("area") == input.at("id")) {
+        up += slot(g,"reserve_up_contribution_mw",t); down += slot(g,"reserve_down_contribution_mw",t);
+      }
+      for (const auto& storage : day["resources"]["storage"]) if (bus_inputs.at(storage_inputs.at(storage.at("id"))->at("bus"))->at("area") == input.at("id")) {
+        const double net = slot(storage,"discharge_mw",t)+slot(storage,"charge_mw",t);
+        up -= net; down += net;
+      }
+      const double up_required = slot(input,"reserve_up_mw",t)+slot(input,"network_reserve_reduction_mw",t);
+      const double down_required = slot(input,"reserve_down_mw",t)-slot(input,"load_side_down_reserve_mw",t);
+      a["reserve_up_mw"].push_back(up); a["reserve_down_mw"].push_back(down);
+      a["reserve_up_required_mw"].push_back(up_required); a["reserve_down_required_mw"].push_back(down_required);
+      a["reserve_up_margin_mw"].push_back(up-up_required); a["reserve_down_margin_mw"].push_back(down-down_required);
+    }
+    day["resources"]["areas"].push_back(std::move(a));
+  }
   day["constraint_families"] = s.value("constraint_families", J::object());
   day["binding_constraints"] = s.value("binding_constraints", J::array());
   day["binding_constraints_truncated"] = s.value("binding_constraints_truncated", false);
@@ -175,6 +236,13 @@ J summarize(const J& result) {
     const auto& authored = *limits.at(l.at("id"));
     for (const auto* f : {"from_bus", "to_bus"}) row[f] = authored.at(f);
     for (const auto* f : {"min_mw", "max_mw", "available"}) row[f] = J(authored.at(f).begin(), authored.at(f).begin()+96);
+    row["loading_percent"] = J::array();
+    for (int t = 0; t < 96; ++t) {
+      const double p = slot(l,"power_mw",t), lo = slot(authored,"min_mw",t), hi = slot(authored,"max_mw",t);
+      const double limit = p >= 0 ? hi : -lo;
+      // Directional active-power utilization; not AC apparent-power loading.
+      row["loading_percent"].push_back(slot(authored,"available",t) != 0 && lo <= 0 && hi >= 0 && limit > 0 ? J(100*std::abs(p)/limit) : J(nullptr));
+    }
     day["lines"].push_back(row);
   }
   double energy = 0, surplus_energy = 0, overload_energy = 0;
@@ -200,12 +268,17 @@ J summarize(const J& result) {
 } // namespace
 
 J make_market_operation(const J& boundary, const J& config) {
-  keys(config, {"horizon", "start_date", "penalty_per_mwh", "explain", "days", "reference_days", "terminal_forecast_source", "solver_options"});
+  keys(config, {"horizon", "start_date", "penalty_per_mwh", "explain", "explain_trigger", "recovery_pricing", "days", "reference_days", "terminal_forecast_source", "solver_options", "posthoc_ac_audit"});
+  const auto trigger = config.value("explain_trigger", std::string("always"));
+  require(trigger == "anomaly" || trigger == "always" || trigger == "manual", "invalid explain_trigger");
+  const auto pricing = config.value("recovery_pricing", std::string("dispatch_only"));
+  require(pricing == "dispatch_only" || pricing == "full", "invalid recovery_pricing");
+  require(!config.contains("posthoc_ac_audit") || config.at("posthoc_ac_audit").is_boolean(), "posthoc_ac_audit must be boolean");
   validate_southern_market(boundary);
   // Preserve raw bus proportions until day-specific 2.4.1.2 reconciliation.
   auto base = boundary;
   if (config.contains("solver_options")) {
-    keys(config.at("solver_options"),{"solver","time_limit_sec","mip_gap","threads"});
+    keys(config.at("solver_options"),{"solver","time_limit_sec","mip_gap","threads","native_root_cuts"});
     base["execution"].update(config.at("solver_options"));
     validate_southern_market(base);
   }
@@ -217,8 +290,8 @@ J make_market_operation(const J& boundary, const J& config) {
   using namespace std::chrono;
   const year_month_day start{year{std::stoi(date.substr(0,4))}, month{static_cast<unsigned>(std::stoi(date.substr(5,2)))}, day{static_cast<unsigned>(std::stoi(date.substr(8,2)))}};
   require(start.ok(), "invalid calendar date");
-  require(config.at("horizon") == "week" || config.at("horizon") == "month", "horizon must be week or month");
-  int count = 7;
+  require(config.at("horizon") == "day" || config.at("horizon") == "week" || config.at("horizon") == "month", "horizon must be day, week or month");
+  int count = config.at("horizon") == "day" ? 1 : 7;
   if (config.at("horizon") == "month") {
     require(unsigned(start.day()) == 1, "month starts on day 1");
     count = unsigned(year_month_day_last{start.year(), month_day_last{start.month()}}.day());
@@ -231,8 +304,11 @@ J make_market_operation(const J& boundary, const J& config) {
     for (const auto& curve : g.at("startup_curves_mw")) require(curve.empty(), "cross-day startup trajectory unsupported in rolling mode");
   }
   J normalized = config;
+  normalized["explain_trigger"] = trigger;
+  normalized["recovery_pricing"] = pricing;
   normalized["solver_options"] = {{"solver",base["execution"].value("solver",std::string("highs"))},
-    {"threads",base["execution"].value("threads",0)}, {"time_limit_sec",base["execution"]["time_limit_sec"]}, {"mip_gap",base["execution"]["mip_gap"]}};
+    {"threads",base["execution"].value("threads",0)}, {"time_limit_sec",base["execution"]["time_limit_sec"]}, {"mip_gap",base["execution"]["mip_gap"]},
+    {"native_root_cuts",base["execution"].value("native_root_cuts",std::string("default"))}};
   normalized["terminal_forecast_source"] = config.at("days").size() == static_cast<size_t>(count+1) ? config.value("terminal_forecast_source", std::string("authored")) : "baseline_template";
   require(normalized["terminal_forecast_source"] == "authored" || normalized["terminal_forecast_source"] == "baseline_template", "invalid terminal forecast source");
   normalized["days"] = J::array();
@@ -319,7 +395,102 @@ J preview_market_operation_boundary(const J& boundary, const J& config, int day)
     {"state_scope","Boundary preview uses authored initial state; daily solving replaces it with chronological carry. Forecast-only preview uses only first 96 points."}};
 }
 
+static void recover_day(const J& job, J& day, int d, const std::string& pricing) {
+      require(pricing == "dispatch_only" || pricing == "full", "invalid recovery pricing");
+      const auto& change = job.at("config").at("days").at(d);
+      const auto& next = job.at("config").at("days").at(d+1);
+      const double penalty = job.at("config").at("penalty_per_mwh");
+      day["counterfactuals"] = J::array();
+      auto interventions = factors;
+      interventions.push_back("generator_outages"); interventions.push_back("branch_outages");
+      if (change.contains("boundary_overrides")) interventions.push_back("boundary_overrides");
+      std::vector<std::tuple<std::string,J,J>> experiments;
+      for (const auto& factor : interventions) {
+        const bool outage = factor == "generator_outages" || factor == "branch_outages" || factor == "boundary_overrides";
+        const J reference = job.at("config").contains("reference_days") ? job.at("config").at("reference_days")[d].value(factor,outage ? J::array() : J(1.0)) : outage ? J::array() : J(1.0);
+        const J sampled = change.value(factor, outage ? J::array() : J(1.0));
+        if (sampled != reference) experiments.emplace_back(factor,reference,sampled);
+      }
+      // Independent potential outcomes share the same pre-intervention state;
+      // never parallelize chronological days. Bounded Gurobi environments,
+      // Amdahl/memory budget: docs/modules/market/performance.md, Paired Recovery.
+      const auto& execution = job.at("base").at("execution");
+      const int requested_threads = execution.value("threads",0);
+      const unsigned cores = std::thread::hardware_concurrency();
+      const int per_solve_threads = requested_threads == 0 ? 2 : requested_threads;
+      const bool parallel = execution.value("solver",std::string("highs")) == "gurobi" &&
+        experiments.size()>1 && job.at("base").at("buses").size()<=118 &&
+        job.at("base").at("generators").size()<=128 && job.at("base").at("storage").size()<=16 &&
+        job.at("base").at("reservoirs").size()<=24 &&
+        cores>=4 && per_solve_threads<=static_cast<int>(cores/2);
+      const size_t workers = parallel ? 2 : 1;
+      const auto recovery_start = std::chrono::steady_clock::now();
+      day["recovery_execution"] = {{"workers",workers},{"experiments",experiments.size()},
+        {"requested_solver_threads",requested_threads},{"resolved_solver_threads",parallel ? per_solve_threads : requested_threads},
+        {"scope","independent paired interventions; chronological days remain sequential"}};
+      const J baseline_totals = {{"deficit_mwh",day.at("deficit_mwh")},
+        {"surplus_mwh",day.at("surplus_mwh")},{"overload_mwh",day.at("overload_mwh")}};
+      const auto evaluate = [&](size_t index) {
+        const auto& [factor,reference,sampled] = experiments[index];
+        J restored = change; restored[factor] = reference;
+        J proof = {{"factor", factor}, {"valid", false}, {"reference_value", reference}, {"sampled_value", sampled},
+          {"pricing_scope",pricing},{"prices_valid",false}};
+        try {
+          J restored_provenance;
+          const auto boundary_start = std::chrono::steady_clock::now();
+          auto restored_input = daily_window(job.at("base"),day.at("state_start"),restored,next,penalty,restored_provenance);
+          proof["boundary_sec"] = std::chrono::duration<double>(std::chrono::steady_clock::now()-boundary_start).count();
+          if(parallel) restored_input["execution"]["threads"] = per_solve_threads;
+          auto other = summarize(pricing == "full" ? run_southern_day_ahead_market(restored_input)
+                                                     : run_southern_dispatch_recovery(restored_input));
+          proof["pricing_scope"] = pricing;
+          proof["prices_valid"] = other.at("diagnostic_prices_valid");
+          proof["runtime_sec"] = other.at("runtime_sec");
+          proof["validation_sec"] = other.at("validation_sec");
+          proof["stages"] = other.at("stages");
+          proof["status"] = other["status"]; proof["valid"] = other["valid"];
+          if (other["valid"].get<bool>()) {
+            for (const auto* field : {"deficit_mwh", "surplus_mwh", "overload_mwh"}) proof[std::string("reduction_")+field] = baseline_totals.at(field).get<double>()-other[field].get<double>();
+            proof["periods"] = other["periods"];
+          }
+        } catch (const std::invalid_argument& e) { proof["error"] = e.what(); }
+        catch (const std::exception& e) { proof["error"] = e.what(); }
+        return proof;
+      };
+      for(size_t first=0;first<experiments.size();first+=workers) {
+        if(workers==2 && first+1<experiments.size()) {
+          auto second = std::async(std::launch::async,evaluate,first+1);
+          auto first_result = evaluate(first);
+          day["counterfactuals"].push_back(std::move(first_result));
+          day["counterfactuals"].push_back(second.get());
+        } else day["counterfactuals"].push_back(evaluate(first));
+      }
+      day["recovery_execution"]["wall_sec"] = std::chrono::duration<double>(std::chrono::steady_clock::now()-recovery_start).count();
+      const bool all_valid = std::all_of(day.at("counterfactuals").begin(), day.at("counterfactuals").end(),
+        [](const J& proof) { return proof.at("valid").get<bool>(); });
+      day["cause_analysis"]["status"] = experiments.empty() ? "no_interventions" : all_valid ? "completed" : "partial_failure";
+      day["cause_analysis"]["executed_experiments"] = experiments.size();
+      day["cause_analysis"]["pricing_scope"] = pricing;
+}
+
+J explain_market_operation_day(const J& previous, int d, const std::string& pricing) {
+  require(d >= 0 && d < previous.at("completed_days").get<int>(), "explanation day must be completed");
+  require(previous.at("status") != "stale" && previous.at("status") != "cancelled", "job cannot be explained");
+  J job = previous;
+  auto& day = job["days"][d];
+  require(day.at("valid").get<bool>(), "explanation requires valid SCED");
+  const J original_execution = day.value("recovery_execution", J(nullptr));
+  day["cause_analysis"]["requested_by"] = "manual";
+  recover_day(job, day, d, pricing);
+  day["cause_analysis"]["manual_wall_sec"] = day.at("recovery_execution").at("wall_sec");
+  day["manual_recovery_execution"] = day.at("recovery_execution");
+  if (original_execution.is_null()) day.erase("recovery_execution");
+  else day["recovery_execution"] = original_execution;
+  return job;
+}
+
 J step_market_operation(const J& previous) {
+  const auto day_start = std::chrono::steady_clock::now();
   J job = previous;
   require(job["status"] == "ready" || job["status"] == "running", "job cannot advance");
   const int d = job.at("completed_days"); const auto change = job.at("config").at("days")[d];
@@ -327,36 +498,34 @@ J step_market_operation(const J& previous) {
     const double penalty = job["config"]["penalty_per_mwh"];
     J provenance;
     const auto& next = job.at("config").at("days").at(d+1);
+    const auto boundary_start = std::chrono::steady_clock::now();
     const J input = daily_window(job.at("base"), job.at("carry"), change, next, penalty, provenance);
+    const double boundary_sec = std::chrono::duration<double>(std::chrono::steady_clock::now()-boundary_start).count();
     provenance["source_day"] = d+1;
     const J result = run_southern_day_ahead_market(input);
+    const auto summary_start = std::chrono::steady_clock::now();
     J day = summarize(result); day["day"] = d; day["boundary"] = change; day["lookahead"] = provenance;
+    const auto analysis_start = std::chrono::steady_clock::now();
+    if (day["valid"].get<bool>()) day["analysis"] = analyze_southern_market_result(result, job.at("config").value("posthoc_ac_audit", false));
+    const double analysis_sec = std::chrono::duration<double>(std::chrono::steady_clock::now()-analysis_start).count();
     day["state_start"] = job.at("carry"); day["counterfactuals"] = J::array();
-    if (day["valid"].get<bool>() && job["config"]["explain"].get<bool>()) {
-      auto interventions = factors;
-      interventions.push_back("generator_outages"); interventions.push_back("branch_outages");
-      if (change.contains("boundary_overrides")) interventions.push_back("boundary_overrides");
-      for (const auto& factor : interventions) {
-        const bool outage = factor == "generator_outages" || factor == "branch_outages" || factor == "boundary_overrides";
-        const J reference = job.at("config").contains("reference_days") ? job.at("config").at("reference_days")[d].value(factor,outage ? J::array() : J(1.0)) : outage ? J::array() : J(1.0);
-        const J sampled = change.value(factor, outage ? J::array() : J(1.0));
-        if (sampled == reference) continue;
-        J restored = change; restored[factor] = reference;
-        J proof = {{"factor", factor}, {"valid", false}, {"reference_value", reference}, {"sampled_value", sampled}};
-        try {
-          J restored_provenance;
-          auto other = summarize(run_southern_day_ahead_market(daily_window(job.at("base"), job.at("carry"), restored, next, penalty, restored_provenance)));
-          proof["stages"] = other.at("stages");
-          proof["status"] = other["status"]; proof["valid"] = other["valid"];
-          if (other["valid"].get<bool>()) {
-            for (const auto* field : {"deficit_mwh", "surplus_mwh", "overload_mwh"}) proof[std::string("reduction_")+field] = day[field].get<double>()-other[field].get<double>();
-            proof["periods"] = other["periods"];
-          }
-        } catch (const std::invalid_argument& e) { proof["error"] = e.what(); }
-        catch (const std::exception& e) { proof["error"] = e.what(); }
-        day["counterfactuals"].push_back(proof);
-      }
-    }
+    const auto trigger = job.at("config").value("explain_trigger", std::string("always"));
+    // Same realized-day MW threshold as the diagnostic UI; performance.md.
+    const bool anomaly = std::any_of(day.at("periods").begin(), day.at("periods").end(), [](const J& p) {
+      return p.at("deficit_mw").get<double>() > 1e-6 || p.at("surplus_mw").get<double>() > 1e-6 ||
+             p.at("overload_sum_mw").get<double>() > 1e-6;
+    });
+    const bool requested = job.at("config").at("explain").get<bool>() && trigger != "manual";
+    day["cause_analysis"] = {{"status", !day.at("valid").get<bool>() ? "unavailable" : !requested ? "not_requested" : "not_triggered"},
+      {"trigger",trigger},{"requested_by","automatic"},{"anomaly_detected",day.at("valid").get<bool>() ? J(anomaly) : J(nullptr)},
+      {"threshold_mw",1e-6},{"executed_experiments",0}};
+    if (day.at("valid").get<bool>() && requested && (trigger == "always" || anomaly))
+      recover_day(job, day, d, job.at("config").value("recovery_pricing",std::string("dispatch_only")));
+    day["execution_timing"] = {{"main_sec",result.at("runtime_sec")},
+      {"boundary_sec",boundary_sec},{"validation_sec",result.at("validation_sec")},
+      {"summary_sec",std::chrono::duration<double>(analysis_start-summary_start).count()},{"analysis_sec",analysis_sec},
+      {"recovery_wall_sec",day.contains("recovery_execution") ? day.at("recovery_execution").at("wall_sec") : J(0)},
+      {"day_wall_sec",std::chrono::duration<double>(std::chrono::steady_clock::now()-day_start).count()}};
     job["days"].push_back(day);
     if (!day["valid"].get<bool>()) { job["status"] = "failed"; return job; }
     job["carry"] = day["state_end"];

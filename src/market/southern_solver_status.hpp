@@ -20,10 +20,10 @@ inline SouthernSolverStatus southern_solver_status(const std::string& status, bo
   if (token == "StrictHiGHS" || token == "HiGHS") stream >> token;
   std::transform(token.begin(), token.end(), token.begin(), [](unsigned char c) { return std::tolower(c); });
   token.erase(std::remove(token.begin(), token.end(), '_'), token.end());
-  const bool limit = token == "timelimit" || token == "iterationlimit" || token == "solutionlimit" ||
+  const bool limit = status == "Time limit reached" || status == "Node limit reached" || token == "timelimit" || token == "iterationlimit" || token == "solutionlimit" ||
     token == "memorylimit" || token == "interrupt" || token == "highsinterrupt" || token == "nodelimit" || token == "worklimit";
   if (feasible) {
-    const bool optimal = token == "optimal";
+    const bool optimal = token == "optimal" || status == "Optimality gap reached";
     return {optimal ? "optimal_within_tolerance" : limit ? "feasible_limit" : "feasible_unproven",
       limit, optimal && std::isfinite(gap) && gap <= 1e-9};
   }

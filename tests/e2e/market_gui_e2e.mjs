@@ -1,7 +1,7 @@
 // @ts-check
 import { spawn } from 'node:child_process';
 import { createServer } from 'node:net';
-import { existsSync } from 'node:fs';
+import { existsSync, mkdirSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
 import process from 'node:process';
 import { fileURLToPath } from 'node:url';
@@ -79,7 +79,15 @@ async function main() {
       catch { return false; }
     });
     if (!appReady) throw new Error(`App failed to initialize: ${pageErrors.join(' | ') || 'no page error captured'}`);
-    await page.evaluate(() => App.loadMatpowerCase('case9.m'));
+    const builtin = arg('builtin');
+    if(builtin) await page.evaluate(name=>App.loadBuiltinCase(name),builtin);
+    else await page.evaluate(() => App.loadMatpowerCase('case9.m'));
+    if(builtin==='market_ieee118') {
+      const snapshot=await page.evaluate(()=>Canvas.buildSystemJson());
+      const counts={};for(const g of snapshot.ac.generators)counts[g.fuel_type]=(counts[g.fuel_type]||0)+1;
+      if(JSON.stringify(counts)!==JSON.stringify({Hydro:36,Coal:18,Wind:6,Solar:6}))throw new Error('Canvas lost mixed fuel types: '+JSON.stringify(counts));
+      for(const g of snapshot.ac.generators)if(g.fuel_type==='Coal' && (g.min_up_time_hr!==1||g.min_dn_time_hr!==1))throw new Error('Canvas lost thermal minimum times');
+    }
     await page.evaluate(() => App.setActiveModule('marketBehavior'));
 
     const module = page.locator('#moduleMarketBehavior');
@@ -96,17 +104,15 @@ async function main() {
     const marketModules = await page.locator('.module-btn[data-group="market"]')
       .evaluateAll(elements => elements.map(element => element.textContent.trim()));
     if (JSON.stringify(marketModules) !== JSON.stringify([
-      '市场行为', '边界条件', '运行模拟', '市场出清', '安全校核', '市场结算'])) {
+      '运行模拟', '边界与单日出清', '对比试验', '云南调频', '实时市场', '主体与报价', '预测与时域', '市场出清', '安全校核', '市场结算'])) {
       throw new Error(`market workflow order is wrong: ${JSON.stringify(marketModules)}`);
     }
-    if (!(await page.locator('[data-market-step-target="marketBehavior"]')
-      .evaluate(element => element.classList.contains('active')))) {
-      throw new Error('market behavior is not the active first workflow step');
-    }
+    if (await page.locator('#marketModel').inputValue() !== 'generic') throw new Error('generic market family not selected');
+    if (await page.locator('#southernMarketWorkspace').isVisible()) throw new Error('Southern boundary leaked into generic market');
 
     await page.locator('#btnMarketParticipants').click();
     await page.locator('#marketParticipantModal').waitFor({ state: 'visible' });
-    const strategicRow = 2;
+    const strategicRow = builtin ? 0 : 2;
     await page.locator(`[data-market-row="${strategicRow}"][data-market-field="participant_id"]`).fill('firm_a');
     await page.locator(`[data-market-row="${strategicRow}"][data-market-field="participant_name"]`).fill('Firm A');
     await page.locator(`[data-market-row="${strategicRow}"][data-market-field="type"]`).selectOption('markup_and_withholding');
@@ -116,7 +122,7 @@ async function main() {
     await page.locator('#btnMarketParticipantsApply').click();
     await page.locator('#marketParticipantModal').waitFor({ state: 'hidden' });
 
-    await page.evaluate(() => App.setActiveModule('marketBoundary'));
+    await page.evaluate(() => App.setActiveModule('marketInputs'));
     if (!(await page.locator('#marketNumSteps').isVisible()) ||
         !(await page.locator('#btnMarketImportLoadProfile').isVisible()) ||
         !(await page.locator('#marketLoadForecastStatus').isVisible()) ||
@@ -150,6 +156,9 @@ async function main() {
     const response = await responsePromise;
     const market = await response.json();
     if (!response.ok()) throw new Error(`market endpoint failed: ${market.error || response.status()}`);
+    if(builtin)for(const keyword of ['AC storage','AC flexible loads','reservoir']) {
+      if(!market.model_scope?.limitations?.some(s=>s.includes(keyword)))throw new Error('Missing generic resource limitation: '+keyword);
+    }
     if (!market.security?.enabled || !market.security?.lodf_available) {
       throw new Error('N-1 security result is missing from the market response');
     }
@@ -229,7 +238,19 @@ async function main() {
       response.request().method() === 'POST', { timeout: 120000 });
     await page.locator('#btnRunRealTimeMarket').click();
     const realTimeResponse = await realTimeResponsePromise;
-    const realTime = await realTimeResponse.json();
+    let realTime = await realTimeResponse.json();
+    if(builtin && realTime.status==='invalid_day_ahead_baseline' && realTime.day_ahead?.status==='ac_validation_failed') {
+      const dir=path.join(ROOT,'output/market-operation',builtin+'-generic');mkdirSync(dir,{recursive:true});
+      writeFileSync(path.join(dir,'ac-rejected-settlement.json'),JSON.stringify({market,realTime},null,2));
+      // Keep the AC rejection evidence; this second experiment validates the
+      // financial ledger conditional on linear dispatch, without AC certification.
+      await page.evaluate(()=>App.setActiveModule('marketSecurity'));
+      await page.locator('#marketAcValidation').uncheck();
+      await page.evaluate(()=>App.setActiveModule('market'));
+      const conditional=page.waitForResponse(r=>r.url().includes('/api/session/run_real_time_market')&&r.request().method()==='POST',{timeout:120000});
+      await page.locator('#btnRunRealTimeMarket').click();
+      realTime=await (await conditional).json();
+    }
     if (!realTimeResponse.ok() || !realTime.feasible ||
         !(realTime.total_absolute_generator_deviation_mwh > 0) ||
         !realTime.ancillary_services_enabled ||
@@ -262,13 +283,22 @@ async function main() {
     await page.locator('#btnRunMarketGame').click();
     const gameResponse = await gameResponsePromise;
     const game = await gameResponse.json();
+    if(builtin){
+      const dir=path.join(ROOT,'output/market-operation',builtin+'-generic');mkdirSync(dir,{recursive:true});
+      writeFileSync(path.join(dir,'workflow.json'),JSON.stringify({market,realTime,game},null,2));
+    }
     const strategicChanged = (game.rounds || []).some(round =>
       (round.participants || []).some(row =>
         row.participant_id === 'firm_a' && row.strategy_changed));
     const finalRoundChanged = (game.rounds?.at(-1)?.participants || [])
       .some(row => row.strategy_changed);
+    const stationaryFirm=game.rounds?.at(-1)?.participants?.find(row=>row.participant_id==='firm_a');
+    const certifiedStationary=!!builtin && game.converged && stationaryFirm &&
+      Number.isFinite(stationaryFirm.profit) && Number.isFinite(stationaryFirm.best_response_profit) &&
+      Math.abs(stationaryFirm.best_response_profit-stationaryFirm.profit)<=1e-4 &&
+      stationaryFirm.best_response_improvement<=1e-4;
     if (!gameResponse.ok() || !game.feasible || !(game.rounds || []).length ||
-        !strategicChanged ||
+        (!strategicChanged && !certifiedStationary) ||
         (finalRoundChanged &&
           (game.converged || game.status !== 'maximum_rounds_reached')) ||
         !game.final_two_settlement?.ancillary_services_enabled ||

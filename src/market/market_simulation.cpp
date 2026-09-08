@@ -4742,6 +4742,13 @@ MarketResult run_day_ahead_market(
       "VSC fixed, current-dependent, capacity-circle, current and modulation limits are not commercial constraints.",
       "Preventive price-eligible N-1 cuts cover AC branches; generator, DC branch, converter and DC-storage outages use corrective fixed-commitment SCED.",
       "Bus, load, shunt, switchgear and protection failures are outside the market N-1 element set."};
+  if (!system.ac.storage.empty()) result.model_scope.limitations.push_back(
+      "AC storage uses authored exogenous power in this generic market; charge/discharge bids and intertemporal SOC are not optimized. Use the Southern boundary model for AC storage scheduling.");
+  if (!system.ac.flexible_loads.empty()) result.model_scope.limitations.push_back(
+      "AC flexible loads enter generic market gross demand; compensated interruption is not optimized. Use the Southern boundary model for controllable-load compensation.");
+  if (std::any_of(system.ac.generators.begin(),system.ac.generators.end(),
+      [](const auto& g){return g.fuel_type==FuelType::Hydro;})) result.model_scope.limitations.push_back(
+      "Generic hydro generator offers have no reservoir or cascade water balance; those states are modeled only in the Southern boundary workflow.");
   if (time_series.num_steps <= 0 || time_series.step_duration_hr <= 0.0) {
     result.status = "invalid_time_series";
     result.warnings.push_back("Market time series must have positive periods and duration.");

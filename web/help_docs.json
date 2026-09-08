@@ -9,7 +9,7 @@
       "entries": [
         {
           "title": "文档中心总览",
-          "path": "overview/README.md",
+          "path": "README.md",
           "tags": [
             "导航",
             "入门"
@@ -50,6 +50,12 @@
       "id": "tutorials",
       "title": "示例教程",
       "entries": [
+        {
+          "title": "电力市场分步操作教程",
+          "path": "guides/market_simulation_workflow.zh.md",
+          "tags": ["市场", "教程", "帮助", "单日", "周计划", "跨日继承", "SOC", "水位", "故障", "调频", "实时", "结算"],
+          "modules": ["marketOperation", "marketBoundary", "marketStudy", "marketAncillary", "marketRealtime", "marketBehavior", "marketInputs", "market", "marketSecurity", "marketSettlement"]
+        },
         {
           "title": "内置算例目录",
           "path": "overview/case_catalog.md",
@@ -239,12 +245,25 @@
             "LMP"
           ],
           "modules": [
+            "marketOperation",
             "marketBehavior",
             "marketBoundary",
             "market",
             "marketSecurity",
             "marketSettlement"
           ]
+        },
+        {
+          "title": "南方日前执行与跨日状态继承",
+          "path": "modules/market/southern_execution_contract.md",
+          "tags": ["市场", "SCUC", "SCED", "LMP", "跨日继承", "开停机时间", "SOC", "水位", "周月"],
+          "modules": ["marketOperation", "marketBoundary", "marketStudy"]
+        },
+        {
+          "title": "市场性能验收与分解瓶颈",
+          "path": "modules/market/performance.md",
+          "tags": ["市场", "2000节点", "性能", "首次运行", "重复运行", "最大等待", "矩阵复用", "完整对偶"],
+          "modules": ["marketOperation", "marketBoundary", "marketStudy"]
         },
         {
           "title": "园区综合能源",

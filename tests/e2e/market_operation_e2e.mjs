@@ -3,6 +3,7 @@ import { createServer } from 'node:net';
 import { mkdir, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import assert from 'node:assert/strict';
+import os from 'node:os';
 import { fileURLToPath } from 'node:url';
 import { chromium } from 'playwright';
 
@@ -23,17 +24,56 @@ try {
   const errors = []; page.on('pageerror', e => errors.push(e.message));
   await page.goto(`${base}/xjtu/#market-operation`, { waitUntil: 'load' });
   await page.locator('#operationCase').waitFor({ state: 'visible' });
+  await mkdir(path.join(root,'output/market-operation'),{recursive:true});
+  await page.screenshot({path:path.join(root,'output/market-operation/workflow-case-desktop.png')});
   assert.equal(await page.locator('#moduleMarketOperation').textContent(), '运行模拟');
+  await page.locator('#operationCase').selectOption('activsg2000_hydro');
+  assert.equal(await page.locator('#operationThermalCount').isVisible(),true);
+  await page.locator('#operationThermalCount').fill('120');await page.locator('#operationLoadCase').click();
+  await page.waitForFunction(()=>document.querySelector('#operationBoundaryName').textContent.includes('火电 120 台'));
+  assert.equal(await page.locator('#marketOperationWorkspace').getAttribute('data-workflow-step'),'2');
+  assert.equal(await page.locator('#operationCase').isVisible(),false);
+  assert.equal(await page.locator('#operationRulesAdvanced').getAttribute('open'),null);
+  await page.locator('.operation-workflow').scrollIntoViewIfNeeded();
+  await page.screenshot({path:path.join(root,'output/market-operation/workflow-boundary-desktop.png')});
+  const fleet=await (await fetch(base+'/api/session/southern_market')).json();
+  assert.equal(fleet.boundary.generators.filter(g=>g.kind==='thermal').length,120);
+  assert.equal(fleet.boundary.generators.filter(g=>g.kind==='hydro').length,720);
+  assert.equal(fleet.boundary.buses.length,2000);
+  assert.equal(await page.locator('#operationMipGap').inputValue(),'0.01');
+  assert.match(await page.locator('#operationSolver option[value="native"]').textContent(),/Native/);
+  assert.equal(await page.locator('#operationRun').isVisible(),false);
+  await page.locator('[data-operation-step="1"]').click();
+  await page.locator('#operationCase').selectOption('demo');await page.locator('#operationLoadCase').click();
+  await page.waitForFunction(()=>document.querySelector('#operationBoundaryName').textContent.includes('南方多资源两节点演示'));
+  await page.locator('summary').filter({hasText:'当日拓扑 / PTDF'}).click();
+  await page.locator('#operationPtdfQuery').click();
+  await page.waitForFunction(()=>document.querySelector('#operationPtdfResult').textContent.includes('PTDF MW/MW'));
+  assert.match(await page.locator('#operationPtdfResult').textContent(),/电气孤岛 1 个/);
+  await page.locator('#operationBranchOutages').fill('1');
+  await page.locator('#operationPtdfQuery').click();
+  await page.waitForFunction(()=>document.querySelector('#operationPtdfResult').textContent.includes('电气孤岛 2 个'));
+  await page.locator('#operationBranchOutages').fill('');
+  await page.locator('[data-operation-step="1"]').click();
   await page.locator('#operationCase').selectOption('example'); await page.locator('#operationLoadCase').click();
   await page.waitForFunction(() => document.querySelector('#operationBoundaryName').textContent.includes('南方规则解析算例'));
   assert.equal(await page.locator('#operationRuleCategory option').count(), 15);
   const catalog = (await get()).boundary_catalog;
+  await page.locator('#operationRulesAdvanced > summary').click();
+  await page.locator('#operationDeviceAdvanced > summary').click();
+  await page.locator('#operationConfig .operation-solver-advanced > summary').click();
   assert.deepEqual(await page.locator('#operationRuleCategory option').evaluateAll(nodes=>nodes.map(n=>n.value)),catalog.items.map(g=>g.id));
   await page.locator('#operationRuleCategory').selectOption('reservoir_use');
   assert.match(await page.locator('#operationRuleCoverage').textContent(), /振动区/);
   assert.equal(await page.locator('#operationBoundaryAdd').isDisabled(),true);
   await page.locator('#operationRuleCategory').selectOption('dispatch_load');
   const hasGurobi=(await get()).solver_capabilities.find(s=>s.id==='gurobi').available;
+  await page.locator('#operationSolver').selectOption('native');
+  assert.equal(await page.locator('#operationRootCuts').isEnabled(),true);
+  await page.locator('#operationRootCuts').selectOption('enhanced');
+  await page.locator('#operationSolver').selectOption('highs');
+  assert.equal(await page.locator('#operationRootCuts').isDisabled(),true);
+  assert.equal(await page.locator('#operationRootCuts').inputValue(),'default');
   if(hasGurobi) { await page.locator('#operationSolver').selectOption('gurobi');await page.locator('#operationThreads').fill('2'); }
   const engineering = await page.evaluate(() => {
     Canvas.addComponent('ac_bus', 200, 200, { index: 1, name: 'Unrelated engineering bus', bus_type: 'SLACK', base_kv: 110, in_service: true });
@@ -66,13 +106,74 @@ try {
   await page.locator('#moduleMarketOperation').click();
   await page.waitForFunction(() => document.querySelector('#operationStatus').textContent.includes('边界已就绪'));
   assert.equal(await page.locator('#operation-load_scale').inputValue(), '3');
+  await page.locator('#operationNextStep').click();
+  assert.equal(await page.locator('#operationConfig').isVisible(),false,await page.evaluate(()=>JSON.stringify({step:document.querySelector('#marketOperationWorkspace').dataset.workflowStep,mode:document.querySelector('#operationForecastMode').getAttribute('aria-selected'),message:document.querySelector('#operationWorkflowStatus').textContent,next:document.querySelector('#operationNextStep').outerHTML})));
+  await page.locator('.operation-workflow').scrollIntoViewIfNeeded();
+  await page.screenshot({path:path.join(root,'output/market-operation/workflow-run-desktop.png')});
   await page.locator('#operationRun').click();
   await page.waitForFunction(() => document.querySelector('#operationStatus').textContent.includes('已完成 7/7'), { timeout: 120000 });
   let state = await get(); assert.equal(state.job.status, 'completed'); assert.equal(state.job.days.flatMap(d => d.periods).length, 672);
+  assert.equal(state.job.config.explain_trigger,'anomaly');
+  assert.equal(state.job.days[0].cause_analysis.status,'not_triggered');
+  assert.equal(state.job.days[1].cause_analysis.status,'completed');
+  assert.equal(state.job.days[1].counterfactuals[0].stages.lmp,undefined);
+  const beforeExplanation=structuredClone(state.job);
+  await page.locator('#operationResultDay').selectOption('1');
+  await page.getByLabel('手动恢复范围',{exact:true}).selectOption('full');
+  await page.locator('[data-testid="market-explain-day"]').click();
+  await page.waitForFunction(()=>document.querySelector('#operationCauses').textContent.includes('最近手动补算'));
+  state=await get();
+  assert.equal(state.job.completed_days,7);
+  assert.equal(state.job.days[1].counterfactuals[0].prices_valid,true);
+  for(let d=0;d<7;d++) for(const key of ['resources','state_start','state_end','stages','nodes','lines'])
+    assert.deepEqual(state.job.days[d][key],beforeExplanation.days[d][key]);
+  assert.equal((await post({action:'explain',run_id:state.run_id,day:7})).status,400);
+  assert.equal((await post({action:'explain',run_id:state.run_id-1,day:0})).status,409);
+  assert.equal((await post({action:'explain',run_id:state.run_id,day:0.5})).status,400);
+  await page.locator('#operationResultDay').selectOption('6');
   assert.equal(state.job.days[6].lookahead.points[0].load_mw,150);
   assert.equal(state.job.days[6].lookahead.source_day,7);
   assert.equal(state.job.config.days.length,8);
   if(hasGurobi) { assert.equal(state.job.config.solver_options.solver,'gurobi');assert.equal(state.job.days[0].stages.scuc.solver,'Gurobi'); }
+  for (const day of beforeExplanation.days) {
+    const timing = day.execution_timing;
+    assert.equal(timing.main_sec, day.runtime_sec);
+    assert.ok(timing.day_wall_sec >= timing.main_sec + timing.recovery_wall_sec);
+    assert.equal(timing.recovery_wall_sec, day.recovery_execution?.wall_sec ?? 0);
+    for (const field of ['boundary_sec','validation_sec','summary_sec','analysis_sec'])
+      assert.ok(Number.isFinite(timing[field]) && timing[field] >= 0, field);
+    const measuredStages = Object.values(day.stages).reduce((sum, stage) =>
+      sum + stage.assembly_sec + stage.solve_wall_sec + stage.audit_sec + stage.solution_export_sec, 0);
+    assert.ok(timing.main_sec >= timing.validation_sec + measuredStages);
+    assert.ok(timing.day_wall_sec >= timing.main_sec + timing.recovery_wall_sec + timing.boundary_sec + timing.summary_sec + timing.analysis_sec);
+    for (const proof of day.counterfactuals) if (proof.valid) {
+      assert.ok(proof.runtime_sec >= proof.validation_sec);
+      assert.ok(Number.isFinite(proof.boundary_sec) && proof.boundary_sec >= 0);
+    }
+  }
+  assert.match(await page.locator('#operationCauses').textContent(), /本日总耗时 .*主出清 .*恢复实验/);
+  for (const stage of Object.values(state.job.days[0].stages)) {
+    assert.equal(stage.formulation,'compact'); assert.equal(stage.compact_units,1);
+    for (const field of ['variables','nonzeros','assembly_sec','audit_sec','solve_wall_sec','solution_export_sec','reconstructed_max_residual']) assert.ok(Number.isFinite(stage[field]),field);
+    assert.ok(stage.reconstructed_max_residual <= 1e-6);
+    assert.equal(stage.reservoir_scaling,'energy_coordinate');
+    assert.equal(stage.primal_start.status,'not_requested');
+    assert.ok(['barrier','solver_default','dual_simplex'].includes(stage.lp_algorithm));
+    assert.equal(stage.model_size.variables,stage.variables);
+    assert.equal(stage.model_size.binary_variables,stage.binary_variables);
+    assert.equal(stage.model_size.constraints_removed,0);
+  }
+  assert.match(await page.locator('[data-testid="market-stage-performance"]').textContent(),/等价紧凑式/);
+  await page.locator('[data-testid="market-model-size"] summary').click();
+  assert.match(await page.locator('[data-testid="market-model-size"]').textContent(),/边界可证明冗余/);
+  assert.match(await page.locator('[data-testid="market-model-size"]').textContent(),/火电/);
+  await page.setViewportSize({width:390,height:844});
+  await page.locator('[data-testid="market-model-size"]').scrollIntoViewIfNeeded();
+  assert.ok(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth));
+  await page.screenshot({path:path.join(root,'output/market-operation/model-size-mobile.png')});
+  await page.setViewportSize({width:1440,height:1000});
+  await page.screenshot({path:path.join(root,'output/market-operation/model-size-desktop.png')});
+  await page.locator('[data-testid="market-model-size"] summary').click();
   assert.match(await page.locator('#operationDays').textContent(),/达到最优性容差/);
   assert.ok(Math.abs(state.job.days[1].deficit_mwh - 2400) < 1e-6);
   assert.ok(Math.abs(state.job.days[1].counterfactuals[0].reduction_deficit_mwh - 2400) < 1e-6);
@@ -104,9 +205,11 @@ try {
   await page.setViewportSize({ width: 390, height: 844 }); await page.locator('#operationCauses').scrollIntoViewIfNeeded();
   assert.ok(await page.evaluate(() => document.documentElement.scrollWidth <= document.documentElement.clientWidth + 1));
   await page.screenshot({ path: path.join(root, 'output/market-operation/mobile.png') });
+  await page.locator('[data-operation-step="2"]').click();
   await page.locator('#operationHorizon').selectOption('month');
   assert.equal(await page.locator('#operationEditDay option').count(), 30);
   await page.locator('#operationEditDay').selectOption('1'); await page.locator('#operation-load_scale').fill('1');
+  await page.locator('#operationNextStep').click();
   await page.locator('#operationRun').click();
   await page.waitForFunction(() => document.querySelector('#operationStatus').textContent.includes('已完成 29/29'), { timeout: 120000 });
   state = await get(); assert.equal(state.job.days.flatMap(d => d.periods).length, 2784);
@@ -115,13 +218,13 @@ try {
   const config = { ...state.job.config, horizon: 'week', days: [] };
   let start = await post({ action: 'start', revision: state.revision, config }); assert.equal(start.status, 200);
   let response = await post({ action: 'step', run_id: start.data.run_id, day: 1 }); assert.equal(response.status, 409);
-  await page.locator('#operationReload').click(); await page.locator('#operationResume').waitFor({ state: 'visible' });
+  await page.locator('#operationReload').click(); await page.locator('[data-operation-step="3"]').click();await page.locator('#operationResume').waitFor({ state: 'visible' });
   await page.waitForFunction(() => !document.querySelector('#operationResume').disabled);
   assert.equal(await page.locator('#marketCanvas').getAttribute('data-valid'), 'false');
   await page.locator('#operationResume').click();
   await page.waitForFunction(() => document.querySelector('#operationStatus').textContent.includes('已完成 7/7'), { timeout: 120000 });
   start = await post({ action: 'start', revision: state.revision, config }); assert.equal(start.status, 200);
-  await page.locator('#operationReload').click(); await page.waitForFunction(() => !document.querySelector('#operationCancel').disabled);
+  await page.locator('#operationReload').click(); await page.locator('[data-operation-step="3"]').click();await page.waitForFunction(() => !document.querySelector('#operationCancel').disabled);
   await page.locator('#operationCancel').click(); await page.waitForFunction(() => document.querySelector('#operationStatus').textContent.includes('终止'));
   assert.equal((await get()).job.status, 'cancelled');
   response = await post({ action: 'step', run_id: start.data.run_id, day: 0 }); assert.equal(response.status, 400);
@@ -137,8 +240,10 @@ try {
   boundary.branches = [{ id: 10, name: '解析联络线', source: 'synthetic test', from_bus: 1, to_bus: 2, available: Array(98).fill(1), r_pu: 0, x_pu: 0.1, b_pu: 0, tap: 1, shift_deg: 0, min_mw: Array(98).fill(-50), max_mw: Array(98).fill(50), rate_mva: Array(98).fill(50) }];
   response = await post({ action: 'save', revision: snapshot.revision, boundary }, '/api/session/southern_market'); assert.equal(response.status, 200, JSON.stringify(response));
   await page.locator('#operationReload').click(); await page.waitForFunction(() => document.querySelector('#operationBoundaryName').textContent.includes('双节点'));
+  await page.locator('[data-operation-step="2"]').click();
   await page.locator('#operationEditDay').selectOption('0');
   await page.locator('#operation-line_limit_scale').fill('0.5'); await page.locator('#operationFirst').fill('5'); await page.locator('#operationLast').fill('8');
+  await page.locator('#operationNextStep').click();
   await page.locator('#operationRun').click(); await page.waitForFunction(() => document.querySelector('#operationStatus').textContent.includes('已完成 7/7'), { timeout: 120000 });
   state = await get(); assert.ok(Math.abs(state.job.days[0].overload_mwh - 1225) < 1e-6);
   assert.ok(Math.abs(state.job.days[0].counterfactuals[0].reduction_overload_mwh - 25) < 1e-6);
@@ -165,6 +270,9 @@ try {
   await writeFile(path.join(root, 'output/market-operation/overload-evidence.json'), JSON.stringify(state.job, null, 2));
   // Daily physical boundary values are separate from dimensionless scenario factors.
   await page.setViewportSize({width:1440,height:1000});
+  await page.locator('[data-operation-step="2"]').click();
+  await page.locator('#operationRulesAdvanced > summary').click();
+  await page.locator('#operationDeviceAdvanced > summary').click();
   await page.locator('#operationRuleCategory').selectOption('bus_load');
   await page.locator('#operationEditDay').selectOption('0');
   await page.locator('#operationBoundaryEntity').selectOption('1');
@@ -175,6 +283,7 @@ try {
   await page.locator('#operationBoundaryPreview').click();
   await page.waitForFunction(()=>document.querySelector('#operationBoundaryFeedback').textContent.includes('当日边界校验通过'));
   assert.match(await page.locator('#operationBoundaryResolved').textContent(), /50/);
+  await page.locator('#operationNextStep').click();
   await page.locator('#operationRun').click();
   await page.waitForFunction(()=>document.querySelector('#operationStatus').textContent.includes('已完成 7/7'),{timeout:120000});
   state=await get();
@@ -187,6 +296,7 @@ try {
   const bad=structuredClone(state.job.config);bad.days[0].boundary_overrides[0].field='initial_power_mw';
   assert.equal((await post({action:'start',revision:state.revision,config:bad})).status,400);
   assert.equal((await get()).run_id,state.run_id);
+  await page.locator('[data-operation-step="2"]').click();
   await page.locator('#operationRuleBoundaries').scrollIntoViewIfNeeded();
   await page.screenshot({path:path.join(root,'output/market-operation/rule-boundary-desktop.png')});
   await page.setViewportSize({width:390,height:844});
@@ -194,5 +304,88 @@ try {
   assert.ok(await page.evaluate(()=>document.documentElement.scrollWidth<=document.documentElement.clientWidth+1));
   await page.screenshot({path:path.join(root,'output/market-operation/rule-boundary-mobile.png')});
   assert.deepEqual(errors, []);
-  console.log('Market operation GUI/API passed: week/month, daily boundary edits, deficit and paired restoration, plots, reload/resume/cancel/stale revisions, mobile.');
+  await page.evaluate(()=>{
+    const failure={boundary_name:'Solver failure display fixture',config:{start_date:'2028-02-01'},total_days:7,completed_days:1,status:'failed',limitations:[],days:[{day:0,valid:false,status:'scuc_failed',periods:[],nodes:[],lines:[],stages:{scuc:{solver:'Gurobi',requested_solver:'gurobi',requested_time_limit_sec:120,requested_mip_gap:.01,runtime_sec:122,solver_status:'TimeLimit',solution_quality:'limit_without_verified_solution',mip_gap:null}}}]};
+    HySimMarketOperation.preview(failure);HySimMarketOperation.setStep(4);
+  });
+  await page.locator('#operationResultDay').selectOption('0');
+  assert.match(await page.locator('#operationCauses').textContent(),/不能保证在时限内找到可行解/);
+  assert.match(await page.locator('#operationCauses').textContent(),/请求 gurobi \/ 实际 Gurobi/);
+  assert.match(await page.locator('#operationSummary').textContent(),/暂无有效出清统计/);
+  assert.equal(await page.locator('#operationBalanceChart').isVisible(),false);
+  assert.equal(await page.locator('#operationOverloadChart').isVisible(),false);
+  state=await get();
+  assert.equal((await post({action:'example',revision:state.revision},'/api/session/southern_market')).status,200);
+  state=await get();
+  const nativeConfig={horizon:'week',start_date:'2028-02-01',days:[],penalty_per_mwh:100000,explain:false,
+    solver_options:{solver:'native',threads:0,time_limit_sec:10,mip_gap:.01,native_root_cuts:'enhanced'}};
+  start=await post({action:'start',revision:state.revision,config:nativeConfig});
+  assert.equal(start.status,200,JSON.stringify(start));
+  response=await post({action:'step',run_id:start.data.run_id,day:0});
+  assert.equal(response.status,200,JSON.stringify(response));
+  state=await get();
+  assert.equal(state.job.days[0].valid,true);
+  assert.equal(state.job.days[0].stages.scuc.native_diagnostics.profile,'enhanced');
+  await page.reload({waitUntil:'load'});
+  await page.waitForFunction(()=>document.querySelector('#operationRootCuts')?.value==='enhanced');
+  await page.evaluate(()=>HySimMarketOperation.setStep(4));
+  await page.locator('[data-testid="market-native-cuts"]').waitFor();
+  assert.match(await page.locator('[data-testid="market-native-cuts"]').textContent(),/SCUC \/ enhanced/);
+  assert.equal(await page.locator('#operationBalanceChart').isVisible(),true);
+  await page.locator('[data-testid="market-native-cuts"]').scrollIntoViewIfNeeded();
+  assert.ok(await page.evaluate(()=>document.documentElement.scrollWidth<=document.documentElement.clientWidth+1));
+  await page.screenshot({path:path.join(root,'output/market-operation/native-cuts-mobile.png')});
+  await page.setViewportSize({width:1440,height:1000});
+  await page.locator('[data-testid="market-native-cuts"]').scrollIntoViewIfNeeded();
+  await page.screenshot({path:path.join(root,'output/market-operation/native-cuts-desktop.png')});
+  await page.waitForLoadState('networkidle');
+  await page.route('**/api/session/market_operation',async route=>{
+    if(route.request().method()!=='GET')return route.continue();
+    const response=await route.fetch(),data=await response.json();
+    for(const c of data.solver_capabilities||[])delete c.root_cut_profiles;
+    await route.fulfill({response,json:data});
+  });
+  await page.reload({waitUntil:'load'});
+  await page.waitForFunction(()=>document.querySelector('#operationSolver')?.options.length===3 && !document.querySelector('#operationSolver').disabled);
+  assert.equal(await page.locator('#operationRootCuts').isVisible(),false);
+  assert.equal(await page.evaluate(()=>Object.hasOwn(HySimMarketOperation.solverDraft('operation'),'native_root_cuts')),false);
+  await page.waitForLoadState('networkidle');
+  await page.unrouteAll({behavior:'wait'});
+  assert.deepEqual(errors,[]);
+  if (hasGurobi) {
+    for (const threads of [0, 128]) {
+      const current = await get();
+      let run = await post({action:'start',revision:current.revision,config:{
+        horizon:'day',start_date:'2026-09-07',penalty_per_mwh:100000,explain:true,days:[],
+        solver_options:{solver:'gurobi',threads,time_limit_sec:10,mip_gap:.01}
+      }});
+      const config = run.data.job.config;
+      Object.assign(config.days[0],{load_scale:2.5,solar_scale:1.1,generator_bid_scale:1.1});
+      run = await post({action:'start',revision:current.revision,config});
+      run = await post({action:'step',run_id:run.data.run_id,day:0});
+      assert.equal(run.status,200,JSON.stringify(run.data));
+      const day = run.data.job.days[0];
+      assert.equal(day.valid,true);
+      const parallel = threads === 0 && os.cpus().length >= 4;
+      assert.equal(day.recovery_execution.workers,parallel ? 2 : 1);
+      assert.equal(day.recovery_execution.requested_solver_threads,threads);
+      assert.equal(day.recovery_execution.resolved_solver_threads,parallel ? 2 : threads);
+      assert.deepEqual(day.counterfactuals.map(c=>c.factor),['load_scale','solar_scale','generator_bid_scale']);
+      for (const proof of day.counterfactuals) {
+        assert.equal(proof.valid,true);
+        assert.equal(proof.stages.scuc.requested_threads,parallel ? 2 : threads);
+      }
+    }
+  }
+  await page.route('**/api/session/market_operation',async route=>{
+    if(route.request().method()!=='GET'){await route.continue();return;}
+    const response=await route.fetch(),data=await response.json();delete data.recovery_policies;
+    await route.fulfill({response,json:data});
+  });
+  await page.reload({waitUntil:'load'});
+  await page.waitForFunction(()=>document.querySelector('#operationSolver')?.options.length===3);
+  assert.equal(await page.locator('#operationExplainTrigger').isVisible(),false);
+  const legacy=await page.evaluate(()=>HySimMarketOperation.config());
+  assert.equal(legacy.explain_trigger,undefined);assert.equal(legacy.recovery_pricing,undefined);
+  console.log('Market operation GUI/API passed: week/month, daily boundary edits, deficit and paired restoration, plots, reload/resume/cancel/stale revisions, mobile, recovery policy compatibility.');
 } finally { if (browser) await browser.close(); server.kill(); }

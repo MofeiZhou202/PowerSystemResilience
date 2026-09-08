@@ -1,6 +1,7 @@
 /* Forecast API owns generation, daily execution and probability semantics. */
 (() => {
   'use strict';
+  const marketCanvas = window.HySimMarketCanvas.forOwner("marketOperation");
   const $ = id => document.getElementById(id);
   const shared = window.HySimMarketOperation;
   const names = { load_scale: '负荷', wind_scale: '风电', solar_scale: '光伏', inflow_scale: '来水', generator_bid_scale: '发电/储能报价', load_bid_scale: '可控负荷补偿', line_limit_scale: '线路限额' };
@@ -8,10 +9,10 @@
   const el = (tag, text) => { const n = document.createElement(tag); if (text !== undefined) n.textContent = String(text); return n; };
   const fmt = shared.fmt;
   const pct = x => typeof x === 'number' ? `${fmt(x*100)}%` : '不可用';
-  const status = text => { $('forecastStatus').textContent = text; if (state.mode === 'forecast') window.HySimMarketCanvas.progress(text); };
+  const status = text => { $('forecastStatus').textContent = text; if (state.mode === 'forecast') marketCanvas.progress(text); };
   async function api(body, exporting = false) {
-    const r = await fetch(`/api/session/market_forecast${exporting ? '?export=1' : ''}`, body ? { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) } : {});
-    const data = await r.json(); if (!r.ok) throw new Error(data.error || `HTTP ${r.status}`); return data;
+    return window.HySimMarketActivity.request(`/api/session/market_forecast${exporting ? '?export=1' : ''}`, body, { owner: 'marketOperation',
+      label: body?.action === 'step' ? `场景 ${body.scenario + 1}/${state.job.scenarios.length} · 第 ${body.day + 1}/7 日 · 已完成 ${state.job.completed_days}/${state.job.total_days} 日窗` : undefined });
   }
   function controls() {
     const locked = state.running || state.busy || state.serverBusy;
@@ -29,11 +30,12 @@
   }
   function editor() {
     const c = state.config; if (!c) return;
-    shared.solverEditor('forecast',c.operation.solver_options || shared.solverOptions('operation'));
+    shared.solverEditor('forecast',c.operation.solver_options || shared.solverDraft('operation'));
     $('forecastSolverOptions').onchange=()=>{c.operation.solver_options=shared.solverOptions('forecast');};
     $('forecastMode').value = c.mode; $('forecastStartDate').value = c.operation.start_date;
     $('forecastCount').value = c.sample_count; $('forecastSeed').value = c.seed; $('forecastRho').value = c.temporal_rho;
     $('forecastPenalty').value = c.operation.penalty_per_mwh; $('forecastExplain').checked = c.operation.explain;
+    shared.recoveryEditor('forecast',c.operation);
     $('forecastTemplateStatus').textContent = c.operation.days.length ? `底稿：${c.operation.days.length}日边界（含末日预测）` : '底稿：每日基准模板，含第八日预测';
     $('forecastRho').disabled = c.mode === 'interval';
     $('forecastMarginals').replaceChildren(shared.table(['预测因素', '分布/区间', '下界倍数', '上界倍数', '正态 σ', '统一预测中心'], c.marginals.map(m => {
@@ -52,7 +54,7 @@
   function chart(id, traces, title, ytitle) {
     if (typeof Plotly === 'undefined') return;
     const css = getComputedStyle(document.body);
-    Plotly.react($(id), traces, { title: { text: title, font: { size: 14 } }, height: 280, margin: { t: 40, l: 65, r: 10, b: 65 }, paper_bgcolor: css.getPropertyValue('--bg2').trim(), plot_bgcolor: css.getPropertyValue('--bg2').trim(), font: { color: css.getPropertyValue('--ink').trim() }, yaxis: { title: { text: ytitle } }, legend: { orientation: 'h', y: -0.25 }, autosize: true }, { responsive: true, displaylogo: false });
+    window.HySimMarketActivity.whenVisible(id, () => Plotly.react($(id), traces, { title: { text: title, font: { size: 14 } }, height: 280, margin: { t: 40, l: 65, r: 10, b: 65 }, paper_bgcolor: css.getPropertyValue('--bg2').trim(), plot_bgcolor: css.getPropertyValue('--bg2').trim(), font: { color: css.getPropertyValue('--ink').trim() }, yaxis: { title: { text: ytitle } }, legend: { orientation: 'h', y: -0.25 }, autosize: true }, { responsive: true, displaylogo: false }));
   }
   function scatter() {
     if (!state.job) return;
@@ -63,7 +65,16 @@
   function selected() {
     if (state.mode !== 'forecast') return;
     const scenario = state.job?.scenarios[Number($('forecastScenario').value)];
-    shared.preview(scenario || { boundary_name: '尚无预测场景', config: state.config?.operation || {}, days: [], total_days: 7, completed_days: 0, status: 'ready', limitations: [], boundary_revision: state.revision });
+    const scenarioIndex=Number($('forecastScenario').value);
+    shared.preview(scenario || { boundary_name: '尚无预测场景', config: state.config?.operation || {}, days: [], total_days: 7, completed_days: 0, status: 'ready', limitations: [], boundary_revision: state.revision }, {
+      locked:state.running || state.busy || state.serverBusy || ['cancelled','stale'].includes(state.job?.status),
+      run:async(day,pricing)=>{
+        if(state.running || state.busy || state.serverBusy)return;
+        state.busy=true;controls();selected();status(`正在补算场景 ${scenarioIndex+1} 第 ${day+1} 日原因`);
+        try { Object.assign(state,await api({action:'explain',run_id:state.run_id,scenario:scenarioIndex,day,pricing})); }
+        finally { state.busy=false;results();document.dispatchEvent(new CustomEvent('market-operation-unlock')); }
+      }
+    });
     $('forecastBoundaryPreview').replaceChildren(); if (!scenario) return;
     const resolved = el('div'); resolved.id='forecastRuleBoundaryResolved';
     $('forecastBoundaryPreview').append(shared.table(['日期', ...Object.values(names), '机组停运', '线路停运', '设备级覆盖', '条款边界'], scenario.config.days.map((d, i) => {
@@ -75,8 +86,11 @@
   function results() {
     controls(); const j = state.job;
     for (const id of ['forecastStatistics', 'forecastNodeStatistics', 'forecastLineStatistics', 'forecastPeriodStatistics', 'forecastCorrelations', 'forecastLimitations']) $(id).replaceChildren();
-    if (!j) { $('forecastScenario').replaceChildren(); selected(); status('预测参数待生成；先加载并保存市场算例'); return; }
-    const labels = { ready: '边界已生成', running: '任务可继续', completed: '场景任务结束', cancelled: '已终止', stale: '已失效' };
+    if (!j) {
+      for (const id of ['forecastDeltaPChart', 'forecastDeltaPijChart', 'forecastScatterChart']) { window.HySimMarketActivity.cancelRender(id); if (typeof Plotly !== 'undefined') Plotly.purge($(id)); }
+      $('forecastScenario').replaceChildren(); selected(); status('预测参数待生成；先加载并保存市场算例'); return;
+    }
+    const labels = { ready: '边界已生成', running: state.running ? '正在逐日计算' : '已暂停，可继续', completed: '场景任务结束', cancelled: '已终止', stale: '已失效' };
     status(`${labels[j.status] || j.status} · ${j.boundary_name} · 完成 ${j.finished_scenarios}/${j.scenarios.length} 场景 · 已出清 ${j.completed_days}/${j.total_days} 个日窗${j.boundary_revision !== state.revision ? ' · 边界已变化，需重新生成' : ''}`);
     const old = $('forecastScenario').value;
     $('forecastScenario').replaceChildren(...j.scenarios.map((s, i) => { const o = el('option', `场景 ${i + 1} · ${s.status} · ${s.completed_days}/7 天${s.error ? ` · ${s.error}` : ''}`); o.value = i; return o; }));
@@ -97,34 +111,48 @@
       for (const [table, id] of [['nodes', 'forecastNodeStatistics'], ['lines', 'forecastLineStatistics']]) shared.paged(id, ['ID', '名称', '有效/计划', probability ? '周异常概率（有效）' : '周异常样本比例', '峰值 P95 MW', '积分均值 MW·h'], s[table].map(r => [r.id, r.name, `${r.peak_mw.valid_count}/${r.peak_mw.total_count}`, pct(r.peak_mw.sample_event_fraction), fmt(r.peak_mw.p95), fmt(r.integral_mwh.mean)]));
     } else {
       $('forecastStatistics').textContent = '尚无已结束场景，统计不可用。';
-      for (const id of ['forecastDeltaPChart', 'forecastDeltaPijChart']) if (typeof Plotly !== 'undefined') Plotly.purge($(id));
+      for (const id of ['forecastDeltaPChart', 'forecastDeltaPijChart']) { window.HySimMarketActivity.cancelRender(id); if (typeof Plotly !== 'undefined') Plotly.purge($(id)); }
     }
     scatter(); selected(); controls();
   }
-  async function load(preserve = false) {
+  let loading = null;
+  function load(preserve = false) {
+    if (state.running) return Promise.resolve();
+    if (!loading) loading = loadTask(preserve).finally(() => { loading = null; });
+    return loading;
+  }
+  async function loadTask(preserve) {
     const data = await api(); state.revision = data.revision; state.run_id = data.run_id; state.job = data.job; state.serverBusy = data.busy;
     if (!state.config || !preserve) { state.config = structuredClone(data.job?.config || data.defaults); for (const m of state.config.marginals) if (m.center.length === 7) m.center.push(m.center[6]); editor(); }
     results(); if (data.busy) status('服务端正在计算，完成后重载可继续');
+    if (!modeChosen && !state.job) {
+      const response=await fetch('/api/session/market_operation');
+      if(response.ok){const operation=await response.json();if(!modeChosen && !state.job && operation.job?.days?.length)mode('manual',false);}
+    }
   }
-  function mode(value) {
-    state.mode = value; localStorage.setItem('hysim.marketOperationMode', value);
+  let modeChosen = localStorage.getItem('hysim.marketOperationMode') !== null;
+  function mode(value, persist = true) {
+    state.mode = value;if(persist){modeChosen=true;localStorage.setItem('hysim.marketOperationMode', value);}
     $('marketForecastWorkspace').hidden = value !== 'forecast';
     document.querySelectorAll('[data-operation-mode="manual"]').forEach(n => { n.hidden = value !== 'manual'; });
     $('operationForecastMode').setAttribute('aria-selected', String(value === 'forecast')); $('operationManualMode').setAttribute('aria-selected', String(value === 'manual'));
+    $('operationForecastMode').classList.toggle('active',value==='forecast');$('operationManualMode').classList.toggle('active',value==='manual');
     if (value === 'manual') shared.preview(null); else selected();
   }
   async function loop() {
-    state.running = true; state.pause = false; controls();
+    state.running = true; state.pause = false; controls();shared.setStep(3);
     try {
       while (!state.pause && ['ready', 'running'].includes(state.job.status)) {
         const s = state.job.next_scenario, d = state.job.scenarios[s].completed_days;
-        status(`正在出清场景 ${s + 1}/${state.job.scenarios.length} · 第 ${d + 1}/7 日（含恢复重算）`);
-        Object.assign(state, await api({ action: 'step', run_id: state.run_id, scenario: s, day: d })); results();
-        if (window.HySimMarketCanvas.follow()) { $('forecastScenario').value = s; selected(); $('operationResultDay').value = d; $('operationResultDay').dispatchEvent(new Event('change')); }
+        status(`正在出清场景 ${s + 1}/${state.job.scenarios.length} · 第 ${d + 1}/7 日`);
+        Object.assign(state, await api({ action: 'step', run_id: state.run_id, scenario: s, day: d }));
+        if (marketCanvas.follow()) $('forecastScenario').value = s;
+        results();
+        if (marketCanvas.follow()) { $('operationResultDay').value = d; $('operationResultDay').dispatchEvent(new Event('change')); }
       }
-    } finally { state.running = false; controls(); results(); document.dispatchEvent(new CustomEvent('market-operation-unlock')); }
+    } finally { state.running = false; controls(); results(); shared.setStep(4);document.dispatchEvent(new CustomEvent('market-operation-unlock')); }
   }
-  const handle = fn => async () => { try { await fn(); } catch (e) { status(e.message); controls(); } };
+  const handle = fn => async () => { try { await fn(); } catch (e) { status(e.message);$('operationWorkflowStatus').textContent=e.message; controls(); } };
   const bind = (id, fn) => { $(id).onclick = handle(fn); };
   bind('operationForecastMode', () => { mode('forecast'); }); bind('operationManualMode', () => mode('manual'));
   bind('forecastGenerate', async () => {
@@ -132,9 +160,10 @@
     for (const input of $('forecastConfig').querySelectorAll('input')) if (!input.reportValidity()) return;
     const c = structuredClone(state.config); c.sample_count = Number($('forecastCount').value); c.seed = Number($('forecastSeed').value); c.temporal_rho = Number($('forecastRho').value);
     c.operation.start_date = $('forecastStartDate').value; c.operation.penalty_per_mwh = Number($('forecastPenalty').value); c.operation.explain = $('forecastExplain').checked;
+    Object.assign(c.operation,shared.recoveryOptions('forecast'));
     c.operation.solver_options=shared.solverOptions('forecast');
     state.busy = true; controls();
-    try { Object.assign(state, await api({ action: 'generate', revision: state.revision, config: c })); state.config = structuredClone(state.job.config); results(); }
+    try { Object.assign(state, await api({ action: 'generate', revision: state.revision, config: c })); state.config = structuredClone(state.job.config); results();shared.setStep(3); }
     finally { state.busy = false; document.dispatchEvent(new CustomEvent('market-operation-unlock')); controls(); }
   });
   bind('forecastRun', loop); bind('forecastReload', load);
@@ -153,13 +182,19 @@
   for (const [id, key] of [['forecastCount','sample_count'], ['forecastSeed','seed'], ['forecastRho','temporal_rho']]) $(id).onchange = () => { state.config[key] = Number($(id).value); };
   $('forecastPenalty').onchange = () => { state.config.operation.penalty_per_mwh = Number($('forecastPenalty').value); };
   $('forecastExplain').onchange = () => { state.config.operation.explain = $('forecastExplain').checked; };
+  for(const id of ['forecastExplainTrigger','forecastRecoveryPricing'])$(id).onchange=()=>Object.assign(state.config.operation,shared.recoveryOptions('forecast'));
   $('forecastScenario').onchange = selected;
   for (const [factor, name] of Object.entries(names)) { const o = el('option', name); o.value = factor; $('forecastScatterFactor').append(o); }
   $('forecastScatterFactor').onchange = scatter; $('forecastScatterMetric').onchange = scatter;
   document.querySelectorAll('#marketForecastWorkspace button').forEach(b => b.classList.add('btn','btn-sm'));
   document.addEventListener('market-operation-open', handle(() => load(true)));
-  document.addEventListener('market-operation-boundary-loaded', handle(() => load(true)));
+  document.addEventListener('market-operation-boundary-loaded', event => {
+    handle(async () => {
+      if (loading) await loading;
+      if (!state.config || event.detail.revision !== state.revision) await load(true);
+    })();
+  });
   const resize = new ResizeObserver(entries => { for (const { target } of entries) if (target.data && target.clientWidth && typeof Plotly !== 'undefined') Plotly.Plots.resize(target); });
   for (const id of ['forecastDeltaPChart','forecastDeltaPijChart','forecastScatterChart']) resize.observe($(id));
-  mode(state.mode); load().catch(e => status(e.message));
+  mode(state.mode,false);
 })();

@@ -1,12 +1,853 @@
 # Development Status
 
-Updated: 2026-09-05
+Updated: 2026-09-08
 
 This is the living handoff for verified build state and active engineering work.
 Update it in place; do not create dated copies. Source, registered tests, and
 the current Git worktrees remain authoritative.
 
 ## Southern Market Execution and Boundary GUI
+
+SCED-to-LMP ordered-matrix reuse is now validated on the unchanged2000/1320-generator
+fixture. Serial browser protocol: five fresh-server first runs plus five same-session
+repeats per version. Baseline maxima61.292012/61.407915s; candidate maxima
+58.515226/58.570428s (means58.251299/58.296980s). All ten candidate samples are
+below60s; no hard guarantee for arbitrary boundaries or background load. LMP assembly
+means3.365804/3.336026s become0.590407/0.594450s. Shared coefficients/order are
+preserved by row/column selection, original costs/bounds recomputed, independent
+verify oracle retained. No large cross-run cache or solver ordering changes this turn.
+
+All20 complete outputs match scale-final5 except timing/assembly diagnostics; full-size
+verify matches6 matrices and all metadata. Cross-process original/derived LPs match
+all3247054 row duals bitwise (SHA2568ce718243b40c07274a276dc6e7dce446dcb7f044d33ee31fff667803c0cc31a).
+Small-model seven-day reference/verify rolling resources, nodes/prices, water/SOC,
+state/carry, objectives and residuals match. Full2000-node seven-day runtime remains
+unmeasured. Release74 cases/29807 assertions; focused Gurobi ASan+UBSan7 cases/377
+assertions pass with detect_leaks=0 and container checks enabled, remaining Release
+archives mean no whole-library sanitizer claim. Southern and operation GUI/API pass.
+Supplemental trade/noncompact-commitment/nonzero-storage-minima matrix tests pass.
+
+Standalone original-matrix structural diagnosis plus production Gurobi logs identifies
+SCUC relaxation Factor NZ1.014e8/Factor Ops1.284e11, repair4.901e7/2.414e10,
+LMP1.369e7/9.464e8. Wide intertemporal hydro energy, storage cycles, start/stop totals
+and spatial reserve rows are candidates for future structure work; structural degree
+proxy is NOT measured factor fill, device timing attribution or proof of root cause.
+Evidence: output/market-performance/lmp-reuse-dev/{build,verification,test-rebuild}.json,
+lmp-reuse-repetition/{summary,verified-summary}.json, lmp-reuse-checks/ and
+lmp-reuse-asan/{build,test-rebuild}.json. Same preserved dirty archives/dependency guard.
+Server SHA256948626bcdc7602d27352f3baf333d4a6599a23bcc81e6d2707f18f462c20317a.
+Preview http://127.0.0.1:8107/xjtu/#southern-market; saved2000 boundary, idle at startup,
+older ports retained. The following scale-final5 record is the preceding baseline.
+
+2000-node optimization has completed the following scoped validation. The GUI-default fixture has
+2000 buses,3206 branches,120 thermal+720 hydro+480 renewables,180 reservoirs,
+80 storage and120 controllable loads at98 points. Original price-final binary
+failed SCUC after187.889s. Final scale-final5 browser click-to-render waits are
+60.345730792/59.45793225s (mean59.901831521s), with valid schedules/prices.
+Strict <=60s on every run is NOT established; do not cherry-pick the faster run.
+Final candidate precision remains strict; all failed tuning experiments are in
+performance.md. The544-thermal variant and a2000-node full week were not tested.
+
+Implemented: independent outward-rounded Lagrangian box lower bound, fixed-integer
+candidate repair with original-unit audit, same-call SCED bound/candidate reuse
+after exact LP/bound checks, conditional SCED derivation with independent verify,
+empty commitment-window skip, family index hints, scalar result aggregation,
+indexed exports and ownership transfer of completed JSON/SCED solution maps. Original constraints,
+water/SOC equations and pricing gates remain. Candidate trajectories may differ
+from a previous gap-feasible solution; no claim of exact optimality at positive gap.
+Large Gurobi pricing policy is ordered-lp-barrier-8-v2 with concurrent independent
+fresh solves and exact full-dual gate. Small pricing remains v1. Failed network
+bounds/BarOrder/PreDual and bulk-index-sort experiments were removed. Final Release
+71 cases/29589 assertions pass; Southern and operation GUI/API tests pass.
+Gurobi ASan/UBSan scope passes5 cases/327 assertions with container checks enabled.
+The coherent native sanitizer build at scale-final2 passes6 cases/177 assertions,
+with1 Gurobi-only skip. Mixed uninstrumented HiGHS/container-annotation failures
+are retained, not hidden by disabling checks; no whole-library sanitizer claim.
+
+Full final responses, including objective/residual/resource/water/SOC/price values,
+match scale-final2 exactly after excluding timing/assembly diagnostics. Full-size
+verify independently matches6 matrices. Cross-process identical pricing LPs match
+all3247054 row duals bitwise; injected failed checks export null prices. SCUC gap
+0.0652742323%, SCUC/SCED residual2.1792512e-10, LMP residual2.3235316e-9.
+Final local overlay: output/market-performance/scale-final5/build.json (parent
+provenance chain, no dependency guard changes), verification.json and test logs.
+Server SHA25655ca6063e2c633e172f0841666f2a22fecfa60d40dbb836836db7bdd985b0285.
+Preview http://127.0.0.1:8106/xjtu/#southern-market, PID99763, saved2000 boundary,
+Gurobi8 threads/auto strategy/cached assembly, idle at startup; older ports preserved.
+
+Earlier small-model deterministic pricing follow-up: `ordered-lp-dual-simplex-v1` fixes only LMP to
+fresh single-thread dual simplex, independently of requested dispatch method or
+threads. Every LMP is solved again within the remaining stage budget; finite
+original-unit full row duals must match exactly, both statuses must prove optimality,
+and objective/primal residual audits must pass. Failed checks export null prices
+and block energy settlement. The GUI displays the check and separate repeat wall.
+Scope is identical ordered LP/backend/version/platform, not mathematical uniqueness
+or cross-backend dual identity. Generic dispatch algorithms remain configurable.
+
+Final local incremental build: `output/market-performance/price-final/`, server
+SHA256 `87becb70f7da09e3a5a6170d8ad3412fe3febf6e51673a08c4462134a8643442`.
+Release 68 tests/29305 assertions pass, including existing RT/ancillary cases;
+ASan/UBSan price_consistency 2 tests/26 assertions pass (no Gurobi, detect_leaks=0).
+Final-binary operation and forecast GUI/API tests pass. Single-assembly IEEE118
+counterexample: 199246 row duals match exactly across two fresh processes and
+requested auto/dual_simplex/barrier; objective 14034457.13961928, residual
+1.1596057447604835e-10. Injected failed check exports only null node prices.
+The initial new test used invalid nonzero HiGHS threads; corrected to the existing
+contract, then full tests rerun. No validation gate was relaxed.
+
+Four sequential final-binary seven-day browser runs: always/full 170.628 s,
+always/dispatch_only 140.670 s, anomaly/dispatch_only 41.771 s, verify/anomaly
+47.473 s. Strict comparator passes: all-mode main price difference 0, all 147
+compared objective/residual differences 0, exact physical/water/SOC/recovery
+metrics, and 21 main stages/42 verify matrices exact. Default week adds3.209 s
+versus the old38.562 s, close to the predicted3.5 s and below50 s acceptance.
+Old automatic policy to fixed policy can change historical prices (max10.6907241
+CNY/MWh); physical/carry values remain exact and objectives/residual differences
+stay below1e-6. Do not claim bitwise price identity with the old policy.
+
+New service http://127.0.0.1:8105/xjtu/#market-operation, PID66948, saved IEEE118
+boundary/seed with anomaly/dispatch_only, ready 0/7 at launch. Previous services
+8097/8101/8102/8103/8104 preserved. Performance and reproducibility ledger:
+`docs/modules/market/performance.md`, `output/market-performance/price-*`.
+
+Recovery policy follow-up is implemented: new GUI/forecast defaults use anomaly
+triggering (realized-day deficit/surplus/line-overload sum >1e-6 MW); legacy configs
+without explain_trigger retain always. Recovery pricing defaults to dispatch_only;
+main LMP remains enabled. Historical-day manual explain uses stored state_start and
+original lookahead without advancing days, changing carry/statistics, or rewriting
+original execution timings. Gurobi thread-local timing splits environment, model
+import, optimize and extraction; presolve/search remain explicitly unmeasured.
+
+Final incremental build `output/market-performance/recovery-final/` replaces four
+market units, server and external adapter, retaining other archives/libraries.
+Server SHA256 `59c415d2c21c28b3a13ecea3a8f066b1005b60a0d5e03699077ea7063337ad5e`.
+Release 66 tests/29262 assertions pass; ASan/UBSan recovery_policy 2 tests/53
+assertions pass (Gurobi unavailable in that build, leak detection disabled).
+Operation/forecast GUI/API pass including manual scopes, unchanged historical
+state/statistics, invalid/stale requests, responsive views and legacy API behavior.
+
+Same-binary seven-day browser wall: always/full 157.075 s; always/dispatch_only
+136.086 s (-13.36%); anomaly/dispatch_only 38.562 s (-75.45%, zero anomalies).
+Performance predictions met; physical trajectories and water/SOC carry are exact.
+42 recovery metric sets match; 147 compared stages differ at most 4.47e-8 in
+objective and 1.12e-10 in residual. Main verify: 21 stages/42 exact matrices.
+Historical day 3 manual recovery: 17.986 s, all original main results unchanged.
+
+Historical recovery-policy build: the predeclared price-identity gate FAILED in the dispatch-only full week:
+max main LMP difference 6.64876 CNY/MWh, while auto/verify prices match full exactly.
+One assembled LP (Gurobi fingerprint 0x0819db94) independently reproduces both
+price vectors with auto and dual simplex, equal optimal objective within 1e-6 and
+valid residuals. This is nonunique optimal dual selection under concurrent LP,
+not rounding or changed SCED/water/SOC. Do not claim all-mode price identity or
+silently relax its tolerance. `compare_market_recovery.mjs` records false and
+returns 1 for those archived runs. The deterministic pricing follow-up above
+replaces concurrent selection; archived failed evidence remains unchanged.
+See performance.md and recovery-lmp-repeat diagnostic artifacts.
+
+New service: http://127.0.0.1:8104/xjtu/#market-operation, PID58652, same saved
+boundary/seed with explicit anomaly/dispatch_only, ready 0/7 at launch. Desktop
+and mobile checked; prior 8097/8101/8102/8103 services preserved. Full evidence,
+commands, dependency limitations and solver warnings are in performance.md.
+
+Assembly follow-up now implements `execution.assembly_mode=cached|reference|verify`
+(default cached), independently of compact/reference formulation. Sorted vector
+terms preserve original ordered accumulation; indexed column lookup removes
+repeated string-key construction. Exclusive per-stage bounded template leases
+retain storage and CSC positions, recomputing all numeric data and rebuilding
+on any layout/nonzero pattern mismatch. No solver model/solution cache or skipped
+SCUC/SCED/LMP stages. See the assembly section of the performance ledger.
+First three-run diagnostic: assembly median 0.6535 -> 0.4779 s (26.9% less),
+request 4.5116 -> 4.3054 s (4.57% less). This misses the predeclared assembly
+<=0.32 s / roughly 7% request target; the cost model overstated removable work,
+since equation evaluation, row names and certification/report scans remain.
+All nine verify stages match original matrices, objectives and residuals exactly.
+
+Final incremental build `output/market-performance/assembly-final/` recompiles
+southern_market, market_operation and southern_boundary with recorded existing
+dependencies. Server SHA256
+`92b13f4329e79ee3a690c1f6ff3bc9194a3eecb58fec54137b8d9bd675a0ec6c`.
+Release full market: 64 tests/29176 assertions pass. ASan/UBSan assembly cache:
+2 tests/88 assertions pass (exact matrix identity, topology/zero coefficient/
+resource changes, concurrent leases, two-day water/SOC carry). Direct operation
+and forecast GUI/API regressions pass. Independent IEEE118 resources regression
+passes cascade/SOC recurrences, peak/outage cases, 14 sampled days and 28-day
+carry; AC security remains explicitly failed.
+Complete-week reference/cached browser wall is 165.664 -> 158.446 s (4.36%
+less), all 7 main chains/42 interventions retained. Stage assembly sum falls
+32.911 -> 24.143 s (26.64%); 282 of 294 matrices reuse CSC storage. The extra
+verify replay passes exact matrix/model checks for all 147 stages/294 matrices.
+Reference/cached objectives, residuals, trajectories, prices and carry match
+exactly. Verify's scalar reports differ by at most 1.87e-9 objective and
+3.40e-11 residual, while trajectories/carry remain exact; scalar bitwise equality
+is explicitly false, not concealed by the 1e-6 numerical acceptance. Evidence:
+`assembly-week-{reference,cached,verify}/` and cached `assembly-comparison.json`.
+The two performance replays were sequential without other agent compute;
+verify and independent resources were concurrent correctness tasks, not timings.
+
+New cached-assembly service is `http://127.0.0.1:8103/xjtu/#market-operation`,
+PID 47315, with the same saved boundary/seed/week configuration ready (0/7 at
+launch). Launch log/record in `output/market-performance/assembly-service/`.
+Existing 8097/8101/8102 services remain untouched and do not pick up this binary.
+
+The current compute changes go beyond the earlier frontend-only correction below.
+`southern_market.cpp` projects eligible zero-minimum storage onto hourly direction
+integers (196 -> 26 per asset) and fixes a dominant available-state representative
+for costless, unrestricted hydro/renewable commitment. Positive minima, costs,
+slow ramps or event limits retain the original commitment; thermal, realtime and
+ancillary paths are excluded. The original constraint/residual audits remain.
+`market_operation.cpp` runs at most two independent same-day Gurobi interventions;
+chronological carry stays sequential. Automatic threads resolve to two per recovery
+worker. Day timing separates main solve, recovery wall and total wall time.
+See `docs/modules/market/performance.md` for proofs, admission and benchmarks.
+
+Follow-up verification repeats the saved complete week at 164.279 s (prior
+optimized 164.951 s, old 304.315 s); all 147 stage comparisons pass. A new
+`profile_market_parameters.mjs` tests the saved first-day main chain with the
+actual next-day forecast points, keeping 120 s and 1% GAP. Three-run medians:
+auto 4.498 s, explicit start 6.229 s, dual simplex 5.256 s, barrier 4.948 s,
+certified row removal 4.456 s, two threads 4.456 s. None meets the declared
+10% reduction, so defaults are unchanged. All 54 stages pass feasibility and
+pricing; max residual 3.63e-8, relative objective difference 0.006363.
+
+Diagnostic-only timers now expose boundary validation, full solve wall,
+dispatch-map export, daily boundary generation, summary and analysis, including
+recovery runtime/validation/boundary fields. Timers do not alter solver options
+or model equations. Isolated incremental `timing-overlay/run_gui_server` has
+SHA256 `5a19619a4a699ac4b3e144db4f30b8cd859849fefbf4dab03e89356aa2118230`.
+Three-run median 4.511 s is +0.30%, within the predeclared 2% timing overhead
+gate. Representative request: boundary generation/validation 0.0419 s (0.93%),
+assembly 0.6365 s, solve wall 3.3838 s (75.0%), audit 0.2630 s, dispatch export
+0.0629 s. Parameter parsing is not the principal bottleneck in this input.
+Exact first-day resource/period/lookahead/carry and stage objective/residual/size
+parity passed. Updated operation GUI/API timing-accounting regression and
+forecast GUI/API generation/statistics/export/reload/mobile regression passed.
+Evidence: `verification-repeat/`, `parameters/`, `timing/` under the performance
+output directory. No existing 8097/8101/8102 process was replaced; diagnostic
+fields are currently in the separate test binary, not the existing service.
+
+The user's saved one-scenario/week workload includes seven main chains and
+42 paired interventions. A real browser replay of the old backend took 304.315 s;
+main chains 44.163 s, recovery solver stages 214.178 s, recovery assembly/audit
+36.806 s. Recorded browser long tasks were only 109/152 ms. This is not the
+single-day 23.654 s median from the earlier storage/parallel milestone (old
+39.108 s, reduction 39.5%, 63 matched stage audits, max residual 1.265e-10).
+The saved input and exported resolved base are in `output/market-performance/live-input/`.
+The matched optimized browser replay completed all seven days/42 interventions
+in 164.951 s (45.8% less); main 38.879 s, recovery wall 124.552 s. All 147
+matched stages pass, max residual 3.40e-9, max relative objective difference
+0.0095151 within the existing 0.01 gap. This is one full-week replay per version,
+not a universal latency guarantee. Evidence: `live-before/`, `live-after/` and
+`live-after/comparison.json` under `output/market-performance/`.
+Three-run isolated single-day medians with storage projection held constant:
+Gurobi 4.913 -> 4.469 s (9.0%, below predeclared 25%); HiGHS 17.072 -> 4.889 s
+(71.4%, passes). SCUC binary declarations drop by the predicted 4704. The
+Gurobi miss is reconciled by its measured SCUC fraction (39.7%) and SCUC speedup
+(20.0%); full-chain cost prediction was overoptimistic, not a failed identity.
+Evidence: `commitment-before/` and `commitment-after/` under the same directory.
+
+Optimized local service is 8102, PID recorded in `output/market-performance/service/server.json`,
+binary `commitment-overlay/run_gui_server` (SHA256
+`5f2f011d87101c71230a2ab3452092224a7d0896bb43b1d943a588d135887c75`).
+At launch it received the saved boundary and identical sampled-week configuration in ready state.
+Existing 8097/8101 sessions/results remain untouched; their old processes do not
+pick up rebuilt C++ automatically.
+
+The optimized release overlay passed Southern 62 cases/29082 assertions before
+the oracle-only test revision; revised commitment oracle passes 172 assertions.
+ASan/UBSan projection checks pass 1086 assertions; Gurobi parallel recovery is
+skipped in this sanitizer archive because Gurobi is unavailable there. Release
+does cover parallel recovery and GUI auto-thread/budget fallback. The old full
+reference formulation triggers a HiGHS debug assertion at `HighsDomain.cpp:1705`
+on the partial-outage oracle; this remains unresolved and is not a sanitizer
+pass. The production compact oracle retains the original free commitments and
+has identical energy/reserve equations in the reservoir-free test fixture.
+Direct optimized Node operation, forecast, ancillary, realtime and IEEE118
+resources E2Es pass. Resources independently checks water/SOC/pressure cases,
+14 stochastic days and 28-day carry. AC security still fails as expected.
+
+Builds use `tools/market_validation/build_market_overlay.py`: two changed market
+translation units and the test source are rebuilt with existing generated flags,
+then linked ahead of the recorded existing archive. Dirty MIPSolvers prevents a
+clean CMake regeneration; no dependency guard or pin was bypassed/changed. These
+are incremental local builds, not a clean release certification. Source, binary
+and archive hashes plus commands are in each overlay's `build.json`.
+
+IEEE118 frontend performance correction adds `market_activity.js`: elapsed
+request time, actual bytes received, scenario/day labels, and lightweight
+`/api/session/status` polling while a request is pending. Session `busy` is not
+a solver-stage heartbeat; no invented percentage/ETA. POSTs are never retried.
+Overlapping GETs are merged within a mutation generation, redundant operation
+loads removed, and hidden weekly/forecast plots deferred until shown. No
+solver/options/precision/backend changes or C++ rebuild in this correction.
+Read-only measurement of the same 135,439,395-byte forecast on service 8101:
+four downloads -> one (541,757,580 -> 135,439,395 bytes, 75% reduction);
+hidden weekly overview SVGs on step 3: 18 -> 0. Current repeatable profile:
+`node tools/market_validation/profile_market_gui.mjs --base http://127.0.0.1:8101`,
+evidence `output/market-activity/profile.json`. This is a frontend improvement;
+large whole-job responses and solver compute time remain. New activity E2E
+passes delayed response/elapsed clock, honest global busy, pending pause,
+heartbeat failure, real day solve, deferred plot rendering, network failure and
+desktop/mobile visibility. Its CTest registration has not run via CTest.
+This correction directly passed eight Node scripts with the existing
+`build/macos-release/tests/run_gui_server`: `market_activity`, `market_workflow`,
+`market_operation`, `market_forecast`, `southern_market`, `market_study`,
+`yunnan_ancillary`, `southern_realtime` (all filenames end `_e2e.mjs`). Study's
+18 IEEE118 scenarios took 100.477 s before its additional carry checks; all AC
+audits still fail as expected. Nine syntax checks and `git diff --check` pass.
+Temporary E2E servers exited; the existing 8097/8101 sessions were preserved.
+
+Market workflow now has two model families and ten distinct pages: five Southern
+workspaces (operation, boundary/day-ahead, study, Yunnan ancillary, realtime) and
+five generic AC/DC pages (participants, inputs, clearing, security, settlement).
+The duplicated five-step strip is removed; study and Southern boundary editors
+each have one scope. `market_canvas.js` caches updates by workspace owner so a
+late response cannot overwrite another page. Ten hash links survive asynchronous
+startup/reload; market entry skips the unrelated automatic engineering tour.
+Six task-specific tutorials and the searchable Chinese operation manual are
+available from every market page. Narrow screens show operations before the
+optional topology. See `docs/guides/market_simulation_workflow.zh.md` and the GUI
+audit in `docs/modules/market/southern_execution_contract.md`.
+
+Eight direct Node E2E scripts passed against the existing macos-release server:
+`market_workflow`, `market_gui`, `southern_market`, `market_operation`,
+`market_forecast`, `market_study`, `yunnan_ancillary`, `southern_realtime`.
+Command pattern: `node tests/e2e/<name>_e2e.mjs --server
+build/macos-release/tests/run_gui_server`. New workflow evidence is in
+`output/market-workflow/verification.json` and 30 screenshots (ten pages at
+1440/768/390 px). It covers a real two-node solve, help opening/closing,
+initial mobile topology, first-visit deep links, and delayed-response/404 handling.
+Study passed 18 IEEE118 scenarios plus seven-day joint-fault carry checks;
+all 18 AC audits still fail and their ledgers remain conditional. Generic
+`n1_security_failed` and game `maximum_rounds_reached` are expected test outcomes,
+not safety/equilibrium certificates. No C++ solver or mathematical changes in
+this UI correction; no rebuild or CMake regeneration under the existing dirty
+dependency guard. The new workflow CTest registration has not run via CTest.
+
+Existing service 8097 still has an older backend: ancillary/realtime GETs return
+404. The UI now explains this in Chinese. Existing service 8101 supplies these
+APIs and serves the updated frontend; both user sessions were preserved. The
+broader design in `docs/modules/market/system_design.md` remains a proposal for
+unified persistent tasks and immutable stage references. Automatic
+day-ahead/AGC/realtime handoff has not been implemented.
+
+The AEMO adversarial campaign is documented in `docs/modules/market/aemo_validation.md`.
+Seven official DispatchIS archives plus next-day unit dispatch and the existing bid
+archives are pinned in `external_data/market_validation/source_manifest.json`.
+Regional balance max0.010000000002MW, 5min/15min energy relative error3.147e-15;
+25 FCAS award/actual-availability differences remain unresolved field semantics,
+with complete source rows retained. These differences are excluded from the
+regional `identities_pass` flag. No NEM replay or Southern empirical certification.
+
+`tools/market_validation/` runs108 finite checks including256 complete two-unit
+commitment combinations (17 feasible; objective132.58706884519836 matches
+HiGHS/native/Gurobi), two-bus LMP and separate positive deficit/line overload,
+mixed-resource independent physics,12 mutations,7x96+2 day rolling,4 realtime
+windows, AGC shortage/success counterfactuals,14 stochastic scenario-days and
+4 fault/inflow AC studies. Independent maxima: nodal1.706e-12MW,
+SOC1.635e-12MWh, water level1.422e-14m; hourly price reconstruction error0.
+All108 checks pass, INCLUDING expected rejection gates: all4 AC studies fail
+security; energy-only UC lacks AGC capacity in hours10-15; conditioned research
+ledgers are not formally eligible. Post-outage AC nonconvergence still lacks
+detailed cause metadata and a zero default residual is not a feasibility proof.
+
+Direct Python18 tests pass (9 independent audit,9 existing bid tests); new
+`market_independent_audit_unit` is registered but not executed through CTest.
+Existing macos-release binaries pass Southern59/27962, generic22/845 and
+forecast8/12503 (89 cases/41310 assertions). No C++ rebuild this campaign:
+the existing dependency pin/worktree mismatch remains. Four direct Node E2Es
+pass (realtime, Yunnan ancillary, forecast, generic GUI); the generic navigation
+expectation was corrected from6 to the implemented8 pages. Its expected
+`n1_security_failed` and `maximum_rounds_reached` outcomes are not security or
+equilibrium certificates. Evidence, exact commands, binary/source hashes and
+coverage limits are in `output/market-validation/` and the module report.
+Production solver/GUI behavior was not changed by this validation campaign;
+temporary experiment servers exited and existing user GUI sessions were preserved.
+
+Bidding behavior literature/source audit is recorded in
+`docs/modules/market/bidding_behavior_review.md`: Southern scenarios use
+synthetic common bid multipliers; the generic local-best-response game is
+separate. No empirical bid calibration or water-opportunity-value bidding
+has been established. The review verifies AMES mechanisms and the2024 Aneo
+hydropower benchmarking paper, and distinguishes implementation tests from
+real-world behavioral validation. A subsequent empirical experiment is now
+recorded in `docs/modules/market/empirical_bidding_analysis.md`:
+seven official AEMO bid archives (385 positive-capacity GEN DUIDs,58 LOAD DUIDs),
+chronological descriptive comparisons,27 paired98-point Southern API solves
+with HiGHS, and9 directly executed Python tests all pass. Independent merit
+order audit: max power residual0 MW, cost relative error1.88e-13, LMP interval
+distance0. Runtime0.389-0.585s for fixed-on19/19/17-unit single-bus cases.
+Outputs and three PNG/PDF figures are in `output/market-bids/`; source ZIPs
+and official dictionary in `external_data/market_bids/`. No production solver
+or GUI changes; temporary experiment server exited, existing GUI preserved.
+This is foreign bid-shape transfer, NOT Southern behavioral calibration,
+NEM dispatch replication, a real-time-available forecast backtest, or UC/network
+performance validation. Nine tests are registered as `market_bid_empirical_unit`
+but CMake regeneration/ctest was not rerun under the existing dependency guard.
+
+Southern chapter3 realtime is now a separate C++ job and GUI page
+`/xjtu/#market-realtime`, API `/api/session/southern_realtime`.
+It uses24x5min SCUC/SCED, independent8x15min LMP, two-hour reference outlook,
+and15min executed-state carry. Sourced6h forecasts, sealed energy offers,
+province accident reserve, per-period hydro energy and priority transfers,
+storage hour history, topology outages and nullable historical hourly prices
+are documented in `docs/modules/market/southern_real_time.md`.
+Final Release Southern59 tests/27962 assertions and ASan/UBSan
+realtime6 tests/81 assertions passed (leak detection disabled).
+Reports: `output/market-realtime/{release-tests,sanitizer-tests}.txt`.
+IEEE118 two-roll E2E passed with Gurobi0.801/0.776s dispatch windows,
+water level residual6.74e-15m, storage/carry residual0 and no browser errors.
+Desktop1440 and mobile390/768 screenshots and independent conservation
+audit are in `output/market-realtime/`; Southern editor and Yunnan ancillary
+E2E also passed after the shared builder change. Invalid realtime declarations
+are explicitly caught as typed400 errors; stale revision/run ID returns409.
+GUI shows actual solver availability, independently selected reservoir curves,
+and disables execution when a raw JSON draft is pending.
+Live updated server:8101 PID81465, `/xjtu/#market-realtime`, with four
+IEEE118 mixed rounds preloaded. Gurobi dispatch plus pricing0.805-0.842s per
+round; bus1 actual four-quarter hour0 price48 CNY/MWh. This timing excludes
+the separate2-4h reference solve; it is not a2000-bus benchmark.
+Cached object/archive/link rules were used because the existing sibling
+dependency pin/worktree mismatch still prevents normal CMake regeneration;
+no dependency pin or unrelated worktree change was reset. The new E2E is
+registered in tests/CMakeLists.txt and was run directly with Node.
+This is an explicit research execution interpretation, not certification
+of AGC/deep-peak clearing, official price repair or dynamic security.
+
+Yunnan auxiliary page now implements hourly AGC prearrangement after SCUC,
+with fixed commitment/stable state/primary reserve, plant AGC aggregation,
+five-minute upward/downward reserve, and hydro connected safe operating bands
+in coupled SCED. LMP freezes bands and secondary allocation. Official 2025
+regulation and black-start PDFs (joint notice 114) are downloaded, hashed and
+mapped to equations in `docs/modules/market/yunnan_ancillary_markets.md`.
+Black start is rule extraction only. The new independent session endpoint is
+`/api/session/yunnan_ancillary`; main boundary revisions invalidate its saved
+declarations/results. Raw JSON drafts disable running until validated.
+The workflow extension adds sealed bid logs, sourced article41 safety
+removal/backfill/uplift, fixed-day-ahead intraday SCED, suspension/same-hour
+pricing and conservative real-time capacity envelopes. Independent storage
+and controllable-load AGC now enforce sustained headroom and energy-market
+exclusion, including the conditional energy ledger. Explicit AUTOR command
+records feed compensation; complete daily statements can enter an append-only
+simulation journal with corrections and whole-month energy-weight allocation.
+GUI exposes these actions, plots, independent-resource editing and journal
+export. The journal is session-local, not a persistent legal accounting system.
+
+Verified final Release Southern53 tests/27881 assertions and focused
+ASan/UBSan ancillary8/2077, with leaks disabled. Reports are
+`output/market-ancillary/{release-tests,sanitizer-tests}.txt`.
+Hand oracles cover merit ties/fallback/cap,
+hourly availability minima, nonzero frozen primary, reserve sums, safe bands,
+capacity shortage and a physically incompatible-band failure. Forecast formula
+coefficients are authored, not falsely presented as fixed official defaults.
+IEEE118 has36 hydro grouped in12 synthetic plant AGCs plus18 thermal AGCs,
+with wind/solar/storage/controllable demand retained in the energy model.
+Gurobi20 MW test4.790s and HiGHS approximately22.3s both solve; independent
+all-member/98-point reserve and band checks pass. Registered ancillary E2E
+passes save/reload,400/409, plots, Canvas slots/clicks, stale/reset semantics,
+and390px viewport geometry. Southern and operation GUI/API regressions pass.
+New plotting legend geometry is checked separately from page overflow.
+Expanded ancillary E2E passes IEEE118 day-ahead + intraday safety replacement,
+sealed-bid rejection, stale clearance IDs, duplicate/incomplete metering,
+actual GUI compensation and daily posting, duplicate-accounting rejection,
+missing-month-day gating and journal download. Hourly mileage bars replaced
+crowded unit/hour category ticks;390px axis-title separation is asserted.
+Southern editor and operation regression suites pass on the updated server.
+
+Top-level Release server updated atomically. New live8099 (PID52096) serves
+`http://127.0.0.1:8099/xjtu/#market-ancillary`, with mixed118 day-ahead and
+intraday results: Gurobi4.563s/2.302s,20 MW research demand, independent storage
+AGC3 MW and load AGC1 MW, plus conventional AGCs. Removing one conventional
+AGC triggers safe backfill. Synthetic metered compensation16 CNY and cash
+residual0; all98-point frozen states, plant reserve, hydro-band, and storage
+energy-exclusion residuals0 in `output/market-ancillary/live-rules-audit.json`.
+The first load5+3 MW experiment correctly failed against the unchanged80 MWh
+daily cap (192 MWh required); its failure JSON is retained. The accepted1+1 MW
+experiment requires48 MWh. No boundary capacity was relaxed to obtain success.
+HiGHS workflow E2E also passes; latest captured day-ahead21.440s, intraday
+11.436s in `ieee118-intraday-highs.json`. These are individual observations.
+Older live8098 is preserved and serves
+`http://127.0.0.1:8098/xjtu/#market-ancillary` with saved mixed118 results:
+10 MW primary, Cmin50/R1=.005/R2=.003, hourly secondary demand68.789–76.747 MW,
+awards70–80 MW, Gurobi5.106s; independent fixed-state/capacity/band residuals0.
+Artifacts are `output/market-ancillary/`. Existing8097 study and8095 weekly
+services are preserved. Cached direct object/archive/link builds were used;
+dependency pin and dirty-check guard are unchanged. Existing DynamicSystem
+class/struct forward-declaration warning remains outside this change.
+
+Limits: one-day98-point auxiliary task, no automatic weekly AGC-history carry;
+actual timestamp validity of last-eight performance/qualification records,
+official raw-signal statistics, automatic unique safety-failure attribution,
+head-dependent vibration/transition, AGC activation dynamics/security,
+market supervision/disclosure/approvals and legal remittance remain external.
+Monthly outputs restate latest metered daily versions; next legal settlement
+payment and externally approved correction exceptions are not automated.
+Safe bands and qualifications are authored research declarations. Successful
+linear schedules are not AC/dynamic safety or regulator certification.
+The prior study baseline and its independent limitations follow below.
+
+Fault/inflow study now uses the Southern mixed-resource rolling model through
+an independent `/api/session/market_study` task. Day/week/month calendars keep
+96 realized + 2 D+1 points. Up to64 deterministic fault/inflow/bid combinations
+have independent UC/SOC/reservoir carry and common baseline references. Five
+market pages share scenario selection, comparison curves, actual stage status,
+optional98-point post-dispatch AC audit and a conditional closed-AC energy
+ledger. Canvas scenario/day/slot controls and curve clicks are bidirectional;
+the existing full-device plan can display a study scenario. Single-day prices
+show all-node range/median plus a selected node instead of80 overlapping traces.
+
+Current Release Southern45/25804 and focused ASan/UBSan study2/1874 pass, leaks
+disabled. Registered study E2E passed18 IEEE118 scenarios (3 fault profiles x3
+inflows x2 bids), then a7-day joint-fault run with exact carry and paired
+restoration. Actual Plotly, all five pages, Canvas/time clicks, independent
+cashflow recomputation and desktop/mobile geometry pass. Generic mixed-market
+six-tab workflow, Southern editor, forecast, operation and Canvas-layout suites
+pass. The operation browser harness initially fulfilled a request cancelled by
+navigation; draining background requests before changing route mocks fixes the
+reproducible harness failure. Additional live checks opened the study full-device
+heatmap and selected price node118; a390px actual chart fits within374px.
+
+18 scenarios have valid linear clearing/LMP and no deficit or active-flow
+overload, but all fail AC security. PF converges; violated P/Q capability,
+voltage and apparent-power limits remain explicit. No limits were weakened.
+Cashflow maximum residual5.93e-10 CNY is below the fixed1e-4 independent test
+threshold. First18-day study elapsed102.803s; another full run103.521s. This is
+not a2000-bus performance claim. Formal settlement eligibility is alwaysfalse:
+Southern real-time/contract/auxiliary-service settlement remains outside this
+conditional research ledger; external schedules/DC links return unsupported.
+
+Export replay exposed an omitted explicit native_root_cuts default in the raw
+baseline. Persisting resolved solver defaults fixes exact replay, with no
+numerical model change. Current test counts above include the new replay and
+invalid-mode/reference tests. Build used cached object/link rules because the
+dependency guard blocks normal regeneration; dependency sources/pins were not
+edited. Top-level macOS server executable is replaced atomically. Active study
+service8097 and `output/market-operation/fault-inflow-study/` hold the retained
+experiment; prior8095 weekly session is preserved. Detailed units, equations,
+API mapping and limitations: execution contract, Fault/Inflow Study.
+
+Market Canvas now uses the existing ELK layered router, distinct per-branch
+ports, a24-bus/two-hop default neighborhood and explicit80-bus expansion.
+Bus values are opt-in; branch values stay in tooltips/inspector. Same-revision
+reloads and time changes retain positions/zoom; obsolete layout promises are
+cancelled when selection changes, including return to an already-visible bus.
+Independent workspace tracks prevent toolbar/topology/inspector overlap.
+Registered `market_canvas_layout_e2e` passes both fresh IEEE118 and live8095
+sessions: layout boxes/labels, distinct parallel paths, selection races,
+shared-reservoir highlighting and desktop/mobile geometry. Existing operation
+and Southern GUI/API suites pass. Artifacts: `canvas-layout/`; live8095's
+seven-day result is unchanged. This is a static GUI change, with no new C++ or
+numerical validation claim. See execution contract Market Canvas Layout.
+
+Weekly/monthly results now default to six graphical overviews and an all-device
+heatmap/curve explorer; numeric tables are collapsed. `market_weekly_plan.js`
+supports16 metrics,40-device pagination without data truncation, full-calendar
+CSV, qualified Canvas selection, and null gaps for unavailable/stale results.
+SCED primary reserve is exported; per-generator signed up/down constraint
+contributions, area demand/margins, renewable availability/consumption and
+directional active line loading are projected in the daily report. No reserve
+award or AC apparent-power certification is inferred. The inherited300px
+chart container initially clipped heatmap rows; explicit calculated height
+fixes it. New sessions without saved mode preferences can open existing manual
+results, preserving explicit user choices.
+
+Verified current Release Southern43/23930; focused ASan/UBSan weekly projection
+1/963, leak detection disabled. Mixed seven-day plus forecast-resolution E2E
+passes numeric/source/plot/CSV/filter/stale checks; operation and forecast
+GUI/API regressions pass. All7 objectives, variable and nonzero counts match
+the prior mixed-fixture log exactly. Latest live8095 stores a full seven-day
+mixed stress plan; top-level server executable is updated atomically. The
+final desktop/mobile and actual heatmap click checks use the retained live
+report. See execution contract Weekly Plan Results for formulas/field units,
+cost model and verification limits;2000-bus monthly rendering remains untested.
+
+New built-in `market_ieee118` and Southern action `ieee118_mixed` implement
+`IEEE118-mixed-v1`: original54 units become36 hydro/18 thermal;6 wind,6 solar,
+12 shared reservoirs in4 three-reservoir chains,6 storage and6 compensated
+loads. Source network/capabilities/IDs and daily demand energy are retained;
+fuel assignments, offers, temporal shapes and water data are explicit synthetic
+assumptions. The global load also installs the companion Southern boundary;
+old `ieee118` is retained as the previous performance fixture.
+
+Verified: Release Southern42/22870; current-source generic market22/845;
+focused mixed-fixture ASan/UBSan1/273 (leaks disabled). Mixed browser7-day stress
+plus forecast-resolution tests, resources independent conservation/ablation,
+2 joint scenarios/14 solved days,28-day February month with exact carry,
+generic market six-tab workflow, Southern editor and operation regressions pass.
+Generic workflow explicitly preserves N-1/AC rejection; only the conditional
+linear financial experiment converges (cashflow residual2.0e-11). Source CTest
+entries register mixed/resources/generic suites; the guarded cache uses direct
+invocation. The generic test object was rebuilt from current source; its stale
+link file references GCC15 and duplicates HFactor archives, so a temporary
+invocation reused the current Southern test link libraries with the generic
+test object. No generated link files or dependency pins were modified.
+
+GUI validation found and fixed generator Canvas round-trip loss of fuel type,
+minimum up/down times and maximum starts/stops. Fuel editor now includes every
+backend enum. Generic market result limitations explicitly identify exogenous
+AC storage/flexible loads and absent reservoir coupling. `case_profiles` gates
+the new static selector against old binaries. Rolling day reports now retain
+96 realized points in `resources` for generators/storage/reservoirs/controllable
+loads, using authored IDs and MW/MWh/m/m3/s units. Canvas selections display
+actual dispatch, commitment, charging/energy, water level/release and response;
+the final mixed seven-day and operation E2E plus Southern42/22870 pass with
+this result-only projection.2000-bus monthly payload memory remains untested.
+The initial mixed fixture used service8094; weekly graphics now use8095 as
+described above. Earlier services are preserved.
+
+Important open boundaries: Southern AC-required strict run fails certification
+and returns invalid prices. Generic N-1 detects actual load shedding, including
+branch113 (71->73) and183 (68->116) outages; these are detected insecure
+contingencies, not a passing security certificate. Gurobi and HiGHS solve the
+new98-point fixture with objective4212673.15329467CNY; Native fails its root LP
+at25000 simplex iterations in both initial and fallback attempts. The previous
+Native6.4s success below applies only to the old IEEE118 fixture. No Native
+repair for the new fixture is claimed. Southern real-time settlement and
+forecast price/renewable-utilization aggregates are still missing from a unified
+multi-resource workflow. Detailed matrix, equations and evidence are in
+execution contract Mixed IEEE118; artifacts `ieee118-mixed*` and
+`market_ieee118-generic/`. The month and probabilistic runs are regression
+coverage, not real-data calibration or a full statistical validation study.
+
+Native IEEE118 fixed-integer repair now honors its selected HiGHS LP kernel
+and remaining optional-root budget in sibling `06_root_heuristics_a.inc`.
+The disabled automatic root pipeline no longer blocks GAP exit; an audited
+incumbent/root-bound certificate skips optional fixed-point polishing at the
+requested gap unless tree exhaustion is required. Feasibility-jump attempts
+and flips check the same deadline (`07_root_heuristics_b.inc`). No market rows
+or96+2 points are removed. The initial repair-only experiment reached an
+incumbent in2.435s but still took45.103s; the GAP control-flow correction then
+gave6.401s/full chain and3.532s/SCUC versus roughly37s/no incumbent previously.
+Prediction and mismatch analysis: execution contract, Native Fixed-Integer
+Repair Debug; current-source sibling B&C regression passes35 cases/490
+assertions. Release Southern41/22597 and operation/forecast browser suites pass.
+Native IEEE118 E2E passes seven stress days and15/30/60-minute forecast inputs
+with unchanged15-minute calculation and60s per-solve budget. Evidence:
+`output/market-operation/ieee118-native/`; this is not a2000-bus performance
+claim. The new `market_ieee118_native_e2e` CTest entry was invoked directly,
+since the dirty-dependency configure guard still blocks cache regeneration.
+
+The ASan/UBSan cache is unoptimized.30s IEEE118 attempts time out (also in an
+isolated rerun) without a sanitizer report; the test-only
+`HACDCPF_TEST_NATIVE_REPAIR_SECONDS` override permits explicit instrumentation
+budgets without changing the default30s Release criterion. At180s per solve,
+ASan/UBSan passes2 cases/62 assertions (both IEEE118 profiles plus analytic
+root cuts), with leak detection disabled and no sanitizer report. The failed
+30s and successful180s logs are retained in `native-repair-fixed/`.
+Final isolated alternating default/enhanced/enhanced/default process times
+are6.404/6.495/6.394/6.387s; full chain6.276..6.387s, SCUC3.485..3.585s.
+All have valid schedules/prices, gap1.7527268e-6, original/reconstructed
+residual<=1e-6,1 incumbent,3 LP solves and0 cuts/nodes. This closes the below15s
+prediction through repair/GAP exit, not cut strengthening. Top-level server
+is updated; live8092 has a verified enhanced Native stress day1/7, ready to
+resume. GUI/Canvas and desktop/mobile results were inspected, with no390px
+horizontal overflow. Earlier services are preserved. Exact evidence and
+build-cache limitations are in the execution contract.
+
+Native root-cut experiments add `execution.native_root_cuts=default|enhanced`,
+also carried by rolling/forecast solver_options. Enhanced requests20 rounds /
+100 cuts, enables existing audited separation and raises the root row admission
+limit35000->100000 (very-large3x30 adaptive caps retained). Default unchanged.
+That earlier profile change added no sibling source edits or inequality formulas.
+The market preserves public
+BCStats via the same solve_milp_bc entry point; stage/rolling GUI reports actual
+cuts, nodes, LP solves, incumbent updates and available bounds, with null for
+unavailable bounds/LP-only diagnostics. Requested versus measured values are
+distinct. See Native Root Cut Experiments in the execution contract.
+Capability-gated controls avoid sending new fields to old running binaries.
+Release Southern40 cases/22567 assertions, focused ASan/UBSan1/29 (Gurobi OFF),
+Southern editor and operation/forecast browser suites pass. An E2E teardown
+race from outstanding legacy-capability route.fetch was fixed with awaited
+unrouteAll; final operation rerun exits0. Sanitizer covers the numeric/profile
+change; the final additive capability metadata was checked in Release/browser.
+The previous service8091 has the pre-repair IEEE118 boundary loaded;
+earlier tasks preserved. Model performance evidence follows the execution
+contract protocol; initial gated zero-cut runs are retained separately.
+Pre-repair alternating IEEE118 default/enhanced/enhanced/default process times:
+38.592/36.978/37.357/37.822s for30s request. All have0 cuts,0 nodes,0 incumbents,
+5 LP solves and best bound17413231.01694171CNY, matching the prior Gurobi optimum.
+Measured bound lift0 matches prediction<1CNY; none produced a valid schedule or
+prices. The subsequent fixed-integer repair above closes this IEEE118 failure;
+2000-node Native solve performance remains open.
+Evidence `output/market-operation/native-root-cuts/comparison.json`, complete
+profile/admission caveats in the execution contract. Port8091 remains historical.
+Live8091 holds failed IEEE118 rolling day0 with enhanced diagnostics:80239 root
+rows,2 nonmoving rejections,0 admitted cuts/incumbents,36.979s. Its resolved
+D+1 boundary differs from the benchmark, so bounds are not directly comparable.
+Live JSON and desktop/mobile screenshots are in `native-root-cuts/`.
+Live inspection also fixed empty-result totals/plots: no valid periods now
+shows unavailable statistics, hiding empty plots instead of zeros/default date
+axes; partial totals explicitly cover valid periods. Updated operation E2E
+checks failure-to-valid chart restoration, and live desktop/mobile checks pass.
+
+Certified row omission is now implemented behind `execution.row_presolve`
+(`none` default, `enabled` only with compact). SCUC/SCED omit inequalities proved
+by outward-rounded variable-box support; all authored rows remain in final audit.
+LMP retains all rows. Submitted duals map back to original row indices, and GUI
+reports original versus submitted row/nonzero counts. The boundary execution
+schema editor exposes and persists the option; rolling/forecast inherit it.
+Fixed-variable elimination and variable calculation steps are not implemented.
+Reduced2000 assembly removes exactly213331 rows:3333454 to3120123, nonzeros
+10515386 to9950617. This is not a completed2000 solve or throughput claim.
+IEEE118 removes7022 SCUC rows and passes seven enabled stress days plus forecast
+resolution experiments; saved daily deficit/surplus/line-excess integrals match
+the preceding default run within1e-6. Rebuilt Release Southern39 cases/22538
+assertions; focused ASan/UBSan1/61 (Gurobi OFF), Southern editor, operation,
+forecast and enabled IEEE118 browser suites pass. Full pricing objectives may
+differ for nonunique predecessor schedules; only the unique analytic price is
+asserted identical. Performance and mapping protocol: Certified Inequality
+Omission in the execution contract. Artifacts `row-presolve/` and
+`ieee118-row-presolve/`; new comparison driver is
+`tests/run_southern_row_presolve_comparison.mjs`.
+Final isolated three-pair IEEE118 medians none/enabled: Gurobi3.345/3.330s,
+HiGHS7.358/7.163s; max original residual6.06e-9. Small local gains do not justify
+a default change. Final evidence `row-presolve-isolated/comparison.json`.
+Updated top-level executable and new service8090; earlier services preserved.
+
+IEEE118 multi-resource system fixture is available in both market case selectors
+and benchmark case118: original118 nodes/186 branches/54 generator records plus
+1 wind/1 solar/4 hydro,2 shared cascade reservoirs,2 storage and2 interruptible
+loads. Offers, resource additions and200MW line limits are explicitly synthetic;
+source synchronous condensers use declared synthetic dispatchable assumptions.
+Fixed MATPOWER transformer metadata is checked against its source branch before
+alias collapse; original branch parameters and IDs remain intact. Unknown or
+modified/controllable transformer aliases are rejected. The generic importer
+still rejects unsupported engineering components.
+
+New registered `market_ieee118_e2e` passes seven coupled rolling days with load,
+line-limit, islanding, resource and bid stresses, plus15/30/60-minute forecast
+resolution at unchanged15-minute calculation. The latter preserves daily load
+energy104989.5MWh and132300 columns/481939 nonzeros, but peak deficit6051.213MW
+at15-minute forecast disappears at30/60; line excess integrals261.771/930.197/
+22.000MW*h are not monotone. Actual30/60-minute calculation is NOT implemented;
+the validator rejects0.5h operating intervals. Evidence and rationale are in
+the execution contract and `output/market-operation/ieee118/`.
+
+Local30s/GAP.01 algorithm comparison: Gurobi full chain4.253s, HiGHS9.168s,
+both valid with SCUC objective relative difference8.90e-6; native44.157s,
+time-limit without verified solution. Diagnostic comparison overlapped the
+system tests and is not a controlled speed ranking. Rebuilt cached Release
+Southern38 cases/22477 assertions, ASan/UBSan IEEE1181/1507 (Gurobi OFF), and
+IEEE118/manual/forecast browser suites pass. New CTest entry is in source;
+dirty dependency guard still prevents normal reconfigure of the current cache,
+so the new browser script was invoked directly. Updated top-level server and
+port8089 expose IEEE118; older services/tasks remain intact.
+
+Model-size follow-up adds read-only SCUC inspection and per-stage assembly
+census, propagated through rolling/forecast results to an expandable GUI table.
+The benchmark accepts final `inspect` mode without invoking optimization.
+Source counts confirm reducing synthetic thermal544 to120 removes only10.17%
+of columns and15.77% of rows: reduced model2569364 columns/145040 declared
+binaries/3333454 rows. Hydro70560 and wind/solar47040 commitment binaries remain;
+network plus diagnostic columns total1530564. Conservative box-bound audit finds
+213331 redundant inequality candidates; `constraints_removed=0` explicitly
+records that this follow-up does not prune or change the solver matrix.
+Further custom constraint removal is not implemented or benchmarked. Rules,
+certificate assumptions and exact family counts are in the execution contract
+under Model Size and Bound Redundancy Audit and `output/market-operation/model-size-*.json`.
+Inspection process wall6.892s for120 thermal /7.985s for544 thermal; no solver
+speedup is claimed. Rebuilt cached Release Southern37 cases/20970 assertions,
+focused ASan/UBSan1/17 (Gurobi OFF), and operation/forecast browser E2E pass.
+Port8088 runs the updated binary with a multi-resource demo day1/7 for inspection;
+8087 and older user tasks remain intact. Top-level run_gui_server is updated.
+Live desktop/mobile screenshots `model-size-live-{desktop,mobile}.png` show the
+expanded tables; old saved results lacking the field remain readable.
+
+Solver selection follow-up fixes a forecast-editor capability-loading race:
+the editor mounted before the asynchronous solver list and stayed empty because
+preserving the forecast draft skipped reconstruction. Mounted operation/forecast
+selects now hydrate together, disable while loading, retain authored choices and
+reject unavailable selections before execution. Both browser suites pass,
+including deliberately delayed capability GETs, direct selection without editing
+distributions, actual Gurobi execution, reload persistence and390px layout.
+Failure detail now distinguishes requested/actual solver and requested/elapsed
+time from solution quality; root failure does not imply proven infeasibility.
+Only frontend and tests changed in this follow-up; the previous C++ baseline
+below remains applicable. Refresh port8087 to load the new frontend assets.
+
+Reduced2000 diagnostic logs identify Gurobi120s exhaustion in root barrier
+with zero incumbents, and native root HiGHS LP rejection at25000 simplex
+iterations (confirmed with `MIPSOLVERS_HIGHS_LP_KERNEL_TRACE=1`). A short HiGHS
+stack sample beyond120s finds root ziRound repeatedly computing row activities,
+with analytic-center IPM on a worker; its inner loop lacks deadline checks.
+These findings explain failure mechanisms, not proof of model infeasibility.
+Detailed reproduction, evidence and limitations are recorded in the execution
+contract under Solver Selection Readiness and Failure Diagnosis. Artifacts:
+`output/market-operation/failure-diagnosis/` and `failure-native-kernel/`.
+Hard HTTP process deadlines and numerical strategy changes remain outstanding.
+The HiGHS diagnostic rerun finished naturally in418.318s process wall
+(409.506s SCUC adapter), TimeLimit with original-model violation285.41 rejected.
+All three diagnostic runs have no valid prices; comparison.json is complete.
+The separate native trace overlapped HiGHS, so timings are not a controlled
+performance ranking. JavaScript syntax and whitespace checks pass.
+
+Current follow-up adds a four-step operation GUI, configurable synthetic thermal
+fleet (new action `activsg2000_hydro`, default120, original544 case preserved),
+defaultgap0.01, native B&C with HiGHS LP, and selected PTDF rows for authored daily
+topologies including phase shifts and independent island references. New public
+function and HTTP `/api/session/market_ptdf` use stable AC IDs; no dense PTDF is
+inserted into the optimization model and no cross-request cache is claimed.
+Switching cases resets stale daily drafts. Active backend is now available on
+port8087; port8086's existing task was not replaced. The top-level executable is
+updated via the cached optimized build; dirty dependency configure guard remains.
+
+Rebuilt optimized Southern suite passes36 cases/20953 assertions. ASan/UBSan
+`[ptdf],[reduced_fleet],[local_solvers]` passes3 cases/771 assertions (Gurobi disabled).
+Analytic native and HiGHS objective490000/LMP200 agree; phase-shift ring/island
+PTDF identity is within1e-6. Reduced1320-unit fleet checks all720 hydro references.
+Local multi-resource30s comparison: HiGHS2.249s wall, SCUCgap0.000815861;
+Gurobi0.170s wall, gap0; native29.153s, no verified incumbent at time limit.
+Both successful full chains pass original-unit audit. These are one-run
+observations, not statistical speed rankings or real-market-price validation.
+Full numerical and UI workflow validation ledger continues in the execution contract.
+Reduced2000 comparison now complete at120s requested optimizer budget:
+HiGHS380.485s process wall/15.526GiB, time-limit vector rejected (residual285.41);
+native56.178s/13.410GiB, root relaxation failed; Gurobi129.489s/13.268GiB,
+time-limit without incumbent. All lack valid prices. HiGHS optimizer actually
+took371.953s, so productionHTTP still has non-hard deadline risk; independent
+benchmark process watchdog is implemented. No new2000 throughput success claim.
+Binary reduction41552 is verified (186592 to145040). PTDF single-row2000 API
+0.609s/residual6.90e-12;98 identical topology periods. Final manual/forecast
+four-step browser suites pass, including390px. New service8087 has the120-thermal
+case loaded; old8086 task remains untouched. Refreshing restores the current
+workflow step; mode tabs synchronize `.active` with the accessibility module.
+
+2000-bus performance work now has a completed 98-point SCUC/SCED/LMP benchmark:
+1744 generators (720 hydro),180 shared/cascade reservoirs,80 storage,120 flexible
+loads,3206 branches. Exact startup-class projection and transition hull remove
+683648 columns /854560 binary declarations. Matched120s runs reduce RSS29.4%
+but still time out without incumbents. Dedicated Gurobi barrier plus invertible
+water-energy coordinate completes the chain in597.122s, peak16.613GiB, SCUC
+gap2.21e-7 and stage original residuals <=1.65e-7. Evidence and the unsuccessful
+default/concurrent runs are in `output/market-operation/performance-*.json`;
+derivations and fixed predictions are in the Southern execution contract.
+This is synthetic linear-network schedule/conditional-price evidence, not AC
+security or week/month throughput. Final code also completed one actual rolling
+day via the port8086 API in680.365s (1/7, resumable), true D+1 slots0/95.
+SCUC/SCED/LMP times493.130/145.502/13.364s; max original residual8.12e-7,
+SCUC gap8.83e-7, conditional prices valid, all2000 nodes/3206 lines returned.
+Partial integer starts were actually loaded and LMP skipped crossover. Export:
+`output/market-operation/performance-2000-gui-day.json`. The Node driving request
+hit300s headers timeout; GET recovered the persisted result without duplicate
+submission. This is not a full-week benchmark or asynchronous progress service.
+
+Build note: user commits during this session moved HySim to8b93145b and sibling
+MIPSolvers toe6c932e5; current changes build by cached optimized local incremental
+commands. Standard Release configure is refused by the unchanged dirty-dependency
+guard. The top-level GUI binary must be copied after linking the tests/ target;
+port8086 is the current local performance service. Earlier servers remain running.
+
+Final optimized local regressions: Southern33 cases /20182 assertions, forecast
+8 /12503; four registered market browser suites pass34.96s. Rebuilt ASan/UBSan
+(Gurobi disabled) passes the reservoir-coordinate test1 /597. The aggregate
+`[compact]` sanitizer invocation aborts in embedded HiGHS `HighsDomain.cpp:1705`
+`updateActivityUbChange` during the original-form startup fixture, before any
+reference/compact comparison completes. No ASan memory report was emitted;
+this is an unresolved debug solver assertion, not a sanitizer clean-bill claim.
+After the final meter-bound audit addition, rebuilt `[compact],[gurobi]` passes
+5 /8958; operation+forecast browser suites pass23.15s. Top-level GUI executable
+is updated, while port8086 retains the prior solved matrix's in-memory1/7 result.
+Live2000-bus Canvas selection/slot update and390px/1440px screenshots pass;
+small nonzero gaps now render scientifically instead of0.
 
 Gurobi integration is verified: explicit Southern execution and
 operation/forecast solver options, per-call time/gap/threads, sparse LP dispatch

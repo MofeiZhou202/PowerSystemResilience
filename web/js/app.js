@@ -607,6 +607,10 @@ const App = (() => {
     timeSeries: 'planning',
     market: 'market',
     marketOperation: 'market',
+    marketStudy: 'market',
+    marketInputs: 'market',
+    marketAncillary: 'market',
+    marketRealtime: 'market',
     marketBehavior: 'market',
     marketBoundary: 'market',
     marketSecurity: 'market',
@@ -622,7 +626,7 @@ const App = (() => {
     steady: 'powerFlow',
     security: 'shortCircuit',
     planning: 'topology',
-    market: 'marketBehavior',
+    market: 'marketOperation',
     ies: 'integratedEnergy',
     sustainability: 'carbonFlow',
     parameter_validation: 'parameterLibrary',
@@ -636,7 +640,11 @@ const App = (() => {
   // action group. Any module not listed uses its own name for both.
   const SUBSECTION_FOR_MODULE = {
     tspf: 'timeSeries',
+    marketStudy: 'market',
+    marketInputs: 'market',
     marketOperation: 'market',
+    marketAncillary: 'market',
+    marketRealtime: 'market',
     marketBehavior: 'market',
     marketBoundary: 'market',
     marketSecurity: 'market',
@@ -644,7 +652,11 @@ const App = (() => {
   };
   const RESULT_GROUP_FOR_MODULE = {
     tspf: 'timeSeries',
+    marketStudy: 'market',
+    marketInputs: 'market',
     marketOperation: 'market',
+    marketAncillary: 'market',
+    marketRealtime: 'market',
     marketBehavior: 'market',
     marketBoundary: 'market',
     marketSecurity: 'market',
@@ -968,6 +980,7 @@ const App = (() => {
         if (target?.dataset.module) setActiveModule(target.dataset.module);
       }
     }
+    if (!options.preserveModule) window.HySimMarketNavigation?.activate(document.querySelector('.module-btn.active')?.dataset.module);
     updateDependencyChips();
     HySimCore.Accessibility?.syncNavigation();
   }
@@ -1463,6 +1476,7 @@ const App = (() => {
   }
 
   function showSouthernMarketWorkspace() {
+    if (!document.body.classList.contains('market-active')) return;
     document.getElementById('resultsEmpty').style.display = 'none';
     document.getElementById('resultsContent').style.display = 'block';
     setActiveResultGroup('market');
@@ -14793,7 +14807,7 @@ const App = (() => {
       } else if (key === 'fuel_type') {
         const sel = document.createElement('select');
         sel.dataset.field = key;
-        ['Thermal', 'Nuclear', 'Hydro', 'Gas', 'Oil', 'Coal', 'Biomass', 'Other'].forEach(t => {
+        ['Unknown', 'Coal', 'Gas', 'Oil', 'Nuclear', 'Hydro', 'Wind', 'Solar', 'Biomass', 'Geothermal', 'Storage', 'Thermal', 'Other'].forEach(t => {
           sel.innerHTML += `<option value="${t}" ${val === t ? 'selected' : ''}>${t}</option>`;
         });
         div.appendChild(sel);
@@ -15191,15 +15205,20 @@ const App = (() => {
     });
   }
   function setActiveModule(moduleName) {
+    const isMarket = subsectionForModule(moduleName) === 'market';
+    const family = document.querySelector(`.module-btn[data-module="${moduleName}"]`)?.dataset.marketFamily;
+    document.body.classList.toggle('market-active', isMarket);
+    document.body.classList.toggle('market-generic-active', isMarket && family === 'generic');
     document.body.classList.toggle('market-operation-active', moduleName === 'marketOperation');
-    document.body.classList.toggle('market-canvas-active', subsectionForModule(moduleName) === 'market');
-    if (subsectionForModule(moduleName) !== 'market') window.HySimMarketCanvas?.stopPlayback();
+    document.body.classList.toggle('market-canvas-active', isMarket && family === 'southern');
     const prev = document.querySelector('.module-btn.active');
     const changed = !prev || prev.dataset.module !== moduleName;
     setActiveWorkflow(workflowForModule(moduleName), { preserveModule: true });
     document.querySelectorAll('.module-btn').forEach(btn => {
       btn.classList.toggle('active', btn.dataset.module === moduleName);
     });
+    window.HySimMarketNavigation?.activate(moduleName);
+    if (changed) window.HySimMarketCanvas?.activate(moduleName);
     renderSubToolbar(moduleName);
     // Also switch the right-panel result view to the matching module's
     // results group (if any), so the 结果 tab only shows the active
@@ -15227,8 +15246,10 @@ const App = (() => {
     if (moduleName === 'rpo' && changed) {
       setTimeout(() => refreshRpoInputAudit({ quiet: true }), 0);
     }
-    if (changed && subsectionForModule(moduleName) === 'market') {
-      document.dispatchEvent(new CustomEvent(moduleName === 'marketOperation' ? 'market-operation-open' : 'southern-market-open'));
+    if (isMarket) showSouthernMarketWorkspace();
+    if (changed && isMarket) {
+      const event = { marketRealtime: 'market-realtime-open', marketAncillary: 'market-ancillary-open', marketOperation: 'market-operation-open', marketStudy: 'market-study-open', marketBoundary: 'southern-market-open' }[moduleName];
+      if (event) document.dispatchEvent(new CustomEvent(event));
     }
     HySimCore.Accessibility?.syncNavigation();
   }
@@ -15259,18 +15280,17 @@ const App = (() => {
     }
     if (subKey === 'market') {
       const activeScope = moduleName === 'marketBehavior' ? 'behavior'
+        : moduleName === 'marketRealtime' ? 'realtime'
+        : moduleName === 'marketAncillary' ? 'ancillary'
         : moduleName === 'marketOperation' ? 'operation'
-        : moduleName === 'marketBoundary' ? 'boundary'
+        : moduleName === 'marketStudy' ? 'study'
+        : moduleName === 'marketBoundary' ? 'southern-boundary'
+        : moduleName === 'marketInputs' ? 'boundary'
         : moduleName === 'marketSecurity' ? 'security'
         : moduleName === 'marketSettlement' ? 'settlement'
         : 'clearing';
       bar.querySelectorAll('[data-market-scope]').forEach(panel => {
         panel.hidden = !String(panel.dataset.marketScope || '').split(/\s+/).includes(activeScope);
-      });
-      bar.querySelectorAll('[data-market-step-target]').forEach(step => {
-        step.classList.toggle('active', step.dataset.marketStepTarget === moduleName);
-        step.setAttribute('aria-current',
-          step.dataset.marketStepTarget === moduleName ? 'step' : 'false');
       });
       document.querySelectorAll('[data-market-result-scope]').forEach(section => {
         const scopes = String(section.dataset.marketResultScope || '').split(/\s+/);
@@ -18751,10 +18771,6 @@ const App = (() => {
       'click', runRealTimeMarket);
     document.getElementById('btnRunMarketGame')?.addEventListener(
       'click', runMarketGame);
-    document.querySelectorAll('[data-market-step-target]').forEach(button => {
-      button.addEventListener('click', () =>
-        setActiveModule(button.dataset.marketStepTarget));
-    });
     document.getElementById('btnMarketViewSettlement')?.addEventListener('click', () => {
       setActiveModule('marketSettlement');
       setActiveResultGroup('market');
@@ -24979,7 +24995,7 @@ const App = (() => {
       applyTrialEditionProfile();
       setActiveModule('modelIO');
     } else {
-      setActiveModule(location.hash === '#market-operation' ? 'marketOperation' : location.hash === '#southern-market' ? 'marketBoundary' : 'powerFlow');
+      setActiveModule(window.HySimMarketNavigation?.moduleFromHash() || 'powerFlow');
     }
     updateDependencyChips();
 
@@ -25176,9 +25192,11 @@ const App = (() => {
   }
 
   function maybeStartTour() {
-    if (isTourDone()) return;
+    if (isTourDone() || document.body.classList.contains('market-active')) return;
     const delay = 600;  // let the workspace layout settle before measuring rects
-    setTimeout(() => { if (!_tourState && !isTourDone()) startTour(); }, delay);
+    setTimeout(() => {
+      if (!_tourState && !isTourDone() && !document.body.classList.contains('market-active')) startTour();
+    }, delay);
   }
 
   function initHelpMenu() {

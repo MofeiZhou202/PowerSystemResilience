@@ -69,11 +69,80 @@ LMP 使用独立罚因子与 SCED 出力邻域；不可定价机组固定，负�
 失败会拒绝认证和定价。选择 \texttt{schedule\_only} 时可查看线性计划，但顶层
 \texttt{feasible=false}，不能解释为通过交流认证。
 
+\subsection{周月滚动与日末状态承接}
+实现锚点为\srcpath{src/market/market\_operation.cpp:carry\_from}及
+\srcpath{src/market/market\_operation.cpp:step\_market\_operation}。
+每个场景顺序运行，首日使用建任务初态，后续日使用前日 SCED 第96个实际时段末态
+（数组索引95）。次日峰谷参考点（索引96、97）及 LMP 定价解不推进物理状态。
+实体按表内稳定 ID 匹配。设日末状态为 $u_{95}$，向前连续相同状态的时段数为 $k$，则
+\begin{equation}
+ \tau_{d+1}=15k+
+ \begin{cases}
+ \tau_d,&k=96\ \text{且日初状态等于 }u_{95},\\
+ 0,&\text{其他情况}.
+ \end{cases}
+\end{equation}
+$\tau$ 单位为分钟，表示连续开机或停机时长。下一天机组还继承日末出力，开机时
+裁至 $[0,P^{max}_{95}]$，停机置零，用于初始爬坡。储能继承日末能量（MWh），
+裁至 $[0,E^{rated}]$，SOC 为能量除以额定容量。水库继承日末水位（m）、日末下泄
+及前一日96点下泄历史（m$^3$/s）；下泄值取非负，供梯级时滞与下泄爬坡使用。
+直流联络线继承日末非负功率和上调/下调/无调整方向。
+
+\srcpath{src/market/market\_operation.cpp:apply}先应用每日覆盖，再写入承接初态；
+每日储能终值目标仍按申报约束，不是由前日复制的状态字段。相同终值可能使每天的
+SOC初值相同。只有当日结果有效才更新\fld{carry}与完成天数，失败日不推进。
+结果\fld{state\_start}和\fld{state\_end}可用于相邻日核对；恢复实验从历史日初
+重新计算，不改变主任务承接。当前为逐日98点滚动而非全周联合最优；跨日非空启动/
+停机功率轨迹在建任务时拒绝，非市场核电只作为外部功率计划，不含反应堆动态状态。
+
+\subsection{矩阵复用、价格一致性与性能验收}
+\srcpath{src/market/southern\_market.cpp:derive\_lmp}在独立compact、无裁行、无安全割、
+无交流安全迭代、无实时及云南辅助服务的准入条件下，将SCED按原定价分支作有序选择：
+\begin{equation}
+ A_{price}=R A_{sced} C,\qquad E_{price}=R_{eq}E_{sced}C.
+\end{equation}
+共同系数及行列顺序保持，RHS同序选择，定价费用、冻结状态及功率邻域按原式计算。
+只省略原定价策略本来不装配的行列，水库方程保留，调度SOC不受影响。
+\fld{assembly\_mode=reference}使用原装配；\fld{verify}独立原装配比较矩阵、目标、
+边界、原表达式和索引；其他不满足条件的模型走原路径。大型跨运行缓存尚未启用。
+
+\srcpath{src/market/southern\_market.cpp:solve}对百万列及以上Gurobi定价固定8线程
+障碍法，两份新实例同时求解；其他定价固定单线程对偶单纯形。两份完整原单位行对偶
+必须精确相同，且最优性、目标与残差通过，才允许输出有效价格。失败价格为空，不得
+结算。这是同一有序LP/后端版本/平台的代表解一致性，不证明数学对偶唯一。
+
+本机M4 Max/128GiB、Gurobi8调度线程、2000节点的固定合成诊断边界含120火电、
+720水电、480风光、180水库和80储能。完整浏览器点击到显示的验收为：
+\begin{center}
+\begin{tabular}{lrrr}
+\toprule
+各五次样本 & 旧版最大/s & 新版平均/s & 新版最大/s\\
+\midrule
+新进程首次 & 61.292012 & 58.251299 & 58.515226\\
+同会话重复 & 61.407915 & 58.296980 & 58.570428\\
+\bottomrule
+\end{tabular}
+\end{center}
+LMP装配平均由约3.35秒降至0.59秒。首次指新服务器进程首次出清，不包含点击前的
+服务启动与边界导入，未清理操作系统文件缓存。十次新版样本均低于一分钟，不是
+任意边界的硬截止保证；2000节点完整七日及544火电版本尚未测量。
+实际日志中SCUC松弛、整数修复、定价的因子非零数分别为
+$1.014\times10^8$、$4.901\times10^7$、$1.369\times10^7$。
+跨时段水电日电量、储能循环、开停次数及区域备用宽行是后续分解诊断重点，原矩阵
+度数代理不能当作因子填充或各设备耗时。完整命令、原样本及限制见
+\srcpath{docs/modules/market/performance.md}。
+
 \subsection{验证证据与限制}
 \srcpath{tests/test\_southern\_market.cpp} 覆盖 98 点解析费用/电价、负荷校正、
 输入拒绝、拥塞/检修、三态启动/轨迹、分省备用、调频改限、机组群、储能、水库、
 直流损耗/方向、优先计划与 AC 安全反馈。
 \srcpath{tests/e2e/southern\_market\_e2e.mjs} 通过真实浏览器验证边界往返、
 非法输入原子拒绝、修订冲突、基准/情景差值及桌面/手机布局。
-具体 Release/ASan/UBSan 结果及命令以开发状态为准。
-该证据不覆盖真实省级历史出清回放、发布机构释义、调频市场独立优化或大规模在线时延。
+当前Release为74项测试/29807断言，聚焦Gurobi的ASan/UBSan为7项/377断言，
+后者关闭泄漏检测且沿用部分Release归档，不声称全库sanitizer验证。
+七日小模型原路径与verify路径逐日资源、节点价格、状态承接、目标、残差一致；
+2000节点六个矩阵及20份完整非计时响应一致，3247054行定价对偶跨进程逐bit一致。
+构建哈希及原始记录以开发状态和性能契约为准；本次文档同步不增加数值验证范围。
+该证据不覆盖真实省级历史出清回放或发布机构释义；云南独立调频的覆盖范围以其专门
+执行契约为准，不能从日前用例推断。在线帮助与本地Markdown共用同一正文，入口为
+\srcpath{docs/README.md}，操作教程为\srcpath{docs/guides/market\_simulation\_workflow.zh.md}。

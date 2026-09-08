@@ -3010,13 +3010,26 @@ struct Session {
   std::optional<json> southern_boundary;
   std::optional<json> southern_baseline;
   std::optional<json> southern_latest;
+  std::optional<json> yunnan_config;
+  std::optional<json> yunnan_result;
+  std::optional<json> yunnan_day_ahead;
+  std::uint64_t yunnan_clearing_id{0};
+  json yunnan_journal=json::array();
+  std::optional<json> yunnan_month;
+  std::uint64_t yunnan_revision{0};
   std::uint64_t southern_revision{0};
+  std::optional<json> southern_realtime;
+  std::uint64_t realtime_revision{0};
+  std::uint64_t realtime_id{0};
   std::optional<json> market_operation;
   std::uint64_t market_operation_id{0};
   std::atomic<bool> market_operation_cancel{false};
   std::optional<json> market_forecast;
   std::uint64_t market_forecast_id{0};
   std::atomic<bool> market_forecast_cancel{false};
+  std::optional<json> market_study;
+  std::uint64_t market_study_id{0};
+  std::atomic<bool> market_study_cancel{false};
   // Current system held as a read-shared immutable snapshot.  Request handlers
   // copy this shared_ptr under a short lock (read sharing); writers build a new
   // system and atomically replace the pointer via session_replace_system
@@ -3126,6 +3139,7 @@ void session_replace_system(Session& s, hacdcpf::HybridPowerSystem sys) {
   ++s.market_operation_id;
   s.market_operation_cancel.store(true);
   s.market_forecast.reset(); ++s.market_forecast_id; s.market_forecast_cancel.store(true);
+  s.market_study.reset(); ++s.market_study_id; s.market_study_cancel.store(true);
   ++s.southern_revision;
   auto shared = std::make_shared<hacdcpf::HybridPowerSystem>(std::move(sys));
   ++s.system_revision;
@@ -10569,6 +10583,8 @@ const std::vector<CaseInfo>& case_catalog() {
       {"networked_microgrids_islanding", "联网微网群多机暂态", "微网与暂态动态", "8 AC + 2 DC",
        "4 台同步机 + 3 微网 PCC：多机系统 slack 动态化与发电机跳闸事件演示"},
       // ── 可靠性·弹性·市场 ──
+      {"market_ieee118", "IEEE118 水火风光储市场", "可靠性·弹性·市场", "118 AC",
+       "36水电+18火电、风光各6台、12梯级共享水库、6储能与6可控负荷；同步加载南方96+2研究边界"},
       {"cyber_physical_reliability_demo", "信息物理 FLISR 基准", "可靠性·弹性·市场", "3 AC",
        "3 节点 FLISR 基准：量化自动化可用/不可用时的恢复增量（唯一带故障率的小例）"},
       {"market_3bus_toy", "市场 3 节点阻塞", "可靠性·弹性·市场", "3 AC",
@@ -10601,6 +10617,8 @@ std::vector<std::string> case_names() {
 
 hacdcpf::HybridPowerSystem build_case(const std::string& name) {
   using namespace hacdcpf::io;
+  if (name == "market_ieee118") return hacdcpf::market::make_ieee118_market_system(
+    parse_matpower((fs::path(HACDCPF_PROJECT_ROOT)/"external_data"/"matpower"/"case118.m").string()));
   if (name == "ieee14_acdc") return build_ieee14_acdc();
   if (name == "ieee24_3area_acdc") return build_ieee24_3area_acdc();
   if (name == "ieee24_3area_acdc_expanded") return build_ieee24_3area_acdc_expanded();
@@ -11517,8 +11535,12 @@ int main(int argc, char** argv) {
       const auto j = json::parse(req.body.empty() ? "{}" : req.body);
       std::string name = j.value("case", "ieee24_3area_acdc_expanded");
       auto sys = build_case(name);
+	      std::optional<json> market_boundary;
+	      if (name == "market_ieee118") market_boundary = hacdcpf::market::make_southern_market_ieee118_mixed(
+	        hacdcpf::io::parse_matpower((fs::path(HACDCPF_PROJECT_ROOT)/"external_data"/"matpower"/"case118.m").string()));
 	      std::lock_guard<std::mutex> lk(g_session.mu);
 	      session_replace_system(g_session, std::move(sys));
+	      if (market_boundary) g_session.southern_boundary = std::move(*market_boundary);
 	      g_session.current_name = name;
 	      g_session.reliability_configuration = {};
 	      clear_preserved_three_phase(g_session);
@@ -22092,6 +22114,7 @@ int main(int argc, char** argv) {
     svr.Get("/api/session/southern_market", [](const httplib::Request&, httplib::Response& res) {
       std::lock_guard<std::mutex> lock(g_session.mu);
       res.set_content(json{{"schema", hacdcpf::market::southern_market_schema()},
+        {"case_profiles", {"example","demo","ieee118","ieee118_mixed","activsg2000","activsg2000_hydro"}},
         {"revision", g_session.southern_revision}, {"boundary", g_session.southern_boundary.value_or(json(nullptr))},
         {"baseline", g_session.southern_baseline.value_or(json(nullptr))},
         {"latest", g_session.southern_latest.value_or(json(nullptr))}}.dump(), "application/json");
@@ -22100,9 +22123,10 @@ int main(int argc, char** argv) {
       try {
         const json body = json::parse(req.body);
         for (auto it = body.begin(); it != body.end(); ++it)
-          if (it.key() != "action" && it.key() != "revision" && it.key() != "boundary")
+          if (it.key() != "action" && it.key() != "revision" && it.key() != "boundary" && it.key() != "thermal_limit")
             throw std::invalid_argument("Unknown Southern request field: " + it.key());
         const std::string action = body.at("action");
+        if (body.contains("thermal_limit") && action != "activsg2000_hydro") throw std::invalid_argument("thermal_limit requires activsg2000_hydro");
         std::lock_guard<std::mutex> lock(g_session.mu);
         if (g_session.busy.load() || body.at("revision").get<std::uint64_t>() != g_session.southern_revision) {
           res.status = 409; res.set_content(json{{"error", "Market state changed or analysis is running; reload before saving"}}.dump(), "application/json"); return;
@@ -22110,10 +22134,21 @@ int main(int argc, char** argv) {
         json candidate;
         if (action == "example") candidate = hacdcpf::market::make_southern_market_example();
         else if (action == "demo") candidate = hacdcpf::market::make_southern_market_demo();
-        else if (action == "activsg2000") {
+        else if (action == "ieee118" || action == "ieee118_mixed") {
+          const auto path = fs::path(HACDCPF_PROJECT_ROOT) / "external_data" / "matpower" / "case118.m";
+          if (!fs::exists(path)) throw std::invalid_argument("Missing external_data/matpower/case118.m");
+          const auto network = hacdcpf::io::parse_matpower(path.string());
+          candidate = action == "ieee118_mixed" ? hacdcpf::market::make_southern_market_ieee118_mixed(network)
+            : hacdcpf::market::make_southern_market_ieee118(network);
+        }
+        else if (action == "activsg2000" || action == "activsg2000_hydro") {
           const auto path = fs::path(HACDCPF_PROJECT_ROOT) / "data" / "case_ACTIVSg2000.m";
           if (!fs::exists(path)) throw std::invalid_argument("Missing data/case_ACTIVSg2000.m");
-          candidate = hacdcpf::market::southern_market_from_system(hacdcpf::io::parse_matpower(path.string()), true);
+          if (action == "activsg2000_hydro" && body.contains("thermal_limit") && !body.at("thermal_limit").is_number_integer())
+            throw std::invalid_argument("thermal_limit must be an integer");
+          const int count = action == "activsg2000_hydro" ? body.value("thermal_limit",120) : -1;
+          if (action == "activsg2000_hydro" && (count < 0 || count > 544)) throw std::invalid_argument("thermal_limit must be 0..544 for ACTIVSg2000");
+          candidate = hacdcpf::market::southern_market_from_system(hacdcpf::io::parse_matpower(path.string()), true, count);
         }
         else if (action == "from_system") {
           if (!g_session.current_system) throw std::invalid_argument("No engineering system loaded");
@@ -22135,13 +22170,34 @@ int main(int argc, char** argv) {
         const auto effective = hacdcpf::market::validate_southern_market(candidate);
         g_session.southern_boundary = candidate;
         g_session.southern_latest.reset();
-        if (action == "example" || action == "demo" || action == "activsg2000" || action == "from_system") g_session.southern_baseline.reset();
+        if (action == "example" || action == "demo" || action == "ieee118" || action == "ieee118_mixed" || action == "activsg2000" || action == "activsg2000_hydro" || action == "from_system") g_session.southern_baseline.reset();
         ++g_session.southern_revision;
         res.set_content(json{{"revision", g_session.southern_revision}, {"boundary", candidate},
           {"effective_boundary", effective}, {"baseline", g_session.southern_baseline.value_or(json(nullptr))}}.dump(), "application/json");
       } catch (const std::invalid_argument& e) {
         res.status = 400; res.set_content(json{{"error", e.what()}}.dump(), "application/json");
       } catch (const std::exception& e) { res.status = 400; res.set_content(json{{"error", e.what()}}.dump(), "application/json"); }
+    });
+    svr.Post("/api/session/market_ptdf", [](const httplib::Request& req, httplib::Response& res) {
+      try {
+        const json body=json::parse(req.body);
+        for (auto it=body.begin();it!=body.end();++it)
+          if (it.key()!="revision" && it.key()!="config" && it.key()!="day" && it.key()!="period" && it.key()!="branch_ids")
+            throw std::invalid_argument("Unknown PTDF request field: "+it.key());
+        json boundary;
+        {
+          std::lock_guard<std::mutex> lock(g_session.mu);
+          if (body.at("revision").get<std::uint64_t>()!=g_session.southern_revision) {
+            res.status=409; res.set_content(json{{"error","Boundary revision changed; reload"}}.dump(),"application/json"); return;
+          }
+          if (!g_session.southern_boundary) throw std::invalid_argument("Load a market boundary first");
+          boundary=*g_session.southern_boundary;
+        }
+        const auto preview=hacdcpf::market::preview_market_operation_boundary(boundary,body.at("config"),body.at("day").get<int>());
+        auto result=hacdcpf::market::southern_market_ptdf(preview.at("effective"),body.at("period").get<int>(),body.at("branch_ids").get<std::vector<int>>());
+        result["revision"]=body.at("revision"); result["day"]=body.at("day");
+        res.set_content(result.dump(),"application/json");
+      } catch (const std::exception& e) { res.status=400; res.set_content(json{{"error",e.what()}}.dump(),"application/json"); }
     });
     svr.Post("/api/session/run_southern_market", [](const httplib::Request& req, httplib::Response& res) {
       bool owns_busy = false;
@@ -22167,20 +22223,155 @@ int main(int argc, char** argv) {
           try { result["comparison"] = hacdcpf::market::compare_southern_market_results(*baseline, result); }
           catch (const std::exception& e) { result["comparison"] = {{"comparable", false}, {"reason", e.what()}}; }
         }
+        std::string response_body;
         {
           std::lock_guard<std::mutex> lock(g_session.mu);
-          if (g_session.southern_revision != revision) {
-            result["stale"] = true;
-          } else { result["stale"] = false; g_session.southern_latest = result; }
+          const bool stale = g_session.southern_revision != revision;
+          result["stale"] = stale;
+          // Serialize before transferring ownership, under the same revision
+          // guard. Avoid copying the complete large result (performance.md).
+          response_body = result.dump();
+          if (!stale) g_session.southern_latest = std::move(result);
           g_session.busy.store(false); owns_busy = false;
         }
-        res.set_content(result.dump(), "application/json");
+        res.set_content(std::move(response_body), "application/json");
       } catch (const std::invalid_argument& e) {
         if (owns_busy) g_session.busy.store(false);
         res.status = 400; res.set_content(json{{"error", e.what()}}.dump(), "application/json");
       } catch (const std::exception& e) {
         if (owns_busy) g_session.busy.store(false);
         res.status = 400; res.set_content(json{{"error", e.what()}}.dump(), "application/json");
+      }
+    });
+
+    const auto realtime_view=[](json job){job.erase("prepared");return job;};
+    svr.Get("/api/session/southern_realtime", [realtime_view](const httplib::Request&, httplib::Response& res) {
+      try {std::lock_guard<std::mutex> lock(g_session.mu);const bool current=g_session.realtime_revision==g_session.southern_revision&&g_session.southern_realtime.has_value();
+        res.set_content(json{{"revision",g_session.southern_revision},{"run_id",g_session.realtime_id},{"busy",g_session.busy.load()},
+          {"boundary",g_session.southern_boundary.value_or(json(nullptr))},{"catalog",hacdcpf::market::southern_realtime_catalog()},
+          {"solver_capabilities",hacdcpf::market::southern_market_solver_capabilities()},
+          {"config",current?g_session.southern_realtime->at("config"):g_session.southern_boundary?hacdcpf::market::southern_realtime_defaults(*g_session.southern_boundary):json(nullptr)},
+          {"job",current?realtime_view(*g_session.southern_realtime):json(nullptr)}}.dump(),"application/json");
+      }catch(const std::invalid_argument& e){res.status=400;res.set_content(json{{"error",e.what()}}.dump(),"application/json");}
+      catch(const json::exception& e){res.status=400;res.set_content(json{{"error",e.what()}}.dump(),"application/json");}
+      catch(const std::exception& e){res.status=400;res.set_content(json{{"error",e.what()}}.dump(),"application/json");}
+    });
+    svr.Post("/api/session/southern_realtime", [realtime_view](const httplib::Request& req, httplib::Response& res) {
+      bool owns_busy=false;
+      try {const auto body=json::parse(req.body);const std::string action=body.at("action");
+        const std::set<std::string> keys=action=="save"?std::set<std::string>{"action","revision","config"}:std::set<std::string>{"action","revision","run_id"};
+        if(action!="save"&&action!="step")throw std::invalid_argument("Unknown real-time action");
+        if(body.size()!=keys.size())throw std::invalid_argument("Incorrect real-time fields");for(const auto& k:keys)if(!body.contains(k))throw std::invalid_argument("Missing real-time field: "+k);
+        json job;std::uint64_t revision,id;
+        {std::lock_guard<std::mutex> lock(g_session.mu);revision=g_session.southern_revision;id=g_session.realtime_id;
+          if(body.at("revision")!=revision||g_session.busy.load()){res.status=409;res.set_content(json{{"error","Market revision changed or analysis busy; reload"}}.dump(),"application/json");return;}
+          if(!g_session.southern_boundary)throw std::invalid_argument("Load a Southern market boundary first");
+          if(action=="save"){
+            job=hacdcpf::market::make_southern_realtime(*g_session.southern_boundary,body.at("config"));
+            g_session.southern_realtime=job;g_session.realtime_revision=++g_session.southern_revision;++g_session.realtime_id;
+            res.set_content(json{{"revision",g_session.southern_revision},{"run_id",g_session.realtime_id},{"job",realtime_view(job)},{"config",job.at("config")}}.dump(),"application/json");return;
+          }
+          if(body.at("run_id")!=id||g_session.realtime_revision!=revision||!g_session.southern_realtime){res.status=409;res.set_content(json{{"error","Real-time run changed; reload"}}.dump(),"application/json");return;}
+          job=*g_session.southern_realtime;if(g_session.busy.exchange(true)){res.status=409;res.set_content(json{{"error","Analysis busy"}}.dump(),"application/json");return;}owns_busy=true;
+        }
+        job=hacdcpf::market::step_southern_realtime(job);
+        {std::lock_guard<std::mutex> lock(g_session.mu);
+          if(revision!=g_session.southern_revision||id!=g_session.realtime_id)job["status"]="stale";else g_session.southern_realtime=job;
+          g_session.busy.store(false);owns_busy=false;}
+        res.set_content(json{{"revision",revision},{"run_id",id},{"job",realtime_view(job)}}.dump(),"application/json");
+      }catch(const std::invalid_argument& e){if(owns_busy)g_session.busy.store(false);res.status=400;res.set_content(json{{"error",e.what()}}.dump(),"application/json");}
+      catch(const json::exception& e){if(owns_busy)g_session.busy.store(false);res.status=400;res.set_content(json{{"error",e.what()}}.dump(),"application/json");}
+      catch(const std::exception& e){if(owns_busy)g_session.busy.store(false);res.status=400;res.set_content(json{{"error",e.what()}}.dump(),"application/json");}
+    });
+    svr.Get("/api/session/yunnan_ancillary", [](const httplib::Request&, httplib::Response& res) {
+      try {
+        std::lock_guard<std::mutex> lock(g_session.mu);
+        const bool current=g_session.yunnan_revision==g_session.southern_revision;
+        json config=current?g_session.yunnan_config.value_or(json(nullptr)):json(nullptr);
+        if(config.is_null() && g_session.southern_boundary) config=hacdcpf::market::yunnan_ancillary_defaults(*g_session.southern_boundary);
+        res.set_content(json{{"revision",g_session.southern_revision},{"busy",g_session.busy.load()},
+          {"boundary",g_session.southern_boundary.value_or(json(nullptr))},{"config",config},
+          {"day_ahead_id",current&&g_session.yunnan_day_ahead?g_session.yunnan_day_ahead->at("clearing_id"):json(nullptr)},
+          {"journal",g_session.yunnan_journal},{"month",g_session.yunnan_month.value_or(json(nullptr))},
+          {"result",current?g_session.yunnan_result.value_or(json(nullptr)):json(nullptr)}}.dump(),"application/json");
+      } catch(const std::invalid_argument& e) {res.status=400;res.set_content(json{{"error",e.what()}}.dump(),"application/json");}
+      catch(const std::exception& e) {res.status=400;res.set_content(json{{"error",e.what()}}.dump(),"application/json");}
+    });
+    svr.Post("/api/session/yunnan_ancillary", [](const httplib::Request& req, httplib::Response& res) {
+      bool owns_busy=false;
+      try {
+        const auto body=json::parse(req.body);
+        if(!body.is_object() || !body.contains("revision") || !body.contains("action"))throw std::invalid_argument("Expected revision and action");
+        const std::string action=body.at("action");
+        if(action!="save" && action!="run" && action!="intraday" && action!="settle" && action!="post" && action!="month") throw std::invalid_argument("Unknown ancillary action");
+        const std::set<std::string> keys=(action=="settle"||action=="post")?std::set<std::string>{"action","revision","clearing_id","request"}
+          :action=="month"?std::set<std::string>{"action","revision","request"}
+          :action=="intraday"?std::set<std::string>{"action","revision","day_ahead_id","config"}:std::set<std::string>{"action","revision","config"};
+        if(body.size()!=keys.size())throw std::invalid_argument("Incorrect ancillary action fields");
+        for(const auto& k:keys)if(!body.contains(k))throw std::invalid_argument("Missing ancillary action field: "+k);
+        json boundary,preceding;std::uint64_t revision;
+        {
+          std::lock_guard<std::mutex> lock(g_session.mu);
+          revision=g_session.southern_revision;
+          if(body.at("revision").get<std::uint64_t>()!=revision || g_session.busy.load()) {
+            res.status=409;res.set_content(json{{"error","Market state changed or another analysis is running; reload"}}.dump(),"application/json");return;
+          }
+          if(!g_session.southern_boundary) throw std::invalid_argument("Load a Southern market boundary first");
+          boundary=*g_session.southern_boundary;
+          if(action=="month") {
+            auto month=hacdcpf::market::settle_yunnan_ancillary_month(g_session.yunnan_journal,body.at("request"));
+            g_session.yunnan_month=month;
+            res.set_content(json{{"revision",revision},{"month",month}}.dump(),"application/json");return;
+          }
+          if(action=="settle"||action=="post") {
+            if(g_session.yunnan_revision!=revision || !g_session.yunnan_result || g_session.yunnan_result->at("clearing_id")!=body.at("clearing_id")) {
+              res.status=409;res.set_content(json{{"error","Ancillary clearance changed; reload"}}.dump(),"application/json");return;
+            }
+            if(action=="post") {
+              auto journal=hacdcpf::market::post_yunnan_ancillary_statement(g_session.yunnan_journal,*g_session.yunnan_result,body.at("request"));
+              g_session.yunnan_journal=std::move(journal);g_session.yunnan_month.reset();
+              res.set_content(json{{"revision",revision},{"journal",g_session.yunnan_journal}}.dump(),"application/json");return;
+            }
+            auto statement=hacdcpf::market::settle_yunnan_ancillary(*g_session.yunnan_result,body.at("request"));
+            (*g_session.yunnan_result)["statement"]=statement;
+            res.set_content(json{{"revision",revision},{"result",*g_session.yunnan_result}}.dump(),"application/json");return;
+          }
+          hacdcpf::market::validate_yunnan_ancillary(boundary,body.at("config"));
+          if(action=="save") {
+            g_session.yunnan_config=body.at("config");g_session.yunnan_result.reset();g_session.yunnan_day_ahead.reset();
+            g_session.yunnan_revision=++g_session.southern_revision;
+            res.set_content(json{{"revision",g_session.southern_revision},{"config",*g_session.yunnan_config}}.dump(),"application/json");return;
+          }
+          if(action=="intraday") {
+            if(g_session.yunnan_revision!=revision || !g_session.yunnan_day_ahead || g_session.yunnan_day_ahead->at("clearing_id")!=body.at("day_ahead_id")) {
+              res.status=409;res.set_content(json{{"error","Preceding day-ahead clearance changed; reload"}}.dump(),"application/json");return;
+            }
+            preceding=*g_session.yunnan_day_ahead;
+          }
+          if(g_session.busy.exchange(true)) {
+            res.status=409;res.set_content(json{{"error","Another analysis is running"}}.dump(),"application/json");return;
+          }
+          owns_busy=true;
+        }
+        auto result=action=="intraday"?hacdcpf::market::run_yunnan_ancillary_intraday(boundary,body.at("config"),preceding)
+          :hacdcpf::market::run_yunnan_ancillary_market(boundary,body.at("config"));
+        {
+          std::lock_guard<std::mutex> lock(g_session.mu);
+          result["boundary_revision"]=revision;result["stale"]=g_session.southern_revision!=revision;
+          if(!result.at("stale").get<bool>()) {
+            result["clearing_id"]=++g_session.yunnan_clearing_id;
+            if(action=="run")g_session.yunnan_day_ahead=result;
+            g_session.yunnan_config=body.at("config");g_session.yunnan_result=result;g_session.yunnan_revision=revision;
+          }
+          g_session.busy.store(false);owns_busy=false;
+        }
+        res.set_content(json{{"revision",revision},{"config",body.at("config")},{"day_ahead_id",action=="run"?result.value("clearing_id",json(nullptr)):preceding.at("clearing_id")},{"result",result}}.dump(),"application/json");
+      } catch(const std::invalid_argument& e) {
+        if(owns_busy)g_session.busy.store(false);
+        res.status=400;res.set_content(json{{"error",e.what()}}.dump(),"application/json");
+      } catch(const std::exception& e) {
+        if(owns_busy)g_session.busy.store(false);
+        res.status=400;res.set_content(json{{"error",e.what()}}.dump(),"application/json");
       }
     });
 
@@ -22193,6 +22384,7 @@ int main(int argc, char** argv) {
         {"boundary_name", g_session.southern_boundary ? g_session.southern_boundary->value("name", "") : ""},
         {"boundary_catalog", hacdcpf::market::southern_market_boundary_catalog()},
         {"solver_capabilities", hacdcpf::market::southern_market_solver_capabilities()},
+        {"recovery_policies", true},
         {"busy", g_session.busy.load()}, {"job", g_session.market_operation ? operation_view(*g_session.market_operation) : json(nullptr)}}.dump(), "application/json");
     });
     svr.Post("/api/session/market_operation", [operation_view](const httplib::Request& req, httplib::Response& res) {
@@ -22201,6 +22393,7 @@ int main(int argc, char** argv) {
         const json body = json::parse(req.body); const std::string action = body.at("action");
         const std::set<std::string> allowed = action == "preview" ? std::set<std::string>{"action", "revision", "config", "day"}
           : action == "start" ? std::set<std::string>{"action", "revision", "config"}
+          : action == "explain" ? std::set<std::string>{"action", "run_id", "day", "pricing"}
           : action == "step" ? std::set<std::string>{"action", "run_id", "day"} : std::set<std::string>{"action", "run_id"};
         for (auto it = body.begin(); it != body.end(); ++it) if (!allowed.count(it.key())) throw std::invalid_argument("Unknown operation request field: " + it.key());
         json job; std::uint64_t id, revision;
@@ -22230,16 +22423,18 @@ int main(int argc, char** argv) {
             ++g_session.market_operation_id;
             res.set_content(json{{"run_id", g_session.market_operation_id}, {"job", operation_view(job)}}.dump(), "application/json"); return;
           }
-          if (action != "step") throw std::invalid_argument("Unknown operation action");
+          if (action != "step" && action != "explain") throw std::invalid_argument("Unknown operation action");
+          if (!body.at("day").is_number_integer()) throw std::invalid_argument("Day must be integer");
           if (!g_session.market_operation || body.at("run_id").get<std::uint64_t>() != id ||
-              body.at("day") != g_session.market_operation->at("completed_days") ||
+              (action == "step" && body.at("day") != g_session.market_operation->at("completed_days")) ||
               g_session.market_operation->at("boundary_revision") != revision) {
             res.status = 409; res.set_content("{\"error\":\"Run or boundary changed; reload\"}", "application/json"); return;
           }
           job = *g_session.market_operation;
           g_session.busy.store(true); owns_busy = true;
         }
-        job = hacdcpf::market::step_market_operation(job);
+        job = action == "explain" ? hacdcpf::market::explain_market_operation_day(job, body.at("day").get<int>(), body.value("pricing",std::string("dispatch_only")))
+                                  : hacdcpf::market::step_market_operation(job);
         {
           std::lock_guard<std::mutex> lock(g_session.mu);
           if (g_session.market_operation_cancel.load()) job["status"] = "cancelled";
@@ -22263,54 +22458,73 @@ int main(int argc, char** argv) {
       for (auto& scenario : out["scenarios"]) scenario.erase("carry");
       return out;
     };
-    svr.Get("/api/session/market_forecast", [forecast_view](const httplib::Request& req, httplib::Response& res) {
+    svr.Get(R"(/api/session/market_(forecast|study))", [forecast_view](const httplib::Request& req, httplib::Response& res) {
+      const bool study = req.path == "/api/session/market_study";
+      const auto& task = study ? g_session.market_study : g_session.market_forecast;
+      const auto& task_id = study ? g_session.market_study_id : g_session.market_forecast_id;
       std::lock_guard<std::mutex> lock(g_session.mu);
-      res.set_content(json{{"revision", g_session.southern_revision}, {"run_id", g_session.market_forecast_id},
-        {"busy", g_session.busy.load()}, {"defaults", hacdcpf::market::market_forecast_defaults()},
-        {"job", g_session.market_forecast ? forecast_view(*g_session.market_forecast, req.get_param_value("export") == "1") : json(nullptr)}}.dump(), "application/json");
+      auto defaults = hacdcpf::market::market_forecast_defaults();
+      if (study) {
+        auto operation = defaults.at("operation"); operation["horizon"] = "day";
+        operation["explain"] = false; operation["posthoc_ac_audit"] = true;
+        defaults = {{"operation",operation},{"inflow_scales",{0.5,1.0,1.5}},{"bid_scales",{1.0}},
+          {"faults",json::array({{{"name","正常"},{"generator_outages",json::array()},{"branch_outages",json::array()},
+            {"first_day",0},{"last_day",0},{"first_slot",0},{"last_slot",95}}})}};
+      }
+      res.set_content(json{{"revision", g_session.southern_revision}, {"run_id", task_id},
+        {"busy", g_session.busy.load()}, {"defaults", defaults},
+        {"job", task ? forecast_view(*task, req.get_param_value("export") == "1") : json(nullptr)}}.dump(), "application/json");
     });
-    svr.Post("/api/session/market_forecast", [forecast_view](const httplib::Request& req, httplib::Response& res) {
+    svr.Post(R"(/api/session/market_(forecast|study))", [forecast_view](const httplib::Request& req, httplib::Response& res) {
+      const bool study = req.path == "/api/session/market_study";
+      auto& task = study ? g_session.market_study : g_session.market_forecast;
+      auto& task_id = study ? g_session.market_study_id : g_session.market_forecast_id;
+      auto& task_cancel = study ? g_session.market_study_cancel : g_session.market_forecast_cancel;
       bool owns_busy = false;
       try {
         const json body = json::parse(req.body); const std::string action = body.at("action");
         const std::set<std::string> allowed = action == "generate" ? std::set<std::string>{"action", "revision", "config"}
+          : action == "explain" ? std::set<std::string>{"action", "run_id", "scenario", "day", "pricing"}
           : action == "step" ? std::set<std::string>{"action", "run_id", "scenario", "day"} : std::set<std::string>{"action", "run_id"};
         for (auto it = body.begin(); it != body.end(); ++it) if (!allowed.count(it.key())) throw std::invalid_argument("Unknown forecast request field: " + it.key());
         json job; std::uint64_t id, revision;
         {
-          std::lock_guard<std::mutex> lock(g_session.mu); id = g_session.market_forecast_id; revision = g_session.southern_revision;
+          std::lock_guard<std::mutex> lock(g_session.mu); id = task_id; revision = g_session.southern_revision;
           if (action == "cancel") {
-            if (!g_session.market_forecast || body.at("run_id").get<std::uint64_t>() != id) { res.status = 409; res.set_content("{\"error\":\"Forecast run changed\"}", "application/json"); return; }
-            g_session.market_forecast_cancel.store(true); (*g_session.market_forecast)["status"] = "cancelled";
+            if (!task || body.at("run_id").get<std::uint64_t>() != id) { res.status = 409; res.set_content("{\"error\":\"Forecast run changed\"}", "application/json"); return; }
+            task_cancel.store(true); (*task)["status"] = "cancelled";
             res.set_content("{\"status\":\"cancelled\"}", "application/json"); return;
           }
           if (g_session.busy.load()) { res.status = 409; res.set_content("{\"error\":\"Another computation is running\"}", "application/json"); return; }
           if (action == "generate") {
             if (body.at("revision").get<std::uint64_t>() != revision) { res.status = 409; res.set_content("{\"error\":\"Boundary changed; reload\"}", "application/json"); return; }
             if (!g_session.southern_boundary) throw std::invalid_argument("Load and save a Southern market boundary first");
-            job = hacdcpf::market::make_market_forecast(*g_session.southern_boundary, body.at("config"));
+            job = study ? hacdcpf::market::make_market_study(*g_session.southern_boundary, body.at("config"))
+              : hacdcpf::market::make_market_forecast(*g_session.southern_boundary, body.at("config"));
             job["boundary_name"] = g_session.southern_boundary->at("name"); job["boundary_revision"] = revision;
             for (auto& scenario : job["scenarios"]) { scenario["boundary_name"] = job["boundary_name"]; scenario["boundary_revision"] = revision; }
-            g_session.market_forecast = job; g_session.market_forecast_cancel.store(false); ++g_session.market_forecast_id;
-            res.set_content(json{{"run_id", g_session.market_forecast_id}, {"job", forecast_view(job, false)}}.dump(), "application/json"); return;
+            task = job; task_cancel.store(false); ++task_id;
+            res.set_content(json{{"run_id", task_id}, {"job", forecast_view(job, false)}}.dump(), "application/json"); return;
           }
-          if (action != "step") throw std::invalid_argument("Unknown forecast action");
-          if (!g_session.market_forecast || body.at("run_id").get<std::uint64_t>() != id || g_session.market_forecast->at("boundary_revision") != revision || body.at("scenario") != g_session.market_forecast->at("next_scenario")) {
+          if (action != "step" && action != "explain") throw std::invalid_argument("Unknown forecast action");
+          if (!body.at("day").is_number_integer() || !body.at("scenario").is_number_integer()) throw std::invalid_argument("Day and scenario must be integers");
+          if (!task || body.at("run_id").get<std::uint64_t>() != id || task->at("boundary_revision") != revision || (action == "step" && body.at("scenario") != task->at("next_scenario"))) {
             res.status = 409; res.set_content("{\"error\":\"Forecast run or boundary changed; reload\"}", "application/json"); return;
           }
-          job = *g_session.market_forecast;
-          if (job.at("status") != "ready" && job.at("status") != "running") throw std::invalid_argument("Forecast cannot advance");
-          if (body.at("day") != job.at("scenarios").at(job.at("next_scenario").get<size_t>()).at("completed_days")) {
+          job = *task;
+          if (action == "step" && job.at("status") != "ready" && job.at("status") != "running") throw std::invalid_argument("Forecast cannot advance");
+          if (action == "step" && body.at("day") != job.at("scenarios").at(job.at("next_scenario").get<size_t>()).at("completed_days")) {
             res.status = 409; res.set_content("{\"error\":\"Forecast day changed\"}", "application/json"); return;
           }
           g_session.busy.store(true); owns_busy = true;
         }
-        job = hacdcpf::market::step_market_forecast(job);
+        job = action == "explain" ? hacdcpf::market::explain_market_forecast_day(job, body.at("scenario").get<int>(), body.at("day").get<int>(), body.value("pricing",std::string("dispatch_only")))
+                                  : hacdcpf::market::step_market_forecast(job);
         {
           std::lock_guard<std::mutex> lock(g_session.mu);
-          if (g_session.market_forecast_cancel.load()) job["status"] = "cancelled";
-          if (id != g_session.market_forecast_id || revision != g_session.southern_revision) job["status"] = "stale";
-          else g_session.market_forecast = job;
+          if (task_cancel.load()) job["status"] = "cancelled";
+          if (id != task_id || revision != g_session.southern_revision) job["status"] = "stale";
+          else task = job;
           g_session.busy.store(false); owns_busy = false;
         }
         res.set_content(json{{"run_id", id}, {"job", forecast_view(job, false)}}.dump(), "application/json");

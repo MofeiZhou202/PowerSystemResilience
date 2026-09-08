@@ -5,12 +5,83 @@
 
 本文档面向工程使用者和开发者，说明 HySim-XJTU-HRPES 从“工程场景建模”到“规范模型求解”、再到“结果回投”的完整链路。当前合同与实现参考统一从 `docs/README.md` 进入；历史审计、理论提案和旧技术总笔记隔离在 `docs/archive/`，不代表当前行为。
 
-## 文档同步状态（2026-08-30）
+## 文档同步状态（2026-09-08）
 
+- 本地市场手册与GUI在线帮助统一覆盖[周月跨日状态继承](docs/modules/market/southern_execution_contract.md)、
+  [操作教程](docs/guides/market_simulation_workflow.zh.md)及性能验收。在线“帮助”可搜索
+  “跨日继承”“SOC”“性能”，正文直接来自同一`docs/`目录。
+
+- 2000 节点市场优化新增原模型下界核验、可行整数修复、条件 SCED 派生/复用和百万列
+  定价的固定障碍法双重核验。新增SCED→LMP有序矩阵派生后，首次运行五次最大58.52 s，
+  同会话重复五次最大58.57 s，均为完整单日浏览器等待；同协议旧版最大61.29/61.41 s。
+  十次均低于一分钟，非任意边界的硬截止保证。原矩阵/完整输出/对偶和小模型七日承接核验通过。
+  限定本机Gurobi8线程、GUI默认120火电/720水电/480风光、180水库、80储能合成诊断边界。
+  数学准入、失败实验、最终验证范围见[性能记录](docs/modules/market/performance.md)。
+
+- 市场计算新增有条件的水电/新能源冗余开停机投影、储能小时方向投影及同日恢复实验
+  两路并行，保留原约束复核和逐日水量/SOC 承接。完整周任务与单日计时分别记录，
+  不把单次求解秒数当成界面完整等待时间。公式、复现命令及增量构建/调试限制见
+  [市场性能验证](docs/modules/market/performance.md)和[开发状态](docs/overview/development_status.md)。
+  同一保存配置的完整周任务（7 次主出清＋42 次恢复）浏览器等待从 304.3 s 降到 165.0 s；
+  这是同机完整任务对照，仍需约 2 分 45 秒，不是单日秒数或通用吞吐保证。
+  后续整周复测为 164.3 s；五项求解参数三轮对照均未达到额外 10% 提速门槛，默认值保留。
+  新增分段计时：真实首日参数生成/校验约占 0.93%，模型求解约占 75%，详见性能记录。
+  本轮新增装配结构复用和整数索引访问，保留原装配/逐元素校验路径。完整七日同版对照
+  165.66→158.45 s（再缩短 4.36%），阶段装配累计减少 26.64%；未达到装配减半的预设目标。
+  原因分析现支持异常触发与历史日补算，默认恢复范围为 SCUC/SCED，主任务继续计算 LMP；
+  Gurobi 分别记录环境初始化、模型导入、优化和结果提取，未测阶段不填零。
+  同版七日：完整恢复157.07 s、恢复不定价136.09 s、零异常默认模式38.56 s；主调度与
+  水量/SOC完全一致。此前定价 LP 的非唯一对偶导致跨模式价格检查失败，保留原失败记录。
+  小型定价固定单线程对偶单纯形，百万列Gurobi定价固定8线程障碍法，均独立复算全部行对偶；精确一致、最优性及原残差检查
+  通过才输出有效价格，否则价格为空且不可用于能量结算。199246 行对偶的 IEEE118
+  反例已通过跨进程、跨请求算法检查；版本适用范围及完整周成本见性能手册。
+  新版四组七日对照主价格差为0，目标/残差及水量/SOC对照通过；默认周41.77 s，
+  比未做定价复核的38.56 s增加约3.21 s。价格选取政策变更不保证旧历史价格不变。
+
+- IEEE118 市场运行新增实时耗时、服务端会话状态与下载量提示，合并重复任务加载并延迟
+  隐藏图表渲染。同一 135 MB 任务首屏下载从 4 次减为 1 次；这是前端性能修正，
+  未改变求解器计算时限、精度或模型。使用说明见[市场教程](docs/guides/market_simulation_workflow.zh.md)。
+
+- 市场界面按“南方规则研究 / 通用 AC/DC 研究”分组，边界与对比试验各自独立，
+  修复切页时拓扑结果串页及手机导航挤压。新增六条分步路线和
+  [市场操作教程](docs/guides/market_simulation_workflow.zh.md)；八套直接 Node E2E 通过。
+  各任务尚不自动衔接，排程、交流安全与账本资格仍分别判断。
+
+- 新增[AEMO市场可证伪验证](docs/modules/market/aemo_validation.md)：官方七日数据、
+  108项实验、两机256组合穷举和独立物理/现金复算。四个AC失败场景、调频不足及
+  FCAS字段差异完整保留；这是有限模型/流程验证，不是全部功能或南方实际市场认证。
+
+- 新增“实时市场”：南方第3章边界组织，24×5分钟SCUC/SCED、独立8×15分钟LMP、
+  15分钟滚动及2–4小时参考窗口，IEEE118水火风光储混合案例支持曲线/Canvas联动。
+  规则解释、验证及外部流程限制见[实时市场契约](docs/modules/market/southern_real_time.md)。
+- 新增“辅助服务市场”：云南2025正式调频规则的小时AGC预安排，固定UC/一次调频后
+  在SCED中预留二次备用并约束水电允许区间，GUI含曲线/Canvas联动；黑启动本轮仅提取规则。
+  已扩展日内复用日前状态、安全移出/补入/调增、独立储能/负荷排他、AGC计量与月度仿真账本；
+  外部资质/动态安全及法律结算不作认证。IEEE118及严密逻辑实验的最新证据见开发状态。
+  公式/源码/测试对应见[辅助服务契约](docs/modules/market/yunnan_ancillary_markets.md)。
+
+- 市场新增故障×来水×报价对比试验，独立页面支持日/周/月及五环节结果视图、曲线/Canvas联动。
+  IEEE118的18组出清与七日联合故障测试通过；交流安全仍失败，账本仅作条件性研究。
+  详见[试验契约](docs/modules/market/southern_execution_contract.md#faultinflow-study)。
+- 市场周计划新增六类图形总览、全设备热力图/时序曲线、16项计划指标和CSV；覆盖
+  开机、功率基点、备用约束贡献、线路有功负载率、新能源消纳及水位，数值表默认折叠。
+- 新增IEEE118内置水火风光储市场案例：36水电+18火电、风光各6台、12共享梯级水库、
+  6储能与6可控负荷。7天压力/28天滚动/2场景14日采样通过；交流安全未通过，
+  通用结算不包含南方水库/AC储能优化，详见市场契约覆盖矩阵。
 - 南方运行模拟修正为D日96点＋下一日预测峰谷2点；周8日预测/7日出清，GUI展示
   末日预测、峰谷来源与求解质量。限额可行解不等同于异常不可避免，详见市场执行契约。
 - 南方市场支持显式选择本地Gurobi或HiGHS；Gurobi的MILP/LP均支持每次调用时限、
   MIP gap及线程配置。相同98点模型和原残差审计保持，大规模吞吐仍未认证。
+- 市场“运行模拟”按选择算例、设置边界、运行、结果与原因四步组织，支持可配置
+  火电数量（新研究案例默认120火电+720水电）、逐时PTDF查询及三后端比较，默认GAP=0.01。
+- IEEE 118多资源案例已通过一周市场边界压力测试；15/30/60分钟预测分辨率实验保持
+  15分钟计算，揭示短时缺额与越限对数据平均的敏感性，尚不支持改变正式96+2计算步长。
+- Native整数初解修复已统一到选定的HiGHS LP内核，并修正请求GAP达到后的退出；
+  旧版IEEE118恢复有效出清和定价，通过一周压力测试；新版水火组合及2000节点的
+  Native适用性仍有根LP迭代上限问题，见执行契约。
+- 2000节点实测入口已加入：等价启动分类消元和事件凸包使二进制变量从104万降至
+  18.7万；原单位恢复审计、求解算法和阶段性能同步到运行模拟。实测状态与限制见
+  [南方执行契约](docs/modules/market/southern_execution_contract.md#2000-bus-exact-formulation-experiment)。
 
 - `docs/README.md` 是当前文档的唯一导航入口，明确区分运行契约与理论参考。
 - 暂态保护新增固定前向事件聚类窗口与本地相量 CT/PT 频率/距离测量；EMT 测量
@@ -166,6 +237,8 @@ powershell -ExecutionPolicy Bypass -File tools/package_trial_windows.ps1
 | 暂态动力学 | 机电暂态相量 DAE 声明范围已闭环（持续扩展设备） | 平衡正序/显式三相相量网络、AC/DC 代数网络、潮流一致初始化、7 类求解器（含 MassMatrixDae 同时式 DAE）、DAE 诊断、小信号与 COI 频率观测；DC/DC Power/Voltage/Droop 动态端口与稳态方程同源，DER_A 7/10 状态链已按 PSD/WECC 逐式实现并使用系统 COI 频率。MassMatrixDae 对 IEEE 1547 及直接 `DynamicSystem` API 装配的定时限欠压/频率/正序 Zone-1 继电器执行回滚/二分定位、固定前向窗口事件聚类、`ACLoadScale`/`ACBranchTrip` 重置和事件后代数残差审计；直接继电器使用本地正序 PT、CT 与相角频率滤波，不以系统 COI 代替本地频率。该闭环不包含 EMT、行波、开关波形或形式化 chronology certification；PSD Test 42 轨迹对照仍受外部 SciML 环境阻断。rich-model/JSON/HTTP/GUI 尚不自动装配外部继电器，其他积分器、反时限、多区距离及步内未采样脉冲仍为声明边界。 |
 | 时序与年度生产模拟 | 核心已实现，年度/生命周期边界已深审计 | UC MILP → AC-OPF → PF 校验流水线；年度全耦合 UC、L0 能量/燃料代理预算、跨周 SOC、bottom-up feedback、物理生命周期 replay、抽样 PF correction、AC/DC/外部网碳分项均可执行。冻结 UC 已由 SciPy/HiGHS 和 256 序列穷举证明，6 步 AC 快照已与 OpenDSS/GridLAB-D 对照。制造/材料碳、网络损耗碳、燃料热率曲线和随机抽样 coverage 仍明确不属于当前范围；schedule-only 不能写成全年物理或生命周期外部认证。 |
 | 电力市场 | 已实现（通用混合模型与南方规则研究执行入口） | 南方 GUI `/xjtu/#southern-market`；“运行模拟” `/xjtu/#market-operation` 按细则2.3/2.4组织15类边界，支持每日设备级覆盖、预测联合采样、逐日出清及ΔP统计。报价与物理边界分列，Canvas联动场景/日期/时段及原因复核。已验证小型流程及2000节点局部定位；水库非线性原始材料等仍有覆盖缺口，大规模批量出清性能未验证，不作正式市场等价或AC安全认证，见[执行契约](docs/modules/market/southern_execution_contract.md)。 |
+| 云南辅助服务 | 日前/日内调频、AGC计量及月度研究账本；黑启动仅规则提取 | `/xjtu/#market-ancillary`：固定UC/一次调频、安全移出/补入/调增、水电安全区间、独立储能/负荷排他、计量曲线、月分摊与更正历史。资质与动态安全、监管运营及实际支付需外部证据，见[契约](docs/modules/market/yunnan_ancillary_markets.md)。 |
+| 南方实时市场 | 第3章边界与滚动研究模拟 | `/xjtu/#market-realtime`：24×5分钟SCUC/SCED、独立8×15分钟LMP、实执行15分钟承接、2–4小时参考窗口；IEEE118混合资源实验。规则解释与外部运营限制见[契约](docs/modules/market/southern_real_time.md)。 |
 | 园区综合能源 | 已实现 | 电-热-氢-燃料多能流 MILP 调度（CHP、热泵、电解/燃料电池、多层氢储能、CCUS、碳预算）。 |
 | 承载力、薄弱环节与反事实规划 | 已实现 | DL/T 2041-2025 分布式电源承载力（含工程校核）、多维薄弱环节辨识、五类措施反事实对比。 |
 | 场景生成与台风弹性 | 已实现并完成声明范围文档/数值闭环 | 16 专章/56 页手册覆盖三族条件概率、二元 AR(1)、风险边界锚点、Holland 风雨--易损--故障/修复--交通链与全字段契约；4096 步统计、128→12 聚类和固定公式由独立 Python 复算，hybrid 的尾部收益与运输/regime 退化同时披露。气象预报、易损现场校准及外部引擎等价认证不在声明范围。 |
@@ -327,7 +400,7 @@ Canonical 层的一个重要设计原则是：求解器只看到必要的数学�
 | 暂态仿真 | `run_transient_simulation`, `small_signal_analysis`, `computeFrequencyReport` | 机电暂态相量 DAE（7 类求解器，含 MassMatrixDae 同时式）；AC/DC 一致初始化、共享 DC/DC 端口方程、DER_A COI 频率控制；IEEE 1547 及直接 API 装配的本地 CT/PT 定时限 UVLS/频率/正序 Zone-1 继电器可定位、前向窗口聚类并一致重启 | 轨迹、稳定 ID 事件记录、COI/孤岛遥测频率、小信号摘要、初始化残差所有权、事件定位次数/括号/簇跨度与事件后代数残差；COI 不作为直接继电器输入，EMT 测量拒绝，外部继电器尚无 rich-model/HTTP 自动装配 |
 | 碳分析 | `run_carbon_analysis`, `compute_annual_carbon_analysis`, `compute_annual_user_gec_accounting` | PF result + proportional / matrix tracing；年度时序含储能碳库存 | 节点、支路、负荷碳流；年度碳与用户/节点 GEC 核算 |
 | 时序/生产模拟 | `solve_time_series_pf`, `solve_unit_commitment`, `solve_annual_production_simulation`, `run_lifecycle_simulation`, `run_lifecycle_comparison` | 多时段负荷/资源曲线 + OPF/UC | 年度生产、成本、生命周期指标、容量扫描对比 |
-| 电力市场 | `market::run_day_ahead_market`, `run_real_time_market`, `run_repeated_market_game`, `run_southern_day_ahead_market`, `make_market_operation`, `step_market_operation`, `make_market_forecast`, `step_market_forecast` | 通用混合市场、南方三阶段研究模型、逐日状态承接与七日联合场景 | 独立 LMP、周月运行、预测误差采样、缺额/越限概率和区间统计、条件恢复差值 |
+| 电力市场 | `market::run_day_ahead_market`, `run_real_time_market`, `run_repeated_market_game`, `run_southern_day_ahead_market`, `run_yunnan_ancillary_market`, `run_yunnan_ancillary_intraday`, `settle_yunnan_ancillary_month`, `make_market_operation`, `step_market_operation`, `make_market_forecast`, `step_market_forecast` | 通用混合市场、南方三阶段研究模型、云南日前/日内调频与月度研究账本、逐日状态承接与七日联合场景 | 独立 LMP、二次调频/静态水电允许区间、独立资源排他、AGC计量与月分摊、周月运行、预测误差采样、缺额/越限统计 |
 | 园区综合能源 | `integrated_energy::solve_campus_ies` | 电-热-氢-燃料多能流 MILP（CHP、热泵、电解/燃料电池、氢储能、CCUS） | 多能流调度、成本/碳目标 |
 | 承载力评估 | `assess_hosting_capacity`（DL/T 2041-2025） | 设备级区间公式 + 可选 PF/短路/谐波工程校核 | 逐变压器/逐区域承载区间与分级 |
 | 薄弱环节辨识 | `run_multidimensional_weak_link_assessment` | 多维压力证据评分（severity / consensus / Pareto） | 薄弱环节排序与模式对比 |
@@ -586,7 +659,8 @@ fixtures 见 `data/etap_sample.xlsx`、`data/etap_feeder.xml`。GUI 后端端到
 | 时序/年度/生命周期 | `include/hacdcpf/time_series/`, `src/time_series/` |
 | 碳流/年度碳 | `include/hacdcpf/carbon_analysis/`, `src/carbon_analysis/` |
 | EV-交通耦合 | `include/hacdcpf/ev_power_traffic/`, `src/ev_power_traffic/` |
-| 电力市场 | `include/hacdcpf/market/market_simulation.hpp`, `src/market/` |
+| 电力市场 | `include/hacdcpf/market/market_simulation.hpp`, `include/hacdcpf/market/southern_market.hpp`, `src/market/`（调频校验/排序：`yunnan_ancillary.hpp`；时序规则/计量/月账本：`yunnan_rules_workflow.hpp`；能量/调频耦合：`southern_market.cpp`） |
+| 南方实时边界与状态 | `src/market/southern_real_time.hpp`；公共`make_southern_realtime/step_southern_realtime`；`web/js/core/market_realtime.js` |
 | 园区综合能源 | `include/hacdcpf/integrated_energy/`, `src/integrated_energy/` |
 | 承载力/薄弱环节/反事实 | `include/hacdcpf/analysis/hosting_capacity.hpp` 等, `src/analysis/` |
 | 场景生成/台风 | `include/hacdcpf/analysis/scenario_generation.hpp`, `include/hacdcpf/analysis/typhoon_resilience.hpp`, `src/scenario_generation/` |

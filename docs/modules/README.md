@@ -58,5 +58,5 @@
 
 全部主手册共享 `docs/_manual_common/hysim_manual.sty` 和
 `docs/_manual_common/industrial_evaluation.tex`。编译方法见
-[LaTeX 文档说明](../latex/README.md)，整理与验收结果见
+[LaTeX 文档说明](../_manual_common/README.md)，整理与验收结果见
 [文档重组报告](../planning/documentation_reorganization_report.md)。

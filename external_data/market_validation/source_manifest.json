@@ -1,0 +1,116 @@
+[
+  {
+    "file": "external_data/market_validation/PUBLIC_DISPATCHIS_20260828.zip",
+    "url": "https://nemweb.com.au/Reports/ARCHIVE/DispatchIS_Reports/PUBLIC_DISPATCHIS_20260828.zip",
+    "sha256": "5379ac586f95f04a13050f0ea7937b652139bd82d7e130206005bd024b77dd2d",
+    "bytes": 5630485
+  },
+  {
+    "file": "external_data/market_validation/PUBLIC_DISPATCHIS_20260829.zip",
+    "url": "https://nemweb.com.au/Reports/ARCHIVE/DispatchIS_Reports/PUBLIC_DISPATCHIS_20260829.zip",
+    "sha256": "5d88587c3a231b32f3c0bc07c82dd6210cecfbdcc5bc59bb0c7e6837087a64e5",
+    "bytes": 5615420
+  },
+  {
+    "file": "external_data/market_validation/PUBLIC_DISPATCHIS_20260830.zip",
+    "url": "https://nemweb.com.au/Reports/ARCHIVE/DispatchIS_Reports/PUBLIC_DISPATCHIS_20260830.zip",
+    "sha256": "49e0ef65d025e94dd6dbbf1c6bff13d731e28f59c7fff584eb0309ccbc00a84d",
+    "bytes": 5573433
+  },
+  {
+    "file": "external_data/market_validation/PUBLIC_DISPATCHIS_20260831.zip",
+    "url": "https://nemweb.com.au/Reports/ARCHIVE/DispatchIS_Reports/PUBLIC_DISPATCHIS_20260831.zip",
+    "sha256": "8969c146dd4e3778829fc34a03e6c08501d10817983cdbbbea03838566c7d97d",
+    "bytes": 5595708
+  },
+  {
+    "file": "external_data/market_validation/PUBLIC_DISPATCHIS_20260901.zip",
+    "url": "https://nemweb.com.au/Reports/ARCHIVE/DispatchIS_Reports/PUBLIC_DISPATCHIS_20260901.zip",
+    "sha256": "3bcd2fead19f1611ac9b81a4100194330a2e9b1cb02bdc304b6edd4c19b9f30c",
+    "bytes": 5779787
+  },
+  {
+    "file": "external_data/market_validation/PUBLIC_DISPATCHIS_20260902.zip",
+    "url": "https://nemweb.com.au/Reports/ARCHIVE/DispatchIS_Reports/PUBLIC_DISPATCHIS_20260902.zip",
+    "sha256": "15c292f76af7f7693aa5fafaab16bc995f7ec1a5d48a41d1fc2c192f09c1bbe3",
+    "bytes": 5732846
+  },
+  {
+    "file": "external_data/market_validation/PUBLIC_DISPATCHIS_20260903.zip",
+    "url": "https://nemweb.com.au/Reports/ARCHIVE/DispatchIS_Reports/PUBLIC_DISPATCHIS_20260903.zip",
+    "sha256": "930eec44f2da855804905e198ee5270992b63548a50c49203721fe56d28cc4b7",
+    "bytes": 5806247
+  },
+  {
+    "file": "external_data/market_validation/PUBLIC_NEXT_DAY_DISPATCH_20260901_0000000535633836.zip",
+    "url": "https://nemweb.com.au/Reports/CURRENT/Next_Day_Dispatch/PUBLIC_NEXT_DAY_DISPATCH_20260901_0000000535633836.zip",
+    "sha256": "b30b721bd4ac5ae5e722b8e36fc4607af764e053df909bbba8e2dc0f948de6eb",
+    "bytes": 8074853
+  },
+  {
+    "file": "external_data/market_validation/Elec20.html",
+    "url": "https://nemweb.com.au/Reports/CURRENT/MMSDataModelReport/Electricity/Electricity%20Data%20Model%20Report_files/Elec20.htm",
+    "sha256": "ec1b850f851656d592c7031c42f8077f77ab539b2fe3355db715ebe2255bf66b",
+    "bytes": 120836
+  },
+  {
+    "file": "external_data/market_validation/Elec20_1.html",
+    "url": "https://nemweb.com.au/Reports/CURRENT/MMSDataModelReport/Electricity/Electricity%20Data%20Model%20Report_files/Elec20_1.htm",
+    "sha256": "a9347093f38787984241761820d4d83b0e6189e4f38805823b9d9e03f92f33a2",
+    "bytes": 6530
+  },
+  {
+    "file": "external_data/market_validation/Elec22.html",
+    "url": "https://nemweb.com.au/Reports/CURRENT/MMSDataModelReport/Electricity/Electricity%20Data%20Model%20Report_files/Elec22.htm",
+    "sha256": "9bcb1ac088c6ee9f79070445ccb0d63b330296a353e731bc4b6d069c0fdaaf4e",
+    "bytes": 18591
+  },
+  {
+    "file": "external_data/market_bids/aemo_bid_data_model.html",
+    "url": "https://nemweb.com.au/Reports/CURRENT/MMSDataModelReport/Electricity/Electricity%20Data%20Model%20Report_files/Elec10.htm",
+    "sha256": "365057a4706e3e6443e895177ecdf4fbdbeb97b03f2bdf4372ceb0a5593e632c",
+    "bytes": 82576
+  },
+  {
+    "file": "external_data/market_bids/PUBLIC_BIDMOVE_COMPLETE_20260828_0000000534982753.zip",
+    "url": "https://nemweb.com.au/Reports/CURRENT/Bidmove_Complete/PUBLIC_BIDMOVE_COMPLETE_20260828_0000000534982753.zip",
+    "sha256": "665717a5aa2f7f0b35e0f1c3847e5be1f4fc5e5a6272962342fc52710ec162f7",
+    "bytes": 9298458
+  },
+  {
+    "file": "external_data/market_bids/PUBLIC_BIDMOVE_COMPLETE_20260829_0000000535142632.zip",
+    "url": "https://nemweb.com.au/Reports/CURRENT/Bidmove_Complete/PUBLIC_BIDMOVE_COMPLETE_20260829_0000000535142632.zip",
+    "sha256": "2873ac9313461f0ca3cc61e38977eaf47d197cdb9d44290873248b1c907048dc",
+    "bytes": 9166194
+  },
+  {
+    "file": "external_data/market_bids/PUBLIC_BIDMOVE_COMPLETE_20260830_0000000535298928.zip",
+    "url": "https://nemweb.com.au/Reports/CURRENT/Bidmove_Complete/PUBLIC_BIDMOVE_COMPLETE_20260830_0000000535298928.zip",
+    "sha256": "181a816dc54bd1003b5c1127ca77ff67fd1dde2bf54b2077a812ccba71dbbdac",
+    "bytes": 9229730
+  },
+  {
+    "file": "external_data/market_bids/PUBLIC_BIDMOVE_COMPLETE_20260831_0000000535463922.zip",
+    "url": "https://nemweb.com.au/Reports/CURRENT/Bidmove_Complete/PUBLIC_BIDMOVE_COMPLETE_20260831_0000000535463922.zip",
+    "sha256": "3bc79abec7bc5c95133bd87bb3a8c359b011856185ca4712b105dddef09c1e91",
+    "bytes": 9337045
+  },
+  {
+    "file": "external_data/market_bids/PUBLIC_BIDMOVE_COMPLETE_20260901_0000000535637491.zip",
+    "url": "https://nemweb.com.au/Reports/CURRENT/Bidmove_Complete/PUBLIC_BIDMOVE_COMPLETE_20260901_0000000535637491.zip",
+    "sha256": "6c27adb6ab357a8e9ce82519b862c969d9d4db8073781dce88d07d0653da19a4",
+    "bytes": 9196328
+  },
+  {
+    "file": "external_data/market_bids/PUBLIC_BIDMOVE_COMPLETE_20260902_0000000535804688.zip",
+    "url": "https://nemweb.com.au/Reports/CURRENT/Bidmove_Complete/PUBLIC_BIDMOVE_COMPLETE_20260902_0000000535804688.zip",
+    "sha256": "9aec310bfa2ad57422c641b795bb7c03862985c686cd4e94614e2074597b6599",
+    "bytes": 9278029
+  },
+  {
+    "file": "external_data/market_bids/PUBLIC_BIDMOVE_COMPLETE_20260903_0000000535974210.zip",
+    "url": "https://nemweb.com.au/Reports/CURRENT/Bidmove_Complete/PUBLIC_BIDMOVE_COMPLETE_20260903_0000000535974210.zip",
+    "sha256": "57087139fa7fab46b0b163c1bf50d4ae37d62d6b7bb3171b733288c39f6e6be6",
+    "bytes": 9294968
+  }
+]
