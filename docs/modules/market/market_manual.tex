@@ -77,8 +77,8 @@
 \fld{dc\_storage\_optimized} 系列按实际参与优化的 DC 储能置真；纯 AC 系统则为
 \texttt{"ac-only-dc-power-flow"} 且各 DC 标志保持 false。
 启用 N-1 时另置 \fld{hybrid\_n1\_modelled}=\fld{full\_component\_n1\_modelled}=true 并写入
-\fld{n1\_recourse\_policy}（\srcpath{src/market/market\_simulation.cpp:pricing\_objective（lambda）}）。
-\fld{energy\_prices\_valid} 在基态定价成功前为 false（\srcpath{src/market/market\_simulation.cpp:pricing\_objective（lambda）}）。
+\fld{n1\_recourse\_policy}（\srcpath{src/market/market\_simulation.cpp:run\_day\_ahead\_market}）。
+\fld{energy\_prices\_valid} 在基态定价成功前为 false（\srcpath{src/market/market\_simulation.cpp:run\_day\_ahead\_market}）。
 模型覆盖边界逐条写入 \fld{limitations}（\srcpath{src/market/market\_simulation.cpp:run\_day\_ahead\_market}）：
 DC 支路损耗不进入商业出清、在非线性认证中校核；VSC 固定/电流相关损耗、容量圆、
 电流与调制限值不是商业约束。
@@ -163,10 +163,10 @@ DC 支路损耗不进入商业出清、在非线性认证中校核；VSC 固定/
         \srcpath{src/market/market\_simulation.cpp:unsupported\_market\_assets}）；
   \item N-1：预防式 LODF 割覆盖 AC 支路；机组、DC 支路、换流器与 DC 储能停用在启用
         N-1 时以校正性固定组合 SCED 校核（\fld{hybrid\_n1\_modelled}，
-        \srcpath{src/market/market\_simulation.cpp:pricing\_objective（lambda）}）；AC 应急校核为 opt-in，
+        \srcpath{src/market/market\_simulation.cpp:run\_day\_ahead\_market}）；AC 应急校核为 opt-in，
         失败在 \texttt{SecurityResult} 中保持显式；
   \item \fld{scuc\_mip\_relative\_gap}=$10^{-2}$：SCUC 为近似解，除非 \fld{scuc\_optimality\_proven}；
-  \item \fld{energy\_prices\_valid} 在基态定价成功前为 false（\srcpath{src/market/market\_simulation.cpp:pricing\_objective（lambda）}）。
+  \item \fld{energy\_prices\_valid} 在基态定价成功前为 false（\srcpath{src/market/market\_simulation.cpp:run\_day\_ahead\_market}）。
 \end{itemize}
 平台实现参考：
 \begin{itemize}

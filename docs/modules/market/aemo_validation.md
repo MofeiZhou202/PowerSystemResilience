@@ -70,11 +70,14 @@ N-1、博弈、概率场景及双结算；这些仍标为合成/规则证据。
    两套输入/失败/成功结果分别保留在`ancillary_capacity_shortfall.json`、
    `ancillary_fixed_provider_day.json`。
 3. **不能无条件把公开FCAS的ACTUALAVAILABILITY当作中标量上界。**
-   163584条非干预UNIT_SOLUTION记录形成1635840个产品对照，其中25个超过0.05MW容差，
+   163584条非干预UNIT_SOLUTION记录形成1635840个产品对照（各产品量与其
+   `<产品>ACTUALAVAILABILITY`逐字段比较），其中25个超过0.05MW容差，
    最大100MW。25条均出现INITIALMW与TOTALCLEARED跨充放电方向或从零进入负出力，
    但该关联不是已验证的因果解释。例：BLYTHB1，09-01 06:50，RAISEREG=17MW，
-   ACTUALAVAILABILITY=0，INITIALMW=45.5，TOTALCLEARED=-20；对应AVAILABILITY=74MW。
-   官方字典`Elec20_1.htm`只明确后者为梯形调整后的可用量；当前证据尚不足以统一
+   RAISEREGACTUALAVAILABILITY=0，INITIALMW=45.5，TOTALCLEARED=-20；
+   对应AVAILABILITY=117MW、RAISEREGAVAILABILITY=74MW。
+   官方字典`Elec20_1.html`只明确ACTUALAVAILABILITY系列为梯形调整后的可用量，
+   `Elec20.html`将RAISEREGAVAILABILITY定义为申报与遥测的较小值；当前证据尚不足以统一
    双向设备、方向及初始/目标点的语义。所有原始行保存在`official_data_audit.json`，
    该项状态为`unresolved_field_semantics`，不计入`identities_pass`。
 
@@ -179,8 +182,10 @@ N-1、博弈、概率场景及双结算；这些仍标为合成/规则证据。
 
 独立审计与场景入口见`tools/market_validation/{aemo_data,independent_audit,run_aemo_validation}.py`。
 周/概率实现为`src/market/{market_operation,market_forecast}.cpp`；API生产入口为
-`tests/run_gui_server.cpp`。本轮GUI回归发现导航测试仍期待6个页面，已按生产8页面
-修正`tests/e2e/market_gui_e2e.mjs`，并实跑通过；不是修改GUI来迎合旧测试。
+`tests/run_gui_server.cpp`。本轮GUI回归发现导航测试仍期待6个页面，已按生产10页面
+（南方“运行模拟/边界与单日出清/对比试验/云南调频/实时市场”与通用“主体与报价/预测与时域/
+市场出清/安全校核/市场结算”）修正`tests/e2e/market_gui_e2e.mjs`，并实跑通过；
+不是修改GUI来迎合旧测试。
 
 ## 复现与构建边界
 

@@ -61,10 +61,10 @@ p - r- >= sum_k l_gk z_gtk + startup/shutdown trajectory
 
 这保证基点到调频端点落在同一个连通允许区间；不表示真实振动幅值、过区时间、水头依赖区间或秒级AGC水力响应。LMP固定SCED区间选择以及二次备用分配。跨时点允许换区，不对区间转换轨迹作动态安全认证。
 
-排序候选容量是各小时四个点的设备能力上界的最小值：每台机组在可用区间内最大对称备用为`min(5r_up,5r_down,max_k(h-l-f)/2)`。这只是供排序筛选的必要容量界，水量/网络/时序耦合可使其不可行，最终以SCED残差审计为准。第41条具名安全复核可触发按序移出、补入、调增，随后实际SCED校核。若SCED仍失败，保留失败供下一轮复核，不从MILP不可行状态虚构唯一责任机组。
+排序候选容量是各小时四个点的设备能力上界的最小值：每台机组在可用区间内最大对称备用为`min(5*min(r_up,r_down,r_std), max_k(min(h_k,pmax)-max(l_k,pmin)-f)/2)`，其中`r_std`为申报的AGC标准速率、区间宽度先裁剪到`[pmin,pmax]`；无声明区间的火电取`pmax-pmin-f`。单元内按成员求和后再对小时四点取最小。这只是供排序筛选的必要容量界，水量/网络/时序耦合可使其不可行，最终以SCED残差审计为准。第41条具名安全复核可触发按序移出、补入、调增，随后实际SCED校核。若SCED仍失败，保留失败供下一轮复核，不从MILP不可行状态虚构唯一责任机组。
 
 独立资源来自`independent_units`，`mode=storage|load`，`resource_id`为对应设备表的稳定ID；与发电AGC共用ID空间。标准速率、持续响应小时、每小时负荷削减基点和已中标跨省备用均为具名声明；默认未取得资质、持续能力0、容量0。任何一刻不可用、持续能力不足1小时或同小时跨省备用非零，不参与调频中标及调增。
-储能在中标小时强制`dis=ch=dis_on=ch_on=0`；令`eta=sqrt(roundtrip_efficiency)`、`r`为小时调频容量，小时内各点及起点满足`Emin+r/eta <= E <= Emax-r*eta`，保证至少1小时双向能量余量。日内另要求实际日前SCED该小时全部充放电计划为0。LMP继续保留储能能量约束。负荷以声明削减基点`b`固定运行，要求`r<=b`、`b+r<=available*max_reduction`、`r<=5*ramp`，日削减上限扣除各时点上调预留能量。这是全日同时激活上界的保守约束；不模拟负荷反弹或储能真实AGC能量轨迹。
+储能在中标小时强制`dis=ch=dis_on=ch_on=0`；令`eta=sqrt(roundtrip_efficiency)`、`r`为小时调频容量，小时内各点及起点满足`Emin+r/eta <= E <= Emax-r*eta`，保证至少1小时双向能量余量；首小时初值SOC落在该区间外时建模直接抛出`invalid_argument`拒绝，不自动缩减奖额。日内另要求实际日前SCED该小时全部充放电计划为0。LMP继续保留储能能量约束。负荷以声明削减基点`b`固定运行，要求`r<=b`、`b+r<=available*max_reduction`、`r<=5*ramp`；对称裕度不满足同样抛错拒绝而非暗中降额。日削减上限扣除各时点上调预留能量。这是全日同时激活上界的保守约束；不模拟负荷反弹或储能真实AGC能量轨迹。
 独立资源输出98点`agc_reserved_mw`与`energy_market_eligible`；中标时段不得获得能量补偿，包括通用`analyze_southern_market_result`账本，防止只在优化目标中去掉费用而在结果账本重复支付。
 
 RATIONALE:
@@ -117,7 +117,7 @@ Validation：`test_southern_market '[ancillary]'`手算与失败注入、严格1
 | 最近8个中标时段k、24小时报价与容量 | `prearrange`；外部已统计k，不从能量计划估计 | `k_history[8]`、`price_per_mw[24]`、`capacity_mw[24]` | 同价性能顺序、报价缺省、15元封顶、50%限制、最后一刻不可用 |
 | 24小时容量、缺口、参考价 | `prearrange`性能顺序与必要能力上界 | `result.ancillary.hours[]`、容量/价格曲线及原因表 | 两机各10MW、价6；短缺参考价null |
 | 98点u/一次/二次/基点 | `southern_market.cpp::build_model`，SCUC→SCED→LMP | `result.sced.generators[].{online,primary_reserve_mw,secondary_up_mw,secondary_down_mw,power_mw,stable}` | 原单位残差1e-6、UC/一次不变、厂级双向求和 |
-| 机组允许区间MW | 成员`safe_intervals_mw`；SCED区间二进制，LMP固定 | 完整JSON编辑；曲线显示允许区间/基点/一次+二次上端点/二次下端点 | 每台稳定水电的整个调频端点位于同一允许区间 |
+| 机组允许区间MW | 成员`safe_intervals_mw`（每台水电至多16段、递增不相交非空，火电必须为空）；SCED区间二进制，LMP固定 | 完整JSON编辑；曲线显示允许区间/基点/一次+二次上端点/二次下端点 | 每台稳定水电的整个调频端点位于同一允许区间 |
 | 日内价/安全调整 | `yunnan_rules_workflow.hpp::adjust_awards` | `workflow`、`hours[].clearing_price_per_mw`、`adjustment_log`、独立安全复核编辑器 | 安全移出/补入/调增，实时保价、暂停用同小时历史价、未知主体及超能力调整拒绝 |
 | 计量MW、性能p.u.、费用CNY | `meter/settle` | `result.statement.metering/allocation`，计量JSON、里程曲线/费用表 | AUTOR、试验不补偿、300/301秒、区间并集、缺记录、重复事件、禁止直接输入补偿金额 |
 | 月度CNY及更正历史 | `post_statement/settle_month` | 会话`journal/month`，日期凭证、全月电量及结果表 | 最新有效日版本、完整日历月、跨日事件重放、日历退补窗口、重新计算全月分母 |
@@ -138,14 +138,14 @@ Validation：`test_southern_market '[ancillary]'`手算与失败注入、严格1
 上述`|`表示两个可选动作而非实际动作字符串。save先完整校验再原子保存，清除日前/日内辅助结果并增加共享修订号；run使用锁定边界/配置快照。每次出清赋唯一`clearing_id`。日内仅允许替换workflow里的安全/运行记录，封存报价与主体配置必须与日前有效快照一致；复用SCUC完整解，重算实际SCED/LMP及按需AC。
 GUI在日内配置下禁用日前运行按钮；重建日前申报须在完整配置中显式使用`workflow.stage=day_ahead`并清除只适用于日内的暂停/实时指令后保存。按钮入口拒绝时不清除现有结果。
 `workflow`严格包含`stage,clearing_minutes[24],bid_submissions,safety_reviews,allow_uplift,suspensions,realtime_adjustments`。时间按运行日00:00相对分钟，报价窗口-900..-720，出清不早于-660且每小时至少提前30分钟；相同时戳以事件ID作可复现排序，冲突的同主体同时刻实时指令拒绝。最后一个满足精度及容量上限的申报替换原申报，报价越界采用缺省；原直接容量数组越过50%上限时保留原申报并披露研究降额。
-第41条安全容量为设备必要界、复核上/下调容量、单主体需求50%上限的最小值。未合格主体禁止调增。实时指令按小时/秒排序，同一秒成批计算容量；出现任一容量缺口禁止结算。SCED以各主体整小时最大被调用容量构造保守包络，不把秒级指令等同于已执行动态仿真。
+第41条安全容量为设备必要界、复核上/下调容量、单主体需求50%上限的最小值。未合格主体禁止调增。补入仅从初始中标为0的序列外主体按序进行；调增受`workflow.allow_uplift`开关控制、以安全容量为上界，可为分数MW。实时指令按小时/秒排序，同一秒成批计算容量；出现任一容量缺口禁止结算。SCED以各主体整小时最大被调用容量构造保守包络，不把秒级指令等同于已执行动态仿真。
 
-`settle.request={measurements,allocation}`。每个测量主体小时行含`unit_id,hour,source,test_period,own_unavailability_seconds,events`；输入不可用时间为`[[起秒,止秒],...]`，输出为合并后的总秒数；`events=[]`表示有来源的零指令证明，缺行表示未知。事件含`event_id,start_second,end_second,start_mw,end_mw,autor,metrics`，metrics字段及公式见第12/13条提取。采样性能按本实现已声明的AUTOR事件算术均值汇总；官方另行明确的原始信号统计与仪表真实性仍外部验证。事件不得重叠、重放或跨越实时容量变更；实际调用者也必须在本次AGC名册中。失败、诊断松弛、未通过要求的AC、实时容量不足及日前参考价均不准结算。测量功率与真实机组动态响应的一致性不是此计费器的认证范围。
+`settle.request={measurements,allocation}`。每个测量主体小时行含`unit_id,hour,source,test_period,own_unavailability_seconds,events`；输入不可用时间为`[[起秒,止秒],...]`，输出为合并后的总秒数；`events=[]`表示有来源的零指令证明，缺行表示未知。事件含`event_id,start_second,end_second,start_mw,end_mw,autor,metrics`；`metrics={rate_fraction_per_min,delay_seconds,error_fraction,fleet_standard_fraction_per_min,standard_delay_seconds,allowed_error_fraction}`，速率与误差均为额定容量标幺口径，不混用MW/min，公式见第12/13条提取。实现按事件给定的单一电网标准速率计算k1，附录1的多机加权汇总`Σ_f(w_f v_std,f)`仍属外部统计输入；性能系数`m<0`拒绝并提示需外部统计规则处置，不擅自截断为0。采样性能按本实现已声明的AUTOR事件算术均值汇总；官方另行明确的原始信号统计与仪表真实性仍外部验证。事件不得重叠、重放或跨越实时容量变更；实际调用者也必须在本次AGC名册中。失败、诊断松弛、未通过要求的AC、实时容量不足及日前参考价均不准结算。测量功率与真实机组动态响应的一致性不是此计费器的认证范围。
 
-`allocation={continuous_spot,generation_share,assessment_pool_cny,participants}`；主体行`{id,source,point_to_grid,unit_ids,export_mwh,nonmarket_export_mwh,import_mwh}`。金额仅从计量结果汇总，拒绝外部直接填写`compensation_cny`、未知/重复AGC归属及零分母正费用池。AGC考核总池为外部按两个细则形成的输入，本程序只返还分摊，不伪造个人考核函数。日累计分摊为预览，非正式月分摊。
+`allocation={continuous_spot,generation_share,assessment_pool_cny,participants}`；主体行`{id,source,point_to_grid,unit_ids,export_mwh,nonmarket_export_mwh,import_mwh}`。金额仅从计量结果汇总，拒绝外部直接填写`compensation_cny`、未知/重复AGC归属及零分母正费用池。`research=false`的正式口径下日分摊强制`generation_share=0.5`；研究模式允许其它取值。AGC考核总池为外部按两个细则形成的输入，本程序只返还分摊，不伪造个人考核函数。日累计分摊为预览，非正式月分摊。
 
 `post.request={book,delivery_date,posting_date,discovered_date,supersedes_id,reason,source}`。首次入账发现日期/替代ID均null；更正必须引用最新凭证ID、保留旧版、处理日期不早于发现及原入账日期，并满足发现后1个日历月和运行日后6个日历月。月结后下一次法律结算的实际支付、例外审批仍需外部流程，不由本地日期输入自动认证。不同资源身份或不同对比情景使用不同book；同一出清不能重复记账。
-`month.request={book,month,allocation}`，month为YYYY-MM，allocation为**全月**电量；全月运行日凭证齐备后采用各日最新有效版本，重新按整月电量分摊，缺日返回`complete=false,allocation=null`。账本和月结是会话内数据，服务重启不自动恢复，不是持久化财务系统。
+`month.request={book,month,allocation}`，month为YYYY-MM，allocation为**全月**电量；月分摊按第48条强制`generation_share=0.5`（F=0.5），不接受其它取值。全月运行日凭证齐备后采用各日最新有效版本，重新按整月电量分摊，缺日返回`complete=false,allocation=null`。账本和月结是会话内数据，服务重启不自动恢复，不是持久化财务系统。
 过期revision或忙返回409；非法声明返回400。会话保存独立辅助配置/结果；主边界修订后GET不再返回旧辅助结果/旧声明，重新生成明确标注的研究模板。
 当前平台后端链接环境中仅捕获`std::exception`未能保留部分校验异常，路由按既有市场模式显式捕获`std::invalid_argument`；非法水电单机声明已验证返回400及具体原因。
 
@@ -157,7 +157,7 @@ GUI在日内配置下禁用日前运行按钮；重建日前申报须在完整�
 本轮扩展采用四层验证：第一层手算公式与金额；第二层排列不变性、时间/精度/资格/缺证据等规则反例；第三层实际SCUC/SCED/LMP的固定状态、独立资源排他、SOC及日能量约束；第四层IEEE118 API/浏览器、Canvas、桌面/390px手机曲线和独立金额复核。运行与最新计数记录在开发状态；未把这些层级当作动态安全认证。
 
 最终Release全量市场53用例/27881断言，ASan/UBSan辅助服务8用例/2077断言均通过（禁用泄漏检测）。扩展辅助E2E、南方边界E2E及周月运行E2E通过；移动版里程图改为24小时聚合柱形，单独检查刻度与轴标题不重叠。日志、结果及截图在`output/market-ancillary/`。
-当前8099页面保存Gurobi独立资源IEEE118结果：日前4.563s、复用状态的日内2.302s；独立储能3MW/可控负荷1MW，安全移出一个常规AGC后补入。98点状态、厂级备用、水电连续区间、储能能量排他残差均0，合成计量补偿16元/现金残差0，见`live-rules-audit.json`。同轮HiGHS E2E日前21.440s/日内11.436s，具名安全调整48条，合成计量120元、分摊残差0。这是不同研究声明的单次实测，不是两求解器速度比。
+当前8099页面保存Gurobi独立资源IEEE118结果：日前4.563s、复用状态的日内2.302s；独立储能3MW/可控负荷1MW，安全移出一个常规AGC后补入。98点状态、厂级备用、水电连续区间、储能能量排他残差均0，合成计量补偿16元/现金残差0，见`live-rules-audit.json`（已逐项核实）。同轮HiGHS E2E当时记录日前21.440s/日内11.436s；现保存工件重测为23.229s（`ieee118-highs.json`）/12.226s（`ieee118-intraday-highs.json`），具名安全调整48条、合成计量120元、分摊残差0（`ieee118-rule-statement.json`，已核实）。这些均为不同研究声明的单次实测，不是两求解器速度比。
 
 手算：20 MW需求、移出A后B/C各10 MW、排序价5/6，日内价6；10/20 MW里程、m=1补偿180元，发电/用户各90元，现金残差0。非连续现货月度100+300元补偿、90/10MWh月电量，分摊360/40元；修正第一天至200元后月池500元，原凭证保留。300秒不扣、301秒扣、重放/缺计量/更正超期拒绝。
 
@@ -167,11 +167,11 @@ Release与ASan/UBSan手算测试、IEEE118实解/浏览器测试见`tests/test_s
 两机手算预测每台10MW、参考价6元/MW、新增392连续变量，实测完全一致（价格1e-9、容量/状态1e-6阈值）。水电允许区间与能量平衡冲突反例明确返回`coupled_safety_failed`，不声称查明唯一不可行约束。
 
 IEEE118的20MW/小时缩放试验：36水电+18火电+12风光、12三级共享水库、6储能、6可控负荷；12厂AGC和18火电单机声明。
-Gurobi一次运行4.790s、HiGHS一次运行约22.3s，均通过SCUC/SCED/LMP；这是同一合成模型的单次观测，不是稳健速度比或全局解唯一性结论。
+Gurobi一次运行4.790s（与现存工件一致）、HiGHS一次运行当时记录约22.3s（现存工件重测23.229s），均通过SCUC/SCED/LMP；这是同一合成模型的单次观测，不是稳健速度比或全局解唯一性结论。
 SCUC129164变量、SCED149156变量，差19992恰为`2*98*66 + 98*36*2`，符合预先规模预测；无速度提升承诺。
 记录文件：`output/market-ancillary/ieee118-{gurobi,highs}.json`，浏览器`desktop.png`/`mobile.png`；移动视口390px无页面横溢。
 在线展示另使用Cmin=50 MW、R1=.005、R2=.003和每区10 MW一次调频的研究边界：二次需求68.789–76.747 MW、整块预安排70–80 MW，Gurobi5.106s；`ieee118-live.json`与`live-audit.json`记录原结果及独立复核，固定状态/一次偏差、厂级容量误差、水电区间越界均为0。
-源码工作树基于`8b93145bf4f5617bdf5d8eb7856a93570920fb01`，依赖工作树基于`e6c932e5f8a409cc87bf2668b86eb895f3eccea5`；macOS arm64 Apple Clang Release `-O3`，两仓库均有保留的既有修改。
+该轮验证时源码工作树基于`8b93145bf4f5617bdf5d8eb7856a93570920fb01`，依赖工作树基于`e6c932e5f8a409cc87bf2668b86eb895f3eccea5`（此后两仓库均有新提交，最新基线见`docs/overview/development_status.md`）；macOS arm64 Apple Clang Release `-O3`，两仓库均有保留的既有修改。
 构建沿用已生成的object/archive/link规则；配置期依赖pin保护未绕过、未改pin；sanitizer禁用泄漏检测。
 
 这些结果不构成完整云南调频规则等价认证：已执行的排序、具名安全移出/补入/调增、日内固定状态、独立资源排他、计量计费和月度重分摊仅覆盖可计算研究规则。AGC注册/试验资格、最近8次中标历史的实际时间有效性、官方另行发布的原始信号统计细节、完整安全责任识别、秒级AGC/水力/频率稳定、市场力监管/信息披露/异议审批、两个细则个人考核及法律月结支付仍需外部规则与证据。水头变化振动区及跨区轨迹需外部模型；线性排程可行也不代表交流/动态安全。黑启动继续仅规则提取，未开放交易执行。

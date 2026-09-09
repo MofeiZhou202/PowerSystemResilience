@@ -162,6 +162,8 @@ Python标准库用于数据/HTTP/数值oracle，绘图另需matplotlib。默认�
 未来时间戳拒绝及浮点单调性。已直接执行通过并注册 `market_bid_empirical_unit`；
 受现有兄弟依赖版本/工作树门控影响，本次未重新生成CMake或声称ctest已运行此新增项。
 本次没有改生产出清算法或GUI，也未重跑全项目C++测试。
+2026-09-09复核：本篇全部数值与 `output/market-bids/` 汇总JSON及 `external_data/market_bids/`
+原始档案一致，LOAD训练期逐日系数0/0/0/1由 `extracted.json` 重算确认，9项Python测试当日重跑通过。
 
 最初20台均非零的假设及浮点严格单调问题分别被数据检查和生产接口明确拦截；前者按已记载
 配对规则处理，后者只在64个机器epsilon以内消除积分舍入逆序，实质逆序仍拒绝。

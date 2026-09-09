@@ -139,8 +139,7 @@ $(injection-curtailment)\,LMP\,\Delta t$。客户总付款为能量、备用和 
 \end{align}
 备用交付量是指令乘 performance factor；机组惩罚偏差为
 $\max(0,|P^{RT}-P^{instruction}|-\rho\max(|P^{instruction}|,1))$。
-依据为 \srcpath{src/market/market\_simulation.cpp:invalid\_nonnegative（lambda）} 和
-\srcpath{src/market/market\_simulation.cpp:invalid\_nonnegative（lambda）}。
+依据均为 \srcpath{src/market/market\_simulation.cpp:run\_real\_time\_market}。
 
 HHI 使用百分数份额而非 $[0,1]$ 份额：
 \begin{equation}

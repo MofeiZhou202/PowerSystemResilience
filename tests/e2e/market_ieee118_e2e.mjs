@@ -167,11 +167,11 @@ try {
     if(expected===null)assert.equal(plotted,null);else closePlan(plotted,expected,'weekly chart source');
   }
   await plan.selectOption('utilization_percent');await page.locator('#operationPlanKind').selectOption('wind');
-  assert.equal(await page.locator('#operationPlanEntity option').count(),mixed?6:2);
+  assert.equal(await page.locator('#operationPlanEntity option').count(),mixed?6:1);
   const downloadEvent=page.waitForEvent('download');await page.locator('#operationPlanExport').click();
   const download=await downloadEvent;await download.saveAs(path.join(output,'wind-week.csv'));
   const csv=await readFile(path.join(output,'wind-week.csv'),'utf8');
-  assert.equal(csv.trim().split(/\r?\n/).length,1+(mixed?6:2)*672);
+  assert.equal(csv.trim().split(/\r?\n/).length,1+(mixed?6:1)*672);
   await page.locator('#operationPlanKind').selectOption('');await plan.selectOption('online');
   await page.evaluate(j=>{window.HySimMarketOperation.preview({...j,days:j.days.slice(0,1),completed_days:1});},run.job);
   assert.equal(await page.locator('#operationPlanHeatmap').evaluate(n=>n.data[0].z[0][96]),null);

@@ -51,13 +51,16 @@ pricing分支选择行列，A_price=R*A_sced*C，RHS同序选择，费用和冻�
 独立原装配逐项核对矩阵、RHS、row_lhs、目标、边界、语义和结果索引。其他路径自动使用
 原装配。派生模板不进入跨运行缓存，双定价完整对偶核验规则不变。
 实现为`src/market/southern_market.cpp::derive_lmp`；验证入口为`[lmp_reuse]`、
-`[lmp_reuse_gurobi]`、七日`[assembly_cache]`及`probe_market_scale_price.cpp ... derive`。
+`[lmp_reuse_gurobi]`、覆盖交易费与非紧凑资产分支的`[lmp_reuse_branches]`、
+七日`[assembly_cache]`及`tools/market_validation/probe_market_scale_price.cpp ... derive`。
 完整计时和分解诊断见[性能记录](performance.md)。
 
 ## Deterministic Pricing
 
 For Gurobi pricing LPs with at least 1000000 ordered columns,
-`ordered-lp-barrier-8-v2` fixes Method=2, Threads=8, Seed=0, Crossover=0.
+`ordered-lp-barrier-8-v2` fixes Method=2, Threads=8 and Crossover=0; the fresh
+environment is reset to default parameters (whose Seed default is 0) rather than
+fixing Seed explicitly.
 Two fresh environments solve the immutable LP concurrently, with at most one
 large pair active per process. Both full original-unit duals still must match
 exactly. This changes the representative policy on degenerate LPs; historical
@@ -69,8 +72,10 @@ For smaller LPs and HiGHS, `ordered-lp-dual-simplex-v1` fixes pricing to a fresh
 simplex solve (seed 0). Gurobi resets environment parameter overrides to defaults,
 then uses Method=1, Threads=1, OptimalityTol=1e-8 and the configured time budget;
 HiGHS uses simplex_strategy=1, parallel=off, presolve=on and seed=0. Native market
-pricing continues to use HiGHS. Requested `gurobi_method`/threads govern dispatch;
-the LMP stage reports its effective algorithm and `price_consistency` policy.
+pricing continues to use HiGHS. Requested `gurobi_method`/threads govern SCUC/SCED
+dispatch only; the LMP pricing LP always uses the fixed size-based policy above
+(single thread in the v1 path), regardless of the requested dispatch algorithm.
+The LMP stage reports its effective algorithm and `price_consistency` policy.
 
 For the unchanged ordered LP min c'x subject to Ax<=b, Ex=d, l<=x<=u,
 an optimal face can contain several row multipliers y. This policy selects a
@@ -110,9 +115,14 @@ Auto attempts repair only for compact Gurobi SCUC with >=1000000 columns and
 positive requested gap; reference preserves the original MILP path. Explicit
 certified_repair admits small compact Gurobi fixtures for cross-validation and
 requires positive gap. Real-time and already coupled ancillary models are excluded.
-LP relaxation consumes at most30% of the configured optimizer budget and repair
+Admission additionally requires a nonempty binary set and no general integer
+columns. LP relaxation consumes at most30% of the configured optimizer budget and repair
 at most40%; failed admission uses the remaining soft budget for the original MILP.
 An LP relaxed barrier status alone never proves market feasibility or a lower bound.
+When the certificate box cannot be constructed (a nonpositive-susceptance or
+phase-shifting branch defeats the network bounds, or a column stays unbounded),
+the repair is declined and the same fallback applies; this is an applicability
+exit, not evidence about the market model.
 
 The independently rounded Lagrangian bound, finite optimal-representative box,
 fixed integer repair and numerical assumptions are derived in performance.md.
@@ -123,8 +133,9 @@ solutions use `Optimality gap reached`; a positive gap is not exact optimality.
 
 SCED reuse is restricted to the same call and requires exact CSC matrices, costs,
 RHS, row lower sides, column names/order, constant objective, tighter variable
-bounds, no new integer columns and a fresh full SCED residual check. It retains
-the SCUC lower bound and marks `reused_from=scuc`, `matrix_cost_rhs_comparison=
+bounds, no new integer columns and a fresh full SCED residual check. It is only
+attempted after an accepted certified-repair SCUC, whose Lagrangian bound is the
+retained certificate. It marks `reused_from=scuc`, `matrix_cost_rhs_comparison=
 exact_match`, `bound_subset=true`. Any mismatch invokes the ordinary SCED solver.
 No previous run, day or changed water/SOC boundary can supply a cached certificate.
 For derived SCED that passes the reuse gate, its stored preceding solution map
@@ -183,6 +194,10 @@ carry 或运行状态。忙碌/旧 run_id/边界 revision 拒绝；未完成日�
 operation GET 返回 `recovery_policies:true`；GUI 对未声明该能力的旧服务隐藏新策略控件、
 禁用补算并省略新增配置字段，继续兼容旧的 explain 开关。
 `manual_wall_sec` 单独记录，不回写原逐日 `execution_timing`。
+每次恢复执行另返回 `recovery_execution`：workers（1或2）、experiments、
+请求/实际生效线程数、wall_sec 和范围说明。双 worker 并行仅在 Gurobi 后端、
+不超过118母线/128机组/16储能/24水库、至少4核且每解线程不超过核数一半时启用；
+日内实验独立并行，跨日推进永远串行。并行协议的推导与预算见 performance.md。
 界面可为所选历史日补算供需归因或含 LMP 完整链，并显示触发状态和恢复范围。
 
 每阶段新增 `solver_timing`：Gurobi environment_sec / model_import_sec /
@@ -426,7 +441,8 @@ node tests/run_southern_solver_comparison.mjs demo 30 120 -1 output/market-opera
 node tests/run_southern_solver_comparison.mjs 2000 120 420 120 output/market-operation/local-2000-reduced
 ```
 驱动按后端串行启动独立进程，保留日志、输入规模、资源容量、Git HEAD、主机和
-外部截止证据。`native`单次LP与HiGHS定价LP没有硬时限，不把MILP时限当总耗时保证。
+外部截止证据。`native`单次LP无时限，HiGHS定价LP仅有软时限（实测不硬截止），
+不把MILP时限当总耗时保证。
 
 ## 逐时拓扑与 PTDF
 
@@ -748,10 +764,12 @@ N 的事件范围为 `[events/N,(events+n_unknown)/N]`。Wilson95 反映完整�
 
 ### Gurobi 市场后端
 
-`execution.solver`支持`highs`（旧快照默认）和`gurobi`，不自动替换。
+`execution.solver`支持`highs`（旧快照默认）、`gurobi`和`native`，不自动替换；
+Native 路径见本文 Native 根割与整数修复两节。
 `execution.threads`默认0；非零仅接受Gurobi（最大128）。`time_limit_sec`与
 `mip_gap`沿用原范围；Gurobi参数作用于每个SCUC/SCED/LMP优化调用，LP也限时。
-时限不包含建模、许可证启动或全部恢复实验，仍不是整日硬预算。HiGHS仍仅MILP限时。
+时限不包含建模、许可证启动或全部恢复实验，仍不是整日硬预算。HiGHS路径中
+SCUC MILP与LMP定价LP（含重复核验的剩余预算）接收时限，SCED连续LP不设时限。
 运行模拟`config.solver_options={solver,time_limit_sec,mip_gap,threads}`可覆盖保存边界的
 执行设置；配置缺省时从保存边界继承，规范化结果与预测场景导出保留实际选择。
 GUI手工页和预测页分别编辑并重载这四项；日前边界页按schema编辑execution。
@@ -836,7 +854,8 @@ RATIONALE:
 尚不支持尾部两点独立标量参数或报价；仅预测末日的标量设备覆盖显式拒绝。
 概率模型仍是每日共同倍数，不是外部完整预测
 材料接口。Gurobi接入见上节；进程隔离、整日硬预算及2000节点性能证据仍未完成。
-`time_limit_sec`在HiGHS路径仅用于MILP，Gurobi路径用于MILP/LP；均不能解读为
+`time_limit_sec`在HiGHS路径作用于SCUC MILP与LMP定价LP，SCED连续LP不限时；
+Gurobi路径作用于每次优化调用（MILP/LP）；均不能解读为
 含建模、定价与恢复实验的日总时限。
 
 验证记录：macOS arm64，`macos-release`预设，HEAD `308ccc57`加当前工作树；
@@ -883,6 +902,8 @@ GET 返回进度、条款边界目录与逐日结果，POST start/step/cancel/pr
 服务端修订检查和 busy 状态保护任务。结果以 stable id 和 0-based day/slot 索引、
 MW/MWh/CNY 单位存储。配对重算固定当日日初状态，只恢复一种当日边界因素；
 不能将条件差值解读为统计因果，也不把生效约束直接命名为唯一原因。
+手工任务 config 另接受可选 `reference_days`（同日历长度的每日边界数组）作为
+恢复参照；预测与研究任务自行派生参照，显式拒绝另设 `reference_days`。
 
 ### 运行模拟接口与页面
 
@@ -987,8 +1008,9 @@ RATIONALE（每日覆盖，非求解器改写）:
 点击节点/线路或结果表 ID 定位同一稳定实体；“编辑基准边界”定位原编辑器，
 编辑流程仍需原有保存/校验。跟随计算在每个日窗返回后跳到最新场景/日期；
 播放以 700 ms 递进已选时段并可跨日，末端与离开市场时停止，不伪造求解进度。
-平移、缩放、适应与键盘 Enter/Space 选择均可用。大于 80 节点时显示所选设备
-的至多 80 节点 BFS 邻域并标出可见/总数；完整设备菜单仍覆盖全部实体。
+平移、缩放、适应与键盘 Enter/Space 选择均可用。拓扑范围由“局部/扩展邻域”
+选择器控制：局部为所选设备两跳内至多 24 节点，扩展为 BFS 至多 80 节点，
+并标出可见/总数；完整设备菜单仍覆盖全部实体。
 可视化只连真实支路，所选支路两端优先纳入，不声称全网同时绘制或真实地理布局。
 
 已注册 `southern_market_e2e` / `market_operation_e2e` /
@@ -1120,13 +1142,14 @@ RATIONALE: 算例构造沿用现有 98 点线性模型，不改优化方程。�
 
 `[statistics]` 进一步联合扰动风、光、负荷、可控负荷补偿报价和资源报价，
 逐场景统计有效出清、线路松弛事件、节点价格样本和新能源利用率样本；
-当前 12/12 场景有效，16 项断言通过。统计量下一步将序列化为场景报告并
-加入 Spearman/PRCC 相关性矩阵。
+当前 12/12 场景有效，16 项断言通过。场景统计已在预测任务层序列化
+（`market_forecast_statistics`，含 Pearson 相关）；Spearman/PRCC 相关性
+矩阵仍未实现。
 
 1. **方程与守恒层：已执行。** `[hand_oracle]` 覆盖节点负荷削减、发电量、补偿费用、同库多机组下泄量和水位递推；手算断言 12 项全部通过。
 2. **解析最优层：已执行。** 单母线单机组、储能、拥塞和水库算例均有确定的人工最优值或边界不可行值，测试位于 `tests/test_southern_market.cpp`。
 3. **性质层：部分执行。** 已覆盖负荷微扰、线路/断面限额、备用不足、补偿价格阈值和水电日电量上限；随机性质测试、可行域包含关系和多流域交叉耦合测试仍待补齐。
-4. **外部交叉验证层：待执行。** 计划将小型边界导出到独立 Python/HiGHS 或 SCIP 模型，并用 MATPOWER/pandapower 复核 AC 潮流。当前没有外部 oracle 结果，内部 HiGHS 回归不作为外部验证。
+4. **外部交叉验证层：待执行。** 计划将小型边界导出到独立 Python/HiGHS 或 SCIP 模型，并用 MATPOWER/pandapower 复核 AC 潮流。当前没有外部 oracle 结果，内部 HiGHS 回归不作为外部验证。同一模型在 HiGHS/Gurobi 双后端的目标一致性已由 `[gurobi]`、`[local_solvers]` 覆盖，但属于同模型不同求解器核对，不等同独立外部 oracle。
 
 缺少真实报价时，报价字段均标记为 synthetic/研究输入；验证结论限定为方程、约束、物理守恒和给定实验报价下的优化性质，不解释为真实市场价格认证。
 ## 2000-bus exact formulation experiment
@@ -1232,6 +1255,30 @@ Verification so far: `[compact]` passes 8299 assertions including 239/240 and
 719/720 minute threshold ties, outage/restart, 98-point state/class/output parity
 and all-stage objective parity. Full Southern passes 31 cases / 19562 assertions;
 four registered GUI suites pass (32.96 s), including API/DOM performance fields.
+These two counts are reproduced from the session record; no independent log of
+them survives in tests/ or output/, so they are unverified historical numbers.
+
+### Zero-Cost Commitment Projection
+
+A second exact projection in `assemble_model` removes the commitment binary of
+eligible zero-flexibility-cost units from the solver's integer set. Admission
+requires the compact formulation, the SCUC stage, no real-time/ancillary
+coupling, a hydro or renewable/wind/solar unit whose three startup costs are
+zero and equal with empty startup curves (the compact class above), zero
+`minimum_cost_per_hour`, zero `technical_min_mw`, an empty shutdown curve,
+zero minimum up/down minutes, `max_starts`/`max_stops` >= T, a feasible
+authored initial state, and all 98 points having zero `pmin_mw`, zero
+regulation awards and ramp rates covering full capacity within each interval.
+For such a unit every commitment only relaxes constraints and costs nothing,
+so fixing `u` to its authored availability `available*(1-must_off)` is an exact
+projection, not a heuristic: `u` is submitted as an implied-integer continuous
+column with equal bounds, is absent from the solver binary set, and is still
+audited for integrality (trivially satisfied by the equal bounds). SCED/LMP
+inherit the state through the usual predecessor freeze; `derive_sced` clears
+the projection set. Stage JSON reports `projected_commitment_units`, and
+`model_size.commitment_by_kind` shows these units without declared binaries.
+Equivalence proof: performance.md, Zero-Cost Commitment Projection; automated
+coverage in `[compact][commitment_projection]`.
 
 Second rationale, after profiling: Gurobi default concurrent root LP divides the
 4-thread budget among primal/dual simplex and a 1-thread barrier. Observed root

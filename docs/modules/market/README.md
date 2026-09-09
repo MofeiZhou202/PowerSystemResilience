@@ -2,6 +2,8 @@
 
 本目录是 `src/market/` 的唯一模块文档目录。
 
+[智能仿真标签与价格代理](intelligent_simulation.md)：离线完整周Oracle、LMP分位数/尖峰标签、独立周验证与模型产物；固定IEEE118合成边界试验，不代表边界优化已验证。
+
 本地与在线帮助使用同一份`docs/` Markdown，在线“帮助”可搜索“跨日继承”“SOC”或
 “性能”。[跨日状态契约](southern_execution_contract.md)明确机组连续
 开停机时间、储能能量、水位和下泄历史取前一天SCED第96点末态；每日SOC终值仍按申报
@@ -40,6 +42,21 @@ GUI现分南方规则与通用AC/DC两套导航，默认进入南方“运行模
 [模块系统设计与界面重组](system_design.md)：针对页面和流程混杂，定义七个工作区、
 统一研究任务、报价/边界版本、日前/调频/实时流程、结果与Canvas联动、结算及验证分工。
 包含当前源码映射、分期改造和验收矩阵；七工作区为目标设计，当前已先完成模型分组及页面职责隔离，统一任务接口尚未迁移。
+
+[周尺度市场边界优化数学模型](../../theory/market_boundary_optimization_model.md)：定义外层边界优化、
+场景递推、负荷损失/线路越限/新能源利用率/价格尖峰指标，以及代理模型与 Bayesian/CMA-ES 的验证契约。
+
+[通用AC/DC混合市场引擎运行时契约](../../reference/market_simulation_runtime.md)：
+`market_simulation.cpp` 的完整流水线为报价→SCUC（MILP）→固定组合多时段SCED/LMP（LP对偶）
+→可选LODF N-1割迭代→非线性AC/DC基态/事故认证→能量/备用结算与make-whole uplift，
+实时按双结算恒等式对偏差定价，重复博弈做同步局部最优响应。混合系统按
+`ac-dc-linear-v1:dc-voltage+bidirectional-converters` 口径出清：DC电压线性化、VSC/DC-DC
+双向常效率、两类DC储能跨期SOC；DC支路网损、VSC损耗与容量圆不进商业模型，
+预防式N-1割仅覆盖AC支路，均写入结果的 model_scope/model_limitations。
+external_grid 与 energy_router 无市场契约，显式退回 `unsupported_hybrid_market_assets`。
+定价求解原生单纯形超过5000变量直达HiGHS并有失败回退；gap未证最优写警告。
+测试基线 `hacdcpf_test_market_simulation` 22用例/845断言，另有独立oracle
+`market_sced_cross_validation`；实时/博弈/混合出清的GUI回归见[开发状态](../../overview/development_status.md)。
 
 [AEMO数据与可证伪验证](aemo_validation.md)：七日官方调度/报价，108项实验检查、
 两机256组合穷举与三后端对照，周/实时/调频/现金独立复核及12项结果变异。

@@ -1,6 +1,6 @@
 # HySim-XJTU-HRPES 文档中心
 
-最后核实：2026-09-08
+最后核实：2026-09-10
 
 [市场求解性能与资源对照](modules/market/performance.md)：水量/储能/开停机分项对照、
 零成本开停机/小时储能方向等价投影、同初态恢复实验并行、完整周任务复测、实际输入参数对照与分段计时。
@@ -26,6 +26,16 @@ GUI“帮助”目录，可搜索“跨日继承”“SOC”“性能”；在�
 [电力市场系统设计](modules/market/system_design.md)：将业务操作、市场品种、实验方式与
 计算阶段分开，明确七工作区、输入版本、执行依赖、图形分析和验收路径。
 文档为目标设计；现有GUI/API行为仍以模块执行契约为准。
+
+[智能仿真标签与价格代理](modules/market/intelligent_simulation.md)：完整周Oracle、LMP标签、独立周验证和离线模型复现。
+
+[周尺度市场边界优化模型](theory/market_boundary_optimization_model.md)：定义代理模型与
+Bayesian Optimization/CMA-ES 使用的随机双层问题、输入输出、风险目标、标签口径和 Oracle 复核边界。
+
+[通用AC/DC混合市场引擎运行时契约](reference/market_simulation_runtime.md)：
+报价→SCUC→固定组合SCED/LMP→可选LODF N-1割→非线性AC/DC认证→结算→实时双结算→重复博弈；
+DC电压线性化、双向换流器与DC储能跨期SOC，external_grid/energy_router显式退回，
+model_scope/model_limitations 随结果返回。
 
 [AEMO官方数据与市场可证伪验证](modules/market/aemo_validation.md)：108项实验检查、
 256组合UC穷举、独立水量/SOC/价量账本、实时状态及12类变异；完整功能覆盖矩阵明确
@@ -110,6 +120,7 @@ Native固定整数LP修复、GAP退出条件及IEEE118恢复出清的证据见�
 | 全部源码模块技术手册 | 实现参考 | [模块手册索引](modules/README.md) |
 | 南方区域 2025 V1.0 日前 SCUC/SCED/LMP 规则与实现差异 | 规则参考与实现对照 | [市场规则原文与手册](modules/market/README.md)、[逐条对照](modules/market/southern_rules_comparison.md) |
 | 南方日前细则2.3/2.4边界目录、每日设备覆盖、预测联合采样、Canvas与ΔP统计 | 契约 | [南方规则执行契约](modules/market/southern_execution_contract.md) |
+| 通用 AC/DC 混合出清、实时双结算与重复博弈 | 契约 | [市场模拟运行时契约](reference/market_simulation_runtime.md) |
 | HTTP 路由与响应边界 | 契约 | [运行时 API](reference/runtime_api.md) |
 | 内置算例与能力示例 | 契约 | [算例目录](overview/case_catalog.md) |
 | Python 客户端边界 | 契约 | [Python API](reference/python_api.md) |

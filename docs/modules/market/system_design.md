@@ -1,10 +1,11 @@
 # 电力市场模块系统设计
 
-设计基线：2026-09-07。**本文为目标设计与迁移契约，不是当前GUI/API能力清单。**
+设计基线：2026-09-07，2026-09-09按源码复核。**本文为目标设计与迁移契约，不是当前GUI/API能力清单。**
 当前行为以[南方执行契约](southern_execution_contract.md)、[实时契约](southern_real_time.md)、
 [辅助服务契约](yunnan_ancillary_markets.md)和源码为准；正确性证据见[AEMO验证](aemo_validation.md)。
-七工作区、持久任务和跨市场自动衔接仍为目标。当前已先落实“南方规则 / 通用AC/DC”模型分组、
-故障试验与边界页职责隔离、分步教程和Canvas来源隔离；当前操作见[用户教程](../../guides/market_simulation_workflow.zh.md)。
+七工作区、统一任务接口、持久任务库和跨市场自动衔接仍为目标。当前已落实“南方规则 / 通用AC/DC”
+模型分组（各5个页面共10个）、故障试验与边界页职责隔离、六条任务分步教程与操作手册、
+Canvas按页面属主隔离、十个页面深链接和请求活动状态；当前操作见[用户教程](../../guides/market_simulation_workflow.zh.md)。
 
 ## 1. 设计结论
 
@@ -37,8 +38,20 @@
 | 实时和调频保存配置会递增`southern_revision` | 其他任务可因共用版本号而失效 | 迁移期尊重现有409；后续分开各输入版本 |
 | 当前Yunnan `run`自行执行SCUC，实时从边界创建job | 不能声称点击调频/实时已消费此前看到的日前结果 | 显式记录上游来源；自动衔接须实现并测试后开放 |
 
+截至2026-09-09的落实状态：第1–5行已通过导航重组解决。`web/index.html`现有10个市场导航项，
+按`data-market-family`分为南方规则（运行模拟、边界与单日出清、对比试验、云南调频、实时市场）与
+通用AC/DC（主体与报价、预测与时域、市场出清、安全校核、市场结算）两组；五步条已删除，
+执行步骤只在任务教程内部展示；`marketStudyWorkspace`与`southernMarketWorkspace`各只剩单一
+`data-market-result-scope`（`study`、`southern-boundary`）；通用三个路由保留在“通用AC/DC市场研究”
+分组内并标明覆盖差异。第6–8行仍然成立：日前/周月/预测/试验/实时/调频仍各自持有job/result并依赖
+全局latest；实时与调频保存配置仍递增共用的`southern_revision`；云南调频`run`仍自行重算SCUC
+（`intraday`按`clearing_id`消费具名前序出清）、实时仍从边界直接创建job。
+
 实现证据：`web/js/app.js::setActiveModule/renderSubToolbar`，
-`web/js/core/market_{operation,forecast,study,ancillary,realtime}.js`，
+`web/js/core/market_navigation.js`（页面注册、模型分组、分步教程与深链接）、
+`web/js/core/market_{operation,forecast,study,ancillary,realtime}.js`、`southern_market.js`、
+`market_canvas.js`（按属主缓存，旧响应不覆盖其他页面）、`market_weekly_plan.js`、
+`market_activity.js`、`market_boundary_controls.js`，
 `tests/run_gui_server.cpp`的市场session字段及对应生产路由。
 
 ## 3. 目标信息架构
@@ -310,15 +323,17 @@ Canvas点击打开设备全周曲线。电气线路和水库梯级不能叠画�
 
 | 目标领域 | 现有后端入口（均在`/api/session/`下） | 现有前端承接 | 迁移时新增契约 |
 |---|---|---|---|
-| 南方数据/边界 | `southern_market`，含schema/revision/boundary/effective_boundary | `southern_market.js` | 唯一编辑器、来源版本及适用规则 |
-| 南方单日 | `run_southern_market` | `southern_market.js` | 一个任务的一组SCUC/SCED/LMP产物 |
-| 手工周月 | `market_operation` | `market_operation.js` | 日窗、输入差异、carry及阶段来源 |
-| 概率/区间 | `market_forecast` | `market_forecast.js` | 样本语义/权重、失败质量、统一选择 |
-| 故障/来水 | `market_study` | `market_study.js` | 单一配置入口、具名基准与变更 |
-| 实时 | `southern_realtime` | `market_realtime.js` | 封存输入引用、执行/参考区分、上游来源 |
-| 云南调频/账本 | `yunnan_ancillary` | `market_ancillary.js` | 运行/日内/核算/入账分别归属任务与账本 |
-| 通用市场 | `run_market_clearing`、`run_real_time_market`、`run_repeated_market_game` | `app.js`内市场函数 | 独立规则配置，不能自动映射为南方产物 |
-| 拓扑/PTDF | `market_ptdf` | `market_operation.js`及相关拓扑面板 | 当前任务的有效拓扑指纹、时间、参考方案 |
+| 南方数据/边界 | `GET/POST southern_market`（GET返回schema/revision/boundary/baseline/latest；POST校验并返回revision/boundary/effective_boundary/baseline） | `southern_market.js` | 唯一编辑器、来源版本及适用规则 |
+| 南方单日 | `POST run_southern_market` | `southern_market.js` | 一个任务的一组SCUC/SCED/LMP产物 |
+| 手工周月 | `GET/POST market_operation` | `market_operation.js`、`market_boundary_controls.js` | 日窗、输入差异、carry及阶段来源 |
+| 概率/区间 | `GET/POST market_forecast`（与market_study共用正则路由`market_(forecast\|study)`；GET带`?export=1`返回完整job用于导出） | `market_forecast.js`（嵌入“运行模拟”页的预测模式） | 样本语义/权重、失败质量、统一选择 |
+| 故障/来水 | `GET/POST market_study`（同上正则路由；`?export=1`导出完整job） | `market_study.js` | 单一配置入口、具名基准与变更 |
+| 实时 | `GET/POST southern_realtime` | `market_realtime.js` | 封存输入引用、执行/参考区分、上游来源 |
+| 云南调频/账本 | `GET/POST yunnan_ancillary`（save/run/intraday/settle/post/month按action区分） | `market_ancillary.js` | 运行/日内/核算/入账分别归属任务与账本 |
+| 通用市场 | `POST run_market_clearing`、`POST run_real_time_market`、`POST run_repeated_market_game` | `app.js`内市场函数 | 独立规则配置，不能自动映射为南方产物 |
+| 拓扑/PTDF | `POST market_ptdf` | `market_operation.js`及相关拓扑面板 | 当前任务的有效拓扑指纹、时间、参考方案 |
+| 页面导航与教程 | 无后端路由（前端静态注册，深链接为`#market-operation`等十个hash） | `market_navigation.js` | 统一任务头与跨页选择上下文 |
+| 请求活动状态 | `GET status`（全局busy，无市场专用进度路由） | `market_activity.js` | 真实阶段进度；未提供后端进度时不虚构百分比/ETA |
 | 图表/Canvas | 读取相应产物JSON，无新求解 | `market_weekly_plan.js`、`market_canvas.js` | 统一域/ID/场景/时段选择上下文 |
 | 验证证据 | 当前为本地报告，无统一HTTP验证路由 | 当前为文档与脚本 | 后续只读证据适配器；不伪造在线运行能力 |
 
@@ -335,6 +350,12 @@ HTTP状态、实际求解器、模型范围与原始payload保留。不能把不
 | 3 结果与诊断统一 | 共用时间轴、任务状态矩阵、曲线/Canvas/设备联动、概率分母统一 | 所有设备可达；状态/缺失非零填充；图表导出与独立复算一致 |
 | 4 可追溯流程衔接 | SCUC/调频/SCED/实时显式产物交接、分域版本、保存/恢复 | 上游哈希/时域/成员不符拒绝；已执行状态承接；变更不覆盖旧账本 |
 | 5 结算与验证入口 | 产品账本分开、只读证据展示及验证协议入口 | 缺计量/缺价禁止规则结算；失败样本保留；证据与当前二进制匹配 |
+
+截至2026-09-09，第1期已部分落地：两组导航与十个页面、单一故障试验入口、通用/南方来源显式区分、
+十个深链接经异步启动/刷新存活，由`market_workflow`等Node E2E及三档视口截图验收（证据见
+[开发状态](../../overview/development_status.md)）；七工作区与统一任务头仍未实现，当前导航仍是
+两套模型分组而非按操作组织的一级工作区。第2–5期未实施：统一任务API、输入快照引用、
+显式产物交接、分域版本、产品账本与在线验证入口在对应实现及测试通过前保持“设计目标”身份。
 
 首期不以重写内核为前提；后续改动数值/状态承接时必须重新走公式—源码—测试—数值闭环。
 保留现有市场E2E并逐步重定向页面定位断言，不能通过删除失败断言获得“新框架通过”。

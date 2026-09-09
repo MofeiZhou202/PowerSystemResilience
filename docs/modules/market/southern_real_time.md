@@ -10,7 +10,7 @@ RATIONALE：3.1、3.5.2–3.5.7明确15分钟滚动、2小时SCUC/SCED24×5min�
 
 新增事故备用（3.5.3.17/3.5.4.14）：非固定及固定火电`r>=0,p+r<=u*pmax,r<=u*10*ramp_up`；水电`p+r<=available*pmax`，原式未乘开机状态，可包含备用水机容量。省内`Σr+Σr_pumped+slack>=requirement+reduction`。固定抽蓄净功率非负时备用为声明限开容量减出力，负时为净抽水功率取负。事故备用是独立事故产品，不自动与调频同时激活；实际预留上限可经边界扣减。SCUC目标未给负荷/事故松弛罚项、LMP目标有事故松弛而约束目录未列事故备用：必须显式选择有限罚值，承认执行解释；报告全部松弛，不能视作物理可行。
 
-复杂度：主体/网络变量及主要约束O(T(G+L+R))；开停时窗最坏O(GT²)。24点单模型主体变量约为98点的24/98，2个窗口与8点LMP分别求解；不承诺固定速度比。手算100MW负荷、200元/MWh，2h能量200MWh、报价成本40000元、LMP200；爬坡1MW/min第一步增量不得超过5MW；只执行前三点累积25MWh。火电100MW上限、90MW出力、1MW/min，事故备用最多10MW；11MW需求应产生1MW短缺或严格不可行。容差1e-6 MW/MWh/CNY；测试共享日前回归、独立公式、滚动承接、定价维度、拓扑停运、GUI及IEEE118。
+复杂度：主体/网络变量及主要约束O(T(G+L+R))；开停时窗最坏O(GT²)。24点单模型主体变量约为98点的24/98，2个窗口与8点LMP分别求解；不承诺固定速度比。手算100MW负荷、200元/MWh，2h能量200MWh、报价成本40000元、LMP200；爬坡1MW/min第一步增量不得超过5MW；只执行前三点累积25MWh。火电110MW上限、100MW出力、1MW/min爬坡，10分钟事故备用能力最多10MW；11MW需求严格不可行或惩罚短缺1MW。容差1e-6 MW/MWh/CNY；测试共享日前回归、独立公式、滚动承接、定价维度、拓扑停运、GUI及IEEE118。
 
 ## 边界组织
 
@@ -89,7 +89,7 @@ SCED固定SCUC离散状态，应用外部调频预留并重新优化连续出力
 
 Release手算覆盖双时间网格、小时缺价、首点爬坡、事故备用严格/惩罚、固定抽蓄、逐点水电电量、停机水电备用资格、拓扑断开、线路越限、预测四级递补、封存报价拒绝、共享水库状态与小时储能历史。IEEE118端到端脚本`tests/e2e/southern_realtime_e2e.mjs`独立重算梯级水量、储能能量及前三点承接，含线路停运、Canvas/曲线联动、移动端、版本冲突及非法报价。
 
-验证命令：Release `build/macos-release/tests/test_southern_market`；Sanitizer `ASAN_OPTIONS=detect_leaks=0 build/macos-asan-ubsan/tests/test_southern_market '[realtime]'`；浏览器 `node tests/e2e/southern_realtime_e2e.mjs`。最终Release59测试/27962断言、实时ASan/UBSan6测试/81断言通过；日前及辅助页面E2E回归通过。构建为macOS arm64 Release O3/C++20，仓库HEAD `8b93145`的未提交工作树、现有MIPSolvers依赖工作树；正常CMake重配受原依赖锁定差异阻止，使用已配置构建目标，未改依赖锁。
+验证命令：Release `build/macos-release/tests/test_southern_market`；Sanitizer `ASAN_OPTIONS=detect_leaks=0 build/macos-asan-ubsan/tests/test_southern_market '[realtime]'`；浏览器 `node tests/e2e/southern_realtime_e2e.mjs`。最终Release59测试/27962断言、实时ASan/UBSan6测试/81断言通过；日前及辅助页面E2E回归通过。构建为macOS arm64 Release O3/C++20。Release与Sanitizer报告是HEAD `8b93145`当时工作树（含未提交修改）的记录；E2E摘要已在HEAD `5041bcdb`重跑更新。当时正常CMake重配受原依赖锁定差异阻止，使用已配置构建目标，未改依赖锁。
 
 | 事前预测 | 实测 |
 |---|---|
@@ -97,9 +97,9 @@ Release手算覆盖双时间网格、小时缺价、首点爬坡、事故备用�
 |1MW/min首5分钟只增5MW|90MW初值到95MW，100MW负荷首点缺额5MW|
 |事故备用可用余量10MW，需求11MW|严格失败，惩罚模型短缺1MW|
 |100MW水电、90000m²库面、3600m³/MWh|执行15分钟水位100→99m；两小时末92m；下一轮从99m承接|
-|IEEE118应满足逐库水量/储能能量/实际三点承接守恒|最大水位残差6.74e-15m，储能MWh及承接残差0；两轮Gurobi0–2h加定价0.801/0.776s|
+|IEEE118应满足逐库水量/储能能量/实际三点承接守恒|最大水位残差6.74e-15m，储能MWh及承接残差0；两轮Gurobi0–2h加定价0.847/0.895s|
 
-数值证据：`output/market-realtime/{release-tests.txt,sanitizer-tests.txt,e2e-summary.json,ieee118-result.json}`及桌面/移动端截图。实时GUI非法申报曾返回500，现显式捕获`invalid_argument`/JSON异常，E2E验证400且版本不变。水库图按单库选择、价格轴限制小数位，避免图例和近常数价格刻度遮挡。最新8101服务预置四轮IEEE118混合案例，0–2h出清加定价每轮0.805–0.842s，另有2–4h参考求解；不将该时间当作2000节点性能证据。主模型审计容差1e-6；独立报价成本和浏览器累计浮点守恒检查放宽至1e-5。
+数值证据：`output/market-realtime/{release-tests.txt,sanitizer-tests.txt,e2e-summary.json,ieee118-result.json}`及桌面/移动端截图。实时GUI非法申报曾返回500，现显式捕获`invalid_argument`/JSON异常，E2E验证400且版本不变。水库图按单库选择、价格轴限制小数位，避免图例和近常数价格刻度遮挡。8101服务曾预置四轮IEEE118混合案例，`live-result.json`记录0–2h出清加定价每轮0.805–0.842s，另有2–4h参考求解；该服务进程已退出，不将该时间当作2000节点性能证据。主模型审计容差1e-6；独立报价成本和浏览器累计浮点守恒检查放宽至1e-5。
 
 价格曲线极差小于0.01元/MWh时，纵轴采用中心±0.5元/MWh，防止放大浮点噪声；原始结果不取整。缺额/越限曲线纵轴从0起。
 

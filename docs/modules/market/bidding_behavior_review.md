@@ -1,6 +1,6 @@
 # 报价行为文献与实现审查
 
-核对日期：2026-09-07。用户问题：市场参与者如何报价，当前模拟是否准确。
+核对日期：2026-09-07；2026-09-09按当前源码复核行号与表述。用户问题：市场参与者如何报价，当前模拟是否准确。
 范围：发电商、储能、购电用户/售电商、可控负荷；这里将“用户”与“市场参与者”区分。
 这是文献与源码审查，不修改出清算法，不将建议写成现有能力。
 
@@ -44,20 +44,24 @@ R7的关键证据：试验在2023-09至2024-01期间比较连续两周窗口，�
 
 ### 源码事实
 
-1. `src/market/participant_behavior.cpp:143`起，报价容量为
-   `P_offer=Pmin+(Pmax−Pmin)(1−w)`；段价为`(1+m)[c1+max(0,c2)(P_left+P_right)]`。
+1. `src/market/participant_behavior.cpp:146`起，报价容量为
+   `P_offer=Pmin+(Pmax−Pmin)(1−w)`；段价为`(1+m)[c1+max(0,c2)(P_left+P_right)]`（割线斜率见同文件12行起）。
    其中m为价格加成、w为容量保留比例。这是成本曲线割线近似与预设策略，c1/c2也是输入假设。
+   能量段是报价区间上K段等宽划分（K≥1）；m与承诺加成被钳制到[0,10]、w钳制到[0,0.95]，发生钳制会写入warnings（125–134行）。
+   另有承诺加成作用于空载/启动/停机价格，最小出力小时成本同样乘(1+m)（150–156行）。
    主体可拥有多台发电机，但未指定所有权时自动将每台活动机组作为独立成本主体（同文件77行起）。
-2. `src/market/market_simulation.cpp:5994`起，同时考察各主体加价和容量保留的正/负一步候选，固定其他主体，用出清利润选更好动作，随后同步更新。
-   `converged`只表示受检主体在给定邻域没有获利改动，不代表全局最优、全部主体均衡、唯一均衡或市场真实性。
-   `run_real_time=true`时策略评价使用传入的同一条实现时序（5897行附近），没有场景期望和风险偏好层；若解释为事前报价，必须处理这一信息可得性差异。
-3. `src/market/southern_boundary.cpp:719`起，IEEE118水电基础段价为`35+3*(rank%6)`，热电为`180+3*rank`，再加固定分段价差；风/光5/8元/MWh，可控负荷400–500元/MWh。
+2. `src/market/market_simulation.cpp:5996`起，同时考察各主体加价和容量保留的正/负一步候选，固定其他主体，用出清利润选更好动作，随后同步更新。
+   候选钳制到`maximum_markup_fraction`与`maximum_withholding_fraction`（后者再限0.95），改动须使利润改进超过`profit_improvement_tolerance`；
+   默认CostBased主体不参与策略更新，仅`include_cost_based_participants`开启时参与。
+   `converged`只表示受检主体在给定邻域没有获利改动，不代表全局最优、全部主体均衡、唯一均衡或市场真实性；轮数耗尽返回`maximum_rounds_reached`。
+   `run_real_time=true`时策略评价使用传入的同一条实现时序（同文件5897行起），没有场景期望和风险偏好层；若解释为事前报价，必须处理这一信息可得性差异。
+3. `src/market/southern_boundary.cpp:725`起，IEEE118水电基础段价为`35+3*(rank%6)`，热电为`180+3*rank`，再加固定分段价差；风/光5/8元/MWh（751行），6个可控负荷补偿为`400+20*k`元/MWh即400–500（765行）。
    这些数值由代码构造并标为synthetic，不是从南方实际申报统计估计。IEEE118验证了电网/资源机制，没有因此验证报价数据。
-4. `src/market/market_operation.cpp:64`起，全部发电机段价乘相同`bid_scale*generator_bid_scale`，储能充放电报价也乘同一因子；负荷补偿乘`bid_scale*load_bid_scale`。
+4. `src/market/market_operation.cpp:66`起，全部发电机段价乘相同`bid_scale*generator_bid_scale`，储能充放电报价也乘同一因子；负荷补偿乘`bid_scale*load_bid_scale`。
    正共同倍数不改变发电报价段之间的相对排序。它可以改变与负荷补偿、未同步缩放罚项等的权衡，但不能表达各主体独立加价和竞争排序变化。
-5. `src/market/market_forecast.cpp:65`起，默认8场景、均匀0.9–1.1、潜在Gaussian copula、日AR(1)相关0.5。相关矩阵与边缘分布为设定值，非数据拟合。
+5. `src/market/market_forecast.cpp:63`起，默认8场景、均匀0.9–1.1、Gaussian copula（实现见121行注释，Nelsen 2006）、日际AR(1)相关0.5。相关矩阵与边缘分布为设定值，非数据拟合。
    七个因素是日级共同倍数；现有模型并非逐公司/逐流域/逐机组/逐15分钟的联合报价误差模型，Gaussian copula也不能自动覆盖极端事件尾部依赖。
-6. `src/market/southern_market.cpp:505`起，可控负荷是在功率与累计电量界内最小化`compensation*reduction*dt`。
+6. `src/market/southern_market.cpp:815`起，可控负荷是在功率与累计日电量界内最小化`compensation*reduction*dt`。
    这是有偿中断模型，没有用户消费效用、移峰后的回补、设备温度/生产任务或售电商合同持仓。
 7. `src/market/southern_real_time.hpp:100`起严格封存报价，只更新允许的实时边界。这与本次采用的南方实时规则解释一致；不能为增加“智能报价”而擅自在每轮实时窗口重新报日前价格。
 

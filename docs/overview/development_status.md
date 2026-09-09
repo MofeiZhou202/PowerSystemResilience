@@ -1,10 +1,95 @@
 # Development Status
 
-Updated: 2026-09-08
+Updated: 2026-09-10
 
 This is the living handoff for verified build state and active engineering work.
 Update it in place; do not create dated copies. Source, registered tests, and
 the current Git worktrees remain authoritative.
+
+## Market Price Oracle and First Surrogate
+
+Offline tools in `tools/market_intelligence/` now generate isolated weekly
+Oracle jobs, audit labels and train a fixed-boundary price surrogate. Protocol:
+`docs/modules/market/intelligent_simulation.md`. No production solver or GUI
+changes were made for this experiment. Existing local Release binary
+`build/macos-release/tests/run_gui_server` SHA256
+`795bcc72bbed8697d9b0cbd1f5920a2f99eab6462f3622dd76610f607d460c30`
+was used, not rebuilt; workspace/source/dependency identity is recorded in
+`output/market-intelligence/provenance.json`.
+
+24 independently seeded IEEE118 weeks completed in 608.433 s with two isolated
+workers, Gurobi 2 threads per SCUC, gap 0.01 and 120 s per stage. All 168 main
+LMP stages passed price validity and repeated-dual consistency, yielding
+1,903,104 executed node-time prices. The separate original-input calibration
+week with `explain=true/recovery_pricing=full` completed in 178.430 s: 7 main
+and all 42 counterfactual price stages passed. The fixed spike threshold is
+59.61200124564096 currency/MWh (calibration node-time P95).
+
+Schema-v3 labels independently check energy, directional overload, renewable
+accounting, component IDs, 96-point execution and cross-day carry. Earlier
+v1/v2 labels are superseded: nodes were misread as an object, repeated weeks
+counted by path, and lookahead-inclusive objectives mislabeled weekly cost.
+The new cost field is explicitly `scuc_98point_objective_sum` and not trained.
+7 Python analytic/mutation/identity tests pass via
+`python3 -m unittest discover -s tests -p test_market_intelligence.py -v`.
+
+Model uses 18 training weeks and 6 untouched holdout weeks, per-target 3-fold
+training CV over mean/Ridge/Extra-Trees. Price mean/P95/P99/CVaR99 test MAEs
+are 11.078/50.912/55.774/48.190 currency/MWh; relative MAE reductions vs the
+training-mean baseline are 26.2/37.6/32.9/26.2%. These pass the predeclared
+10% improvement gate, but P99 R2 is only 0.006 and CVaR99 R2 is -0.262.
+Spike fraction worsens by 14.4%; duration improves only 8.0%, failing the gate.
+Load deficit and line overload have no training variation; renewable targets
+select the mean baseline and fail the improvement gate. No safety classifier
+or calibrated uncertainty claim is supported. No post-test tuning was done.
+
+Training took 3.987 s; warm batched prediction of all fitted targets took
+0.001646 s/week excluding I/O. Models, labels and heldout predictions are in
+`output/market-intelligence/price-surrogate-v1/`; `report.md/report.json`
+contain complete results. Reloaded predictions exactly match the heldout
+report; inference rejects a changed case hash and out-of-support features.
+Evidence is `inference-validation.json` in the model directory.
+Scope is fixed synthetic boundary/initial state,
+not a learned boundary policy, realized-market forecast or AC/N-1 certificate.
+No new C++ suite was run for these Python-only changes.
+
+## Market Module Documentation Resync
+
+A full source-to-document audit of `docs/modules/market/` against
+`src/market/` (HEAD `5041bcdb`, source unchanged since `ccfe0bce`) is complete.
+All ten module documents plus the four LaTeX chapters were checked claim by
+claim; corrections cover stale line anchors (e.g. the controllable-load
+compensation model is at `southern_market.cpp:815-835`, not 505), the LMP
+weight-division formula in `southern_execution.tex`, wrong pricing solver
+anchors in `market_manual.tex`, stale real-time timings and exited-server
+claims, the Gurobi Seed/Method pricing strategy description, SCED reuse and
+certified-repair admission gates, HiGHS LMP time-limit scope, the
+`recovery_execution` dual-worker gate, and the AEMO counterexample field names
+(RAISEREGACTUALAVAILABILITY vs RAISEREGAVAILABILITY). Two unsourced assertion
+counts in the 2000-bus compact-formulation section are now marked as having no
+independent source. The module README gains a generic AC/DC hybrid engine
+section (pipeline, `ac-dc-linear-v1:dc-voltage+bidirectional-converters` scope,
+explicit unsupported-asset rejection, 22 cases/845 assertions baseline), and
+`docs/README.md` indexes `reference/market_simulation_runtime.md`. The stale
+`run_day_ahead_market` header comment ("hybrid co-optimisation is a later
+extension") was corrected in `include/hacdcpf/market/market_simulation.hpp`.
+`market_manual.pdf` rebuilt with xelatex: 62 pages, zero errors (page count
+unchanged). Rebuilt `test_southern_market` passes 74 cases/29807 assertions and
+`test_market_simulation` 22/845 on current source.
+
+Full `ctest -R 'market|southern'` on the pre-existing macos-release build:
+26/29 passed. After rebuilding `run_gui_server`, `market_ieee118_e2e`,
+`market_ieee118_row_presolve_e2e` and `market_ieee118_native_e2e` still failed
+identically at `tests/e2e/market_ieee118_e2e.mjs:170`: the assertion expected
+2 wind units in the legacy IEEE118 picker, but `make_southern_market_ieee118`
+has added exactly 1 wind + 1 solar + 4 hydro since `308ccc57` (contract:
+southern_execution_contract.md, intermediate-scale fixture, "adds 1 wind").
+The test expectation `mixed?6:2` introduced in `ccfe0bce` was an authoring
+error (mixed variant with 6 wind always passed); corrected to `mixed?6:1` in
+both the option-count and CSV-row assertions. Rerun after the one-line test
+fix: all three pass (48.7/48.7/82.8 s). No solver, boundary or GUI production
+code was involved.
+
 
 ## PF Presentation Profiling
 
@@ -492,8 +577,10 @@ Existing macos-release binaries pass Southern59/27962, generic22/845 and
 forecast8/12503 (89 cases/41310 assertions). No C++ rebuild this campaign:
 the existing dependency pin/worktree mismatch remains. Four direct Node E2Es
 pass (realtime, Yunnan ancillary, forecast, generic GUI); the generic navigation
-expectation was corrected from6 to the implemented8 pages. Its expected
-`n1_security_failed` and `maximum_rounds_reached` outcomes are not security or
+expectation was corrected from6 to the implemented10 pages (5 southern + 5
+generic; this record previously said 8, which was never an implemented state).
+Its expected `n1_security_failed` and `maximum_rounds_reached` outcomes are not
+security or
 equilibrium certificates. Evidence, exact commands, binary/source hashes and
 coverage limits are in `output/market-validation/` and the module report.
 Production solver/GUI behavior was not changed by this validation campaign;

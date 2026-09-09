@@ -706,9 +706,12 @@ OfferSubmission submit_participant_offers(
 ///   -> optional iterative LODF N-1 cuts -> AC base/contingency certification
 ///   -> day-ahead settlement, uplift, and preventive-security cost attribution.
 ///
-/// The input system is never mutated.  The current implementation intentionally
-/// prices the AC network subset; hybrid AC/DC market co-optimisation is a later
-/// extension and is rejected explicitly rather than silently simplified.
+/// The input system is never mutated.  Hybrid AC/DC systems are cleared with
+/// the linearized DC-voltage model (model scope
+/// "ac-dc-linear-v1:dc-voltage+bidirectional-converters"); assets without a
+/// market contract (external grids, energy routers) are rejected explicitly
+/// with status "unsupported_hybrid_market_assets" rather than silently
+/// simplified.
 MarketResult run_day_ahead_market(
     const HybridPowerSystem& system,
     const TimeSeriesData& time_series,

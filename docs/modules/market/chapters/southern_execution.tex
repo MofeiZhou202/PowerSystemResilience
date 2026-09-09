@@ -61,6 +61,8 @@ LMP 使用独立罚因子与 SCED 出力邻域；不可定价机组固定，负�
  \lambda^{original}=\lambda^{transformed}+d^{up}-d^{down},
 \end{equation}
 其中 $d$ 为求解器上界行 shadow price，非拉格朗日非负乘子。
+节点电价为恢复后的原单位平衡乘子除以该时段目标费用权重 $w_t$：
+$LMP_{b,t}=\lambda^{original}_{b,t}/w_t$（\srcpath{src/market/southern\_market.cpp:stage\_result}）。
 \srcpath{stage\_result} 在原单位代回每条约束和变量界，输出残差与约束族。
 
 交流安全检查电压、线路有功/视在功率、断面和同母线机组聚合 P/Q 能力；网损和平衡

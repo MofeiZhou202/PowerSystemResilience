@@ -101,7 +101,8 @@ detect_leaks=0且未关闭容器检查；部分Release归档沿用，不宣称�
 未运行，原8097及8101--8106保留。`lmp-reuse-dev/run_gui_server` SHA256为
 948626bcdc7602d27352f3baf333d4a6599a23bcc81e6d2707f18f462c20317a；本机M4 Max/128GiB、
 macOS arm64、Release -O3。`build.json`/`test-rebuild.json`/`verification.json`记录
-增量编译与归档/源码哈希；未修改依赖准入。2000节点完整七日及544火电版本仍未实测。
+增量编译与归档/源码哈希；未修改依赖准入。2000节点完整七日仍未实测；544火电/
+1744机组版本在本轮之后完成了一次98点单日全链基准，见下文“2000 节点 98 点全链基准”。
 
 ```bash
 python3 tools/market_validation/benchmark_market_repetition.py --baseline output/market-performance/scale-final5/run_gui_server --candidate output/market-performance/lmp-reuse-dev/run_gui_server --input output/market-performance/scale-final5-browser/boundary.json --output output/market-performance/lmp-reuse-repetition
@@ -284,13 +285,16 @@ relaxation BarConvTol=gap/2（上限1e-2）和修复原默认精度，保留派�
 一分钟目标仍未闭环，最终二进制/浏览器复测另列，不把65.75 s写成<=60 s。
 
 空窗口实测69.024 s，三阶段装配3.456/3.696/3.640 s。优于原5 s但没有达到<=3 s。
-剩余装配需真实创建变量/行并统计，不能由空窗口优化消除。最终小范围派生条件：
-无实时/辅助服务、row_presolve=none、全部机组startup/minimum成本0、调频预留0、
-SCUC/SCED交易费相等时，源码中uc分支只剩固定u/start/stop/stable/offline/start类别。
-在原LP上固定这些列，清理整数索引并重算界限审计，保留全部矩阵/RHS/成本；逐列检查
-新界限为原界限子集。SCED随后仍与SCUC快照逐项比较，verify模式额外独立原式装配
-compare_assembly。条件不满足走常规装配，reference模式也保持常规装配。预期SCED
-装配<=1 s，比3.7 s减少>=2.7 s，时间/存储复杂度O(n+nnz)且避免生成全部Expr行。
+剩余装配需真实创建变量/行并统计，不能由空窗口优化消除。派生条件以当前源码
+`derive_sced` 为准：SCUC阶段、非reference、无实时（`_rt`）/辅助服务（`_yunnan`）、
+row_presolve未启用、全部机组startup_cost与minimum_cost_per_hour为0、各时点调频
+上下预留为0、每笔交易SCUC/SCED费用相等。满足时在原LP上冻结每台机组的
+u/start/stop/stable列，未进入紧凑启动类别投影的机组另冻结offline_minutes与
+start0/1/2类别；冻结值必须落在原界限内，否则放弃派生。冻结后清理整数索引并
+重算界限审计，保留全部矩阵/RHS/成本。SCED随后仍与SCUC快照逐项比较，verify模式
+额外独立原式装配compare_assembly。条件不满足走常规装配，reference模式也保持
+常规装配。预期SCED装配<=1 s，比3.7 s减少>=2.7 s，时间/存储复杂度O(n+nnz)且
+避免生成全部Expr行。
 
 修复LP允许BarConvTol=1e-6，松弛阈值从gap/2改为gap（上限仍1e-2）。这仅改变候选
 生成精度；原矩阵所有约束/整数/水位残差1e-6与原MILP独立gap门槛不变，失败按原预算
@@ -351,8 +355,11 @@ SCED核验0.048 s、并发定价12.848 s；完整3247054行对偶精确一致，
 8 线程、BarConvTol=.005 的松弛 LP19.979 s，整数修复19.706 s，目标1451648809.132451，
 独立盒下界1450719989.562520，gap0.000639838，原残差1.06582e-10。SCED逐项矩阵/
 成本/RHS相等，界限为原界限子集，候选仍满足同一残差。这允许由下界继承与可行性复核
-替代SCED重解，但必须逐项检查，不能只比较算例ID或尺寸。还要求无辅助服务、常数成本
-一致、列语义顺序一致，SCED整数为原整数集合子集；否则走原求解路径。
+替代SCED重解，但必须逐项检查，不能只比较算例ID或尺寸。当前源码的复用准入：仅当
+SCUC的certified repair证书被接受（gap_certificate.accepted）才保留前驱LP/解/下界；
+SCED复用还要求无辅助服务、常数成本一致、前驱与SCED为同一LP仅盒界收紧（矩阵/
+成本/RHS逐项相同）、SCED整数为SCUC整数集合子集，且前驱解在SCED模型上的原单位
+残差<=1e-6；任一不满足走原求解路径。
 
 修正成本预测：盒构造4.807 s超过预计2 s，主要成本为表达式拷贝和逐非零项map查询。
 改为原行引用和列索引数组，将证书构造与独立固定整数LP并行（原模型只读），预测其wall
@@ -810,6 +817,95 @@ solver_timing 秒值来自 Gurobi adapter 的线程局部最近调用：模型�
 提取结果；市场侧单独测环境初始化。未执行阶段和其他后端为 null；
 optimize 包含预处理、根 LP、搜索，不伪称独立整数搜索时间。
 新 getter 不改变 Adapter/Options/SolveResult 类布局，避免破坏现有归档 ABI。
+
+## 基准驱动、行裁剪与 2000 节点全链基准
+
+### 独立进程基准驱动
+
+`tests/run_southern_market_benchmark.cpp` 是当前单机基准入口：算例 example/demo/
+118/118-mixed/2000，execution 固定 mip_gap=0.01、schedule_only、诊断罚价100000，
+Gurobi 固定4线程（其他求解器0/自动），可选 formulation、gurobi_method、
+row_presolve、native_root_cuts 与 solve/inspect 模式；证据 JSON 记录各阶段状态/
+规模/装配/求解/审计/残差/gap、进程 wall_sec 和 getrusage 峰值 RSS，仅当
+schedule_feasible 且 prices_valid（或 inspect 完成）时退出码为0。对照驱动均为
+独立进程、交错顺序，不用旧产物顶替新运行：
+`tests/run_southern_solver_comparison.mjs` 另加进程级 wall 看门狗（超时 SIGKILL）
+和每秒 RSS 采样，因为单次 LP 调用可能超过求解器预算；
+`tests/run_southern_row_presolve_comparison.mjs` 对 118 算例 none/enabled 交错
+三轮，校验 SCUC 裁剪行数、LMP 不裁行、残差<=1e-6 和请求 gap 内目标一致；
+`tests/run_southern_root_cut_comparison.mjs` 对 native default/enhanced 交错两对，
+校验 profile 与根行准入上限生效。
+
+当前求解/定价方法选择以源码为准（`gurobi_method`、`solve_scaled`、`solve`）：
+LMP 阶段列数>=1000000 且 Gurobi 时走 `ordered-lp-barrier-8-v2`——固定
+Method2/Threads8/Seed0/Crossover0，两个独立环境并发 fresh solve，同一进程的大
+定价 LP 对至多一对（互斥）；更小的定价 LP 保持 `ordered-lp-dual-simplex-v1`——
+对偶单纯形、threads=1、Seed0，同一 LP 两次顺序 fresh solve，第二次使用剩余时限。
+两次解的全部原单位行对偶差必须严格为0、目标差<=1e-6，否则 prices_valid=false。
+非 LMP 阶段显式 barrier/dual_simplex 优先；auto 且 compact 且列数>=1000000 时选
+障碍法（纯 LP 时 Crossover=0），否则交给求解器默认。SCUC certified repair 仅
+compact、请求 gap>0、无 RT/辅助服务且（显式 certified_repair，或 auto 且列数
+>=1000000）时尝试，失败按剩余预算回完整 MILP；mip_start 的部分整数补全在未尝试
+certified repair 时按同样门槛（compact 且 auto/显式启用、auto 需列数>=1000000）
+启用，提交前必须通过原单位残差审计。
+
+### 认证行裁剪（row_presolve）
+
+机制（`southern_market.cpp` 的 assemble_model/finish/restore_duals）：默认 none，
+仅 compact 且非定价阶段可启用。启用时 finish 对每条不等式用向外舍入的变量盒
+支撑证明冗余（bound_redundant，不使用可行性容差），被证行不提交求解器；LMP
+始终提交全部 authored 行；最终原模型审计仍覆盖全部行，restore_duals 把提交行
+对偶映射回原行序（被省略行乘子为0）。证据：Reduced-2000（120火电/1320机组）
+inspect 恰好识别213331条冗余候选，行3333454→3120123、非零10515386→9950617；
+这只是装配统计，不是已完成的求解（`output/market-operation/row-presolve/
+2000-inspect.json`）。IEEE118 裁剪7022条SCUC行，七日压力与预测分辨率实验通过。
+最终隔离三轮中位数 none/enabled：Gurobi 3.345/3.330 s、HiGHS 7.358/7.163 s，
+最大原残差6.06e-9（`row-presolve-isolated/comparison.json`）；局部增益很小，
+默认值保持 none。
+
+### Native 根割实验（native_root_cuts）
+
+`execution.native_root_cuts=default|enhanced` 仅作用于 native B&C 路径；enhanced
+请求20轮/每轮100割、强制分离审计，并把根行准入上限从35000提高到100000（超大
+模型3x30自适应上限保留），不新增不等式。native_diagnostics 区分请求值与实测
+（cuts_added、nodes_explored、lp_solves、incumbent_updates、best_bound，不可得
+为 null）。修复前 IEEE118 30 s 交错 default/enhanced/enhanced/default 进程时间
+38.592/36.978/37.357/37.822 s，全部0割0节点0 incumbent、5次LP，最优界
+17413231.01694171元与此前 Gurobi 最优一致，但无有效出清/价格
+（`output/market-operation/native-root-cuts/comparison.json`）。随后的固定整数
+修复使同一对照在6.404/6.495/6.394/6.387 s 完成全链，出清/价格有效、
+gap1.75e-6、残差<=1e-6、1个incumbent、3次LP、0割0节点——收益来自修复/GAP
+退出而非割强化（`native-repair-fixed/comparison.json`）。2000节点 native 求解
+仍未闭环。
+
+### 2000 节点 98 点全链基准
+
+算例为完整1744机组（544火电、720水电、480风光）、180水库、80储能、120可控
+负荷、3206支路、98时点，Gurobi 4线程。精确启动类别投影与过渡包络把 SCUC 从
+3543876列/1041152整数降到2860228列/186592整数（去除683648列/854560整数声明）。
+120 s预算的匹配运行：baseline 25.950 GiB 与 compact 18.326 GiB（峰值RSS降
+29.4%）均 TimeLimit 无 incumbent。专用 Gurobi 障碍法加可逆水量坐标
+（reservoir_scaling=energy_coordinate）在600 s预算完成全链
+（`output/market-operation/performance-scaled-600.json`）：wall 597.122 s、峰值
+RSS 16.613 GiB，SCUC/SCED/LMP 求解389.005/151.307/26.476 s、装配各约
+6.3--6.7 s，SCUC gap 2.21e-7，三阶段原单位残差最大1.65e-7，schedule_only 且
+价格有效。compact-600/barrier-600 对照仍在 TimeLimit 无 incumbent。同一边界
+经 GUI 完成一个真实滚动日680.365 s（1/7，可续跑；
+`performance-2000-gui-day.json`），SCUC/SCED/LMP 阶段493.130/145.502/13.364 s，
+最大原残差8.12e-7、SCUC gap 8.83e-7，条件价格有效；Node 驱动请求命中300 s
+头部超时后由 GET 取回持久结果，未重复提交。以上是单机合成线性网络的单日
+证据：非 AC 安全认证、非完整周/月吞吐，不能写成普遍性能保证。2000节点完整
+七日仍未实测。
+
+### Reduced-2000 与 IEEE118 求解器对照
+
+Reduced-2000（120火电/1320机组，2569364列/145040整数）120 s预算三求解器对照
+均无有效价格（`output/market-operation/local-2000-reduced/`）：HiGHS 380.485 s
+进程 wall/峰值15.526 GiB，TimeLimit 且原模型残差285.41的向量被拒；native
+56.178 s/13.410 GiB 根松弛失败；Gurobi 129.489 s/13.268 GiB TimeLimit 无
+incumbent。IEEE118 30 s对照：Gurobi 4.253 s、HiGHS 9.168 s 均有效（SCUC目标
+相对差8.90e-6），native 44.157 s 超时无验证解；该诊断与系统测试重叠，不是
+受控速度排名（`output/market-operation/ieee118-solvers/comparison.json`）。
 
 ## 构建与范围
 

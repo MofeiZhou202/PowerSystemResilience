@@ -38,6 +38,13 @@
 | `latex/paper/**/*.md` | 论文伴随材料 | [论文工作区索引](../latex/paper/README.md)；由每篇论文 README 管理 |
 | `latex/**/*.md`（不含 `paper/`） | LaTeX 研究资料 | [LaTeX 文档说明](../latex/README.md) |
 
+## 市场智能仿真资料
+
+市场智能仿真资料归属：理论模型为
+[`theory/market_boundary_optimization_model.md`](../theory/market_boundary_optimization_model.md)；
+模块实现与实验协议为
+[`modules/market/intelligent_simulation.md`](../modules/market/intelligent_simulation.md)。
+
 ## LaTeX 归属
 
 - 工业手册：与 `src/` 顶层目录严格同名的

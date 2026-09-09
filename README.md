@@ -659,7 +659,7 @@ fixtures 见 `data/etap_sample.xlsx`、`data/etap_feeder.xml`。GUI 后端端到
 | 时序/年度/生命周期 | `include/hacdcpf/time_series/`, `src/time_series/` |
 | 碳流/年度碳 | `include/hacdcpf/carbon_analysis/`, `src/carbon_analysis/` |
 | EV-交通耦合 | `include/hacdcpf/ev_power_traffic/`, `src/ev_power_traffic/` |
-| 电力市场 | `include/hacdcpf/market/market_simulation.hpp`, `include/hacdcpf/market/southern_market.hpp`, `src/market/`（调频校验/排序：`yunnan_ancillary.hpp`；时序规则/计量/月账本：`yunnan_rules_workflow.hpp`；能量/调频耦合：`southern_market.cpp`） |
+| 电力市场 | `include/hacdcpf/market/market_simulation.hpp`, `include/hacdcpf/market/southern_market.hpp`, `src/market/`（通用引擎：`market_simulation.cpp`；周月滚动：`market_operation.cpp`；预测场景：`market_forecast.cpp`；报价行为：`participant_behavior.cpp`；南方边界装配：`southern_boundary.cpp`；调频校验/排序：`yunnan_ancillary.hpp`；时序规则/计量/月账本：`yunnan_rules_workflow.hpp`；能量/调频耦合：`southern_market.cpp`） |
 | 南方实时边界与状态 | `src/market/southern_real_time.hpp`；公共`make_southern_realtime/step_southern_realtime`；`web/js/core/market_realtime.js` |
 | 园区综合能源 | `include/hacdcpf/integrated_energy/`, `src/integrated_energy/` |
 | 承载力/薄弱环节/反事实 | `include/hacdcpf/analysis/hosting_capacity.hpp` 等, `src/analysis/` |
