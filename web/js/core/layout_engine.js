@@ -5,11 +5,30 @@
   const core = global.HySimCore = global.HySimCore || {};
   let engine = null;
   let sequence = 0;
+  // ELK's dedicated worker script (elkjs 0.9.3, vendored). The main-thread ELK
+  // API (from elk.bundled.js) delegates layout to this worker so large-graph
+  // layout never blocks the UI thread. Relative to the /xjtu/ document root.
+  const WORKER_URL = (global.__ELK_WORKER_URL__ || 'vendor/elk-worker.min.js');
+  let _usedWorker = false;
+  let _forceMainThread = false;
 
   function ensureEngine() {
     if (engine) return engine;
     if (typeof global.ELK !== 'function') throw new Error('ELK bundle is unavailable');
+    // Prefer a Web Worker so large-graph layout never blocks the UI thread.
+    // Fall back to the main-thread engine if workers are unavailable or the
+    // engine has already latched to main-thread after a worker failure.
+    if (!_forceMainThread && typeof Worker === 'function') {
+      try {
+        engine = new global.ELK({ workerUrl: WORKER_URL, workerFactory: (url) => new Worker(url) });
+        _usedWorker = true;
+        return engine;
+      } catch (e) {
+        engine = null;
+      }
+    }
     engine = new global.ELK();
+    _usedWorker = false;
     return engine;
   }
 
@@ -32,23 +51,38 @@
     const requestId = `layout-${Date.now().toString(36)}-${++sequence}`;
     const timeoutMs = Number(options.timeoutMs) || 60000;
     const started = performance.now();
-    let timer;
-    const timeout = new Promise((_, reject) => {
-      timer = setTimeout(() => reject(new Error(`ELK layout timed out after ${timeoutMs} ms`)), timeoutMs);
-    });
+    const withTimeout = (p) => {
+      let timer;
+      const timeout = new Promise((_, reject) => {
+        timer = setTimeout(() => reject(new Error(`ELK layout timed out after ${timeoutMs} ms`)), timeoutMs);
+      });
+      return Promise.race([p, timeout]).finally(() => clearTimeout(timer));
+    };
+    let result;
     try {
-      const result = await Promise.race([ensureEngine().layout(contract.graph), timeout]);
-      return {
-        request_id: requestId,
-        schema: 'hysim_elk_layout_result_v1',
-        positions: flattenNodes(result),
-        width: Number(result.width) || 0,
-        height: Number(result.height) || 0,
-        runtime_ms: performance.now() - started,
-      };
-    } finally {
-      clearTimeout(timer);
+      result = await withTimeout(ensureEngine().layout(contract.graph));
+    } catch (err) {
+      // If the worker-backed engine failed (construction ok but layout errored /
+      // timed out in the worker), drop to a main-thread engine and retry once so
+      // layout never hard-fails because of a worker issue.
+      if (_usedWorker) {
+        try { if (engine && engine.terminateWorker) engine.terminateWorker(); } catch (e) { /* ignore */ }
+        engine = null;
+        _forceMainThread = true;
+        result = await withTimeout(ensureEngine().layout(contract.graph));
+      } else {
+        throw err;
+      }
     }
+    return {
+      request_id: requestId,
+      schema: 'hysim_elk_layout_result_v1',
+      positions: flattenNodes(result),
+      width: Number(result.width) || 0,
+      height: Number(result.height) || 0,
+      runtime_ms: performance.now() - started,
+      worker: _usedWorker,
+    };
   }
 
   function reset() {

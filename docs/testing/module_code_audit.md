@@ -1,6 +1,6 @@
 # Module Code Audit
 
-Updated: 2026-08-24
+Updated: 2026-09-08
 
 This is the living code-audit ledger for repository modules. It records
 source-backed defects and audit coverage; it is not a dated snapshot and does
@@ -23,7 +23,551 @@ regex-based quality checker was attempted but did not complete in practical
 time; the findings below come from manual source review, targeted searches,
 and existing executable tests.
 
-## Open findings
+## Findings and Closure Evidence
+
+### PF Presentation Cost Breakdown
+
+Follow-up measurement of AUD-097 uses the unchanged production server/source
+and a generated instrumented copy from `tools/pf_presentation_profile.py`.
+This is profiling, not an additional production optimization. The model is
+an additive wall-clock partition: request setup + solver/other analysis +
+presentation stages + JSON dump + cleanup + framework/client remainder.
+Per-bus linear searches can contribute O(B^2 + B*G); JSON construction/copy/
+serialization scales with emitted nodes/bytes, while destruction adds allocator
+work. References are `tests/run_gui_server.cpp` (`add_geo_data`,
+`rich_attribution_to_component_results`, PF response finalization) and the
+[measurement contract](../developer/projection_and_results.md).
+
+Predeclared protocol: four MATPOWER cases, five fresh-process samples in each
+baseline/coarse/scan mode, alternating order, `ac_newton`, full responses.
+Require exact non-timing response equality, <=5% large-case median wall
+overhead, and stage totals within max(1 ms, 1%) of presentation. No speedup
+prediction applies because production behavior is not changed. The first
+60-sample pass resolved coarse stages and scans; the second added scope
+lifetime timers and counts of metrics constructed but unused by the merge.
+Both passes are retained, without selecting fast samples.
+
+Final macOS arm64 Release experiment: **60/60 converged responses**, with exact
+normalized full-body hashes after excluding `timing`, `profiling` and
+`execution_time_sec`. Maximum stage accounting gap is 0.024751 ms. Baseline to
+coarse median wall overhead is -0.041% (2000) / +0.548% (9241); scan mode is
++0.352% / +0.514%. All large-case overhead thresholds pass. Small cases are
+controls, not evidence of microsecond precision or production regressions.
+Fresh-server first requests differ from the preceding same-session protocol;
+the absolute 923 ms here must not be compared to 836 ms as a code regression.
+
+| Cost, median ms | ACTIVSg2000 | case9241pegase |
+|---|---:|---:|
+| Full HTTP baseline | 158.361 | 917.865 |
+| Full HTTP coarse instrumented | 158.295 | 922.896 |
+| Existing presentation timer | 84.826 | 560.497 |
+| Geographic JSON construction | 11.440 | 57.849 |
+| Geographic JSON copies into response | 2.223 | 9.970 |
+| Component display JSON construction | 20.153 | 122.093 |
+| Attribution JSON construction | 28.663 | 158.251 |
+| Component JSON merge | 5.701 | 36.811 |
+| Diagnostic scan and row construction | 11.177 | 131.434 |
+| Diagnostic JSON copy into response | 1.412 | 5.685 |
+| Device injection reassembly | 0.177 | 1.383 |
+| Generator balance / 2W recovery | 0.339 | 1.837 |
+| Terminal-flow recovery | 0.759 | 3.831 |
+| Source balance refresh | 0.451 | 17.960 |
+| Repeated attribution projection | 0.430 | 2.172 |
+| Attribution apply | 0.875 | 5.612 |
+| JSON string serialization (`out.dump`) | 25.981 | 137.120 |
+| `add_geo_data` local cleanup, outside presentation | 10.856 | 62.800 |
+| Handler cleanup after response content is set | 13.302 | 69.536 |
+| Outside measured handler lifetime | 2.910 | 12.135 |
+
+Nested rows are not additive with their parents, and medians of individual
+stages need not sum to the median total. The raw records preserve every stage
+and sample. `geo_cleanup_ms` is the scope-lifetime minus existing presentation
+timer: it includes local destruction and negligible timer-boundary work.
+The production `solve_ms` currently includes this cleanup (case9241 reports
+142.738 ms); subtracting the 62.800 ms still leaves cache publication and other
+analysis overhead, so neither number is an isolated numerical-solver timing.
+Handler cleanup includes destruction of `out`, the request-local model and
+other locals. The remaining 12.135 ms includes HTTP framework, scheduling,
+socket and client work; client response-body read alone is 11.431 ms and can
+overlap sending. Neither is a pure network-bandwidth measurement.
+
+Optional scan instrumentation isolates three lambda calls (clock overhead
+included, counts deterministic across repetitions):
+
+| Lookup | 2000 calls / ms | 9241 calls / ms |
+|---|---:|---:|
+| `ac_bus_by_id` | 3999 / 1.199 | 18481 / 45.055 |
+| `ac_is_slack_bus` | 2000 / 1.288 | 9241 / 46.241 |
+| `ac_bus_is_slack_source` | 392 / 0.400 | 1445 / 8.193 |
+
+The first two belong to diagnostic row construction, the third to source
+refresh. The separate `attributed_power_balance_diagnostics` helper is not
+called by this PF branch; its OPF/TSPF performance remains unmeasured. The
+three-winding recovery branch is not exercised by these MATPOWER fixtures.
+There is no evidence here that repeated Ybus/SolverData assembly dominates
+presentation: the observed repeat is result-side projection and aggregation.
+
+Actual case9241 response size is approximately 49,706,646 bytes (timing text
+length can vary). Exact UTF-8 value sizes, excluding surrounding top-level
+keys and separators: `component_results` 33,533,469 bytes (67.46% of response),
+`geo_ac_branches` 6,757,215 (13.59%), `power_balance_diagnostics` 6,425,883
+(12.93%), `geo_buses` 2,047,630 (4.12%). Values are sliced from actual compact
+wire JSON, not estimated from Python's serialization. JSON dump costs
+137.120 ms; allocation/formatting/destruction are separately material costs.
+
+The generated merge counter observes 35,396 matched attribution rows and
+119,161 preconstructed `metrics` items that are not copied into existing
+display rows (2000: 5,899 rows / 22,504 items). The merge copies seven metadata/
+source/terminal fields but keeps the existing display metrics. This establishes
+avoidable construction, not its isolated time: 158.251 ms includes retained
+fields and unmatched rows as well. It must not all be claimed as removable.
+
+Evidence-directed next implementation order:
+
+1. Index diagnostic bus/slack membership while preserving all validation,
+   domain, stable-ID and source semantics; about 91 ms of measured searches
+   is the relevant upper bound before new indexing overhead, not a promise.
+2. Construct only required attribution fields for already-present rows, with
+   the complete existing path retained for missing rows; measure construction,
+   merge and destruction together and compare every field.
+3. Remove avoidable ownership copies after proving source lifetimes. Response
+   size options/compression require separate API and browser measurements;
+   do not drop diagnostics or change the full-response contract silently.
+4. Deprioritize the 2.2 ms repeat projection on these AC cases. Profile OPF,
+   rich 3W and converter-heavy fixtures before generalizing that conclusion.
+
+Reproduce with retained prior build artifacts:
+
+```sh
+python3 tools/pf_presentation_profile.py --build --run --output output/pf-presentation-profile/final
+```
+
+`output/pf-presentation-profile/final/{build,results}.json` records compile/link
+commands, source/generated/binary/output hashes, all 60 samples, stage/scan
+measurements, wire field sizes and acceptance results. First-pass evidence
+remains in the parent directory. Python syntax and documentation anchors pass;
+unique injection anchors and byte-size extraction were exercised by the actual
+run. No production changes this pass, so prior unit/API/sanitizer counts are
+not presented as new test runs. No clean build, full CTest, sanitizer or browser
+performance campaign was run. Dependency guards and existing preview services
+remain untouched; all measurement servers were terminated. Final dependency
+inspection reports clean HEAD `5eac6be`, changed externally from the previous
+dirty `e6c932e5` record. This pass issued no dependency edits/commits. The
+recorded pin is still `a39812aa`; measured binaries retain existing static
+archives, so the newly observed dependency HEAD is not a rebuilt baseline.
+
+### Attribution Performance Follow-Up: AUD-097
+
+**P2, closed within the focused scope below.** In
+`src/model/result_attribution.cpp`, repeated voltage, result-row, canonical
+generator/transformer position and projection-source lookups scale quadratically
+on growing systems. The previous lookup terms include O(C*B + M*C + G^2),
+for C component rows, B buses, M mappings and G generators. Call-local indexes
+now make these terms expected O(B + F*C + G + M + Q), with fixed queried-family
+count F and query/emitted-match count Q. Terminal-flow computation, converter
+transfer scans, same-bus grid scans and the OPF canonical-system copy remain
+outside this bound. No solver equation, tolerance or JSON schema changed.
+
+Before implementation, acceptance was >=70% attribution-time reduction at
+10000 nodes, no material small-case regression and exact full-field equality.
+The first eager row index added about 10 us on the 14-node fixture: asymptotic
+savings did not cover allocator overhead. Re-deriving the small-case cost led
+to lazy per-family indexes. Final batched small-case results meet the target;
+the initial measurements are retained in `output/attribution-performance/`.
+The indexes preserve first-position lookup, AC/DC voltage separation, authored
+fallback, OPF canonical position translation and output/source ordering.
+Source reports lack domain fields, so their existing all-match provenance
+semantics remain; electrical lookup still requires a domain.
+
+macOS arm64, existing Release compile/link configuration, three fresh processes
+per fixture/mode. Fixtures with <=118 buses average 100 calls per process;
+others time one call. Synthetic fixtures use sparse stable IDs, reversed AC
+bus/generator ordering, same-ID DC buses and one transformer per bus pair.
+Real projection and converged PF run before timing. All attribution fields,
+including identities, values, terminals, sources, recovery, diagnostics and
+coverage, serialize to exactly matching baseline/candidate hashes in all runs.
+
+| Fixture | Baseline median s | Candidate median s | Attribution speedup |
+|---|---:|---:|---:|
+| Synthetic 14 | 0.000014065 | 0.000013748 | 1.02x |
+| Synthetic 1000 | 0.004980125 | 0.000680500 | 7.32x |
+| Synthetic 2000 | 0.020345958 | 0.001430250 | 14.23x |
+| Synthetic 10000 | 0.524050042 | 0.007304500 | 71.74x |
+| case118 | 0.000066817 | 0.000054300 | 1.23x |
+| case_ACTIVSg2000 | 0.003230667 | 0.000824541 | 3.92x |
+| case9241pegase | 0.184946667 | 0.005857250 | 31.58x |
+
+Process peak RSS includes setup/PF: synthetic 10000 is 137.036 -> 136.004 MB;
+case9241 is 124.813 -> 127.009 MB. This is not an isolated allocation measure
+or a memory-reduction claim. The timings exclude projection, PF and export.
+
+A separate full HTTP comparison uses prior-round/current servers, three
+sequential `ac_newton` PF requests per case with `response_detail=full`.
+Voltages, angles and complete `component_results` hashes match exactly.
+case9241 median request-through-response time is 0.942449 -> 0.836189 s
+(11.27% lower); presentation is 621.313 -> 511.089 ms, solve is
+126.853 -> 128.122 ms. Its full response is approximately 49.7 MB. ACTIVSg2000
+wall time is 0.145961 -> 0.145678 s, with no material end-to-end improvement.
+This excludes browser rendering and does not imply a 32x HTTP speedup.
+Remaining priorities are profiling presentation diagnostics/repeated assembly
+and JSON serialization/transfer. The 511 ms presentation timer covers more
+than attribution; source-visible scans are candidates, not measured individual
+root causes. Converter-heavy and OPF-copy performance remain unmeasured.
+
+Incremental Release passes **99 cases / 669 assertions** across
+`test_result_attribution` (4/96), `test_component_models_math_audit` (25/165),
+`test_carbonflow_dynamic_storage` (15/126), `test_sppt_metamorphic` (18/89)
+and `test_graph` (37/193). The attribution and test units pass ASan+UBSan 4/96
+with `detect_leaks=0`; remaining archives are Release. The relinked current
+server passes GUI API **82/82**. New cases in the already registered attribution
+target cover sparse/reordered and same-domain/cross-domain IDs, short/null/
+changing PF input, OPF position translation, storage preference and source order.
+MIPSolvers remains dirty at `e6c932e5`, differing from pin `a39812aa`.
+No guard bypass, clean build, full CTest or whole-library sanitizer claim.
+
+Reproduction and local provenance:
+
+```sh
+python3 tools/attribution_performance_benchmark.py --mode baseline --output output/attribution-performance/final
+python3 tools/attribution_performance_benchmark.py --mode candidate --output output/attribution-performance/final
+python3 tools/gui_api_e2e.py --server output/attribution-performance/run_gui_server --data-dir data
+```
+
+`output/attribution-performance/final/{baseline,candidate}.json` records source
+hashes, compile/link commands, output hashes, timing and RSS. Incremental build
+commands/retained archives are in `{tests-build,server-build,sanitize-build}.json`;
+test logs and `tests-results.json` are in the same parent directory. The local
+`http_compare.py` and `http-results.json` retain the full HTTP protocol, payload
+sizes, output/binary hashes and all samples. Temporary test servers were stopped.
+
+### Current Repository Review
+
+Review base: `48e0cf62` (initial main-repository worktree clean). This is a
+risk-directed review, not a claim that all 635 C++/header/JS/Python files under
+`src/`, `include/hacdcpf/`, `tests/`, and `web/` were read or tested exhaustively.
+AUD-089--096 are now **closed within the focused verification scope below**.
+The counterexamples and source locations in the finding descriptions refer to
+the pre-fix review base, not to the updated implementations. Release-wide
+acceptance remains subject to the preserved dependency/build limitations.
+
+#### Implemented Corrections and Validation
+
+- AUD-089: `AtomicFlagLease` owns acquisition/release across all 45 analysis
+  handlers; the global exception handler no longer clears `busy`. The two
+  market check-then-store sites now acquire via CAS as well.
+- AUD-090: all 13 PF cache publication sites pass their captured immutable
+  source; publication under the session mutex rejects a replaced source.
+  An old response can finish for its original caller without publishing to the
+  new model's cache. No JSON schema change.
+- AUD-091/094: both GEC APIs reject incomplete/nonfinite/negative hourly
+  energy/emissions pairs and unverified supplied step diagnostics; both result
+  validators check all numerical summary/hourly metrics for finiteness.
+  External complete matrices without step diagnostics remain supported without
+  an independent verification claim. Inputs now fail with `invalid_argument`
+  rather than manufacturing full coverage from partial evidence.
+- AUD-092: generation and participants use in-service AC stable bus IDs, not
+  vector positions; capacity/equal/droop and reordered/noncontiguous IDs pass.
+- AUD-093: legacy recovery is permitted only when the opposite domain has no
+  matching member/super/voltage ID; unknown same-ID AC/DC values stay absent.
+- AUD-095/096: hourly tables normalize once after local writes; mismatch
+  traverses sparse Ybus with the original polar formula and per-row order.
+
+Incrementally rebuilt Release tests pass **148 cases / 1113 assertions**:
+`test_review_regressions` 6/228, `test_advanced_pf` 35/247, `test_graph` 37/193,
+`test_carbonflow_dynamic_storage` 15/126, `test_power_flow_math_audit` 51/313,
+and `test_thread_pool` 4/6. The three modified numerical translation units and
+new regression test also pass ASan+UBSan, 6/228 with `detect_leaks=0` and
+container checks enabled; other linked Release archives are not instrumented.
+The rebuilt server passes `gui_api_e2e.py` **82/82**, registered
+`session_integrity_e2e.py` (ownership/cancellation and stale-publication flows),
+and `market_operation_e2e.mjs` (week/month, resume/cancel/stale, desktop/mobile).
+Desktop/mobile screenshots were inspected. No full route-by-route or
+whole-library sanitizer certification is implied. The server build retains
+19 existing compiler warnings outside this fix's scope.
+
+Repeatable commands and provenance:
+
+```sh
+python3 tools/review_performance_benchmark.py --baseline 48e0cf62
+output/code-optimization/test_review_regressions --reporter compact
+ASAN_OPTIONS=detect_leaks=0 output/code-optimization/test_review_regressions-san --reporter compact
+python3 tools/session_integrity_e2e.py --server output/code-optimization/run_gui_server
+python3 tools/gui_api_e2e.py --server output/code-optimization/run_gui_server --data-dir data
+node tests/e2e/market_operation_e2e.mjs --server output/code-optimization/run_gui_server
+```
+
+`output/code-optimization/{test-build,server-build,san-build,test-results}.json`
+records commands, source hashes and retained archives; logs are in that directory.
+The new C++ and session E2E tests are registered in `tests/CMakeLists.txt`;
+the current un-reconfigured build was exercised by direct invocation.
+The benchmark driver is repository source under `tools/`; generated copies,
+executables and measurements remain ignored artifacts under
+`output/code-optimization/performance/`.
+
+#### Measured Performance Against the Predeclared Protocol
+
+macOS 26.6.2 arm64, C++20 `-O3 -DNDEBUG`, same existing Release archives;
+three sequential fresh-process samples per mode and fixture, 84 total samples
+including full-redispatch controls. Build/other test workloads finished before
+timing. `performance/results.json` preserves all timings, RSS, commands,
+source SHA256 and exact output SHA256 comparisons. RSS is process peak before
+export serialization, not an isolated allocator measurement.
+
+| Kernel / fixture | Baseline median seconds | Candidate median seconds | Baseline / candidate peak MB |
+|---|---:|---:|---:|
+| Frozen carbon B/L=1/128, T=1000 | 0.086408 | 0.005152 | 20.41 / 18.46 |
+| Frozen carbon B/L=1/128, T=2000 | 0.313586 | 0.010160 | 26.02 / 22.20 |
+| Frozen carbon B/L=1/128, T=4000 | 1.256438 | 0.020222 | 37.50 / 29.64 |
+| Frozen carbon B/L=200/200, T=1000 | 0.196518 | 0.009166 | 32.69 / 26.13 |
+| Frozen carbon B/L=200/200, T=2000 | 0.723020 | 0.018107 | 51.36 / 37.83 |
+| Frozen carbon B/L=200/200, T=4000 | 2.899230 | 0.036692 | 85.93 / 58.85 |
+| AC mismatch N=1000 | 0.005474 | 0.0000212 | 29.46 / 13.53 |
+| AC mismatch N=2000 | 0.017811 | 0.0000287 | 79.04 / 15.25 |
+| AC mismatch N=10000 | 0.525210 | 0.0001293 | 1630.06 / 30.33 |
+| Hybrid ZIP mismatch N=1000 | 0.004175 | 0.0000152 | 29.57 / 13.57 |
+| Hybrid ZIP mismatch N=2000 | 0.018025 | 0.0000310 | 79.22 / 15.27 |
+| Hybrid ZIP mismatch N=10000 | 0.524812 | 0.0001303 | 1630.24 / 30.15 |
+
+AUD-095 predicted >=80% isolated padding reduction at T=4000. Measured
+padding is 1.209245 s -> 4.417 us (1/128) and 2.802789 s -> 6.250 us (200/200),
+both >99.99% reduction. Aggregation grows approximately 2x when T doubles;
+the 200/200 T=4000 aggregation speedup is 79.0x. The timer adds clock reads
+per padding call, so these are instrumented materialization measurements.
+Each run first computes an actual verified carbon snapshot and then freezes
+it for annual materialization; this excludes repeated carbon solves and
+does not predict whole-year runtime. Stable IDs, hourly values/NaN masks,
+raw hourly energy, summaries, totals and verification counts match exactly;
+late columns/failed rows are also covered by the registered regression.
+
+AUD-096 predicted >=90% mismatch time and RSS reduction at N=10000.
+Both AC and hybrid ZIP fixtures exceed 99.97% time and 98.1% process peak-RSS
+reduction; removing the dense allocation accounts for about 1.60 GB. The
+10000-node chain has 29998 Ybus nonzeros and includes taps, phase shifts and
+shunts; hybrid fixtures add a PQ VSC and DC voltage. Per-bus calculated
+injections and total mismatch match baseline exactly, with independent
+`Re(V .* conjugate(YV))` normalized error <=4.10e-15 (threshold 1e-10).
+Three-bus full redispatch, with and without a binding participation limit,
+matches convergence, iteration count, residual, voltages, allocation and
+limit hits exactly. No solver tolerances changed. These are kernel results,
+not a 4000x whole-PF speedup promise. Both acceptance targets are met; no
+cost-model mismatch requiring re-derivation was observed.
+
+#### Original Counterexamples
+
+| ID | Priority | Finding | Evidence |
+|---|---|---|---|
+| AUD-089 | P1 | A request that never acquired the session computation flag can clear another request's `busy`. | Reproduced against production HTTP routes; malformed request returns 400, busy changes true to false, a third analysis returns 200 while the first remains running. |
+| AUD-090 | P1 | An old PF snapshot is stamped with the current model revision when it finishes. | Reproduced: replace 9241-bus model with case14 during PF; old 9241-voltage result later reports `result_matches_current_system=true`. |
+| AUD-091 | P1 | Annual GEC accounting turns missing carbon/energy samples into zero and loses completeness evidence. | Current-source probe: only 1/2 steps verified; failed hour becomes zero energy/emissions, annual coverage is 1.0 and result validator passes. |
+| AUD-092 | P2 | Distributed-slack participant selection mixes stable bus IDs and vector positions. | Current-source probe: identical three-bus model reordered from [1,2,3] to [3,2,1] changes participants [1,2] to [2]. |
+| AUD-093 | P2 | Domain-qualified switch recovery falls back to an AC-owned legacy voltage for a missing same-ID DC result. | Current-source probe: only AC1=1+0.2j is supplied; DC1 and DC2 are fabricated as 1+0.2j pu. |
+| AUD-094 | P2 | Summary-only GEC validators accept NaN numerical fields. | Current-source user-result probe: `energy_mwh=NaN` returns true; node validator has the same comparison/early-return structure. |
+| AUD-095 | P2 | Hourly annual-carbon output repeatedly scans all T time rows inside every bus/load iteration. | Source-proven O(T^2(B+L)) metadata scanning; no before/after timing claim. |
+| AUD-096 | P2 | Distributed-slack mismatch calculation densifies sparse Ybus and visits all N^2 entries. | Source-proven 16N^2-byte matrix plus N^2 trigonometric evaluations per mismatch; no measured speedup claim. |
+
+#### AUD-089: computation flag ownership
+
+Sources: `tests/run_gui_server.cpp:21203` parses the request before the
+`busy.exchange(true)` at line 21241; the exception handlers at lines 21982 and
+21986 unconditionally clear the flag. Other legacy analysis handlers use the
+same unconditional cleanup pattern, although their pre-acquisition triggers
+differ. The production reproduction starts case14 PF-only time series for
+1000 periods, waits for busy=true, and submits the body `{` to `run_ts_pf`.
+The malformed request clears busy while the first call is still running; a
+third `/api/session/pf` succeeds concurrently. The original time series also
+completes all 1000 periods. This defeats the guard intended to serialize shared
+solver/session resources and can make cancellation target the wrong work.
+
+Required closure: use an ownership-scoped guard or the existing `owns_busy`
+pattern consistently; release only a successfully acquired lease. Add a
+barrier-controlled overlapping-request regression covering malformed JSON,
+pre-acquisition errors, conflict returns, and cancellation. A rejected or invalid
+request must leave another task's flag and cancellation state intact.
+
+#### AUD-090: snapshot revision at result publication
+
+Sources: `cache_last_power_flow` in `tests/run_gui_server.cpp:3254` assigns
+`last_pf_revision = s.system_revision` at publication, although `/api/session/pf`
+captured its system earlier (line 13013). Import/edit routes can replace the
+model meanwhile (`load_matpower`, line 11579; `load_json_string`, line 11674).
+`result_window` trusts the revision equality at line 17746 to select the current
+topology/spatial index. A mutex around publication does not bind the old
+snapshot to the new revision.
+
+Production reproduction: launch case9241pegase PF, replace the session with
+case14 while that PF is still pending, await convergence (9241 voltages, residual
+1.0043876841336896e-10), then request `result_window`. It returns 200 with
+`result_matches_current_system=true` and no stale-model limitation. Consequently
+the cached result's index can describe a different model from its values.
+
+Required closure: capture system handle and revision together under the lock;
+carry that revision through every PF/OPF publication. Either decline to publish
+over a newer revision or keep the original revision and use only the solved
+snapshot's indices. Test replacement *during* a solve as well as after it.
+
+#### AUD-091: incomplete annual GEC inputs
+
+Sources: `src/carbon_analysis/annual_carbon_analysis.cpp:1154` ignores non-finite
+energy/emissions and explicitly substitutes zero when no finite energy exists.
+The node path's `aggregate_load_by_bus` (line 1723) likewise skips unknown data.
+Upstream annual-carbon aggregation correctly leaves failed samples as NaN and
+records verification counts, but the GEC result types carry no completeness
+field. A user cannot distinguish an unknown hour from a verified zero-load hour.
+
+The probe computes annual carbon from a one-bus 10 MW, 0.8 tCO2/MWh source/load
+case with one converged PF and one failed PF. `num_carbon_verified=1`,
+`num_steps=2`; the second input energy is NaN. GEC accounting with 10 MWh of
+certificates exports zero for that hour, a 100% coverage ratio, and passes
+`validate_annual_user_gec_result`. These are only known-subset figures, not an
+annual completeness certificate. This also permits a partially missing user's
+load set to be summed without a per-user warning.
+
+Required closure: reject incomplete accounting inputs, or carry explicit
+per-hour/per-user/per-node completeness and distinguish known-subset totals from
+annual totals. Preserve missing energy/emissions pairs through JSON/CSV export;
+do not issue complete annual coverage/net-emission claims from the subset.
+Test failed PF, failed carbon verification, one missing load among several,
+and entirely unknown horizons for both user and node APIs.
+
+#### AUD-092: stable IDs in participation factors
+
+Sources: `src/power_flow/distributed_slack_solver.cpp:33` creates an N+1 array
+and discards generator buses outside [1,N]; lines 358-362 use vector position
+to inspect bus type and then emit that position as a stable ID. Explicit
+participants are also filtered by `bus <= nac` (line 369).
+
+The reordered three-bus probe preserves every component ID, generator terminal,
+and branch terminal, yet drops the slack generator at bus 1 from the automatic
+participant set. Sparse IDs such as 10,20,30 are also rejected by source logic.
+Required closure: key aggregation and existence checks by authored AC bus ID,
+filter in-service buses, and return stable IDs. Regress both permutation and
+non-contiguous numbering for automatic/explicit/equal/capacity/droop paths.
+
+#### AUD-093: recovery must not invent a missing domain
+
+Source: `src/graph/result_recovery.cpp:123` falls back to `bus_voltage` when
+`dc_bus_voltage` lacks the supernode. The preceding AC recovery loop populates
+that same legacy map, so even callers using only the recommended qualified
+input API can receive an AC voltage as a DC result. The second DC recovery loop
+contains the same fallback.
+
+Required closure: admit legacy fallback only when its domain is unambiguous;
+otherwise retain an unavailable value or report an error. Add AC-only-known and
+DC-only-known partial-result cases with colliding supernode/member IDs, in
+addition to the existing tests where both domains are fully supplied.
+
+#### AUD-094: NaN bypasses summary validation
+
+Sources: `src/carbon_analysis/annual_carbon_analysis.cpp:1364` and line 1961
+only use ordered comparisons on summary values, then return true when hourly
+rows are absent. IEEE 754 comparisons with NaN are false, so all those rejection
+conditions can be bypassed. Some derived summary fields are not checked at all.
+This is distinct from AUD-091: a caller-supplied malformed result is certified
+even without any missing annual input data.
+
+Required closure: validate finiteness of all required numerical fields before
+range/identity checks; apply the same rules with and without hourly output.
+Test NaN and positive/negative infinity in primary and derived metrics for both
+user and node result validators.
+
+#### Performance Rationale and Acceptance
+
+The following rationale and thresholds were recorded before implementation;
+the completed experiment and measured acceptance appear above.
+
+- **AUD-095 model/claim:** dense hourly tables are a materialization of indexed
+  per-step rows; padding a row once after the final column registry is known
+  preserves row/column identity, values and the NaN mask. The existing
+  `add_bus_result`/`add_load_result` already resize the current row locally.
+  `extend_hourly_width` (line 423) scans every time row, even when no row needs
+  growth; it is called inside each bus/load loop at lines 923/952/955. With all
+  three tables enabled, the leading metadata visits are T^2(B+2L), versus
+  O(T(B+L)) output work for local growth plus one final normalization. At
+  T=8760, B=L=2000, this is about 4.60e11 redundant row-size visits. Prediction:
+  remove the T multiplier from metadata scanning; this is **not** a wall-time
+  speedup estimate. Reference: current helper/write/final-padding paths in
+  `annual_carbon_analysis.cpp`. Benchmark fixed verified inputs at
+  T=1000/2000/4000, B/L=1/128 and 200/200, three sequential runs per mode;
+  report aggregation wall and peak RSS. Require exact IDs, NaN masks, hourly
+  finite values, verification counts and totals; measure near-linear output
+  growth separately from per-step carbon solves. Target at least 80% reduction
+  in isolated padding time at T=4000; if it misses, inspect allocations and
+  the actually measured fraction before revising the prediction.
+- **AUD-096 model/claim:** the same nodal active injection is
+  P=Re(V .* conjugate(YV)), or the existing nonzero AC kernel's polar sum.
+  `distributed_slack_solver.cpp:193` instead allocates complex-double N-by-N
+  storage and evaluates sin/cos even for structural zeros. Memory is 64 MB at
+  N=2000 and 1.6 GB at N=10000, excluding the original matrix and temporaries;
+  repeated full redispatch can invoke it up to 20 times. Prediction: extra
+  storage drops to O(N+nnz(Y)) and arithmetic visits from N^2 to nnz(Y);
+  on a 10000-node chain the visit ratio is about 3333, not a promised time ratio.
+  Reuse `src/power_flow/ac_kernel.cpp:34` or sparse complex multiplication;
+  keep ZIP/converter injection assembly unchanged. Benchmark frozen states at
+  N=1000/2000/10000, with taps/shunts and hybrid ZIP cases. Require per-bus
+  normalized difference <=1e-10 and unchanged convergence/limit outcomes;
+  compare end-to-end redispatch within its existing tolerance. Target >=90%
+  reduction in isolated mismatch time/RSS at N=10000; do not loosen solver
+  tolerances or claim whole-PF improvement from the kernel alone.
+
+The Southern market already has matrix-reuse guards and a separate detailed
+[performance ledger](../modules/market/performance.md). Its historical Gurobi
+factor-fill/repair-iteration evidence supports investigating ordering and
+intertemporal structure next; this review did not rerun those timings and does
+not identify another proven market bottleneck. Likewise, linear `find_row`
+lookups in rich-result attribution are profiling candidates, not measured
+top-priority bottlenecks here.
+
+#### Initial Review Coverage and Verification
+
+| Area | This review's scope | Limit |
+|---|---|---|
+| PF, graph recovery, annual carbon/GEC | Read implicated implementations, public result contracts and adjacent tests; rebuild three production translation units for focused probes. | Other linked objects remain prebuilt; no whole-library sanitizer claim. |
+| HTTP/session and frontend task flow | Inspect snapshot/busy/cache ownership, import routes, API client/task manager; exercise two production concurrency scenarios. | No exhaustive route audit or visual browser E2E in this pass. |
+| Annual/lifecycle and generic/Southern market | Sample daily admission, solver concurrency, state carry, failure paths, scope/derivation guards and prior numerical evidence. | No new full-year/week or cross-solver campaign. |
+| Reliability/resilience, projection/assembly and I/O | Targeted map/cache/ownership searches and selected implementation/contract reads. | Not a new deep audit of all numerical branches. |
+| Remaining numerical modules | Repository/test/document inventory and prior ledger only. | Prior deep-audit labels below must not be read as new verification. |
+
+Executed: 63 selected existing Release CTest cases passed, zero failures/skips,
+1.91 s. All 60 JS files under `web/` plus browser E2E scripts pass `node --check`.
+The documentation anchor check passes (1846 file/symbol anchors, 711 paths,
+zero failures before this ledger update); `git diff --check` passes.
+Exact focused-test invocation:
+
+```sh
+ctest --test-dir build/macos-release --output-on-failure --timeout 60 -j 2 \
+  -R '^(Graph|Round-trip|Distributed slack|Audit B17|Carbon|carbon|Matrix carbon|Annual replay|Lifecycle storage|Parallel annual)' \
+  --output-log output/code-review/ctest.log
+python3 output/code-review/run_probes.py
+python3 output/code-review/http_probe.py
+```
+
+Probe artifacts: `output/code-review/probe-results.json`, `probe-build.json`,
+`http-results.json`, scripts and server log. These are local diagnostic artifacts
+under ignored `output/`, not registered CI regressions. The HTTP executable is
+`output/market-performance/lmp-reuse-dev/run_gui_server`, SHA256
+`948626bcdc7602d27352f3baf333d4a6599a23bcc81e6d2707f18f462c20317a`;
+its recorded server-source SHA256 matches the pre-fix `tests/run_gui_server.cpp`
+(`114384b6745f45ab8516bd503e424c64847622b6f9fbb45a687ee86eaeb48d5b`).
+Both tests used a fresh private server, which was stopped afterwards; existing
+user services were not changed.
+
+Build boundary: MIPSolvers HEAD `e6c932e5f8a409cc87bf2668b86eb895f3eccea5`
+differs from CMake's recorded `a39812aa5941691b44e8379a8e0b7d42ccdde955`
+and has five modified files. The Release dirty-dependency guard was not bypassed;
+no clean configure/rebuild or full CTest was performed. Existing regression
+passes cannot certify all current source. Initial standalone-probe attempts
+needed `DYLD_LIBRARY_PATH` for OpenDSS; the optional sparse-ID exception probe
+also hit an unresolved exception-unwinding abort (LLDB reached the expected
+`create_participation_factors` throw). The successful identity evidence above
+uses the non-throwing reordered-ID counterexample; this review does not attribute
+that diagnostic executable's unwind failure to a new production defect.
+
+The eight findings above have completed their focused closure. Establish a
+reproducible dependency/build baseline before a
+release-wide regression or performance acceptance; the default CI still gates
+C++ execution behind `ENABLE_FULL_CI` and lacks a concrete dependency checkout.
+
+### Prior Audit Closures
 
 All data-structure review findings R-01–R-08
 （[数据结构设计评审](../developer/data_structure_design_review.md) §2）已关闭
@@ -346,6 +890,10 @@ the review record. The table above is the current status.
   add parser tests for trailing text and quoted/escaped CSV behavior.
 
 ## Module audit matrix
+
+The matrix below is retained from prior module audits. Its depth labels and
+test counts are historical; the current review's narrower coverage and new open
+findings are listed above.
 
 | Module/domain | Documentation | Audit depth | Current result |
 |---|---|---|---|

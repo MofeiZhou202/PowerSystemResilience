@@ -66,6 +66,16 @@ void recover_switch_contracted_buses(
     FullNetworkVoltages&     voltages,
     const ContractionResult& contraction)
 {
+  const auto legacy_is_unambiguous = [&](int bus, bool dc) {
+    const auto& other_members = dc ? contraction.ac_bus_to_super
+                                   : contraction.dc_bus_to_super;
+    const auto& other_supernodes = dc ? contraction.ac_super_to_buses
+                                      : contraction.dc_super_to_buses;
+    const auto& other_voltages = dc ? voltages.ac_bus_voltage
+                                    : voltages.dc_bus_voltage;
+    return !other_members.contains(bus) && !other_supernodes.contains(bus) &&
+           !other_voltages.contains(bus);
+  };
   // AC recovery: propagate AC super-node voltages to all AC member buses.
   // Prefer the domain-qualified map (written by AC solvers) before falling
   // back to the legacy map, so that callers using only the new API are handled
@@ -77,7 +87,7 @@ void recover_switch_contracted_buses(
       auto it = voltages.ac_bus_voltage.find(sup);
       if (it != voltages.ac_bus_voltage.end()) { V_sup = it->second; found = true; }
     }
-    if (!found) {
+    if (!found && legacy_is_unambiguous(sup, false)) {
       auto it = voltages.bus_voltage.find(sup);
       if (it != voltages.bus_voltage.end()) { V_sup = it->second; found = true; }
     }
@@ -95,7 +105,7 @@ void recover_switch_contracted_buses(
       auto it = voltages.ac_bus_voltage.find(sup);
       if (it != voltages.ac_bus_voltage.end()) { V_sup = it->second; found = true; }
     }
-    if (!found) {
+    if (!found && legacy_is_unambiguous(sup, false)) {
       auto it = voltages.bus_voltage.find(sup);
       if (it != voltages.bus_voltage.end()) { V_sup = it->second; found = true; }
     }
@@ -120,7 +130,7 @@ void recover_switch_contracted_buses(
       auto it = voltages.dc_bus_voltage.find(sup);
       if (it != voltages.dc_bus_voltage.end()) { V_sup = it->second; found = true; }
     }
-    if (!found) {
+    if (!found && legacy_is_unambiguous(sup, true)) {
       auto it = voltages.bus_voltage.find(sup);
       if (it != voltages.bus_voltage.end()) { V_sup = it->second; found = true; }
     }
@@ -140,7 +150,7 @@ void recover_switch_contracted_buses(
       auto it = voltages.dc_bus_voltage.find(sup);
       if (it != voltages.dc_bus_voltage.end()) { V_sup = it->second; found = true; }
     }
-    if (!found) {
+    if (!found && legacy_is_unambiguous(sup, true)) {
       auto it = voltages.bus_voltage.find(sup);
       if (it != voltages.bus_voltage.end()) { V_sup = it->second; found = true; }
     }

@@ -113,12 +113,21 @@ LOD0 按电气域聚合。空间坐标是 API 布局空间，不是图索引，�
 （`std::shared_ptr<const HybridPowerSystem>`）；改变模型的路由通过
 `session_replace_system` 原子替换它（写时复制），每次写入重建驻留的
 `PowerSystemGraph`、母线空间索引与紧凑的 `_raw_json` 序列化缓存各一次，并递增
-`system_revision`。`cache_last_power_flow`（在会话锁下调用）记录
+`system_revision`。`cache_last_power_flow`（在会话锁下调用）仅当请求捕获的不可变
+系统快照仍是 `current_system` 时发布缓存并记录
 `last_pf_revision`；`/api/session/result_window` 比较两个修订号以声明
 `result_matches_current_system`。`last_pf_result`/`last_pf_system` 是共享快照，
 因此结果服务路由读取它们时无需复制。
+模型替换后才完成的旧 PF 可以向原请求返回旧快照结果，但不能重新写入会话缓存；
+此时窗口路由返回 `409/no_cached_power_flow`，直到当前模型的新 PF 成功发布。
 加载路径的响应（`load_*`、`update_components`、参数库与设计手册应用）内嵌
 `_raw_json`，即缓存的紧凑（无缩进）序列化；前端用 `JSON.parse` 解析它。
+
+45 个使用 `Session::busy` 的分析处理器统一通过 `AtomicFlagLease` 原子获取占用权，
+仅成功获取者可以释放。非法 JSON、获取前异常和 `409` 冲突均不能清除另一个任务的
+`busy` 或重置其 `cancel`。全局异常处理器只生成错误响应，已获取的占用权由栈展开释放。
+`/api/session/status` 中 `busy`/`cancel` 的布尔类型及前端任务管理契约保持不变。
+注册测试 `session_integrity_e2e` 验证拒绝请求、取消、PF 期间替换模型和新 PF 发布流程。
 
 ## 拓扑窗口
 

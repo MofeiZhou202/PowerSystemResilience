@@ -125,13 +125,27 @@ The session holds the current system as a read-shared immutable snapshot
 atomically (copy-on-write) via `session_replace_system`, which rebuilds the
 resident `PowerSystemGraph`, the bus spatial index, and the compact `_raw_json`
 serialization cache once per write and increments `system_revision`.
-`cache_last_power_flow` (called under the session lock) records
-`last_pf_revision`; `/api/session/result_window` compares the two revisions to
+`cache_last_power_flow` (called under the session lock) publishes only if the
+request's captured immutable system is still `current_system`, then records
+`last_pf_revision`. A PF finishing after model replacement may return its old
+snapshot to its original caller, but cannot repopulate the session cache. The
+window route returns `409/no_cached_power_flow` until a current PF publishes.
+`/api/session/result_window` compares the two revisions to
 declare `result_matches_current_system`. `last_pf_result`/`last_pf_system` are
 shared snapshots, so result-serving routes read them with no copy.
 Load-path responses (`load_*`, `update_components`, parameter-library and
 design-handbook apply) embed `_raw_json` as the cached compact (un-indented)
 serialization; the frontend parses it with `JSON.parse`.
+
+All 45 legacy analysis handlers that acquire `Session::busy` use an
+`AtomicFlagLease`: acquisition is compare-and-exchange, and cleanup releases
+only the acquiring request's lease. Malformed JSON, pre-acquisition exceptions,
+and `409` conflicts cannot clear another task's `busy` or reset its `cancel`.
+The global exception handler only formats the error; stack unwinding releases
+an owned lease. `/api/session/status.busy` and `.cancel` remain booleans with
+the existing frontend polling/task-manager contract; no response keys change.
+The registered `session_integrity_e2e` exercises rejected requests, cancellation,
+model replacement during PF, and successful publication of the next current PF.
 
 ## Topology window
 

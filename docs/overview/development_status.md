@@ -6,6 +6,123 @@ This is the living handoff for verified build state and active engineering work.
 Update it in place; do not create dated copies. Source, registered tests, and
 the current Git worktrees remain authoritative.
 
+## PF Presentation Profiling
+
+The next measurement pass is complete without production-code changes.
+`tools/pf_presentation_profile.py` generates an instrumented server copy and
+uses the previous incremental Release overlays. Final paired alternating runs:
+four MATPOWER cases x five fresh servers x baseline/coarse/scan modes = 60
+converged responses with exact full non-timing body hashes. Large-case median
+wall overhead stays below 0.6% (predeclared limit 5%); stage gap <=0.024751 ms.
+
+case9241 coarse medians: HTTP 922.896 ms; component display JSON 122.093 ms,
+attribution JSON 158.251 ms, diagnostic scan/rows 131.434 ms, final JSON dump
+137.120 ms. Two diagnostic lookups consume 45.055 + 46.241 ms; repeat projection
+only 2.172 ms. 35,396 merged rows leave 119,161 prebuilt metric items unused.
+Full output is 49.71 MB, with component results 33.53 MB. Priority is diagnostic
+indexing and selective attribution JSON construction; no savings claim yet.
+
+Timing interpretation corrected: `add_geo_data` destruction costs 62.800 ms
+outside the existing presentation timer, so existing `solve_ms` includes it.
+Handler cleanup costs another 69.536 ms; outside-handler remainder is 12.135 ms,
+not all network time. Fresh-server first requests are not comparable as a
+code regression to prior same-session 836 ms. OPF/TSPF and rich 3W/converter
+performance remain unmeasured. No numerical model, tolerance, API or GUI changed.
+
+Detailed stage/scan/byte tables, boundaries and follow-up priorities:
+`docs/testing/module_code_audit.md`; tool contract:
+`docs/developer/projection_and_results.md`; two-pass evidence:
+`output/pf-presentation-profile/` (final results under `final/`). Python syntax,
+exact response comparisons and source-anchor checks pass. No new full CTest,
+sanitizer, clean build or browser performance run. Existing previews were
+preserved and temporary measurement servers stopped. Final dependency check
+observes externally updated clean HEAD `5eac6be` (pin still `a39812aa`), replacing
+the prior dirty `e6c932e5` state; this pass made no dependency edits or commits.
+The measured server retains old static archives and is not validation of a
+fresh `5eac6be` dependency build.
+
+## Attribution Performance Follow-Up
+
+AUD-097 replaces repeated linear result-attribution lookups with call-local,
+domain-aware voltage/position indexes and lazy component-family row indexes.
+Output order, canonical OPF positions, fallback and recovery semantics remain.
+No cross-call cache or solver tolerance change. Source reports still lack
+domain fields and retain existing all-match provenance behavior.
+
+Three fresh-process samples per mode/fixture, with 100-call batches for small
+cases: synthetic 10000 attribution median 0.524050 -> 0.007305 s (71.74x),
+case9241pegase 0.184947 -> 0.005857 s (31.58x). All full-field output hashes
+match. Initial eager indexing added about 10 us on case14; lazy indexing removes
+the regression (14.065 -> 13.748 us). No memory-reduction claim. These timings
+exclude projection, PF and serialization. Full HTTP case9241 improves
+0.942449 -> 0.836189 s (11.27%), with exact voltage/component-result hashes.
+ACTIVSg2000 has no material HTTP gain. Remaining measured presentation time
+is 511 ms versus the then-reported 128 ms analysis remainder, and the full
+payload is 49.7 MB. The subsequent profiling section above resolves diagnostic,
+JSON and destruction costs; the 128 ms is not pure numerical solve time.
+
+Incremental Release: 99 cases / 669 assertions across attribution, component math,
+carbon storage, SPPT and graph; attribution-unit ASan+UBSan: 4/96
+(`detect_leaks=0`, other archives Release); current relinked server GUI API: 82/82.
+Dependency mismatch/dirty tree and guards remain unchanged. This is not a clean
+build, full CTest or whole-library sanitizer run. Reproduction tool:
+`tools/attribution_performance_benchmark.py`; provenance and measurements:
+`output/attribution-performance/`. Contract and full ledger:
+`docs/developer/projection_and_results.md`, `docs/testing/module_code_audit.md`.
+
+Current preview: http://127.0.0.1:53731/xjtu/ (PID 77754); previous services
+retained. Binary SHA256
+`79acc4a603abacc24a6028378f22843bc04d3264eb6ec384c46570be8696adff`;
+launch provenance: `output/attribution-performance/preview.json`.
+Chrome MATPOWER case14 import/run smoke converges in 3 iterations, residual
+1.3159e-10, with topology and voltage labels rendered. This is a basic desktop
+smoke, not exhaustive GUI acceptance: the imported case's load rows show
+"missing post-PF component row", and Canvas uses 110 kV labels while the result
+table reports zero/unknown base kV. These presentation observations remain
+untriaged and are not covered by the exact backend-output comparison.
+Documentation anchor check passes (1847 symbols, 719 paths, zero failures).
+
+## Repository Review: Correctness Fixes and Measured Optimizations
+
+AUD-089--096 from the risk-directed review of `48e0cf62` are fixed within the
+focused validation scope. All 45 analysis handlers own their busy lease;
+13 PF cache sites reject publication from replaced immutable snapshots.
+User/node GEC rejects incomplete annual evidence and nonfinite metrics;
+distributed-slack participants use stable in-service AC IDs; voltage recovery
+keeps missing same-ID AC/DC values unavailable. Hourly-carbon tables now pad
+once, and distributed-slack mismatch traverses sparse Ybus.
+
+Incremental Release: 148 cases / 1113 assertions pass across six rebuilt test
+executables. The three modified numerical translation units plus new regression
+test pass ASan+UBSan, 6 cases / 228 assertions (`detect_leaks=0`, container checks
+enabled). The rebuilt server passes GUI API 82/82, both session-integrity
+concurrency scenarios, and market-operation desktop/mobile GUI/API E2E.
+Other archives remain prebuilt; this is not full CTest, a clean build, or a
+whole-library sanitizer run. Server compilation retains 19 existing warnings.
+
+Three sequential runs per fixture/mode, 84 samples including controls:
+frozen verified carbon materialization (200 buses/200 loads/4000 steps) median
+2.899230 -> 0.036692 s, 79.0x; AC mismatch (10000 buses) 0.525210 -> 0.0001293 s,
+process peak 1630.06 -> 30.33 MB. Predeclared padding/time/RSS thresholds pass.
+Outputs match exactly; independent injection oracle error <=4.10e-15;
+full small-system redispatch and binding-limit outcomes match. These are
+isolated kernel/materialization results, not full annual/PF speedups.
+Reproducible tool: `tools/review_performance_benchmark.py`; evidence:
+`output/code-optimization/` and `docs/testing/module_code_audit.md`.
+
+Preview: http://127.0.0.1:52180/xjtu/ (PID 47682; separate new server).
+Chrome interaction loads case14 and runs distributed slack: converged in
+15 iterations, residual 1.3157e-10, frontend/backend ready. Existing services
+were not replaced. Binary SHA256
+`3764249b13e88a7179d7d46d4501cd7682d4ae8816edf0c09b26300013cc562e`;
+launch details are in `output/code-optimization/preview.json`.
+
+Main worktree was initially clean; MIPSolvers has five modified files and HEAD
+`e6c932e5` differs from recorded pin `a39812aa`. No dependency files or guards
+were changed. An initial diagnostic executable could not unwind the optional
+sparse-ID exception; that harness issue remains unassigned, and the successful
+non-throwing permutation probe is the identity finding's executable evidence.
+
 ## Southern Market Execution and Boundary GUI
 
 Local/online documentation synchronization: the user tutorial now explains chronological

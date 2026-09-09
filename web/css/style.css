@@ -499,6 +499,13 @@ select:focus-visible, .btn:focus-visible, button:focus-visible, [role="button"]:
 #canvas .port { cursor: crosshair; }
 #canvas .port circle { fill: var(--accent2); stroke: #fff; stroke-width: 1; r: 4; }
 #canvas .port:hover circle { r: 6; fill: var(--accent); }
+/* Busbar connect handles: hidden until the bus is hovered, then act as wire
+   start points at the bar ends + centre (works in select mode). Their radius is
+   counter-scaled in JS (updateConnectHandleScale) to stay a constant screen size
+   at any zoom, so do NOT set a CSS `r` here (it is a world-space override). */
+#canvas .busbar-connect-handle { fill: var(--accent); stroke: var(--canvas-bg, #1e2127); stroke-width: 1.5; opacity: 0; cursor: crosshair; transition: opacity .12s; }
+#canvas .component:hover .busbar-connect-handle { opacity: 0.95; }
+#canvas .busbar-connect-handle:hover { opacity: 1; }
 #canvas .connection { cursor: pointer; }
 #canvas .connection path { fill: none; }
 #canvas .conn-line { fill: none; stroke-linecap: round; stroke-linejoin: round; }
@@ -698,6 +705,18 @@ select:focus-visible, .btn:focus-visible, button:focus-visible, [role="button"]:
 #rightPanelResizer:hover, #rightPanelResizer.dragging {
   background: var(--accent);
 }
+#libraryResizer {
+  width: 5px;
+  cursor: col-resize;
+  background: var(--border);
+  flex-shrink: 0;
+  transition: background 0.15s;
+}
+#libraryResizer:hover, #libraryResizer.dragging {
+  background: var(--accent);
+}
+body.library-collapsed #libraryResizer,
+body.network-overview-active #libraryResizer { display: none; }
 #rightPanel {
   width: var(--right-w);
   min-width: 240px;

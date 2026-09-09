@@ -1,6 +1,23 @@
 \section{源码等价数学模型}
 本章只转写当前实现，不给出比代码更一般的碳流模型。行号对应本章编写时的工作树；函数名是长期定位锚点。
 
+\subsection{年度逐时材料化与 GEC 完整性准入}
+\srcpath{src/carbon\_analysis/annual\_carbon\_analysis.cpp:compute\_annual\_carbon\_analysis\_impl}
+按首次出现顺序登记各域母线及负荷稳定 ID。每个时段只增长本行，全部处理完后由
+\srcpath{extend\_hourly\_width} 各扫描一次三类逐时表，填充后出现列的 NaN。
+对 $T$ 时段、$B$ 母线和 $L$ 负荷，材料化工作为 $O(T(B+L))$；旧实现的
+$O(T^2(B+2L))$ 全表元数据扫描已移除。失败行和缺失列仍为 NaN；这不改变碳流方程或储能库存递推。
+
+用户和节点 GEC 入口共同调用 \srcpath{validate\_gec\_hourly\_inputs}：时段数和
+时长必须为正且有限；逐时能量（MWh）和排放（tCO$_2$）必须严格为
+$T\times L$，且每对样本均有限、非负。若提供 \fld{step\_results}，其长度须为 $T$，
+每步 \fld{pf\_converged} 与 \fld{carbon\_verified} 均须为真。
+不完整输入抛 \texttt{invalid\_argument}，不把未知排放转换成零并报告全年覆盖率。
+无诊断的外部组装数据仍可按完整有限矩阵准入，此时不额外声称追踪已被独立验证。
+两个 GEC 结果校验器对摘要和逐时指标均先检查有限性；关闭逐时输出不能绕过摘要检查。
+注册测试 \srcpath{tests/test\_review\_regressions.cpp} 覆盖上述边界；可复现计时和
+构建范围见 \srcpath{docs/testing/module\_code\_audit.md} 的 AUD-091/094/095。
+
 \subsection{节点净源需求与校核}
 对应 \srcpath{src/carbon\_analysis/carbon\_analysis.cpp:compute\_node\_net\_source\_requirement}
 （1253--1280 行）。对节点 $i$，代码计算

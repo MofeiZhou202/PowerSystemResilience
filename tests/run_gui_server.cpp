@@ -29,6 +29,7 @@
 #include <vector>
 
 #include <httplib.h>
+#include <pthread.h>
 #include <nlohmann/json.hpp>
 
 #include "hacdcpf/analysis/short_circuit.hpp"
@@ -44,6 +45,7 @@
 #include "hacdcpf/projection/result_attribution.hpp"
 #include "hacdcpf/api/hacdcpf.hpp"
 #include "hacdcpf/sppt/sppt.hpp"
+#include "hacdcpf/util/atomic_flag_lease.hpp"
 #include "hacdcpf/io/case_builders.hpp"
 #include "hacdcpf/io/component_io_mapping.hpp"
 #include "hacdcpf/io/json_io.hpp"
@@ -3254,7 +3256,10 @@ void clear_cached_analysis(Session& s) {
 void cache_last_power_flow(Session& s,
                            const hacdcpf::PowerFlowResult& pf,
                            const std::string& method,
-                           const hacdcpf::HybridPowerSystem& sys) {
+                           const hacdcpf::HybridPowerSystem& sys,
+                           const std::shared_ptr<const hacdcpf::HybridPowerSystem>& source) {
+  // An immutable snapshot's identity binds the result to its source revision.
+  if (s.current_system != source) return;
   s.last_pf_result = std::make_shared<const hacdcpf::PowerFlowResult>(pf);
   s.last_pf_system = std::make_shared<const hacdcpf::HybridPowerSystem>(sys);
   s.last_pf_method = method;
@@ -10906,12 +10911,74 @@ json rpo_control_inventory_json(const hacdcpf::HybridPowerSystem& sys,
 
 }  // namespace
 
+// Worker threads with a large (16 MiB) stack. httplib's default ThreadPool uses
+// std::thread (~512 KiB stack on macOS), which several deep-recursion /
+// large-stack-frame handlers (the dynamics catalog, reliability / topology
+// builders) can overflow. This drop-in TaskQueue gives every worker ample stack.
+class BigStackThreadPool : public httplib::TaskQueue {
+public:
+  explicit BigStackThreadPool(size_t n, size_t stack_bytes = 16u * 1024u * 1024u)
+      : shutdown_(false) {
+    pthread_attr_t attr;
+    pthread_attr_init(&attr);
+    pthread_attr_setstacksize(&attr, stack_bytes);
+    threads_.resize(n);
+    for (size_t i = 0; i < n; ++i)
+      pthread_create(&threads_[i], &attr, &BigStackThreadPool::trampoline, this);
+    pthread_attr_destroy(&attr);
+  }
+  BigStackThreadPool(const BigStackThreadPool&) = delete;
+  ~BigStackThreadPool() override = default;
+
+  bool enqueue(std::function<void()> fn) override {
+    {
+      std::unique_lock<std::mutex> lock(mutex_);
+      jobs_.push_back(std::move(fn));
+    }
+    cond_.notify_one();
+    return true;
+  }
+
+  void shutdown() override {
+    {
+      std::unique_lock<std::mutex> lock(mutex_);
+      shutdown_ = true;
+    }
+    cond_.notify_all();
+    for (pthread_t t : threads_) pthread_join(t, nullptr);
+  }
+
+private:
+  static void* trampoline(void* self) {
+    static_cast<BigStackThreadPool*>(self)->worker_loop();
+    return nullptr;
+  }
+  void worker_loop() {
+    for (;;) {
+      std::function<void()> fn;
+      {
+        std::unique_lock<std::mutex> lock(mutex_);
+        cond_.wait(lock, [&] { return !jobs_.empty() || shutdown_; });
+        if (shutdown_ && jobs_.empty()) break;
+        fn = std::move(jobs_.front());
+        jobs_.pop_front();
+      }
+      if (fn) fn();
+    }
+  }
+  std::vector<pthread_t> threads_;
+  std::list<std::function<void()>> jobs_;
+  bool shutdown_;
+  std::mutex mutex_;
+  std::condition_variable cond_;
+};
+
 int main(int argc, char** argv) {
   Args args;
   if (!parse_args(argc, argv, args)) return 1;
 
   httplib::Server svr;
-  svr.new_task_queue = [] { return new httplib::ThreadPool(8); };
+  svr.new_task_queue = [] { return new BigStackThreadPool(8); };
   if (hacdcpf::server::trial_edition_enabled()) {
     svr.set_pre_routing_handler([](const httplib::Request& req,
                                    httplib::Response& res) {
@@ -10949,7 +11016,6 @@ int main(int argc, char** argv) {
 
   // Global exception handler — catch anything that escapes per-route handlers
   svr.set_exception_handler([](const httplib::Request&, httplib::Response& res, std::exception_ptr ep) {
-    g_session.busy.store(false);
     try {
       if (ep) std::rethrow_exception(ep);
     } catch (const std::exception& e) {
@@ -13002,6 +13068,7 @@ int main(int argc, char** argv) {
 
   svr.Post("/api/session/pf",
            [](const httplib::Request& req, httplib::Response& res) {
+    hacdcpf::util::AtomicFlagLease analysis_lease(g_session.busy);
     try {
       const auto request_started = std::chrono::steady_clock::now();
       double presentation_ms = 0.0;
@@ -13013,7 +13080,7 @@ int main(int argc, char** argv) {
       const auto sys_snapshot = session_system_snapshot();
       hacdcpf::HybridPowerSystem sys = *sys_snapshot;
       const auto snapshot_finished = std::chrono::steady_clock::now();
-      if (g_session.busy.exchange(true)) {
+      if (!analysis_lease.try_acquire()) {
         res.status = 409;
         res.set_content(json{{"error","Another analysis is already running"}}.dump(), "application/json");
         return;
@@ -13249,8 +13316,9 @@ int main(int argc, char** argv) {
 
       auto store_last_pf = [&](const hacdcpf::PowerFlowResult* pf) {
         std::lock_guard<std::mutex> lk(g_session.mu);
+        if (g_session.current_system != sys_snapshot) return;
         if (pf != nullptr) {
-          cache_last_power_flow(g_session, *pf, method, sys);
+          cache_last_power_flow(g_session, *pf, method, sys, sys_snapshot);
         } else {
           g_session.last_pf_result.reset();
           g_session.last_pf_system.reset();
@@ -16272,7 +16340,7 @@ int main(int argc, char** argv) {
         add_reactive_limit_diagnostics(pf);
         {
           std::lock_guard<std::mutex> lk(g_session.mu);
-          cache_last_power_flow(g_session, pf, method, ac_sys);
+          cache_last_power_flow(g_session, pf, method, ac_sys, sys_snapshot);
         }
       } else if (method == "dc") {
         auto pf = hacdcpf::solve_dc_power_flow(sys, opt);
@@ -16289,7 +16357,7 @@ int main(int argc, char** argv) {
           out["vm"] = ac_pf.vm;
           out["va"] = ac_pf.va;
           std::lock_guard<std::mutex> lk(g_session.mu);
-          cache_last_power_flow(g_session, ac_pf, method, sys);
+          cache_last_power_flow(g_session, ac_pf, method, sys, sys_snapshot);
         }
       } else if (method == "hybrid_linearized") {
         auto pf = hacdcpf::solve_ac_dc_power_flow(sys, opt);
@@ -16306,7 +16374,7 @@ int main(int argc, char** argv) {
           out["vm"] = ac_pf.vm;
           out["vdc"] = ac_pf.vdc;
           std::lock_guard<std::mutex> lk(g_session.mu);
-          cache_last_power_flow(g_session, ac_pf, method, sys);
+          cache_last_power_flow(g_session, ac_pf, method, sys, sys_snapshot);
         }
       } else if (method == "fdpf") {
         auto pf = hacdcpf::solve_power_flow_fdpf(sys, opt);
@@ -16322,7 +16390,7 @@ int main(int argc, char** argv) {
         add_reactive_limit_diagnostics(pf);
         {
           std::lock_guard<std::mutex> lk(g_session.mu);
-          cache_last_power_flow(g_session, pf, method, sys);
+          cache_last_power_flow(g_session, pf, method, sys, sys_snapshot);
         }
       } else if (method == "adaptive") {
         auto pf = hacdcpf::solve_power_flow_adaptive(sys, opt);
@@ -16340,14 +16408,14 @@ int main(int argc, char** argv) {
             add_transfers(ac_pf);
             add_geo_data(ac_pf);
             std::lock_guard<std::mutex> lk(g_session.mu);
-            cache_last_power_flow(g_session, ac_pf, method, sys);
+            cache_last_power_flow(g_session, ac_pf, method, sys, sys_snapshot);
           } else {
             hacdcpf::PowerFlowResult pfr; pfr.vm = pf.vm; pfr.va = pf.va; pfr.vdc = pf.vdc;
             pfr.converged = pf.converged; pfr.iterations = pf.iterations; pfr.residual = pf.residual;
             pfr.branch_flows = pf.branch_flows;
             add_geo_data(pfr);
             std::lock_guard<std::mutex> lk(g_session.mu);
-            cache_last_power_flow(g_session, pfr, method, sys);
+            cache_last_power_flow(g_session, pfr, method, sys, sys_snapshot);
           }
         }
       } else if (method == "islanded") {
@@ -16366,13 +16434,13 @@ int main(int argc, char** argv) {
             add_geo_data(ac_pf);
             for (const auto& bf : ac_pf.branch_flows) out["branch_abs"].push_back(std::abs(bf.pf_mw));
             std::lock_guard<std::mutex> lk(g_session.mu);
-            cache_last_power_flow(g_session, ac_pf, method, sys);
+            cache_last_power_flow(g_session, ac_pf, method, sys, sys_snapshot);
           } else {
             hacdcpf::PowerFlowResult pfr; pfr.vm = pf.vm; pfr.va = pf.va; pfr.vdc = pf.vdc;
             pfr.converged = pf.converged; pfr.iterations = pf.iterations; pfr.residual = pf.residual;
             add_geo_data(pfr);
             std::lock_guard<std::mutex> lk(g_session.mu);
-            cache_last_power_flow(g_session, pfr, method, sys);
+            cache_last_power_flow(g_session, pfr, method, sys, sys_snapshot);
           }
         }
       } else if (method == "distributed_slack") {
@@ -16768,9 +16836,9 @@ int main(int argc, char** argv) {
                          ", serialize;dur=" + std::to_string(serialization_ms));
       res.set_header("X-HySim-Response-Bytes", std::to_string(payload.size()));
       res.set_content(std::move(payload), "application/json");
-      g_session.busy.store(false);
+      analysis_lease.release();
     } catch (const std::exception& e) {
-      g_session.busy.store(false);
+      analysis_lease.release();
       res.status = 400;
       res.set_content(json{{"error", e.what()}}.dump(), "application/json");
     }
@@ -16782,6 +16850,7 @@ int main(int argc, char** argv) {
   // and per-island validity diagnostics.  Backed by hacdcpf::graph.
   svr.Post("/api/session/run_transient",
            [](const httplib::Request& req, httplib::Response& res) {
+    hacdcpf::util::AtomicFlagLease analysis_lease(g_session.busy);
     try {
       std::shared_ptr<const hacdcpf::HybridPowerSystem> sys_snap;
       hacdcpf::HybridPowerSystem sys;
@@ -16795,7 +16864,7 @@ int main(int argc, char** argv) {
         cached_pf_method = g_session.last_pf_method;
       }
       sys = *sys_snap;  // request-local mutable copy, made after releasing the session lock
-      if (g_session.busy.exchange(true)) {
+      if (!analysis_lease.try_acquire()) {
         res.status = 409;
         res.set_content(json{{"error","Another analysis is already running"}}.dump(), "application/json");
         return;
@@ -17043,9 +17112,9 @@ int main(int argc, char** argv) {
       }
       res.status = result.success ? 200 : 400;
       res.set_content(out.dump(), "application/json");
-      g_session.busy.store(false);
+      analysis_lease.release();
     } catch (const std::exception& e) {
-      g_session.busy.store(false);
+      analysis_lease.release();
       res.status = 400;
       res.set_content(json{{"error", e.what()}}.dump(), "application/json");
     }
@@ -17183,6 +17252,7 @@ int main(int argc, char** argv) {
 
   svr.Post("/api/session/topology",
            [](const httplib::Request&, httplib::Response& res) {
+    hacdcpf::util::AtomicFlagLease analysis_lease(g_session.busy);
     try {
       // Read-shared snapshot + resident topology graph: no per-request system
       // deep copy and no per-request graph rebuild.  Both are immutable and
@@ -17195,7 +17265,7 @@ int main(int argc, char** argv) {
         sys_snapshot = g_session.current_system;
         resident_graph = g_session.topology_graph;
       }
-      if (g_session.busy.exchange(true)) {
+      if (!analysis_lease.try_acquire()) {
         res.status = 409;
         res.set_content(json{{"error","Another analysis is already running"}}.dump(), "application/json");
         return;
@@ -17353,9 +17423,9 @@ int main(int argc, char** argv) {
       out["diagnostics"] = diags;
 
       res.set_content(out.dump(), "application/json");
-      g_session.busy.store(false);
+      analysis_lease.release();
     } catch (const std::exception& e) {
-      g_session.busy.store(false);
+      analysis_lease.release();
       res.status = 400;
       res.set_content(json{{"error", e.what()}}.dump(), "application/json");
     }
@@ -18116,6 +18186,7 @@ int main(int argc, char** argv) {
   // ──────────────────────────────────────────────────────────────────
   svr.Post("/api/session/network_reduction",
            [](const httplib::Request& req, httplib::Response& res) {
+    hacdcpf::util::AtomicFlagLease analysis_lease(g_session.busy);
     try {
       json body = req.body.empty() ? json::object() : json::parse(req.body);
       std::shared_ptr<const hacdcpf::HybridPowerSystem> sys_snap;
@@ -18125,7 +18196,7 @@ int main(int argc, char** argv) {
         sys_snap = g_session.current_system;
       }
       const hacdcpf::HybridPowerSystem& sys = *sys_snap;  // zero-copy read of the shared immutable snapshot
-      if (g_session.busy.exchange(true)) {
+      if (!analysis_lease.try_acquire()) {
         res.status = 409;
         res.set_content(json{{"error","Another analysis is already running"}}.dump(), "application/json");
         return;
@@ -18485,9 +18556,9 @@ int main(int argc, char** argv) {
       }
 
       res.set_content(out.dump(), "application/json");
-      g_session.busy.store(false);
+      analysis_lease.release();
     } catch (const std::exception& e) {
-      g_session.busy.store(false);
+      analysis_lease.release();
       res.status = 400;
       res.set_content(json{{"error", e.what()}}.dump(), "application/json");
     }
@@ -18503,6 +18574,7 @@ int main(int argc, char** argv) {
   // Used by the XJTU GUI OPF module.
   svr.Post("/api/session/opf",
            [](const httplib::Request& req, httplib::Response& res) {
+    hacdcpf::util::AtomicFlagLease analysis_lease(g_session.busy);
     try {
       const auto request_started = std::chrono::steady_clock::now();
       double core_solver_ms = 0.0;
@@ -18517,7 +18589,7 @@ int main(int argc, char** argv) {
       }
       sys = *sys_snap;  // request-local mutable copy, made after releasing the session lock
       const auto snapshot_finished = std::chrono::steady_clock::now();
-      if (g_session.busy.exchange(true)) {
+      if (!analysis_lease.try_acquire()) {
         res.status = 409;
         res.set_content(json{{"error","Another analysis is already running"}}.dump(), "application/json");
         return;
@@ -19607,7 +19679,7 @@ int main(int argc, char** argv) {
             }
             {
               std::lock_guard<std::mutex> lk(g_session.mu);
-              cache_last_power_flow(g_session, ac_pf, "opf", carbon_sys);
+              cache_last_power_flow(g_session, ac_pf, "opf", carbon_sys, sys_snap);
             }
             // Post-OPF power-flow view: the actual branch flows + converter
             // transfers at the OPF dispatch, so the GUI can show 潮流 (and drive a
@@ -19926,9 +19998,9 @@ int main(int argc, char** argv) {
                          ", serialize;dur=" + std::to_string(serialization_ms));
       res.set_header("X-HySim-Response-Bytes", std::to_string(payload.size()));
       res.set_content(std::move(payload), "application/json");
-      g_session.busy.store(false);
+      analysis_lease.release();
     } catch (const std::exception& e) {
-      g_session.busy.store(false);
+      analysis_lease.release();
       res.status = 400;
       res.set_content(json{{"error", e.what()}}.dump(), "application/json");
     }
@@ -19936,6 +20008,7 @@ int main(int argc, char** argv) {
 
   svr.Post("/api/session/opf_ac",
            [](const httplib::Request& req, httplib::Response& res) {
+    hacdcpf::util::AtomicFlagLease analysis_lease(g_session.busy);
     try {
       std::shared_ptr<const hacdcpf::HybridPowerSystem> sys_snap;
       hacdcpf::HybridPowerSystem sys;
@@ -19945,7 +20018,7 @@ int main(int argc, char** argv) {
         sys_snap = g_session.current_system;
       }
       sys = *sys_snap;  // request-local mutable copy, made after releasing the session lock
-      if (g_session.busy.exchange(true)) {
+      if (!analysis_lease.try_acquire()) {
         res.status = 409;
         res.set_content(json{{"error","Another analysis is already running"}}.dump(), "application/json");
         return;
@@ -20000,13 +20073,13 @@ int main(int argc, char** argv) {
         auto ac_pf = hacdcpf::solve_power_flow(sys);
         if (ac_pf.converged) {
           std::lock_guard<std::mutex> lk(g_session.mu);
-          cache_last_power_flow(g_session, ac_pf, "opf_ac", sys);
+          cache_last_power_flow(g_session, ac_pf, "opf_ac", sys, sys_snap);
         }
       }
       res.set_content(out.dump(), "application/json");
-      g_session.busy.store(false);
+      analysis_lease.release();
     } catch (const std::exception& e) {
-      g_session.busy.store(false);
+      analysis_lease.release();
       res.status = 400;
       res.set_content(json{{"error", e.what()}}.dump(), "application/json");
     }
@@ -20014,6 +20087,7 @@ int main(int argc, char** argv) {
 
   svr.Post("/api/session/opf_parity",
            [](const httplib::Request&, httplib::Response& res) {
+    hacdcpf::util::AtomicFlagLease analysis_lease(g_session.busy);
     try {
       std::shared_ptr<const hacdcpf::HybridPowerSystem> sys_snap;
       hacdcpf::HybridPowerSystem sys;
@@ -20023,7 +20097,7 @@ int main(int argc, char** argv) {
         sys_snap = g_session.current_system;
       }
       sys = *sys_snap;  // request-local mutable copy, made after releasing the session lock
-      if (g_session.busy.exchange(true)) {
+      if (!analysis_lease.try_acquire()) {
         res.status = 409;
         res.set_content(json{{"error","Another analysis is already running"}}.dump(), "application/json");
         return;
@@ -20056,13 +20130,13 @@ int main(int argc, char** argv) {
         auto ac_pf = hacdcpf::solve_power_flow(sys);
         if (ac_pf.converged) {
           std::lock_guard<std::mutex> lk(g_session.mu);
-          cache_last_power_flow(g_session, ac_pf, "opf_parity", sys);
+          cache_last_power_flow(g_session, ac_pf, "opf_parity", sys, sys_snap);
         }
       }
       res.set_content(out.dump(), "application/json");
-      g_session.busy.store(false);
+      analysis_lease.release();
     } catch (const std::exception& e) {
-      g_session.busy.store(false);
+      analysis_lease.release();
       res.status = 400;
       res.set_content(json{{"error", e.what()}}.dump(), "application/json");
     }
@@ -20070,6 +20144,7 @@ int main(int argc, char** argv) {
 
   svr.Post("/api/session/opf_dc",
            [](const httplib::Request&, httplib::Response& res) {
+    hacdcpf::util::AtomicFlagLease analysis_lease(g_session.busy);
     try {
       std::shared_ptr<const hacdcpf::HybridPowerSystem> sys_snap;
       hacdcpf::HybridPowerSystem sys;
@@ -20079,7 +20154,7 @@ int main(int argc, char** argv) {
         sys_snap = g_session.current_system;
       }
       sys = *sys_snap;  // request-local mutable copy, made after releasing the session lock
-      if (g_session.busy.exchange(true)) {
+      if (!analysis_lease.try_acquire()) {
         res.status = 409;
         res.set_content(json{{"error","Another analysis is already running"}}.dump(), "application/json");
         return;
@@ -20101,13 +20176,13 @@ int main(int argc, char** argv) {
         auto ac_pf = hacdcpf::solve_power_flow(sys);
         if (ac_pf.converged) {
           std::lock_guard<std::mutex> lk(g_session.mu);
-          cache_last_power_flow(g_session, ac_pf, "opf_dc", sys);
+          cache_last_power_flow(g_session, ac_pf, "opf_dc", sys, sys_snap);
         }
       }
       res.set_content(out.dump(), "application/json");
-      g_session.busy.store(false);
+      analysis_lease.release();
     } catch (const std::exception& e) {
-      g_session.busy.store(false);
+      analysis_lease.release();
       res.status = 400;
       res.set_content(json{{"error", e.what()}}.dump(), "application/json");
     }
@@ -20115,6 +20190,7 @@ int main(int argc, char** argv) {
 
   svr.Post("/api/session/sc",
            [](const httplib::Request& req, httplib::Response& res) {
+    hacdcpf::util::AtomicFlagLease analysis_lease(g_session.busy);
     try {
       std::shared_ptr<const hacdcpf::HybridPowerSystem> sys_snap;
       {
@@ -20123,7 +20199,7 @@ int main(int argc, char** argv) {
         sys_snap = g_session.current_system;
       }
       const hacdcpf::HybridPowerSystem& sys = *sys_snap;  // zero-copy read of the shared immutable snapshot
-      if (g_session.busy.exchange(true)) {
+      if (!analysis_lease.try_acquire()) {
         res.status = 409;
         res.set_content(json{{"error","Another analysis is already running"}}.dump(), "application/json");
         return;
@@ -20164,9 +20240,9 @@ int main(int argc, char** argv) {
         });
       }
       res.set_content(out.dump(), "application/json");
-      g_session.busy.store(false);
+      analysis_lease.release();
     } catch (const std::exception& e) {
-      g_session.busy.store(false);
+      analysis_lease.release();
       res.status = 400;
       res.set_content(json{{"error", e.what()}}.dump(), "application/json");
     }
@@ -20175,6 +20251,7 @@ int main(int argc, char** argv) {
   // ---- Harmonic Power Flow (hybrid AC/DC, frequency-domain penetration) ----
   svr.Post("/api/session/harmonics",
            [](const httplib::Request& req, httplib::Response& res) {
+    hacdcpf::util::AtomicFlagLease analysis_lease(g_session.busy);
     try {
       std::shared_ptr<const hacdcpf::HybridPowerSystem> sys_snap;
       {
@@ -20183,7 +20260,7 @@ int main(int argc, char** argv) {
         sys_snap = g_session.current_system;
       }
       const hacdcpf::HybridPowerSystem& sys = *sys_snap;  // zero-copy read of the shared immutable snapshot
-      if (g_session.busy.exchange(true)) {
+      if (!analysis_lease.try_acquire()) {
         res.status = 409;
         res.set_content(json{{"error","Another analysis is already running"}}.dump(), "application/json");
         return;
@@ -20301,9 +20378,9 @@ int main(int argc, char** argv) {
       }
 
       res.set_content(out.dump(), "application/json");
-      g_session.busy.store(false);
+      analysis_lease.release();
     } catch (const std::exception& e) {
-      g_session.busy.store(false);
+      analysis_lease.release();
       res.status = 400;
       res.set_content(json{{"error", e.what()}}.dump(), "application/json");
     }
@@ -20312,6 +20389,7 @@ int main(int argc, char** argv) {
   // ---- Frequency-coupled harmonic state-space (HSS) ----
   svr.Post("/api/session/harmonics_hss",
            [](const httplib::Request& req, httplib::Response& res) {
+    hacdcpf::util::AtomicFlagLease analysis_lease(g_session.busy);
     try {
       std::shared_ptr<const hacdcpf::HybridPowerSystem> sys_snap;
       {
@@ -20319,7 +20397,7 @@ int main(int argc, char** argv) {
         if (!g_session.current_system) throw std::runtime_error("No system loaded");
         sys_snap = g_session.current_system;
       }
-      if (g_session.busy.exchange(true)) {
+      if (!analysis_lease.try_acquire()) {
         res.status = 409;
         res.set_content(json{{"error", "Another analysis is already running"}}.dump(),
                         "application/json");
@@ -20396,9 +20474,9 @@ int main(int argc, char** argv) {
         out["device_terminal_results"].push_back(std::move(row));
       }
       res.set_content(out.dump(), "application/json");
-      g_session.busy.store(false);
+      analysis_lease.release();
     } catch (const std::exception& e) {
-      g_session.busy.store(false);
+      analysis_lease.release();
       res.status = 400;
       res.set_content(json{{"error", e.what()}}.dump(), "application/json");
     }
@@ -20407,6 +20485,7 @@ int main(int argc, char** argv) {
   // ---- Harmonic frequency scan / resonance analysis ----
   svr.Post("/api/session/harmonics_freqscan",
            [](const httplib::Request& req, httplib::Response& res) {
+    hacdcpf::util::AtomicFlagLease analysis_lease(g_session.busy);
     try {
       std::shared_ptr<const hacdcpf::HybridPowerSystem> sys_snap;
       {
@@ -20415,7 +20494,7 @@ int main(int argc, char** argv) {
         sys_snap = g_session.current_system;
       }
       const hacdcpf::HybridPowerSystem& sys = *sys_snap;  // zero-copy read of the shared immutable snapshot
-      if (g_session.busy.exchange(true)) {
+      if (!analysis_lease.try_acquire()) {
         res.status = 409;
         res.set_content(json{{"error","Another analysis is already running"}}.dump(), "application/json");
         return;
@@ -20477,9 +20556,9 @@ int main(int argc, char** argv) {
         }
       }
       res.set_content(out.dump(), "application/json");
-      g_session.busy.store(false);
+      analysis_lease.release();
     } catch (const std::exception& e) {
-      g_session.busy.store(false);
+      analysis_lease.release();
       res.status = 400;
       res.set_content(json{{"error", e.what()}}.dump(), "application/json");
     }
@@ -20488,6 +20567,7 @@ int main(int argc, char** argv) {
   // ---- Three-phase (abc-domain) harmonic power flow ----
   svr.Post("/api/session/harmonics_3ph",
            [](const httplib::Request& req, httplib::Response& res) {
+    hacdcpf::util::AtomicFlagLease analysis_lease(g_session.busy);
     try {
       std::shared_ptr<const hacdcpf::HybridPowerSystem> sys_snap;
       {
@@ -20502,7 +20582,7 @@ int main(int argc, char** argv) {
             "three-phase harmonic power flow is unavailable."}}.dump(), "application/json");
         return;
       }
-      if (g_session.busy.exchange(true)) {
+      if (!analysis_lease.try_acquire()) {
         res.status = 409;
         res.set_content(json{{"error","Another analysis is already running"}}.dump(), "application/json");
         return;
@@ -20579,9 +20659,9 @@ int main(int argc, char** argv) {
         out["compliance"] = comp;
       }
       res.set_content(out.dump(), "application/json");
-      g_session.busy.store(false);
+      analysis_lease.release();
     } catch (const std::exception& e) {
-      g_session.busy.store(false);
+      analysis_lease.release();
       res.status = 400;
       res.set_content(json{{"error", e.what()}}.dump(), "application/json");
     }
@@ -20590,6 +20670,7 @@ int main(int argc, char** argv) {
   // ---- Harmonic metrics: losses, K-factor, current THD / TDD ----
   svr.Post("/api/session/harmonics_metrics",
            [](const httplib::Request& req, httplib::Response& res) {
+    hacdcpf::util::AtomicFlagLease analysis_lease(g_session.busy);
     try {
       std::shared_ptr<const hacdcpf::HybridPowerSystem> sys_snap;
       {
@@ -20598,7 +20679,7 @@ int main(int argc, char** argv) {
         sys_snap = g_session.current_system;
       }
       const hacdcpf::HybridPowerSystem& sys = *sys_snap;  // zero-copy read of the shared immutable snapshot
-      if (g_session.busy.exchange(true)) {
+      if (!analysis_lease.try_acquire()) {
         res.status = 409;
         res.set_content(json{{"error","Another analysis is already running"}}.dump(), "application/json");
         return;
@@ -20651,9 +20732,9 @@ int main(int argc, char** argv) {
         out["branches"].push_back(std::move(row));
       }
       res.set_content(out.dump(), "application/json");
-      g_session.busy.store(false);
+      analysis_lease.release();
     } catch (const std::exception& e) {
-      g_session.busy.store(false);
+      analysis_lease.release();
       res.status = 400;
       res.set_content(json{{"error", e.what()}}.dump(), "application/json");
     }
@@ -20662,6 +20743,7 @@ int main(int argc, char** argv) {
   // ---- Newton-Raphson harmonic power flow (nonlinear resources) ----
   svr.Post("/api/session/harmonics_newton",
            [](const httplib::Request& req, httplib::Response& res) {
+    hacdcpf::util::AtomicFlagLease analysis_lease(g_session.busy);
     try {
       std::shared_ptr<const hacdcpf::HybridPowerSystem> sys_snap;
       {
@@ -20670,7 +20752,7 @@ int main(int argc, char** argv) {
         sys_snap = g_session.current_system;
       }
       const hacdcpf::HybridPowerSystem& sys = *sys_snap;  // zero-copy read of the shared immutable snapshot
-      if (g_session.busy.exchange(true)) {
+      if (!analysis_lease.try_acquire()) {
         res.status = 409;
         res.set_content(json{{"error","Another analysis is already running"}}.dump(), "application/json");
         return;
@@ -20724,9 +20806,9 @@ int main(int argc, char** argv) {
       for (const auto& b : r.ac_bus_results)
         out["ac_bus_results"].push_back(hpf_api::bus_json(b, sys));
       res.set_content(out.dump(), "application/json");
-      g_session.busy.store(false);
+      analysis_lease.release();
     } catch (const std::exception& e) {
-      g_session.busy.store(false);
+      analysis_lease.release();
       res.status = 400;
       res.set_content(json{{"error", e.what()}}.dump(), "application/json");
     }
@@ -20736,6 +20818,7 @@ int main(int argc, char** argv) {
   // ---- Hosting-Capacity Assessment (DL/T 2041-2025, equipment-level) ----
   svr.Post("/api/session/run_hosting_capacity",
            [](const httplib::Request& req, httplib::Response& res) {
+    hacdcpf::util::AtomicFlagLease analysis_lease(g_session.busy);
     try {
       const auto request_started = std::chrono::steady_clock::now();
       std::shared_ptr<const hacdcpf::HybridPowerSystem> sys_snap;
@@ -20745,7 +20828,7 @@ int main(int argc, char** argv) {
         sys_snap = g_session.current_system;
       }
       const hacdcpf::HybridPowerSystem& sys = *sys_snap;  // zero-copy read of the shared immutable snapshot
-      if (g_session.busy.exchange(true)) {
+      if (!analysis_lease.try_acquire()) {
         res.status = 409;
         res.set_content(json{{"error","Another analysis is already running"}}.dump(), "application/json");
         return;
@@ -20759,10 +20842,10 @@ int main(int argc, char** argv) {
         out["converged"] = true;
         out["execution_time_sec"] = elapsed_seconds(request_started);
         res.set_content(out.dump(), "application/json");
-      } catch (...) { g_session.busy.store(false); throw; }
-      g_session.busy.store(false);
+      } catch (...) { analysis_lease.release(); throw; }
+      analysis_lease.release();
     } catch (const std::exception& e) {
-      g_session.busy.store(false);
+      analysis_lease.release();
       res.status = 400;
       res.set_content(json{{"error", e.what()}}.dump(), "application/json");
     }
@@ -20771,6 +20854,7 @@ int main(int argc, char** argv) {
     // ---- Detailed Short Circuit at Selected Buses ----
     svr.Post("/api/session/sc_detailed",
              [](const httplib::Request& req, httplib::Response& res) {
+      hacdcpf::util::AtomicFlagLease analysis_lease(g_session.busy);
       try {
         std::shared_ptr<const hacdcpf::HybridPowerSystem> sys_snap;
         {
@@ -20779,7 +20863,7 @@ int main(int argc, char** argv) {
           sys_snap = g_session.current_system;
         }
         const hacdcpf::HybridPowerSystem& sys = *sys_snap;  // zero-copy read of the shared immutable snapshot
-        if (g_session.busy.exchange(true)) {
+        if (!analysis_lease.try_acquire()) {
           res.status = 409;
           res.set_content(json{{"error","Another analysis is already running"}}.dump(), "application/json");
           return;
@@ -20793,7 +20877,7 @@ int main(int argc, char** argv) {
         hacdcpf::analysis::SCDetailedOptions dopt;
         apply_sc_request_options(j, dopt);
         if (const auto error = sc_detailed_options_validation_error(dopt)) {
-          g_session.busy.store(false);
+          analysis_lease.release();
           res.status = 400;
           res.set_content(json{{"error", *error}}.dump(), "application/json");
           return;
@@ -20897,9 +20981,9 @@ int main(int argc, char** argv) {
         out["solved_count"] = solved_count;
         out["failed_count"] = failed_count;
         res.set_content(out.dump(), "application/json");
-        g_session.busy.store(false);
+        analysis_lease.release();
       } catch (const std::exception& e) {
-        g_session.busy.store(false);
+        analysis_lease.release();
         res.status = 400;
         res.set_content(json{{"error", e.what()}}.dump(), "application/json");
       }
@@ -20908,6 +20992,7 @@ int main(int argc, char** argv) {
     // ---- DC Short Circuit at Selected DC Buses ----
     svr.Post("/api/session/dc_sc",
              [](const httplib::Request& req, httplib::Response& res) {
+      hacdcpf::util::AtomicFlagLease analysis_lease(g_session.busy);
       try {
         std::shared_ptr<const hacdcpf::HybridPowerSystem> sys_snap;
         {
@@ -20916,7 +21001,7 @@ int main(int argc, char** argv) {
           sys_snap = g_session.current_system;
         }
         const hacdcpf::HybridPowerSystem& sys = *sys_snap;  // zero-copy read of the shared immutable snapshot
-        if (g_session.busy.exchange(true)) {
+        if (!analysis_lease.try_acquire()) {
           res.status = 409;
           res.set_content(json{{"error","Another analysis is already running"}}.dump(), "application/json");
           return;
@@ -20988,9 +21073,9 @@ int main(int argc, char** argv) {
         out["solved_count"] = solved_count;
         out["failed_count"] = static_cast<int>(dc_results.size()) - solved_count;
         res.set_content(out.dump(), "application/json");
-        g_session.busy.store(false);
+        analysis_lease.release();
       } catch (const std::exception& e) {
-        g_session.busy.store(false);
+        analysis_lease.release();
         res.status = 400;
         res.set_content(json{{"error", e.what()}}.dump(), "application/json");
       }
@@ -21189,6 +21274,7 @@ int main(int argc, char** argv) {
     svr.Post("/api/session/run_ts_pf",
              [materialize_loads_and_apply_binding]
              (const httplib::Request& req, httplib::Response& res) {
+      hacdcpf::util::AtomicFlagLease analysis_lease(g_session.busy);
       try {
         const auto request_started = std::chrono::steady_clock::now();
         hacdcpf::HybridPowerSystem sys_ts;
@@ -21238,7 +21324,7 @@ int main(int argc, char** argv) {
         int n_remat = materialize_loads_and_apply_binding(sys_ts, spec);
         // Native DCStorage identity remains in the rich model. The solver
         // materializes it only inside its canonical working copy.
-        if (g_session.busy.exchange(true)) {
+        if (!analysis_lease.try_acquire()) {
           res.status = 409;
           res.set_content(json{{"error","Another analysis is already running"}}.dump(), "application/json");
           return;
@@ -21977,13 +22063,13 @@ int main(int argc, char** argv) {
         out["voltage_qualification"]["basis"] = "converged_time_steps";
         out["execution_time_sec"] = elapsed_seconds(request_started);
         res.set_content(out.dump(), "application/json");
-        g_session.busy.store(false);
+        analysis_lease.release();
       } catch (const std::exception& e) {
-        g_session.busy.store(false);
+        analysis_lease.release();
         res.status = 400;
         res.set_content(json{{"error", e.what()}}.dump(), "application/json");
       } catch (...) {
-        g_session.busy.store(false);
+        analysis_lease.release();
         res.status = 500;
         res.set_content(json{{"error", "Unknown internal error in time-series PF"}}.dump(), "application/json");
       }
@@ -21992,7 +22078,8 @@ int main(int argc, char** argv) {
     // ---- Campus integrated energy simulation (multi-carrier LP/MILP) ----
     svr.Post("/api/session/run_campus_ies",
              [](const httplib::Request& req, httplib::Response& res) {
-      if (g_session.busy.exchange(true)) {
+    hacdcpf::util::AtomicFlagLease analysis_lease(g_session.busy);
+      if (!analysis_lease.try_acquire()) {
         res.status = 409;
         res.set_content(json{{"error","Another analysis is already running"}}.dump(),
                         "application/json");
@@ -22038,13 +22125,13 @@ int main(int argc, char** argv) {
             {"grid_buy_price", data.grid_buy_price},
             {"grid_carbon_tco2_mwh", data.grid_carbon_tco2_mwh}};
         res.set_content(out.dump(), "application/json");
-        g_session.busy.store(false);
+        analysis_lease.release();
       } catch (const std::exception& e) {
-        g_session.busy.store(false);
+        analysis_lease.release();
         res.status = 400;
         res.set_content(json{{"error", e.what()}}.dump(), "application/json");
       } catch (...) {
-        g_session.busy.store(false);
+        analysis_lease.release();
         res.status = 500;
         res.set_content(json{{"error", "Unknown internal error in campus integrated energy simulation"}}.dump(),
                         "application/json");
@@ -22054,6 +22141,7 @@ int main(int argc, char** argv) {
     // ---- Unit Commitment only ----
     svr.Post("/api/session/run_uc",
              [](const httplib::Request& req, httplib::Response& res) {
+      hacdcpf::util::AtomicFlagLease analysis_lease(g_session.busy);
       try {
         std::shared_ptr<const hacdcpf::HybridPowerSystem> sys_ts_snap;
         hacdcpf::HybridPowerSystem sys_ts;
@@ -22069,7 +22157,7 @@ int main(int argc, char** argv) {
           ts_data = g_session.ts_data;
         }
         sys_ts = *sys_ts_snap;  // request-local mutable copy, made after releasing the session lock
-        if (g_session.busy.exchange(true)) {
+        if (!analysis_lease.try_acquire()) {
           res.status = 409;
           res.set_content(json{{"error","Another analysis is already running"}}.dump(), "application/json");
           return;
@@ -22097,13 +22185,13 @@ int main(int argc, char** argv) {
             en.push_back(sys_ts.ac.storage[i].name.empty() ? "ESS"+std::to_string(i) : sys_ts.ac.storage[i].name);
         out["gen_names"] = gn; out["ren_names"] = rn; out["ess_names"] = en;
         res.set_content(out.dump(), "application/json");
-        g_session.busy.store(false);
+        analysis_lease.release();
       } catch (const std::exception& e) {
-        g_session.busy.store(false);
+        analysis_lease.release();
         res.status = 400;
         res.set_content(json{{"error", e.what()}}.dump(), "application/json");
       } catch (...) {
-        g_session.busy.store(false);
+        analysis_lease.release();
         res.status = 500;
         res.set_content(json{{"error", "Unknown internal error in unit commitment"}}.dump(), "application/json");
       }
@@ -22200,7 +22288,8 @@ int main(int argc, char** argv) {
       } catch (const std::exception& e) { res.status=400; res.set_content(json{{"error",e.what()}}.dump(),"application/json"); }
     });
     svr.Post("/api/session/run_southern_market", [](const httplib::Request& req, httplib::Response& res) {
-      bool owns_busy = false;
+      hacdcpf::util::AtomicFlagLease analysis_lease(g_session.busy);
+
       try {
         const json body = json::parse(req.body);
         if (!body.is_object() || body.size() != 1 || !body.contains("revision")) throw std::invalid_argument("Expected only revision");
@@ -22212,10 +22301,10 @@ int main(int argc, char** argv) {
             res.status = 409; res.set_content(json{{"error", "Boundary revision changed; reload"}}.dump(), "application/json"); return;
           }
           if (!g_session.southern_boundary) throw std::invalid_argument("Save Southern market boundaries first");
-          if (g_session.busy.exchange(true)) {
+          if (!analysis_lease.try_acquire()) {
             res.status = 409; res.set_content(json{{"error", "Another analysis is running"}}.dump(), "application/json"); return;
           }
-          owns_busy = true; input = *g_session.southern_boundary; baseline = g_session.southern_baseline;
+           input = *g_session.southern_boundary; baseline = g_session.southern_baseline;
         }
         json result = hacdcpf::market::run_southern_day_ahead_market(input);
         result["boundary_revision"] = revision;
@@ -22232,14 +22321,14 @@ int main(int argc, char** argv) {
           // guard. Avoid copying the complete large result (performance.md).
           response_body = result.dump();
           if (!stale) g_session.southern_latest = std::move(result);
-          g_session.busy.store(false); owns_busy = false;
+          analysis_lease.release();
         }
         res.set_content(std::move(response_body), "application/json");
       } catch (const std::invalid_argument& e) {
-        if (owns_busy) g_session.busy.store(false);
+        analysis_lease.release();
         res.status = 400; res.set_content(json{{"error", e.what()}}.dump(), "application/json");
       } catch (const std::exception& e) {
-        if (owns_busy) g_session.busy.store(false);
+        analysis_lease.release();
         res.status = 400; res.set_content(json{{"error", e.what()}}.dump(), "application/json");
       }
     });
@@ -22257,7 +22346,8 @@ int main(int argc, char** argv) {
       catch(const std::exception& e){res.status=400;res.set_content(json{{"error",e.what()}}.dump(),"application/json");}
     });
     svr.Post("/api/session/southern_realtime", [realtime_view](const httplib::Request& req, httplib::Response& res) {
-      bool owns_busy=false;
+      hacdcpf::util::AtomicFlagLease analysis_lease(g_session.busy);
+
       try {const auto body=json::parse(req.body);const std::string action=body.at("action");
         const std::set<std::string> keys=action=="save"?std::set<std::string>{"action","revision","config"}:std::set<std::string>{"action","revision","run_id"};
         if(action!="save"&&action!="step")throw std::invalid_argument("Unknown real-time action");
@@ -22272,16 +22362,16 @@ int main(int argc, char** argv) {
             res.set_content(json{{"revision",g_session.southern_revision},{"run_id",g_session.realtime_id},{"job",realtime_view(job)},{"config",job.at("config")}}.dump(),"application/json");return;
           }
           if(body.at("run_id")!=id||g_session.realtime_revision!=revision||!g_session.southern_realtime){res.status=409;res.set_content(json{{"error","Real-time run changed; reload"}}.dump(),"application/json");return;}
-          job=*g_session.southern_realtime;if(g_session.busy.exchange(true)){res.status=409;res.set_content(json{{"error","Analysis busy"}}.dump(),"application/json");return;}owns_busy=true;
+          job=*g_session.southern_realtime;if(!analysis_lease.try_acquire()){res.status=409;res.set_content(json{{"error","Analysis busy"}}.dump(),"application/json");return;}
         }
         job=hacdcpf::market::step_southern_realtime(job);
         {std::lock_guard<std::mutex> lock(g_session.mu);
           if(revision!=g_session.southern_revision||id!=g_session.realtime_id)job["status"]="stale";else g_session.southern_realtime=job;
-          g_session.busy.store(false);owns_busy=false;}
+          analysis_lease.release();}
         res.set_content(json{{"revision",revision},{"run_id",id},{"job",realtime_view(job)}}.dump(),"application/json");
-      }catch(const std::invalid_argument& e){if(owns_busy)g_session.busy.store(false);res.status=400;res.set_content(json{{"error",e.what()}}.dump(),"application/json");}
-      catch(const json::exception& e){if(owns_busy)g_session.busy.store(false);res.status=400;res.set_content(json{{"error",e.what()}}.dump(),"application/json");}
-      catch(const std::exception& e){if(owns_busy)g_session.busy.store(false);res.status=400;res.set_content(json{{"error",e.what()}}.dump(),"application/json");}
+      }catch(const std::invalid_argument& e){analysis_lease.release();res.status=400;res.set_content(json{{"error",e.what()}}.dump(),"application/json");}
+      catch(const json::exception& e){analysis_lease.release();res.status=400;res.set_content(json{{"error",e.what()}}.dump(),"application/json");}
+      catch(const std::exception& e){analysis_lease.release();res.status=400;res.set_content(json{{"error",e.what()}}.dump(),"application/json");}
     });
     svr.Get("/api/session/yunnan_ancillary", [](const httplib::Request&, httplib::Response& res) {
       try {
@@ -22298,7 +22388,8 @@ int main(int argc, char** argv) {
       catch(const std::exception& e) {res.status=400;res.set_content(json{{"error",e.what()}}.dump(),"application/json");}
     });
     svr.Post("/api/session/yunnan_ancillary", [](const httplib::Request& req, httplib::Response& res) {
-      bool owns_busy=false;
+      hacdcpf::util::AtomicFlagLease analysis_lease(g_session.busy);
+
       try {
         const auto body=json::parse(req.body);
         if(!body.is_object() || !body.contains("revision") || !body.contains("action"))throw std::invalid_argument("Expected revision and action");
@@ -22348,10 +22439,10 @@ int main(int argc, char** argv) {
             }
             preceding=*g_session.yunnan_day_ahead;
           }
-          if(g_session.busy.exchange(true)) {
+          if(!analysis_lease.try_acquire()) {
             res.status=409;res.set_content(json{{"error","Another analysis is running"}}.dump(),"application/json");return;
           }
-          owns_busy=true;
+
         }
         auto result=action=="intraday"?hacdcpf::market::run_yunnan_ancillary_intraday(boundary,body.at("config"),preceding)
           :hacdcpf::market::run_yunnan_ancillary_market(boundary,body.at("config"));
@@ -22363,14 +22454,14 @@ int main(int argc, char** argv) {
             if(action=="run")g_session.yunnan_day_ahead=result;
             g_session.yunnan_config=body.at("config");g_session.yunnan_result=result;g_session.yunnan_revision=revision;
           }
-          g_session.busy.store(false);owns_busy=false;
+          analysis_lease.release();
         }
         res.set_content(json{{"revision",revision},{"config",body.at("config")},{"day_ahead_id",action=="run"?result.value("clearing_id",json(nullptr)):preceding.at("clearing_id")},{"result",result}}.dump(),"application/json");
       } catch(const std::invalid_argument& e) {
-        if(owns_busy)g_session.busy.store(false);
+        analysis_lease.release();
         res.status=400;res.set_content(json{{"error",e.what()}}.dump(),"application/json");
       } catch(const std::exception& e) {
-        if(owns_busy)g_session.busy.store(false);
+        analysis_lease.release();
         res.status=400;res.set_content(json{{"error",e.what()}}.dump(),"application/json");
       }
     });
@@ -22388,7 +22479,8 @@ int main(int argc, char** argv) {
         {"busy", g_session.busy.load()}, {"job", g_session.market_operation ? operation_view(*g_session.market_operation) : json(nullptr)}}.dump(), "application/json");
     });
     svr.Post("/api/session/market_operation", [operation_view](const httplib::Request& req, httplib::Response& res) {
-      bool owns_busy = false;
+      hacdcpf::util::AtomicFlagLease analysis_lease(g_session.busy);
+
       try {
         const json body = json::parse(req.body); const std::string action = body.at("action");
         const std::set<std::string> allowed = action == "preview" ? std::set<std::string>{"action", "revision", "config", "day"}
@@ -22431,7 +22523,7 @@ int main(int argc, char** argv) {
             res.status = 409; res.set_content("{\"error\":\"Run or boundary changed; reload\"}", "application/json"); return;
           }
           job = *g_session.market_operation;
-          g_session.busy.store(true); owns_busy = true;
+          if (!analysis_lease.try_acquire()) { res.status = 409; res.set_content("{\"error\":\"Another computation is running\"}", "application/json"); return; }
         }
         job = action == "explain" ? hacdcpf::market::explain_market_operation_day(job, body.at("day").get<int>(), body.value("pricing",std::string("dispatch_only")))
                                   : hacdcpf::market::step_market_operation(job);
@@ -22440,14 +22532,14 @@ int main(int argc, char** argv) {
           if (g_session.market_operation_cancel.load()) job["status"] = "cancelled";
           if (id != g_session.market_operation_id || revision != g_session.southern_revision) job["status"] = "stale";
           else g_session.market_operation = job;
-          g_session.busy.store(false); owns_busy = false;
+          analysis_lease.release();
         }
         res.set_content(json{{"run_id", id}, {"job", operation_view(job)}}.dump(), "application/json");
       } catch (const std::invalid_argument& e) {
-        if (owns_busy) g_session.busy.store(false);
+        analysis_lease.release();
         res.status = 400; res.set_content(json{{"error", e.what()}}.dump(), "application/json");
       } catch (const std::exception& e) {
-        if (owns_busy) g_session.busy.store(false);
+        analysis_lease.release();
         res.status = 400; res.set_content(json{{"error", e.what()}}.dump(), "application/json");
       }
     });
@@ -22476,11 +22568,12 @@ int main(int argc, char** argv) {
         {"job", task ? forecast_view(*task, req.get_param_value("export") == "1") : json(nullptr)}}.dump(), "application/json");
     });
     svr.Post(R"(/api/session/market_(forecast|study))", [forecast_view](const httplib::Request& req, httplib::Response& res) {
+    hacdcpf::util::AtomicFlagLease analysis_lease(g_session.busy);
       const bool study = req.path == "/api/session/market_study";
       auto& task = study ? g_session.market_study : g_session.market_forecast;
       auto& task_id = study ? g_session.market_study_id : g_session.market_forecast_id;
       auto& task_cancel = study ? g_session.market_study_cancel : g_session.market_forecast_cancel;
-      bool owns_busy = false;
+
       try {
         const json body = json::parse(req.body); const std::string action = body.at("action");
         const std::set<std::string> allowed = action == "generate" ? std::set<std::string>{"action", "revision", "config"}
@@ -22516,7 +22609,7 @@ int main(int argc, char** argv) {
           if (action == "step" && body.at("day") != job.at("scenarios").at(job.at("next_scenario").get<size_t>()).at("completed_days")) {
             res.status = 409; res.set_content("{\"error\":\"Forecast day changed\"}", "application/json"); return;
           }
-          g_session.busy.store(true); owns_busy = true;
+          if (!analysis_lease.try_acquire()) { res.status = 409; res.set_content("{\"error\":\"Another computation is running\"}", "application/json"); return; }
         }
         job = action == "explain" ? hacdcpf::market::explain_market_forecast_day(job, body.at("scenario").get<int>(), body.at("day").get<int>(), body.value("pricing",std::string("dispatch_only")))
                                   : hacdcpf::market::step_market_forecast(job);
@@ -22525,14 +22618,14 @@ int main(int argc, char** argv) {
           if (task_cancel.load()) job["status"] = "cancelled";
           if (id != task_id || revision != g_session.southern_revision) job["status"] = "stale";
           else task = job;
-          g_session.busy.store(false); owns_busy = false;
+          analysis_lease.release();
         }
         res.set_content(json{{"run_id", id}, {"job", forecast_view(job, false)}}.dump(), "application/json");
       } catch (const std::invalid_argument& e) {
-        if (owns_busy) g_session.busy.store(false);
+        analysis_lease.release();
         res.status = 400; res.set_content(json{{"error", e.what()}}.dump(), "application/json");
       } catch (const std::exception& e) {
-        if (owns_busy) g_session.busy.store(false);
+        analysis_lease.release();
         res.status = 400; res.set_content(json{{"error", e.what()}}.dump(), "application/json");
       }
     });
@@ -22540,6 +22633,7 @@ int main(int argc, char** argv) {
     // ---- Market Clearing (SCUC -> SCED -> LMP -> Settlement) ----
     svr.Post("/api/session/run_market_clearing",
              [](const httplib::Request& req, httplib::Response& res) {
+      hacdcpf::util::AtomicFlagLease analysis_lease(g_session.busy);
       try {
         std::shared_ptr<const hacdcpf::HybridPowerSystem> sys_snap;
         hacdcpf::HybridPowerSystem sys;
@@ -22550,7 +22644,7 @@ int main(int argc, char** argv) {
         }
         sys = *sys_snap;  // request-local mutable copy, made after releasing the session lock
 
-        if (g_session.busy.exchange(true)) {
+        if (!analysis_lease.try_acquire()) {
           res.status = 409;
           res.set_content(json{{"error","Another analysis is already running"}}.dump(), "application/json");
           return;
@@ -23148,9 +23242,9 @@ int main(int argc, char** argv) {
             {"cashflow_residual", ledger.cashflow_residual}};
 
         res.set_content(payload.dump(), "application/json");
-        g_session.busy.store(false);
+        analysis_lease.release();
       } catch (const std::exception& e) {
-        g_session.busy.store(false);
+        analysis_lease.release();
         res.status = 400;
         res.set_content(json{{"error", e.what()}}.dump(), "application/json");
       }
@@ -23159,6 +23253,7 @@ int main(int argc, char** argv) {
     // ---- Real-time fixed-commitment market + two-settlement deviations ----
     svr.Post("/api/session/run_real_time_market",
              [](const httplib::Request& req, httplib::Response& res) {
+      hacdcpf::util::AtomicFlagLease analysis_lease(g_session.busy);
       try {
         std::shared_ptr<const hacdcpf::HybridPowerSystem> sys_snap;
         hacdcpf::HybridPowerSystem sys;
@@ -23170,7 +23265,7 @@ int main(int argc, char** argv) {
           sys_snap = g_session.current_system;
         }
         sys = *sys_snap;  // request-local mutable copy, made after releasing the session lock
-        if (g_session.busy.exchange(true)) {
+        if (!analysis_lease.try_acquire()) {
           res.status = 409;
           res.set_content(
               json{{"error", "Another analysis is already running"}}.dump(),
@@ -23213,9 +23308,9 @@ int main(int argc, char** argv) {
         res.set_content(
             real_time_market_json(day_ahead, real_time).dump(),
             "application/json");
-        g_session.busy.store(false);
+        analysis_lease.release();
       } catch (const std::exception& error) {
-        g_session.busy.store(false);
+        analysis_lease.release();
         res.status = 400;
         res.set_content(json{{"error", error.what()}}.dump(),
                         "application/json");
@@ -23225,6 +23320,7 @@ int main(int argc, char** argv) {
     // ---- Repeated participant best-response game ----
     svr.Post("/api/session/run_repeated_market_game",
              [](const httplib::Request& req, httplib::Response& res) {
+      hacdcpf::util::AtomicFlagLease analysis_lease(g_session.busy);
       try {
         std::shared_ptr<const hacdcpf::HybridPowerSystem> sys_snap;
         hacdcpf::HybridPowerSystem sys;
@@ -23236,7 +23332,7 @@ int main(int argc, char** argv) {
           sys_snap = g_session.current_system;
         }
         sys = *sys_snap;  // request-local mutable copy, made after releasing the session lock
-        if (g_session.busy.exchange(true)) {
+        if (!analysis_lease.try_acquire()) {
           res.status = 409;
           res.set_content(
               json{{"error", "Another analysis is already running"}}.dump(),
@@ -23291,9 +23387,9 @@ int main(int argc, char** argv) {
             sys, day_ahead_series, realized_series, game_options);
         res.set_content(repeated_game_json(result).dump(),
                         "application/json");
-        g_session.busy.store(false);
+        analysis_lease.release();
       } catch (const std::exception& error) {
-        g_session.busy.store(false);
+        analysis_lease.release();
         res.status = 400;
         res.set_content(json{{"error", error.what()}}.dump(),
                         "application/json");
@@ -23303,9 +23399,10 @@ int main(int argc, char** argv) {
     // ---- Carbon Flow Analysis ----
     svr.Post("/api/session/run_carbon",
              [](const httplib::Request&, httplib::Response& res) {
+      hacdcpf::util::AtomicFlagLease analysis_lease(g_session.busy);
       try {
         const auto request_started = std::chrono::steady_clock::now();
-        if (g_session.busy.exchange(true)) {
+        if (!analysis_lease.try_acquire()) {
           res.status = 409;
           res.set_content(json{{"error","Another analysis is already running"}}.dump(), "application/json");
           return;
@@ -23339,9 +23436,9 @@ int main(int argc, char** argv) {
         out["requires_pf"] = true;
         out["execution_time_sec"] = elapsed_seconds(request_started);
         res.set_content(out.dump(), "application/json");
-        g_session.busy.store(false);
+        analysis_lease.release();
       } catch (const std::exception& e) {
-        g_session.busy.store(false);
+        analysis_lease.release();
         res.status = 400;
         res.set_content(json{{"error", e.what()}}.dump(), "application/json");
       }
@@ -23351,6 +23448,7 @@ int main(int argc, char** argv) {
     svr.Post("/api/session/run_dynamic_carbon",
              [materialize_loads_and_apply_binding]
              (const httplib::Request& req, httplib::Response& res) {
+      hacdcpf::util::AtomicFlagLease analysis_lease(g_session.busy);
       try {
         const auto request_started = std::chrono::steady_clock::now();
         hacdcpf::TimeSeriesData ts_data;
@@ -23391,7 +23489,7 @@ int main(int argc, char** argv) {
         }
         const hacdcpf::HybridPowerSystem& current_sys = *current_sys_snap;  // zero-copy read of the shared immutable snapshot
 
-        if (g_session.busy.exchange(true)) {
+        if (!analysis_lease.try_acquire()) {
           res.status = 409;
           res.set_content(json{{"error","Another analysis is already running"}}.dump(), "application/json");
           return;
@@ -23489,13 +23587,13 @@ int main(int argc, char** argv) {
         out["execution_time_sec"] = elapsed_seconds(request_started);
 
         res.set_content(out.dump(), "application/json");
-        g_session.busy.store(false);
+        analysis_lease.release();
       } catch (const std::exception& e) {
-        g_session.busy.store(false);
+        analysis_lease.release();
         res.status = 400;
         res.set_content(json{{"error", e.what()}}.dump(), "application/json");
       } catch (...) {
-        g_session.busy.store(false);
+        analysis_lease.release();
         res.status = 500;
         res.set_content(json{{"error", "Unknown internal error in dynamic carbon flow"}}.dump(), "application/json");
       }
@@ -23535,6 +23633,7 @@ int main(int argc, char** argv) {
     // ---- Reactive Power Optimization (local discrete search + AC/DC NLP) ----
     svr.Post("/api/session/run_rpo",
              [](const httplib::Request& req, httplib::Response& res) {
+      hacdcpf::util::AtomicFlagLease analysis_lease(g_session.busy);
       try {
         std::shared_ptr<const hacdcpf::HybridPowerSystem> sys_snap;
         {
@@ -23543,7 +23642,7 @@ int main(int argc, char** argv) {
           sys_snap = g_session.current_system;
         }
         const hacdcpf::HybridPowerSystem& sys = *sys_snap;  // zero-copy read of the shared immutable snapshot
-        if (g_session.busy.exchange(true)) {
+        if (!analysis_lease.try_acquire()) {
           res.status = 409;
           res.set_content(json{{"error","Another analysis is already running"}}.dump(), "application/json");
           return;
@@ -24015,9 +24114,9 @@ int main(int argc, char** argv) {
         out["gen_names"] = gn;
 
         res.set_content(out.dump(), "application/json");
-        g_session.busy.store(false);
+        analysis_lease.release();
       } catch (const std::exception& e) {
-        g_session.busy.store(false);
+        analysis_lease.release();
         res.status = 400;
         res.set_content(json{{"error", e.what()}}.dump(), "application/json");
       }
@@ -24026,6 +24125,7 @@ int main(int argc, char** argv) {
     // ---- Network Reconfiguration (TS-TR MILP) ----
     svr.Post("/api/session/run_reconfig",
              [](const httplib::Request& req, httplib::Response& res) {
+      hacdcpf::util::AtomicFlagLease analysis_lease(g_session.busy);
       try {
         std::shared_ptr<const hacdcpf::HybridPowerSystem> sys_tr_snap;
         hacdcpf::HybridPowerSystem sys_tr;
@@ -24041,7 +24141,7 @@ int main(int argc, char** argv) {
           ts_data = g_session.ts_data;
         }
         sys_tr = *sys_tr_snap;  // request-local mutable copy, made after releasing the session lock
-        if (g_session.busy.exchange(true)) {
+        if (!analysis_lease.try_acquire()) {
           res.status = 409;
           res.set_content(json{{"error","Another analysis is already running"}}.dump(), "application/json");
           return;
@@ -24648,13 +24748,13 @@ int main(int argc, char** argv) {
         }
         out["curt_per_step"] = curt_j;
         res.set_content(out.dump(), "application/json");
-        g_session.busy.store(false);
+        analysis_lease.release();
       } catch (const std::exception& e) {
-        g_session.busy.store(false);
+        analysis_lease.release();
         res.status = 400;
         res.set_content(json{{"error", e.what()}}.dump(), "application/json");
       } catch (...) {
-        g_session.busy.store(false);
+        analysis_lease.release();
         res.status = 500;
         res.set_content(json{{"error", "Unknown internal error in topology reconfiguration"}}.dump(), "application/json");
       }
@@ -24663,7 +24763,8 @@ int main(int argc, char** argv) {
     // ---- EV power-traffic coupling ----
     svr.Post("/api/session/run_ev_traffic",
              [](const httplib::Request& req, httplib::Response& res) {
-      bool owns_busy = false;
+      hacdcpf::util::AtomicFlagLease analysis_lease(g_session.busy);
+
       try {
         const auto j = json::parse(req.body.empty() ? "{}" : req.body);
         const std::string scenario_source =
@@ -24709,14 +24810,14 @@ int main(int argc, char** argv) {
               "The selected power system has no AC charging stations for route stops");
         }
 
-        if (g_session.busy.exchange(true)) {
+        if (!analysis_lease.try_acquire()) {
           res.status = 409;
           res.set_content(
               json{{"error", "Another analysis is already running"}}.dump(),
               "application/json");
           return;
         }
-        owns_busy = true;
+
         g_session.cancel.store(false);
 
         const std::string formulation =
@@ -24831,15 +24932,15 @@ int main(int argc, char** argv) {
         out["scenario"] = std::move(scenario_out);
         out["parameters"] = j;
         out["result"] = std::move(result);
-        g_session.busy.store(false);
-        owns_busy = false;
+        analysis_lease.release();
+
         res.set_content(out.dump(), "application/json");
       } catch (const std::exception& e) {
-        if (owns_busy) g_session.busy.store(false);
+        analysis_lease.release();
         res.status = 400;
         res.set_content(json{{"error", e.what()}}.dump(), "application/json");
       } catch (...) {
-        if (owns_busy) g_session.busy.store(false);
+        analysis_lease.release();
         res.status = 500;
         res.set_content(
             json{{"error", "Unknown internal error in EV power-traffic analysis"}}
@@ -24852,6 +24953,7 @@ int main(int argc, char** argv) {
     svr.Post("/api/session/run_annual_sim",
              [materialize_loads_and_apply_binding]
              (const httplib::Request& req, httplib::Response& res) {
+      hacdcpf::util::AtomicFlagLease analysis_lease(g_session.busy);
       try {
         const auto request_started = std::chrono::steady_clock::now();
         const auto j = json::parse(req.body.empty() ? "{}" : req.body);
@@ -24873,7 +24975,7 @@ int main(int argc, char** argv) {
           }
         }
         sys_ann = *sys_ann_snap;  // request-local mutable copy, made after releasing the session lock
-        if (g_session.busy.exchange(true)) {
+        if (!analysis_lease.try_acquire()) {
           res.status = 409;
           res.set_content(json{{"error","Another analysis is already running"}}.dump(), "application/json");
           return;
@@ -25298,9 +25400,9 @@ int main(int argc, char** argv) {
         }
         out["geo_ac_branches"] = geo_ac_branches;
         res.set_content(out.dump(), "application/json");
-        g_session.busy.store(false);
+        analysis_lease.release();
       } catch (const std::exception& e) {
-        g_session.busy.store(false);
+        analysis_lease.release();
         res.status = 400;
         res.set_content(json{{"error", e.what()}}.dump(), "application/json");
       }
@@ -25309,6 +25411,7 @@ int main(int argc, char** argv) {
     // ---- Lifecycle Simulation ----
     svr.Post("/api/session/run_lifecycle_sim",
              [](const httplib::Request& req, httplib::Response& res) {
+      hacdcpf::util::AtomicFlagLease analysis_lease(g_session.busy);
       try {
         std::shared_ptr<const hacdcpf::HybridPowerSystem> sys_lc_snap;
         hacdcpf::HybridPowerSystem sys_lc;
@@ -25318,7 +25421,7 @@ int main(int argc, char** argv) {
           sys_lc_snap = g_session.current_system;
         }
         sys_lc = *sys_lc_snap;  // request-local mutable copy, made after releasing the session lock
-        if (g_session.busy.exchange(true)) {
+        if (!analysis_lease.try_acquire()) {
           res.status = 409;
           res.set_content(json{{"error","Another analysis is already running"}}.dump(), "application/json");
           return;
@@ -25461,9 +25564,9 @@ int main(int argc, char** argv) {
         out["replacements"] = repl_arr;
 
         res.set_content(out.dump(), "application/json");
-        g_session.busy.store(false);
+        analysis_lease.release();
       } catch (const std::exception& e) {
-        g_session.busy.store(false);
+        analysis_lease.release();
         res.status = 400;
         res.set_content(json{{"error", e.what()}}.dump(), "application/json");
       }
@@ -25472,6 +25575,7 @@ int main(int argc, char** argv) {
     // ---- Lifecycle Capacity Comparison ----
     svr.Post("/api/session/run_lifecycle_compare",
              [](const httplib::Request& req, httplib::Response& res) {
+      hacdcpf::util::AtomicFlagLease analysis_lease(g_session.busy);
       try {
         std::shared_ptr<const hacdcpf::HybridPowerSystem> sys_base_snap;
         hacdcpf::HybridPowerSystem sys_base;
@@ -25481,7 +25585,7 @@ int main(int argc, char** argv) {
           sys_base_snap = g_session.current_system;
         }
         sys_base = *sys_base_snap;  // request-local mutable copy, made after releasing the session lock
-        if (g_session.busy.exchange(true)) {
+        if (!analysis_lease.try_acquire()) {
           res.status = 409;
           res.set_content(json{{"error","Another analysis is already running"}}.dump(), "application/json");
           return;
@@ -25549,9 +25653,9 @@ int main(int argc, char** argv) {
         out["scenarios"] = scens_arr;
 
         res.set_content(out.dump(), "application/json");
-        g_session.busy.store(false);
+        analysis_lease.release();
       } catch (const std::exception& e) {
-        g_session.busy.store(false);
+        analysis_lease.release();
         res.status = 400;
         res.set_content(json{{"error", e.what()}}.dump(), "application/json");
       }
@@ -25560,6 +25664,7 @@ int main(int argc, char** argv) {
     // ---- Reliability Assessment (Non-Sequential Monte Carlo) ----
     svr.Post("/api/session/run_reliability_nsq",
              [](const httplib::Request& req, httplib::Response& res) {
+      hacdcpf::util::AtomicFlagLease analysis_lease(g_session.busy);
       try {
         std::shared_ptr<const hacdcpf::HybridPowerSystem> sys_snap;
         hacdcpf::HybridPowerSystem sys;
@@ -25569,7 +25674,7 @@ int main(int argc, char** argv) {
           sys_snap = g_session.current_system;
         }
         sys = *sys_snap;  // request-local mutable copy, made after releasing the session lock (parse_reliability_data_policy may apply template data)
-        if (g_session.busy.exchange(true)) {
+        if (!analysis_lease.try_acquire()) {
           res.status = 409;
           res.set_content(json{{"error","Another analysis is already running"}}.dump(), "application/json");
           return;
@@ -25650,9 +25755,9 @@ int main(int argc, char** argv) {
 	        out["critical_components"] = crit_arr;
         
         res.set_content(out.dump(), "application/json");
-        g_session.busy.store(false);
+        analysis_lease.release();
       } catch (const std::exception& e) {
-        g_session.busy.store(false);
+        analysis_lease.release();
         res.status = 400;
         res.set_content(json{{"error", e.what()}}.dump(), "application/json");
       }
@@ -25661,6 +25766,7 @@ int main(int argc, char** argv) {
     // ---- Reliability Assessment (Sequential Monte Carlo) ----
     svr.Post("/api/session/run_reliability_seq",
              [](const httplib::Request& req, httplib::Response& res) {
+      hacdcpf::util::AtomicFlagLease analysis_lease(g_session.busy);
       try {
         std::shared_ptr<const hacdcpf::HybridPowerSystem> sys_snap;
         hacdcpf::HybridPowerSystem sys;
@@ -25670,7 +25776,7 @@ int main(int argc, char** argv) {
           sys_snap = g_session.current_system;
         }
         sys = *sys_snap;  // request-local mutable copy, made after releasing the session lock (parse_reliability_data_policy may apply template data)
-        if (g_session.busy.exchange(true)) {
+        if (!analysis_lease.try_acquire()) {
           res.status = 409;
           res.set_content(json{{"error","Another analysis is already running"}}.dump(), "application/json");
           return;
@@ -25745,9 +25851,9 @@ int main(int argc, char** argv) {
 	        out["critical_components"] = crit_arr;
         
         res.set_content(out.dump(), "application/json");
-        g_session.busy.store(false);
+        analysis_lease.release();
       } catch (const std::exception& e) {
-        g_session.busy.store(false);
+        analysis_lease.release();
         res.status = 400;
         res.set_content(json{{"error", e.what()}}.dump(), "application/json");
       }
@@ -25756,6 +25862,7 @@ int main(int argc, char** argv) {
     // ---- Reliability Assessment (FMEA - Distribution System) ----
     svr.Post("/api/session/run_reliability_fmea",
              [](const httplib::Request& req, httplib::Response& res) {
+      hacdcpf::util::AtomicFlagLease analysis_lease(g_session.busy);
       try {
         std::shared_ptr<const hacdcpf::HybridPowerSystem> sys_snap;
         hacdcpf::HybridPowerSystem sys;
@@ -25765,7 +25872,7 @@ int main(int argc, char** argv) {
           sys_snap = g_session.current_system;
         }
         sys = *sys_snap;  // request-local mutable copy, made after releasing the session lock (parse_reliability_data_policy may apply template data)
-        if (g_session.busy.exchange(true)) {
+        if (!analysis_lease.try_acquire()) {
           res.status = 409;
           res.set_content(json{{"error","Another analysis is already running"}}.dump(), "application/json");
           return;
@@ -25914,9 +26021,9 @@ int main(int argc, char** argv) {
         out["eens_by_display_type"] = eens_by_display_type;
         
         res.set_content(out.dump(), "application/json");
-        g_session.busy.store(false);
+        analysis_lease.release();
       } catch (const std::exception& e) {
-        g_session.busy.store(false);
+        analysis_lease.release();
         res.status = 400;
         res.set_content(json{{"error", e.what()}}.dump(), "application/json");
       }
@@ -25925,6 +26032,7 @@ int main(int argc, char** argv) {
     // ---- Distribution Resilience Assessment (MESS) ----
     svr.Post("/api/session/generate_scenarios",
              [](const httplib::Request& req, httplib::Response& res) {
+      hacdcpf::util::AtomicFlagLease analysis_lease(g_session.busy);
       try {
         std::shared_ptr<const hacdcpf::HybridPowerSystem> sys_snap;
         {
@@ -25933,7 +26041,7 @@ int main(int argc, char** argv) {
           sys_snap = g_session.current_system;
         }
         const hacdcpf::HybridPowerSystem& sys = *sys_snap;  // zero-copy read of the shared immutable snapshot
-        if (g_session.busy.exchange(true)) {
+        if (!analysis_lease.try_acquire()) {
           res.status = 409;
           res.set_content(json{{"error","Another analysis is already running"}}.dump(), "application/json");
           return;
@@ -25977,9 +26085,9 @@ int main(int argc, char** argv) {
         res.set_header("X-Scenario-Response-Bytes",
                        std::to_string(body.size()));
         res.set_content(body, "application/json");
-        g_session.busy.store(false);
+        analysis_lease.release();
       } catch (const std::exception& e) {
-        g_session.busy.store(false);
+        analysis_lease.release();
         res.status = 400;
         res.set_content(json{{"error", e.what()}}.dump(), "application/json");
       }
@@ -26080,6 +26188,7 @@ int main(int argc, char** argv) {
     // ---- Distribution Resilience Assessment (MESS) ----
     svr.Post("/api/session/run_distribution_resilience",
              [](const httplib::Request& req, httplib::Response& res) {
+      hacdcpf::util::AtomicFlagLease analysis_lease(g_session.busy);
       try {
         std::shared_ptr<const hacdcpf::HybridPowerSystem> sys_snap;
         hacdcpf::HybridPowerSystem sys;
@@ -26089,7 +26198,7 @@ int main(int argc, char** argv) {
           sys_snap = g_session.current_system;
         }
         sys = *sys_snap;  // request-local mutable copy, made after releasing the session lock
-        if (g_session.busy.exchange(true)) {
+        if (!analysis_lease.try_acquire()) {
           res.status = 409;
           res.set_content(json{{"error","Another analysis is already running"}}.dump(), "application/json");
           return;
@@ -26817,9 +26926,9 @@ int main(int argc, char** argv) {
         out["branch_flow_traces"] = bf_arr;
 
         res.set_content(out.dump(), "application/json");
-        g_session.busy.store(false);
+        analysis_lease.release();
       } catch (const std::exception& e) {
-        g_session.busy.store(false);
+        analysis_lease.release();
         res.status = 400;
         res.set_content(json{{"error", e.what()}}.dump(), "application/json");
       }
@@ -26897,6 +27006,7 @@ int main(int argc, char** argv) {
     // AC/DC LinDistFlow restoration MILP scope and explicit unsupported assets.
     svr.Post("/api/session/run_reliability_three_stage",
              [](const httplib::Request& req, httplib::Response& res) {
+      hacdcpf::util::AtomicFlagLease analysis_lease(g_session.busy);
       try {
         std::shared_ptr<const hacdcpf::HybridPowerSystem> sys_snap;
         hacdcpf::HybridPowerSystem sys;
@@ -26908,7 +27018,7 @@ int main(int argc, char** argv) {
           reliability_configuration = g_session.reliability_configuration;
         }
         sys = *sys_snap;  // request-local mutable copy, made after releasing the session lock (parse_reliability_data_policy may apply template data)
-        if (g_session.busy.exchange(true)) {
+        if (!analysis_lease.try_acquire()) {
           res.status = 409;
           res.set_content(json{{"error","Another analysis is already running"}}.dump(), "application/json");
           return;
@@ -26964,9 +27074,9 @@ int main(int argc, char** argv) {
 	                 ? json("No enabled protection row matched the selected three-stage contingency families.")
 	                 : json(nullptr)}};
 	        res.set_content(out.dump(), "application/json");
-	        g_session.busy.store(false);
+	        analysis_lease.release();
       } catch (const std::exception& e) {
-        g_session.busy.store(false);
+        analysis_lease.release();
         res.status = 400;
         res.set_content(json{{"error", e.what()}}.dump(), "application/json");
       }
@@ -26977,6 +27087,7 @@ int main(int argc, char** argv) {
     // per-method endpoints above remain for backward compatibility.
     svr.Post("/api/session/run_reliability",
              [](const httplib::Request& req, httplib::Response& res) {
+      hacdcpf::util::AtomicFlagLease analysis_lease(g_session.busy);
       try {
         const auto request_started = std::chrono::steady_clock::now();
         std::shared_ptr<const hacdcpf::HybridPowerSystem> sys_snap;
@@ -26989,7 +27100,7 @@ int main(int argc, char** argv) {
           reliability_configuration = g_session.reliability_configuration;
         }
         sys = *sys_snap;  // request-local mutable copy, made after releasing the session lock
-        if (g_session.busy.exchange(true)) {
+        if (!analysis_lease.try_acquire()) {
           res.status = 409;
           res.set_content(json{{"error","Another analysis is already running"}}.dump(), "application/json");
           return;
@@ -27803,9 +27914,9 @@ int main(int argc, char** argv) {
 
         out["execution_time_sec"] = elapsed_seconds(request_started);
         res.set_content(out.dump(), "application/json");
-        g_session.busy.store(false);
+        analysis_lease.release();
       } catch (const std::exception& e) {
-        g_session.busy.store(false);
+        analysis_lease.release();
         res.status = 400;
         res.set_content(json{{"error", e.what()}}.dump(), "application/json");
       }
@@ -27998,7 +28109,8 @@ int main(int argc, char** argv) {
 
   svr.Post("/api/session/run_counterfactual_planning",
            [](const httplib::Request& req, httplib::Response& res) {
-    bool busy_acquired = false;
+    hacdcpf::util::AtomicFlagLease analysis_lease(g_session.busy);
+
     try {
       std::shared_ptr<const hacdcpf::HybridPowerSystem> sys_snap;
       {
@@ -28007,13 +28119,13 @@ int main(int argc, char** argv) {
         sys_snap = g_session.current_system;
       }
       const hacdcpf::HybridPowerSystem& sys = *sys_snap;  // zero-copy read of the shared immutable snapshot
-      if (g_session.busy.exchange(true)) {
+      if (!analysis_lease.try_acquire()) {
         res.status = 409;
         res.set_content(json{{"error", "Another analysis is already running"}}.dump(),
                         "application/json");
         return;
       }
-      busy_acquired = true;
+
       g_session.cancel.store(false);
       const auto j = json::parse(req.body.empty() ? "{}" : req.body);
       const auto option_json = j.value("options", json::object());
@@ -28181,10 +28293,10 @@ int main(int argc, char** argv) {
       out["methodology"] = result.methodology;
       out["benefit_definition"] = "baseline_metric - counterfactual_metric";
       out["synergy_definition"] = "B(a+b) - B(a) - B(b)";
-      g_session.busy.store(false);
+      analysis_lease.release();
       res.set_content(out.dump(), "application/json");
     } catch (const std::exception& e) {
-      if (busy_acquired) g_session.busy.store(false);
+      analysis_lease.release();
       res.status = 400;
       res.set_content(json{{"error", e.what()}}.dump(), "application/json");
     }
@@ -28473,6 +28585,13 @@ int main(int argc, char** argv) {
   svr.Options("/(.*)", [](const httplib::Request&, httplib::Response& res) {
     res.status = 204;
   });
+
+  // Warm the dynamic-model catalog on the MAIN thread. dynamic_model_catalog()
+  // lazily initialises a large static via build_catalog(); forcing it here (on
+  // the big main-thread stack) prevents a stack overflow if the first call
+  // otherwise lands on a small httplib worker-thread stack. See
+  // src/dynamics/DynamicModelCatalog.cpp.
+  (void)hacdcpf::dynamics::dynamic_model_catalog();
 
   std::cout << "HySim-XJTU-HRPES running at http://"
             << args.host << ":" << args.port << "/xjtu/\n";

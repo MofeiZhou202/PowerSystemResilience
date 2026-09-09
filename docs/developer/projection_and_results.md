@@ -1,6 +1,6 @@
 # Projection and Result Attribution Contract
 
-Updated: 2026-08-15
+Updated: 2026-09-08
 
 Rich engineering components are converted to canonical solver objects by
 `projection::RichToCanonicalOperator`. Solver observables return to authored
@@ -42,6 +42,31 @@ flow, charging, rating, and attribution are not discarded.
 audit-only, or unsupported. A total rich identity does not imply that every
 physical observable is solved; audit-only rows must say why a value is absent.
 
+## Attribution lookup contract
+
+`CanonicalToRichOperator::apply` builds call-local AC/DC voltage indexes and
+stable-ID-to-position indexes; no index or operating-point value survives the
+call. Voltage lookup retains PF-vector precedence, authored `vm_pu` fallback
+for a missing vector entry, and the existing zero fallback for a missing bus.
+That fallback is not evidence that a bus voltage was solved. Duplicate IDs
+retain the first matching position; validation remains responsible for rejecting
+invalid identities. OPF maps still refer to canonical container positions.
+
+Result-row indexes are constructed lazily by component family after all rows
+exist. Electrical lookup checks type, domain and stable ID. Result order,
+source order, terminal signs and recovery classifications are unchanged.
+`ProjectionReport` source records currently have no domain: provenance therefore
+retains all same-type/same-ID matches, including across AC/DC domains. This is
+an existing provenance limitation, not permission to mix electrical domains.
+
+For B buses, C result rows, M source mappings and G generators, repeated
+voltage/source/position scans previously included O(C*B + M*C + G^2) work.
+Hash indexing changes these lookup terms to expected O(B + F*C + G + M + Q),
+where F is the fixed number of queried component families and Q counts queries
+and emitted matches. This bound excludes terminal-flow computation and other
+remaining scans/copies in attribution. See AUD-097 in the
+[audit ledger](../testing/module_code_audit.md) for measured scope and limitations.
+
 ## Terminal power convention
 
 Component terminal P/Q uses positive injection into the network. Network edge
@@ -70,7 +95,47 @@ slack equation must be labeled; it must not hide an ordinary-bus mismatch.
 
 ## Verification
 
+For profiling the legacy full PF presentation path, run:
+
+```sh
+python3 tools/pf_presentation_profile.py --build --run
+```
+
+This developer tool generates an instrumented copy of `tests/run_gui_server.cpp`
+under `output/pf-presentation-profile/` and links the retained incremental Release
+overlays recorded by the previous attribution build. It requires that local
+build provenance and baseline binary; it does not configure dependencies or
+change production sources. Unique source anchors fail explicitly if the route
+changes. It starts and stops private temporary servers, leaving existing
+services untouched. The tool is a performance experiment, not a registered
+CTest target or a clean-build validation.
+
+The generated server adds experiment-only response headers for 19 disjoint
+presentation stages, three optional lookup timers, result-row merge counts,
+and scope lifetimes. These headers are not part of the production API or GUI.
+The existing `Server-Timing` serialization metric measures `out.dump()`;
+constructing JSON objects, copying them and destroying them are distinct costs.
+The existing `presentation_ms` stops before local objects in `add_geo_data` are
+destroyed; its remainder in `solve_ms` therefore must not be read as pure
+numerical solver time. Handler lifetime additionally measures response-object
+cleanup after `set_content`; time outside that scope still includes framework,
+scheduling, socket and client costs, not an isolated network-transfer metric.
+
+The protocol alternates baseline/coarse/scan modes with five fresh servers per
+case/mode (case14, case118, ACTIVSg2000 and case9241pegase). Non-timing response
+fields must match exactly after excluding `timing`, `profiling` and
+`execution_time_sec`. Exact UTF-8 value sizes are extracted from the actual
+top-level JSON wire text. Stage sums must agree with presentation within
+max(1 ms, 1%); the predeclared large-case median wall overhead limit is 5%.
+Per-call scan timing is kept separate from coarse measurement and includes
+clock overhead. Measurements and residual boundaries are recorded in the
+[audit ledger](../testing/module_code_audit.md).
+
 Projection metamorphic tests cover idempotence, merge/delete composition, and
-result recovery. `tools/gui_api_e2e.py` additionally checks `power_system.json`
+result recovery. `test_result_attribution` additionally checks reordered sparse
+IDs, same-ID AC/DC components, canonical OPF positions, short/null/changing PF
+inputs and ordered source mappings. `tools/attribution_performance_benchmark.py`
+compares all serialized attribution fields against the baseline on synthetic
+and MATPOWER cases. `tools/gui_api_e2e.py` additionally checks `power_system.json`
 for Grid attribution, source-side and feeder CB P/Q, PF/OPF consistency, TSPF
 frames, and Bus 1 P/Q closure.

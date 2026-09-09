@@ -244,3 +244,101 @@ TEST_CASE("SPPT attribution restores charging from a merged self-loop line",
   CHECK_THAT(attributed_line.terminals[1].q_mvar, WithinAbs(-1.0, 1e-12));
   CHECK(attributed_line.recovery == RecoveryClass::AuditOnly);
 }
+
+TEST_CASE("Attribution indexes preserve domain, positions and per-call voltage state",
+          "[projection][attribution][indexed]") {
+  HybridPowerSystem rich;
+  ACBus ac90; ac90.index = 90; ac90.vm_pu = 1.02;
+  ACBus ac10; ac10.index = 10; ac10.vm_pu = 1.03;
+  DCBus dc10; dc10.index = 10; dc10.vm_pu = 0.96;
+  rich.ac.buses = {ac90, ac10};
+  rich.dc.buses = {dc10};
+  Generator first; first.index = 71; first.bus = 10; first.pg_mw = 3.0;
+  Generator second = first; second.index = 19; second.bus = 90;
+  rich.ac.generators = {first, second};
+  Storage ac; ac.index = 71; ac.bus = 10; ac.p_mw = 4.0;
+  Storage dc = ac; dc.p_mw = 5.0;
+  rich.ac.storage = {ac};
+  rich.dc.storage = {dc};
+  Load missing; missing.index = 71; missing.bus = 777;
+  rich.ac.loads = {missing};
+
+  ProjectionBundle bundle;
+  bundle.canonical = rich;
+  std::reverse(bundle.canonical.ac.buses.begin(), bundle.canonical.ac.buses.end());
+  std::reverse(bundle.canonical.ac.generators.begin(), bundle.canonical.ac.generators.end());
+  CHECK(CanonicalToRichOperator::ac_bus_reprojection_positions(rich, bundle) ==
+        std::vector<int>{1, 0});
+  bundle.canonical.ac.buses.pop_back();
+  CHECK(CanonicalToRichOperator::ac_bus_reprojection_positions(rich, bundle) ==
+        std::vector<int>{-1, 0});
+
+  PowerFlowResult pf;
+  pf.vm = {1.11}; // AC10 must use its authored value, not DC10's solved value.
+  pf.vdc = {0.91};
+  opf::ACOPFResult opf;
+  opf.pg_mw = {20.0, 70.0};
+  opf.qg_mvar = {2.0, 7.0};
+  opf.pstor_mw = {8.0, 9.0};
+  opf.qstor_mvar = {0.8, 0.9};
+  opf.stor_map = {{0, 0}, {0, 1}};
+  const auto result = CanonicalToRichOperator::apply(rich, bundle, &opf, nullptr, &pf);
+  const auto& g = require_row(result, "generator", "AC", 71);
+  CHECK(g.position == 0);
+  CHECK(require_value(g, "p_mw") == 70.0);
+  CHECK(require_value(g, "q_mvar") == 7.0);
+  CHECK(g.terminals.front().v_pu == 1.03);
+  CHECK(require_value(require_row(result, "ac_bus", "AC", 90), "vm_pu") == 1.11);
+  CHECK(require_row(result, "load", "AC", 71).terminals.front().v_pu == 0.0);
+  const auto& ac_result = require_row(result, "storage", "AC", 71);
+  const auto& dc_result = require_row(result, "storage", "DC", 71);
+  CHECK(ac_result.terminals.front().p_mw == 8.0);
+  CHECK(dc_result.terminals.front().p_mw == 9.0);
+  CHECK(ac_result.terminals.front().v_pu == 1.03);
+  CHECK(dc_result.terminals.front().v_pu == 0.91);
+
+  const auto authored = CanonicalToRichOperator::apply(rich, bundle, nullptr, nullptr, nullptr);
+  CHECK(require_value(require_row(authored, "ac_bus", "AC", 90), "vm_pu") == 1.02);
+  CHECK(require_value(require_row(authored, "dc_bus", "DC", 10), "vdc_pu") == 0.96);
+  CHECK(require_value(require_row(authored, "generator", "AC", 71), "p_mw") == 3.0);
+  pf.vm = {1.04, 1.05}; pf.vdc = {0.92};
+  const auto replay = CanonicalToRichOperator::apply(rich, bundle, &opf, nullptr, &pf, {true});
+  CHECK(require_row(replay, "storage", "AC", 71).terminals.front().p_mw == 4.0);
+  CHECK(require_row(replay, "storage", "DC", 71).terminals.front().p_mw == 5.0);
+  CHECK(require_row(replay, "generator", "AC", 71).terminals.front().v_pu == 1.05);
+  CHECK(require_row(replay, "storage", "DC", 71).terminals.front().v_pu == 0.92);
+  CHECK(result.components.size() == replay.components.size());
+}
+
+TEST_CASE("Attribution source index preserves mapping order and all matching identities",
+          "[projection][attribution][indexed]") {
+  HybridPowerSystem rich;
+  CircuitBreaker ac; ac.index = 8; ac.in_service = false;
+  DCCircuitBreaker dc; dc.index = 8; dc.in_service = false;
+  rich.ac.circuit_breakers = {ac};
+  rich.dc.dc_circuit_breakers = {dc};
+  FlexibleLoad load; load.index = 8;
+  rich.ac.flexible_loads = {load};
+  ProjectionBundle bundle;
+  bundle.canonical.projection_report.emplace();
+  bundle.canonical.projection_report->mappings = {
+      {"CircuitBreaker", "8", "ACBranch", "901", 0.25},
+      {"Unknown", "8", "ACBranch", "999", 1.0},
+      {"CircuitBreaker", "8", "ACBranch", "902", 0.75},
+      {"FlexibleLoad", "8", "Load", "903", 1.0},
+      {"Switch", "88", "ACBranch", "904", 1.0}};
+  const auto result = CanonicalToRichOperator::apply(rich, bundle, nullptr, nullptr, nullptr);
+  REQUIRE(result.components.size() == 3);
+  CHECK(result.components.front().component_type == "flexible_load");
+  for (const auto& domain : {"AC", "DC"}) {
+    const auto& row = require_row(result, "circuit_breaker", domain, 8);
+    REQUIRE(row.canonical_sources.size() == 2);
+    CHECK(row.canonical_sources[0].component_index == 901);
+    CHECK(row.canonical_sources[0].participation_factor == 0.25);
+    CHECK(row.canonical_sources[1].component_index == 902);
+  }
+  const auto& row = require_row(result, "flexible_load", "AC", 8);
+  REQUIRE(row.canonical_sources.size() == 1);
+  CHECK(row.canonical_sources.front().component_index == 903);
+  CHECK(CanonicalToRichOperator::apply({}, {}, nullptr, nullptr, nullptr).components.empty());
+}

@@ -42,8 +42,12 @@ intermediate$\to$final 复合，并串接 operation records。可靠恢复仍依
 \subsection{开关收缩恢复}
 
 legacy overload 接收 flat bus/super maps，把 super 电压复制给成员，只适用于 ID 数值不重叠系统。
-推荐 overload 接收 \texttt{ContractionResult}：AC 先从 ac map、再从 flat map找 super voltage，并写
-ac+flat；DC 从 dc map、再从 flat 找，并写 dc，只有同 ID 未被 AC 占用才写 flat。
+推荐 overload 接收 \texttt{ContractionResult}：AC/DC 先从本域 map 找 super voltage。
+仅当该 ID 不存在于另一域的成员映射、super 映射或电压映射中时，才允许从 flat map 回退。
+同号跨域缺失结果保持缺失，不得把已知 AC 电压复制成 DC 电压，反向亦然。
+AC 写 ac+flat；DC 写 dc，只有同 ID 未被 AC 占用才写 flat。
+注册测试 \srcpath{tests/test\_review\_regressions.cpp} 覆盖两种单域已知、同号 legacy 歧义与
+不重号兼容输入（AUD-093）。
 关系 $V_i=V_{super}$ 对理想收缩精确。该函数不恢复内部开关电流或被删边潮流。
 
 \subsection{串联节点恢复}

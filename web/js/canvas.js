@@ -71,6 +71,9 @@ const Canvas = (() => {
     baseMva: 100,          // system base MVA (preserved from loaded system)
     connectionStyle: 'avoid', // 'straight' | 'orthogonal' | 'avoid' (doc §10.2/§10.3)
     alignSnap: true,       // snap to neighbour x/y while dragging (doc §18 Phase 4)
+    busbarMode: true,      // P1: resizable busbars with sliding taps (default on); '0' in localStorage forces legacy
+    showEnergization: true, // P4: grey de-energized elements in busbar mode
+    sheetStack: [],        // P4: hierarchical-sheet drill path (composite sub-networks)
     // ===== Large-system headless mode =====
     // For very large networks the SVG single-line diagram cannot be drawn
     // responsively (tens of thousands of glyphs freeze the browser). In that
@@ -87,7 +90,9 @@ const Canvas = (() => {
   // getCompBusMap() cache: rebuilt lazily on next call, invalidated on every
   // topology or component-parameter change (add/remove/clear/rerender).
   let _compBusMapCache = null;
-  function invalidateCompBusMap() { _compBusMapCache = null; }
+  let _deenergizedCache = null;   // P4 energization cache; reset with the bus map
+  let _buildingRoot = false;      // P4: guards buildSystemJson to the root sheet
+  function invalidateCompBusMap() { _compBusMapCache = null; _deenergizedCache = null; }
 
   // Above these limits a freshly loaded system enters headless (no-canvas) mode.
   // Either a large bus count or a large total-element count triggers it; users
@@ -95,8 +100,24 @@ const Canvas = (() => {
   // Full SVG routing becomes unresponsive around the 400-bus distribution
   // feeder range because switches and transformers roughly double the glyph
   // and connection count. Keep these models editable through virtual tables.
-  const HEADLESS_BUS_THRESHOLD = 400;      // AC + DC buses
-  const HEADLESS_ELEMENT_THRESHOLD = 2500; // buses + branches + devices
+  //
+  // Device-capability scaling for the render thresholds: more CPU cores afford
+  // more SVG glyphs before we cull; retina (DPR>=2) paints more pixels so we damp
+  // the ceiling. Bounded to [0.6, 1.5]. The headless/WebGL switch uses only the
+  // downward half (min(1, factor)) so weak devices go to WebGL sooner but strong
+  // ones never delay it past the tuned default (which would risk jank on big
+  // models and is strictly worse than the GPU overview).
+  const _perfFactor = (() => {
+    try {
+      const cores = Math.max(1, (typeof navigator !== 'undefined' && navigator.hardwareConcurrency) || 4);
+      const dpr = Math.max(1, (typeof window !== 'undefined' && window.devicePixelRatio) || 1);
+      let f = cores / 8;
+      if (dpr >= 2) f *= 0.9;
+      return Math.max(0.6, Math.min(1.5, f));
+    } catch (e) { return 1; }
+  })();
+  const HEADLESS_BUS_THRESHOLD = Math.round(400 * Math.min(1, _perfFactor));      // AC + DC buses
+  const HEADLESS_ELEMENT_THRESHOLD = Math.round(2500 * Math.min(1, _perfFactor)); // buses + branches + devices
   function cloneJsonBlock(value) {
     if (!value || typeof value !== 'object') return undefined;
     try {
@@ -267,10 +288,17 @@ const Canvas = (() => {
   // outside the visible viewBox (plus a margin) are display:none'd so the
   // browser skips their layout/paint while panning and zooming. Connections
   // outside the expanded viewport are culled from cached routing bounds too.
-  // Below the threshold every component and connection is rendered.
-  const CULL_THRESHOLD = 350;
+  // Below the threshold every component and connection is rendered. Scaled by
+  // device capability and tightened downward if sustained frame-time jank is
+  // measured during interaction (see scheduleViewportCulling).
+  let CULL_THRESHOLD = Math.round(350 * _perfFactor);
   let _cullActive = false;
   let _cullPending = false;
+  // Windowed PF/OPF voltage overlay (#6): the world-space region the overlay was
+  // last built for (viewport + one screen of margin) and a debounce timer to
+  // rebuild it after the view pans past that region on a large, culled diagram.
+  let _overlayRegion = null;
+  let _overlayRefreshTimer = null;
   const _renderStats = {
     pointer_events: 0,
     pointer_frames: 0,
@@ -315,6 +343,10 @@ const Canvas = (() => {
       if (['straight', 'orthogonal', 'avoid'].includes(cs)) state.connectionStyle = cs;
     } catch (e) { /* ignore */ }
 
+    // Busbar mode is the default one-line look (P1); '0' forces the legacy path.
+    try { state.busbarMode = localStorage.getItem('busbarMode') !== '0'; } catch (e) { state.busbarMode = true; }
+    injectEnergizationStyles();
+
     initMinimap();
     if (typeof NetworkOverview !== 'undefined') NetworkOverview.init();
   }
@@ -322,9 +354,25 @@ const Canvas = (() => {
   // ========== View ==========
   function updateViewBox() {
     svg.setAttribute('viewBox', `${viewBox.x} ${viewBox.y} ${viewBox.w} ${viewBox.h}`);
+    updateConnectHandleScale();
     scheduleViewportCulling();
     updateMinimapViewport();
     updateZoomIndicator();
+  }
+
+  // Busbar connect handles carry a world-space radius, which becomes sub-pixel
+  // (unclickable) when zoomed out over wide bars. Counter-scale them so they stay
+  // ~7 px on screen at any zoom. Cheap: only touches bus handles, and only when
+  // the world radius actually changes.
+  let _handleWorldR = 5;
+  function updateConnectHandleScale() {
+    if (!svg || !componentsLayer) return;
+    const rect = svg.getBoundingClientRect ? svg.getBoundingClientRect() : null;
+    const pxPerWorld = rect && rect.width && viewBox.w ? rect.width / viewBox.w : 1;
+    const r = Math.max(4, Math.min(80, 7 / (pxPerWorld || 1)));
+    if (Math.abs(r - _handleWorldR) < 0.01) return;
+    _handleWorldR = r;
+    componentsLayer.querySelectorAll('.busbar-connect-handle').forEach(h => h.setAttribute('r', String(r)));
   }
 
   // ---- Zoom level indicator ------------------------------------------------
@@ -449,6 +497,7 @@ const Canvas = (() => {
       if (_cullActive) {
         comps.forEach(c => { if (c.el && c.el.style.display === 'none') c.el.style.display = ''; });
         state.connections.forEach(c => { if (c.el && c.el.style.display === 'none') c.el.style.display = ''; });
+        if (resultsLayer) resultsLayer.querySelectorAll('[data-comp-id]').forEach(el => { if (el.style.display === 'none') el.style.display = ''; });
         _cullActive = false;
       }
       _renderStats.hidden_components = 0;
@@ -461,13 +510,14 @@ const Canvas = (() => {
     const x0 = viewBox.x - mx, x1 = viewBox.x + viewBox.w + mx;
     const y0 = viewBox.y - my, y1 = viewBox.y + viewBox.h + my;
     let hiddenComponents = 0;
+    const hiddenCompIds = new Set();
     for (let i = 0; i < comps.length; i++) {
       const c = comps[i];
       if (!c.el) continue;
       const visible = c.x >= x0 && c.x <= x1 && c.y >= y0 && c.y <= y1;
       const want = visible ? '' : 'none';
       if (c.el.style.display !== want) c.el.style.display = want;
-      if (!visible) hiddenComponents += 1;
+      if (!visible) { hiddenComponents += 1; hiddenCompIds.add(c.id); }
     }
     let hiddenConnections = 0;
     for (const connection of state.connections) {
@@ -483,6 +533,17 @@ const Canvas = (() => {
       if (connection.el.style.display !== want) connection.el.style.display = want;
       if (!visible) hiddenConnections += 1;
     }
+    // Cull result-overlay glyphs (PF/OPF voltage bars + readouts, tagged with
+    // data-comp-id) with the same visibility as their bus/device, so the overlay
+    // DOM also stays O(visible) on large diagrams instead of O(model).
+    if (resultsLayer) {
+      const ov = resultsLayer.querySelectorAll('[data-comp-id]');
+      for (let i = 0; i < ov.length; i++) {
+        const el = ov[i];
+        const want = hiddenCompIds.has(Number(el.getAttribute('data-comp-id'))) ? 'none' : '';
+        if (el.style.display !== want) el.style.display = want;
+      }
+    }
     _renderStats.hidden_components = hiddenComponents;
     _renderStats.hidden_connections = hiddenConnections;
   }
@@ -490,8 +551,43 @@ const Canvas = (() => {
   function scheduleViewportCulling() {
     if (_cullPending) return;
     _cullPending = true;
-    requestAnimationFrame(() => { _cullPending = false; updateViewportCulling(); });
+    const t0 = (typeof performance !== 'undefined' ? performance.now() : Date.now());
+    requestAnimationFrame(() => {
+      _cullPending = false;
+      updateViewportCulling();
+      // Frame-time adaptation: the scheduled cull frame's duration is a proxy for
+      // interaction frame time. If culling stays janky (EMA > ~33 ms ≈ <30 fps),
+      // tighten the cull threshold downward — latched, never thrashing back up —
+      // so weak sessions shed more off-screen DOM. Only meaningful while active.
+      const dt = (typeof performance !== 'undefined' ? performance.now() : Date.now()) - t0;
+      _cullFrameEma = _cullFrameEma * 0.8 + dt * 0.2;
+      _renderStats.cull_frame_ms = Math.round(_cullFrameEma * 10) / 10;
+      if (_cullActive && _cullFrameEma > 33) {
+        if (++_cullJankStreak >= 15 && CULL_THRESHOLD > 120) {
+          CULL_THRESHOLD = Math.max(120, Math.round(CULL_THRESHOLD * 0.85));
+          _cullJankStreak = 0;
+        }
+      } else {
+        _cullJankStreak = 0;
+      }
+      // Windowed overlay refresh (#6): if the view panned beyond the region the
+      // PF voltage overlay was built for, rebuild it (debounced) so newly-visible
+      // buses get their readouts. Only when culling with a live PF result.
+      if (_cullActive && _lastPfResult && !state.headless && _overlayRegion) {
+        const r = _overlayRegion;
+        const inside = viewBox.x >= r.x0 && (viewBox.x + viewBox.w) <= r.x1 &&
+                       viewBox.y >= r.y0 && (viewBox.y + viewBox.h) <= r.y1;
+        if (!inside) {
+          if (_overlayRefreshTimer) clearTimeout(_overlayRefreshTimer);
+          _overlayRefreshTimer = setTimeout(() => {
+            _overlayRefreshTimer = null;
+            if (_lastPfResult && !state.headless) showPowerFlowResults(_lastPfResult);
+          }, 220);
+        }
+      }
+    });
   }
+  let _cullFrameEma = 16, _cullJankStreak = 0;
 
   function screenToSvg(clientX, clientY) {
     const pt = svg.createSVGPoint();
@@ -945,25 +1041,368 @@ const Canvas = (() => {
   }
 
   // ========== Rendering ==========
+  // ==================== P1: busbar mode (flag-gated, default off) ============
+  // Resizable AC/DC busbars whose taps slide to each connected device's x, per
+  // docs/planning/gui_one_line_redesign.md. Off by default: the legacy fixed
+  // 80px, 4-port bus rendering and routing are untouched unless the flag is on.
+  // Reuse the existing BUS_TYPES / isBusType helpers (auto-layout section).
+
+  // Auto-span half-length: cover every connected device's x-offset (min 40 =
+  // legacy 80px bar), using each incident connection's other-endpoint world x.
+  function busHalfLen(comp) {
+    let half = 40;
+    for (const conn of connectionsOf(comp.id)) {
+      const otherId = conn.from.compId === comp.id ? conn.to.compId : conn.from.compId;
+      const other = getComponent(otherId);
+      if (other) half = Math.max(half, Math.abs(other.x - comp.x) + 20);
+    }
+    return half;
+  }
+
+  // Slide a bus endpoint to the other endpoint's x (clamped to the bar): the tap.
+  function projectOntoBar(busComp, otherPt) {
+    const half = busHalfLen(busComp);
+    return { x: Math.max(busComp.x - half, Math.min(busComp.x + half, otherPt.x)), y: busComp.y };
+  }
+
+  function busbarSymbol(comp) {
+    const p = comp.params || {};
+    const half = busHalfLen(comp);
+    const dc = comp.type === 'dc_bus';
+    const dash = dc ? ' stroke-dasharray="8 4"' : '';
+    const stroke = dc ? '#56b6c2' : '#61afef';
+    const kv = p.base_kv || (dc ? 320 : 110);
+    const name = p.name || (dc ? 'DC Bus' : 'Bus');
+    // ETAP-style bus tag anchored at the left end of the bar.
+    return `<line x1="${-half}" y1="0" x2="${half}" y2="0" stroke-width="6" stroke="${stroke}"${dash} stroke-linecap="round"/>
+              <text class="comp-label" x="${-half}" y="-20" text-anchor="start" style="font-weight:700">${name}</text>
+              <text class="comp-value" x="${-half}" y="-7" text-anchor="start" fill="${stroke}">${kv} kV${dc ? ' DC' : ''}</text>`;
+  }
+
+  // Cheap in-place bar re-span (drag hot path): update the bar line + hit width
+  // without recreating the <g> or its connections.
+  function respanBusInPlace(busComp) {
+    if (!busComp || !busComp.el || !isBusType(busComp.type)) return;
+    const half = busHalfLen(busComp);
+    const lineEl = busComp.el.querySelector('line');
+    if (lineEl) { lineEl.setAttribute('x1', -half); lineEl.setAttribute('x2', half); }
+    const hitEl = busComp.el.querySelector('.comp-outline');
+    if (hitEl) { hitEl.setAttribute('x', -half - 6); hitEl.setAttribute('width', 2 * half + 12); }
+  }
+
+  function respanBusesForConn(conn) {
+    [conn.from.compId, conn.to.compId].forEach(id => {
+      const c = getComponent(id);
+      if (c && isBusType(c.type)) respanBusInPlace(c);
+    });
+  }
+
+  function setBusbarMode(on) {
+    state.busbarMode = !!on;
+    try { localStorage.setItem('busbarMode', on ? '1' : '0'); } catch (e) { /* ignore */ }
+    _deenergizedCache = null;
+    state.components.forEach(c => rerenderComponent(c));
+  }
+
+  // ==================== P4: energization coloring (busbar mode) =============
+  // ETAP-style: de-energized (out-of-service or islanded) buses/branches/devices
+  // render greyed. Topology BFS from in-service sources through conducting,
+  // in-service elements. docs/planning/gui_one_line_redesign.md P4.
+  function getDeenergized() {
+    if (!_deenergizedCache) _deenergizedCache = computeDeenergized();
+    return _deenergizedCache;
+  }
+
+  function computeDeenergized() {
+    const inSvc = (c) => !!c && (c.params?.in_service !== false);
+    const isSource = (c) => (c.type === 'external_grid' || c.type === 'generator') && inSvc(c);
+    const conducts = (c) => {
+      if (!inSvc(c)) return false;
+      if (c.type === 'switch_comp' || c.type === 'circuit_breaker') return c.params?.closed !== false;
+      return ['ac_branch', 'dc_branch', 'transformer_2w', 'transformer_3w',
+              'vsc_converter', 'lcc_converter', 'dcdc_converter'].includes(c.type);
+    };
+    const busesOf = (comp) => {
+      const out = [];
+      for (const conn of connectionsOf(comp.id)) {
+        const otherId = conn.from.compId === comp.id ? conn.to.compId : conn.from.compId;
+        const other = getComponent(otherId);
+        if (other && isBusType(other.type)) out.push(other);
+      }
+      return out;
+    };
+    const energized = new Set();
+    const queue = [];
+    state.components.forEach(c => {
+      if (!isSource(c)) return;
+      busesOf(c).forEach(b => { if (inSvc(b) && !energized.has(b.id)) { energized.add(b.id); queue.push(b); } });
+    });
+    while (queue.length) {
+      const bus = queue.shift();
+      for (const conn of connectionsOf(bus.id)) {
+        const elemId = conn.from.compId === bus.id ? conn.to.compId : conn.from.compId;
+        const elem = getComponent(elemId);
+        if (!elem || !conducts(elem)) continue;
+        busesOf(elem).forEach(b2 => {
+          if (b2.id !== bus.id && inSvc(b2) && !energized.has(b2.id)) { energized.add(b2.id); queue.push(b2); }
+        });
+      }
+    }
+    const deen = new Set();
+    state.components.forEach(c => {
+      if (!inSvc(c)) { deen.add(c.id); return; }
+      if (isBusType(c.type)) { if (!energized.has(c.id)) deen.add(c.id); return; }
+      const bs = busesOf(c);
+      if (bs.length && bs.every(b => !energized.has(b.id))) deen.add(c.id);
+    });
+    return deen;
+  }
+
+  function connectionDeenergized(conn) {
+    const de = getDeenergized();
+    return de.has(conn.from.compId) || de.has(conn.to.compId);
+  }
+
+  function energizeClass(comp) {
+    return state.busbarMode && state.showEnergization && getDeenergized().has(comp.id);
+  }
+
+  let _energizationStylesInjected = false;
+  function injectEnergizationStyles() {
+    if (_energizationStylesInjected) return;
+    _energizationStylesInjected = true;
+    const st = document.createElement('style');
+    st.textContent = '.component.deenergized{opacity:.4;filter:grayscale(1)}' +
+                     '.connection.deenergized{opacity:.32}' +
+                     '.connection.deenergized .conn-line{stroke:#6b7280}';
+    document.head.appendChild(st);
+  }
+
+  function setEnergizationColoring(on) {
+    state.showEnergization = !!on;
+    _deenergizedCache = null;   // recompute against current in_service before re-rendering
+    if (state.busbarMode) state.components.forEach(c => rerenderComponent(c));
+  }
+
+  // ==================== P4: hierarchical sheets (drill-down) ================
+  // Double-click a composite node (microgrid / VPP / energy-router) to open its
+  // sub-network on a sheet, with breadcrumb navigation back to the root. The
+  // sub-sheet is a visual authoring layer held on the host (`host._sheet`);
+  // analysis always runs on the ROOT network (see the buildSystemJson guard).
+  // Session-only for now (not persisted across save/load). docs P4.
+  const SUBSHEET_TYPES = new Set(['microgrid', 'vpp', 'energy_router']);
+
+  function renderCurrentSheet() {
+    componentsLayer.innerHTML = '';
+    connectionsLayer.innerHTML = '';
+    resultsLayer.innerHTML = '';
+    invalidateCompBusMap();
+    _routeCtx = state.connectionStyle === 'avoid' ? buildRouteContext() : null;
+    state.components.forEach(renderComponent);
+    state.connections.forEach(conn => renderConnection(conn));
+    renderBreadcrumb();
+    updateInfo();
+  }
+
+  function enterSheet(compId) {
+    const host = getComponent(compId);
+    if (!host || !SUBSHEET_TYPES.has(host.type)) return false;
+    host._sheet = host._sheet || { components: [], connections: [], nextId: 1 };
+    state.sheetStack.push({
+      hostId: compId, name: host.params?.name || host.type,
+      components: state.components, connections: state.connections,
+      componentById: state.componentById, connectionsByEndpoint: state.connectionsByEndpoint,
+      nextId: state.nextId,
+    });
+    state.components = host._sheet.components;
+    state.connections = host._sheet.connections;
+    state.componentById = new Map(state.components.map(c => [c.id, c]));
+    state.connectionsByEndpoint = new Map();
+    state.connections.forEach(indexConnection);
+    state.nextId = host._sheet.nextId || 1;
+    state.selectedId = null; state.selectedConnectionId = null; state.selectedIds.clear();
+    clearUndoStacks();
+    renderCurrentSheet();
+    return true;
+  }
+
+  function popSheetOnce() {
+    if (!state.sheetStack.length) return;
+    const parent = state.sheetStack.pop();
+    const host = parent.componentById.get(parent.hostId);
+    if (host) host._sheet = { components: state.components, connections: state.connections, nextId: state.nextId };
+    state.components = parent.components;
+    state.connections = parent.connections;
+    state.componentById = parent.componentById;
+    state.connectionsByEndpoint = parent.connectionsByEndpoint;
+    state.nextId = parent.nextId;
+    state.selectedId = null; state.selectedConnectionId = null; state.selectedIds.clear();
+    clearUndoStacks();
+  }
+
+  function exitToLevel(level) {
+    while (state.sheetStack.length > level) popSheetOnce();
+    renderCurrentSheet();
+  }
+
+  function renderBreadcrumb() {
+    const hostEl = document.getElementById('canvasContainer');
+    if (!hostEl) return;
+    let bar = document.getElementById('sheetBreadcrumb');
+    if (!state.sheetStack.length) { if (bar) bar.remove(); return; }
+    if (!bar) {
+      bar = document.createElement('div');
+      bar.id = 'sheetBreadcrumb';
+      bar.setAttribute('aria-label', '\u5c42\u7ea7\u5bfc\u822a');
+      bar.style.cssText = 'position:absolute;top:10px;left:10px;z-index:20;display:flex;gap:6px;align-items:center;' +
+        'background:var(--surface-raised,#2c313a);border:1px solid var(--border,#3e4451);border-radius:8px;' +
+        'padding:5px 10px;font-size:12px;box-shadow:0 2px 8px rgba(0,0,0,.25)';
+      hostEl.appendChild(bar);
+    }
+    const crumbs = [{ name: '\u6839 Root', level: 0 }];
+    state.sheetStack.forEach((s, i) => crumbs.push({ name: s.name, level: i + 1 }));
+    bar.innerHTML = '';
+    crumbs.forEach((c, i) => {
+      if (i) { const sep = document.createElement('span'); sep.textContent = '\u203a'; sep.style.opacity = '.5'; bar.appendChild(sep); }
+      const a = document.createElement('span');
+      a.textContent = c.name;
+      const isLast = i === crumbs.length - 1;
+      a.style.cssText = isLast ? 'color:var(--ink,#dcdfe4);font-weight:600'
+                               : 'color:var(--accent,#61afef);cursor:pointer';
+      if (!isLast) a.onclick = () => exitToLevel(c.level);
+      bar.appendChild(a);
+    });
+  }
+
+  // Serialize / restore a composite's sub-sheet (nested) for save/load (P4).
+  function serializeSheet(sheet) {
+    if (!sheet) return null;
+    return {
+      nextId: sheet.nextId || 1,
+      components: (sheet.components || []).map(c => {
+        const o = { id: c.id, type: c.type, x: c.x, y: c.y, rotation: c.rotation || 0, params: cloneJsonBlock(c.params) || {} };
+        if (c._sheet) o._sheet = serializeSheet(c._sheet);
+        return o;
+      }),
+      connections: (sheet.connections || []).map(cn => ({
+        id: cn.id, from: { compId: cn.from.compId, portId: cn.from.portId },
+        to: { compId: cn.to.compId, portId: cn.to.portId },
+      })),
+    };
+  }
+
+  function deserializeSheet(data) {
+    if (!data) return null;
+    return {
+      nextId: data.nextId || 1,
+      components: (data.components || []).map(c => {
+        const o = { id: c.id, type: c.type, x: numOr(c.x, 0), y: numOr(c.y, 0), rotation: c.rotation || 0, params: c.params || {}, el: null };
+        if (c._sheet) o._sheet = deserializeSheet(c._sheet);
+        return o;
+      }),
+      connections: (data.connections || []).map(cn => ({
+        id: cn.id || ('conn_' + (state.nextId++)), el: null,
+        from: { compId: cn.from.compId, portId: cn.from.portId },
+        to: { compId: cn.to.compId, portId: cn.to.portId },
+      })),
+    };
+  }
+
+  // ==================== P4: print / export (standalone SVG) =================
+  // Serialize the drawn one-line (busbar rendering + IEC symbols + result
+  // overlay) to a self-contained, printable vector SVG. docs P4.
+  function pickComputed(sel, prop, fb) {
+    const el = document.querySelector(sel);
+    if (!el) return fb;
+    const v = getComputedStyle(el)[prop];
+    return v && v !== 'none' && v !== '' ? v : fb;
+  }
+
+  function exportOneLineSvg() {
+    let bb;
+    try {
+      const cb = componentsLayer.getBBox(), nb = connectionsLayer.getBBox();
+      const x0 = Math.min(cb.x, nb.x), y0 = Math.min(cb.y, nb.y);
+      const x1 = Math.max(cb.x + cb.width, nb.x + nb.width);
+      const y1 = Math.max(cb.y + cb.height, nb.y + nb.height);
+      bb = { x: x0, y: y0, w: Math.max(1, x1 - x0), h: Math.max(1, y1 - y0) };
+    } catch (e) { bb = { x: viewBox.x, y: viewBox.y, w: viewBox.w, h: viewBox.h }; }
+    const pad = 40; bb.x -= pad; bb.y -= pad; bb.w += 2 * pad; bb.h += 2 * pad;
+    const NS = 'http://www.w3.org/2000/svg';
+    const out = document.createElementNS(NS, 'svg');
+    out.setAttribute('xmlns', NS);
+    out.setAttribute('viewBox', `${bb.x} ${bb.y} ${bb.w} ${bb.h}`);
+    out.setAttribute('width', String(Math.round(bb.w)));
+    out.setAttribute('height', String(Math.round(bb.h)));
+    const bg = (getComputedStyle(document.documentElement).getPropertyValue('--canvas-bg') || '#1e2127').trim();
+    const labelC = pickComputed('.comp-label', 'fill', '#dcdfe4');
+    const valueC = pickComputed('.comp-value', 'fill', '#8b93a1');
+    const lineC = pickComputed('.conn-line', 'stroke', '#5c6370');
+    const style = document.createElementNS(NS, 'style');
+    style.textContent =
+      `.comp-label{fill:${labelC};font:600 11px -apple-system,"PingFang SC",sans-serif;text-anchor:middle}` +
+      `.comp-value{fill:${valueC};font:10px -apple-system,"PingFang SC",sans-serif;text-anchor:middle}` +
+      `.conn-line{stroke:${lineC};fill:none;stroke-width:2}` +
+      `.component.deenergized{opacity:.4}.connection.deenergized .conn-line{stroke:#6b7280}` +
+      `.flow-label{font:600 11px sans-serif}text{text-anchor:middle}`;
+    out.appendChild(style);
+    const rect = document.createElementNS(NS, 'rect');
+    rect.setAttribute('x', String(bb.x)); rect.setAttribute('y', String(bb.y));
+    rect.setAttribute('width', String(bb.w)); rect.setAttribute('height', String(bb.h));
+    rect.setAttribute('fill', bg || '#1e2127');
+    out.appendChild(rect);
+    // Connections under components under result overlays; strip invisible hit
+    // areas and port dots for a clean vector.
+    const conns = connectionsLayer.cloneNode(true);
+    const comps = componentsLayer.cloneNode(true);
+    comps.querySelectorAll('.comp-outline, .port, .busbar-connect-handle').forEach(e => e.remove());
+    out.appendChild(conns);
+    out.appendChild(comps);
+    if (resultsLayer) out.appendChild(resultsLayer.cloneNode(true));
+    return '<?xml version="1.0" encoding="UTF-8"?>\n' + new XMLSerializer().serializeToString(out);
+  }
+
+  function downloadOneLineSvg() {
+    const svg = exportOneLineSvg();
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(new Blob([svg], { type: 'image/svg+xml' }));
+    a.download = 'one_line.svg'; a.click(); URL.revokeObjectURL(a.href);
+  }
+
   function renderComponent(comp) {
     const g = document.createElementNS('http://www.w3.org/2000/svg', 'g');
     g.classList.add('component', `comp-${comp.type}`);
     g.setAttribute('transform', `translate(${comp.x}, ${comp.y}) rotate(${comp.rotation || 0})`);
     g.dataset.compId = comp.id;
+    if (energizeClass(comp)) g.classList.add('deenergized');
 
-    // Symbol
+    // Symbol — busbar mode draws a resizable bar (P1) + IEC 60617 device
+    // glyphs; off = legacy glyphs. IEC_SYMBOLS is optional (core/iec_symbols.js).
     const symbolFn = COMP.symbols[comp.type];
-    if (symbolFn) {
+    const iecFn = (typeof window !== 'undefined' && window.IEC_SYMBOLS) ? window.IEC_SYMBOLS[comp.type] : null;
+    if (state.busbarMode && isBusType(comp.type)) {
+      g.innerHTML = busbarSymbol(comp);
+    } else if (state.busbarMode && iecFn) {
+      g.innerHTML = iecFn(comp.params);
+    } else if (symbolFn) {
       g.innerHTML = symbolFn(comp.params);
     }
 
-    // Invisible hit area
+    // Invisible hit area (widened to the bar in busbar mode)
     const hit = document.createElementNS('http://www.w3.org/2000/svg', 'rect');
     hit.classList.add('comp-outline');
-    hit.setAttribute('x', '-45');
-    hit.setAttribute('y', '-35');
-    hit.setAttribute('width', '90');
-    hit.setAttribute('height', '80');
+    if (state.busbarMode && isBusType(comp.type)) {
+      const half = busHalfLen(comp);
+      hit.setAttribute('x', String(-half - 6));
+      hit.setAttribute('y', '-18');
+      hit.setAttribute('width', String(2 * half + 12));
+      hit.setAttribute('height', '36');
+    } else {
+      hit.setAttribute('x', '-45');
+      hit.setAttribute('y', '-35');
+      hit.setAttribute('width', '90');
+      hit.setAttribute('height', '80');
+    }
     hit.setAttribute('fill', 'transparent');
     hit.setAttribute('stroke', 'transparent');
     hit.setAttribute('stroke-width', '1');
@@ -972,6 +1411,7 @@ const Canvas = (() => {
 
     // Ports
     const portDefs = COMP.ports[comp.type] || [];
+    const hidePortDots = state.busbarMode && isBusType(comp.type);
     portDefs.forEach(pd => {
       const pg = document.createElementNS('http://www.w3.org/2000/svg', 'g');
       pg.classList.add('port');
@@ -981,9 +1421,28 @@ const Canvas = (() => {
       c.setAttribute('cx', pd.x);
       c.setAttribute('cy', pd.y);
       c.setAttribute('r', '4');
+      // Busbar mode: taps slide along the bar, so hide the 4 fixed port dots
+      // (kept in the DOM at opacity 0 so connect-start still works).
+      if (hidePortDots) c.setAttribute('opacity', '0');
       pg.appendChild(c);
       g.appendChild(pg);
     });
+
+    // Busbar connect handles: hover-revealed dots at the bar ends + centre so a
+    // wire can be started from a bus in select mode too (see onMouseDown). Kept
+    // separate from .port so they always begin a projected-onto-bar wire.
+    if (hidePortDots) {
+      const half = busHalfLen(comp);
+      [-half, 0, half].forEach(hx => {
+        const h = document.createElementNS('http://www.w3.org/2000/svg', 'circle');
+        h.classList.add('busbar-connect-handle');
+        h.dataset.compId = comp.id;
+        h.setAttribute('cx', String(hx));
+        h.setAttribute('cy', '0');
+        h.setAttribute('r', String(_handleWorldR));
+        g.appendChild(h);
+      });
+    }
 
     componentsLayer.appendChild(g);
     comp.el = g;
@@ -1291,6 +1750,13 @@ const Canvas = (() => {
     const p1 = getPortWorldPos(conn.from.compId, conn.from.portId);
     const p2 = getPortWorldPos(conn.to.compId, conn.to.portId);
     if (!p1 || !p2) return null;
+    // Busbar mode: slide each bus endpoint to the other endpoint's x (tap).
+    if (state.busbarMode) {
+      const fromComp = getComponent(conn.from.compId);
+      const toComp = getComponent(conn.to.compId);
+      if (fromComp && isBusType(fromComp.type)) { const q = projectOntoBar(fromComp, p2); p1.x = q.x; p1.y = q.y; }
+      if (toComp && isBusType(toComp.type)) { const q = projectOntoBar(toComp, p1); p2.x = q.x; p2.y = q.y; }
+    }
     const style = state.connectionStyle || 'orthogonal';
     if (style === 'straight') return makeStraightPoints(p1, p2);
     const d1 = portDirection(conn.from.compId, conn.from.portId);
@@ -1683,6 +2149,7 @@ const Canvas = (() => {
     indexConnection(conn);
     invalidateCompBusMap();
     renderConnection(conn);
+    if (state.busbarMode) respanBusesForConn(conn);
     recordOps([{ op: 'add_conn', conn: snapshotConnection(conn) }]);
     updateInfo();
     return conn;
@@ -1706,6 +2173,7 @@ const Canvas = (() => {
     const g = document.createElementNS('http://www.w3.org/2000/svg', 'g');
     g.classList.add('connection');
     g.dataset.connId = conn.id;
+    if (state.busbarMode && state.showEnergization && connectionDeenergized(conn)) g.classList.add('deenergized');
 
     // Wide invisible hit area for easier clicking
     const hit = document.createElementNS('http://www.w3.org/2000/svg', 'path');
@@ -1736,6 +2204,20 @@ const Canvas = (() => {
   }
 
   // ========== Event: Mouse ==========
+  // Begin a pending wire from (x, y) world coords, previewing a dashed temp line
+  // coloured by the source carrier. Shared by port clicks and busbar clicks.
+  function startWire(compId, portId, x, y) {
+    state.connectStart = { compId, portId, x, y };
+    const line = document.createElementNS('http://www.w3.org/2000/svg', 'line');
+    line.setAttribute('x1', x); line.setAttribute('y1', y);
+    line.setAttribute('x2', x); line.setAttribute('y2', y);
+    const carrier = carrierFromPort(portId) || carrierFromIesType(getComponent(compId)?.type);
+    line.setAttribute('stroke', IES_CARRIER_COLORS[carrier] || '#61afef');
+    line.setAttribute('stroke-width', '2');
+    line.setAttribute('stroke-dasharray', '6 3');
+    tempLayer.appendChild(line);
+    state.tempLine = line;
+  }
   function onMouseDown(e) {
     // A pointer interaction ends any pending arrow-key move burst.
     commitKeyboardMove();
@@ -1747,18 +2229,34 @@ const Canvas = (() => {
       const compId = parseInt(portEl.dataset.compId);
       const portId = portEl.dataset.portId;
       const pos = getPortWorldPos(compId, portId);
-      state.connectStart = { compId, portId, x: pos.x, y: pos.y };
-      // Create temp line
-      state.tempLine = document.createElementNS('http://www.w3.org/2000/svg', 'line');
-      state.tempLine.setAttribute('x1', pos.x);
-      state.tempLine.setAttribute('y1', pos.y);
-      state.tempLine.setAttribute('x2', pos.x);
-      state.tempLine.setAttribute('y2', pos.y);
-      const sourceCarrier = carrierFromPort(portId) || carrierFromIesType(getComponent(compId)?.type);
-      state.tempLine.setAttribute('stroke', IES_CARRIER_COLORS[sourceCarrier] || '#61afef');
-      state.tempLine.setAttribute('stroke-width', '2');
-      state.tempLine.setAttribute('stroke-dasharray', '6 3');
-      tempLayer.appendChild(state.tempLine);
+      startWire(compId, portId, pos.x, pos.y);
+      e.preventDefault();
+      return;
+    }
+
+    // Busbar wire start: a bus's port dots are hidden and slide as taps, so a
+    // wire is started either (a) from a hover-revealed connect handle at a bar
+    // end/centre — which works in select mode too — or (b) by clicking anywhere
+    // along the bar in connect mode. Select mode still drags the bar body.
+    const handleEl0 = e.target.closest('.busbar-connect-handle');
+    let handleEl = handleEl0;
+    if (!handleEl && state.busbarMode && typeof document.elementsFromPoint === 'function') {
+      // A counter-scaled handle can still sit under a wider transparent
+      // comp-outline in the z-order, so scan the full hit stack at the pointer
+      // for one — this makes select-mode wiring from a bus reliable.
+      handleEl = document.elementsFromPoint(e.clientX, e.clientY)
+        .find(el => el.classList && el.classList.contains('busbar-connect-handle')) || null;
+    }
+    let wireBus = null;
+    if (handleEl) {
+      wireBus = getComponent(parseInt(handleEl.dataset.compId));
+    } else if (!portEl && state.mode === 'connect' && state.busbarMode) {
+      const busEl = e.target.closest('.component');
+      wireBus = busEl ? getComponent(parseInt(busEl.dataset.compId)) : null;
+    }
+    if (wireBus && isBusType(wireBus.type) && state.mode !== 'place') {
+      const proj = projectOntoBar(wireBus, pt);
+      startWire(wireBus.id, pt.x < wireBus.x ? 'left' : 'right', proj.x, proj.y);
       e.preventDefault();
       return;
     }
@@ -1907,6 +2405,15 @@ const Canvas = (() => {
         });
       }
       cheapReroute(comp.id);
+      // Busbar mode: keep connected bus bars spanning their taps live.
+      if (state.busbarMode) {
+        if (isBusType(comp.type)) respanBusInPlace(comp);
+        connectionsOf(comp.id).forEach(cn => {
+          const oid = cn.from.compId === comp.id ? cn.to.compId : cn.from.compId;
+          const o = getComponent(oid);
+          if (o && isBusType(o.type)) respanBusInPlace(o);
+        });
+      }
       // Update result overlays (voltage text + visualization)
       updateResultsOnDrag(comp.id);
       return;
@@ -1979,20 +2486,31 @@ const Canvas = (() => {
     // Complete connection
     if (state.connectStart && state.tempLine) {
       const portEl = e.target.closest('.port');
+      let toCompId = null, toPortId = null;
       if (portEl) {
-        const toCompId = parseInt(portEl.dataset.compId);
-        const toPortId = portEl.dataset.portId;
-        if (toCompId !== state.connectStart.compId) {
-          if (isCrossDomainConnection(state.connectStart.compId, toCompId)) {
-            // AC↔DC must go through a converter — block the wire and warn.
-            const msg = 'AC 元件不能直接连接 DC 元件，请通过换流器 (VSC / DC-DC) 连接';
-            if (typeof App !== 'undefined' && App.log) App.log(msg, 'warn');
-            if (typeof App !== 'undefined' && App.setStatus) App.setStatus('非法连接：AC↔DC', 'error');
-          } else {
-            addConnection(state.connectStart.compId, state.connectStart.portId,
-                          toCompId, toPortId);
-            if (typeof App !== 'undefined') App.onTopologyChanged();
-          }
+        toCompId = parseInt(portEl.dataset.compId);
+        toPortId = portEl.dataset.portId;
+      } else if (state.busbarMode) {
+        // Finish onto a bus bar clicked anywhere along its length (its port dots
+        // are hidden), mirroring the busbar connect-start above.
+        const busEl = e.target.closest('.component');
+        const busComp = busEl ? getComponent(parseInt(busEl.dataset.compId)) : null;
+        if (busComp && isBusType(busComp.type)) {
+          toCompId = busComp.id;
+          const up = screenToSvg(e.clientX, e.clientY);
+          toPortId = up.x < busComp.x ? 'left' : 'right';
+        }
+      }
+      if (toCompId !== null && toCompId !== state.connectStart.compId) {
+        if (isCrossDomainConnection(state.connectStart.compId, toCompId)) {
+          // AC↔DC must go through a converter — block the wire and warn.
+          const msg = 'AC 元件不能直接连接 DC 元件，请通过换流器 (VSC / DC-DC) 连接';
+          if (typeof App !== 'undefined' && App.log) App.log(msg, 'warn');
+          if (typeof App !== 'undefined' && App.setStatus) App.setStatus('非法连接：AC↔DC', 'error');
+        } else {
+          addConnection(state.connectStart.compId, state.connectStart.portId,
+                        toCompId, toPortId);
+          if (typeof App !== 'undefined') App.onTopologyChanged();
         }
       }
       state.tempLine.remove();
@@ -2068,6 +2586,9 @@ const Canvas = (() => {
     const compEl = e.target.closest('.component');
     if (compEl) {
       const compId = parseInt(compEl.dataset.compId);
+      // P4: composite nodes drill into their sub-sheet; others open properties.
+      const comp = getComponent(compId);
+      if (comp && SUBSHEET_TYPES.has(comp.type)) { enterSheet(compId); return; }
       selectComponent(compId);
       // Switch to properties tab
       if (typeof App !== 'undefined') App.switchTab('properties');
@@ -3496,6 +4017,20 @@ const Canvas = (() => {
   }
 
 	  function buildSystemJson() {
+	    // P4: analysis always runs on the ROOT network, never a composite's
+	    // sub-sheet. Rebuild once with the root context swapped in.
+	    if (state.sheetStack.length && !_buildingRoot) {
+	      const root = state.sheetStack[0];
+	      const saved = { c: state.components, x: state.connections, m: state.componentById, e: state.connectionsByEndpoint };
+	      state.components = root.components; state.connections = root.connections;
+	      state.componentById = root.componentById; state.connectionsByEndpoint = root.connectionsByEndpoint;
+	      _buildingRoot = true;
+	      try { return buildSystemJson(); } finally {
+	        _buildingRoot = false;
+	        state.components = saved.c; state.connections = saved.x;
+	        state.componentById = saved.m; state.connectionsByEndpoint = saved.e;
+	      }
+	    }
 	    // Headless mode: the canvas holds no glyphs, so return the system JSON we
 	    // stored at load time, normalized onto the full skeleton so every
 	    // calculation path and labeling/table helper sees the same complete shape
@@ -4729,6 +5264,7 @@ const Canvas = (() => {
           if (isIntegratedEnergyCanvasType(c.type)) {
             item.params = cloneJsonBlock(c.params) || {};
           }
+          if (c._sheet) item._sheet = serializeSheet(c._sheet);  // P4 sub-sheet
           return item;
         }),
         connections: state.connections
@@ -4795,6 +5331,7 @@ const Canvas = (() => {
       comp.y = numOr(item.y, comp.y);
       comp.rotation = numOr(item.rotation, 0);
       comp.layoutFixed = item.layoutFixed === true;
+      if (item._sheet) comp._sheet = deserializeSheet(item._sheet);  // P4 sub-sheet
       comp.el?.classList.toggle('layout-fixed', comp.layoutFixed);
       comp.el.setAttribute(
         'transform',
@@ -6040,45 +6577,78 @@ const Canvas = (() => {
     refreshSolvedGeneratorComponents();
     refreshSolvedGridAndBreakerComponents();
 
-    // Overlay voltage values on buses (tagged with data-comp-id for drag tracking)
+    // Overlay voltage values on buses (tagged with data-comp-id for drag
+    // tracking). In busbar mode the whole bar is recolored by voltage (ETAP
+    // convention) with an overlay line in the auto-cleared results layer, plus
+    // a centered readout above the bar; legacy point buses keep the label only.
+    function addBusVoltageOverlay(comp, color, labelText, tipText) {
+      const asBar = state.busbarMode && isBusType(comp.type);
+      if (asBar) {
+        const half = busHalfLen(comp);
+        const bar = document.createElementNS('http://www.w3.org/2000/svg', 'line');
+        bar.classList.add('result-busbar-voltage');
+        bar.setAttribute('x1', comp.x - half); bar.setAttribute('y1', comp.y);
+        bar.setAttribute('x2', comp.x + half); bar.setAttribute('y2', comp.y);
+        bar.setAttribute('stroke', color); bar.setAttribute('stroke-width', '8');
+        bar.setAttribute('stroke-linecap', 'round'); bar.setAttribute('opacity', '0.9');
+        bar.setAttribute('data-comp-id', comp.id);
+        const bt = document.createElementNS('http://www.w3.org/2000/svg', 'title');
+        bt.textContent = tipText; bar.appendChild(bt);
+        resultsLayer.appendChild(bar);
+      }
+      const t = document.createElementNS('http://www.w3.org/2000/svg', 'text');
+      t.classList.add('result-voltage');
+      t.setAttribute('x', comp.x);
+      t.setAttribute('y', comp.y - (asBar ? 14 : 24));
+      if (asBar) t.setAttribute('text-anchor', 'middle');
+      t.setAttribute('fill', color);
+      t.setAttribute('data-comp-id', comp.id);
+      t.textContent = labelText;
+      const tt = document.createElementNS('http://www.w3.org/2000/svg', 'title');
+      tt.textContent = tipText; t.appendChild(tt);
+      resultsLayer.appendChild(t);
+    }
+    // Windowed overlay creation (#6): on a large, culled diagram only build the
+    // per-bus voltage overlay for buses within the viewport + one screen of
+    // margin, so creation is O(visible) not O(model). Panning past the built
+    // region triggers a debounced rebuild (see scheduleViewportCulling).
+    if (_cullActive && !state.headless) {
+      const mx = viewBox.w, my = viewBox.h;
+      _overlayRegion = { x0: viewBox.x - mx, x1: viewBox.x + viewBox.w + mx,
+        y0: viewBox.y - my, y1: viewBox.y + viewBox.h + my };
+    } else {
+      _overlayRegion = null;
+    }
+    const inOverlayWindow = (comp) => !_overlayRegion ||
+      (comp.x >= _overlayRegion.x0 && comp.x <= _overlayRegion.x1 &&
+       comp.y >= _overlayRegion.y0 && comp.y <= _overlayRegion.y1);
     let dcIdx = 0;
     state.components.forEach(comp => {
       if (comp.type === 'ac_bus') {
+        if (!inOverlayWindow(comp)) return;   // idx is a lookup, safe to skip
         const idx = compToBusIndex(comp.id);
         if (idx !== null && result.vm && result.vm[idx] !== undefined) {
           const vm = result.vm[idx];
           const va = result.va ? result.va[idx] : 0;
           const color = vm < 0.95 ? '#e06c75' : vm > 1.05 ? '#d19a66' : '#98c379';
-          const t = document.createElementNS('http://www.w3.org/2000/svg', 'text');
-          t.classList.add('result-voltage');
-          t.setAttribute('x', comp.x);
-          t.setAttribute('y', comp.y - 24);
-          t.setAttribute('fill', color);
-          t.setAttribute('data-comp-id', comp.id);
           const baseKv = Number(comp.params?.base_kv);
           const actualKv = Number.isFinite(baseKv) && baseKv > 0 ? vm * baseKv : NaN;
-          t.textContent = Number.isFinite(actualKv)
+          const labelText = Number.isFinite(actualKv)
             ? `${actualKv.toFixed(2)} kV`
             : `${vm.toFixed(4)} pu`;
-          const tip = document.createElementNS('http://www.w3.org/2000/svg', 'title');
-          tip.textContent = Number.isFinite(actualKv)
+          const tipText = Number.isFinite(actualKv)
             ? `${actualKv.toFixed(3)} kV = ${vm.toFixed(6)} pu; angle ${(va * 180 / Math.PI).toFixed(4)}°`
             : `${vm.toFixed(6)} pu; angle ${(va * 180 / Math.PI).toFixed(4)}°`;
-          t.appendChild(tip);
-          resultsLayer.appendChild(t);
+          addBusVoltageOverlay(comp, color, labelText, tipText);
         }
       } else if (comp.type === 'dc_bus') {
-        if (result.vdc && result.vdc[dcIdx] !== undefined) {
+        // Always advance dcIdx (vdc is indexed by DC-bus order) even when the bus
+        // is outside the overlay window, so voltages stay aligned to their buses.
+        if (inOverlayWindow(comp) && result.vdc && result.vdc[dcIdx] !== undefined) {
           const vdc = result.vdc[dcIdx];
           const color = vdc < 0.95 ? '#e06c75' : vdc > 1.05 ? '#d19a66' : '#56b6c2';
-          const t = document.createElementNS('http://www.w3.org/2000/svg', 'text');
-          t.classList.add('result-voltage');
-          t.setAttribute('x', comp.x);
-          t.setAttribute('y', comp.y - 24);
-          t.setAttribute('fill', color);
-          t.setAttribute('data-comp-id', comp.id);
-          t.textContent = `DC ${vdc.toFixed(4)} pu`;
-          resultsLayer.appendChild(t);
+          addBusVoltageOverlay(comp, color, `DC ${vdc.toFixed(4)} pu`,
+            `DC ${vdc.toFixed(6)} pu — ${comp.params?.name || 'DC Bus'}`);
         }
         dcIdx++;
       }
@@ -6608,6 +7178,22 @@ const Canvas = (() => {
       // Collect heatmap data for radial glow rendering
       if (showHeat) {
         heatItems.push({ comp, colorPct, absPower, maxPower, bd, hasLoading: bd.rate_mva > 0, loading });
+        // ETAP-style: tint the branch's wires by loading so an overloaded line
+        // reads red directly on the one-line (not only via glow/arrow). The
+        // reset at the top of applyVisualizationOverlay restores the default
+        // stroke on the next apply / when visualization is switched off.
+        const wireColor = loadingColor(colorPct);
+        const overloaded = bd.rate_mva > 0 && loading >= 100;
+        for (const conn of connectionsOf(comp.id)) {
+          const busCompId = conn.from.compId === comp.id ? conn.to.compId
+            : conn.to.compId === comp.id ? conn.from.compId : null;
+          if (busCompId !== fromBusCompId && busCompId !== toBusCompId) continue;
+          const line = conn.el && conn.el.querySelector('.conn-line');
+          if (line) {
+            line.setAttribute('stroke', wireColor);
+            line.setAttribute('stroke-width', overloaded ? '4' : '3');
+          }
+        }
       }
 
       // Add flow direction arrows
@@ -7072,6 +7658,19 @@ const Canvas = (() => {
         // Heatmap glow for DC branch
         if (showHeat) {
           heatItems.push({ comp, colorPct, absPower, maxPower, bd: { rate_mva: rateMva }, hasLoading: rateMva > 0, loading: loadingPct });
+          // ETAP-style: tint the DC line's wires by loading (mirrors AC branch).
+          const wireColor = loadingColor(colorPct);
+          const overloaded = rateMva > 0 && loadingPct >= 100;
+          for (const c of connectionsOf(comp.id)) {
+            const busCompId = c.from.compId === comp.id ? c.to.compId
+              : c.to.compId === comp.id ? c.from.compId : null;
+            if (busCompId !== fromBusCompId && busCompId !== toBusCompId) continue;
+            const line = c.el && c.el.querySelector('.conn-line');
+            if (line) {
+              line.setAttribute('stroke', wireColor);
+              line.setAttribute('stroke-width', overloaded ? '4' : '3');
+            }
+          }
         }
 
         if (showFlow) {
@@ -8579,6 +9178,13 @@ const Canvas = (() => {
     autoLayout,
     autoLayoutSelection,
     setConnectionStyle,
+    setBusbarMode,
+    setEnergizationColoring,
+    enterSheet,
+    exitToRoot: () => exitToLevel(0),
+    getSheetDepth: () => state.sheetStack.length,
+    exportOneLineSvg,
+    downloadOneLineSvg,
     rerouteConnections,
     setAlignSnap,
     get layoutStats() { return _layoutStats; },

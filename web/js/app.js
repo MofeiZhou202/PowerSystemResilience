@@ -4352,6 +4352,91 @@ const App = (() => {
     reader.readAsText(file);
   }
 
+  // ===== Model database (.sqlite) persistence — P3 =====
+  // Save/open the authored model as a portable single-file SQLite database via
+  // the P0 lossless one-line store (HySimCore.OneLineStore) + vendored sql.js
+  // (WASM SQLite). The relational schema round-trips the system JSON byte-for-
+  // byte (tests/e2e/one_line_store_roundtrip.mjs, one_line_store_sqlite.mjs).
+  let _sqlJsPromise = null;
+  function getSqlJs() {
+    if (typeof initSqlJs !== 'function') {
+      return Promise.reject(new Error('sql.js 未加载（vendor/sql-wasm.js）'));
+    }
+    if (!_sqlJsPromise) {
+      _sqlJsPromise = Promise.resolve(initSqlJs({ locateFile: (f) => 'vendor/' + f }))
+        .catch((err) => { _sqlJsPromise = null; throw err; });
+    }
+    return _sqlJsPromise;
+  }
+
+  function downloadBinaryFile(filename, bytes, mimeType = 'application/octet-stream') {
+    const blob = new Blob([bytes], { type: mimeType });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = filename;
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    setTimeout(() => URL.revokeObjectURL(url), 0);
+  }
+
+  async function saveModelDatabase() {
+    const store = window.HySimCore && window.HySimCore.OneLineStore;
+    if (!store) { log('模型数据库不可用（one_line_store.js 未加载）', 'error'); return; }
+    if (typeof Canvas === 'undefined' || !Canvas.buildSystemJson) { log('画布未就绪', 'error'); return; }
+    setStatus('导出模型数据库...', 'busy');
+    try {
+      const SQL = await getSqlJs();
+      const sys = Canvas.buildSystemJson();
+      const rel = store.importSystemJson(sys);
+      const db = new SQL.Database();
+      try {
+        store.saveToDb(db, rel);
+        const bytes = db.export();
+        const base = (sys && sys.name ? String(sys.name) : 'one_line_model').replace(/[^\w.-]+/g, '_') || 'one_line_model';
+        downloadBinaryFile(`${base}.sqlite`, bytes, 'application/vnd.sqlite3');
+        log(`已保存模型数据库：${base}.sqlite（${rel.buses.length} 母线 / ${rel.devices.length} 设备 / ${rel.links.length} 支路）`, 'success');
+        showModelIoStatus('模型数据库已导出', [
+          ['文件', `${base}.sqlite`],
+          ['母线', String(rel.buses.length)],
+          ['设备', String(rel.devices.length)],
+          ['支路', String(rel.links.length)],
+        ], { subtitle: '关系型 SQLite（sql.js）· 与系统 JSON 无损互换' });
+        setStatus('就绪');
+      } finally {
+        db.close();
+      }
+    } catch (err) {
+      log(`模型数据库导出失败：${err.message}`, 'error');
+      setStatus('导出失败', 'error');
+    }
+  }
+
+  async function openModelDatabase(file) {
+    const store = window.HySimCore && window.HySimCore.OneLineStore;
+    if (!store) { log('模型数据库不可用（one_line_store.js 未加载）', 'error'); return; }
+    setStatus('打开模型数据库...', 'busy');
+    try {
+      const SQL = await getSqlJs();
+      const buf = new Uint8Array(await file.arrayBuffer());
+      let sys;
+      const db = new SQL.Database(buf);
+      try {
+        const rel = store.readFromDb(db);
+        sys = store.exportSystemJson(rel);
+      } finally {
+        db.close();
+      }
+      await importSystemJson(sys, file.name);
+      log(`已打开模型数据库：${file.name}`, 'success');
+      setStatus('就绪');
+    } catch (err) {
+      log(`模型数据库打开失败：${err.message}`, 'error');
+      setStatus('打开失败', 'error');
+    }
+  }
+
   // Static manifest of the JSON example templates shipped under web/examples/.
   // The C++ server mounts web/ at /xjtu/, so these load via plain relative
   // fetches and then follow the same load_json_string path as a file import.
@@ -15154,12 +15239,15 @@ const App = (() => {
         div.className = 'lib-item';
         div.dataset.compType = item.type;
 
-        // Create a small SVG icon
+        // Create a small SVG icon. Prefer the IEC 60617 glyph (the busbar-mode
+        // canvas symbol) so the library matches what gets drawn; fall back to
+        // the legacy glyph when a type has no IEC symbol yet.
         const iconSvg = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
         iconSvg.setAttribute('viewBox', '-30 -30 60 60');
         iconSvg.setAttribute('width', '36');
         iconSvg.setAttribute('height', '36');
-        const symbolFn = COMP.symbols[item.type];
+        const iecFn = (typeof window !== 'undefined' && window.IEC_SYMBOLS) ? window.IEC_SYMBOLS[item.type] : null;
+        const symbolFn = iecFn || COMP.symbols[item.type];
         if (symbolFn) {
           const g = document.createElementNS('http://www.w3.org/2000/svg', 'g');
           g.setAttribute('transform', 'scale(0.6)');
@@ -24824,6 +24912,42 @@ const App = (() => {
       connStyleSel.addEventListener('change', (e) => Canvas.setConnectionStyle?.(e.target.value));
     }
     document.getElementById('btnReroute')?.addEventListener('click', () => Canvas.rerouteConnections?.());
+    // Busbar mode toggle (P1): resizable busbars + sliding taps + IEC 60617 symbols.
+    const busbarBtn = document.getElementById('btnBusbarMode');
+    if (busbarBtn) {
+      let busbarOn = true;
+      try { busbarOn = localStorage.getItem('busbarMode') !== '0'; } catch (e) { busbarOn = true; }
+      const syncBusbarBtn = () => {
+        busbarBtn.classList.toggle('active', busbarOn);
+        busbarBtn.setAttribute('aria-pressed', busbarOn ? 'true' : 'false');
+      };
+      syncBusbarBtn();
+      busbarBtn.addEventListener('click', () => {
+        busbarOn = !busbarOn;
+        Canvas.setBusbarMode?.(busbarOn);
+        syncBusbarBtn();
+        if (busbarOn) {
+          // Busbar lanes (P1 slice 3): default the auto-layout to the BUSBAR
+          // arrangement (horizontal bus lanes + vertical feeders) and switch
+          // connections to orthogonal so wires route as clean bus lanes.
+          const dirSel = document.getElementById('layoutDirSelect');
+          if (dirSel) dirSel.value = 'BUSBAR';
+          const connSel = document.getElementById('connStyleSelect');
+          if (connSel) connSel.value = 'orthogonal';
+          Canvas.setConnectionStyle?.('orthogonal');
+        }
+      });
+    }
+    document.getElementById('btnExportSvg')?.addEventListener('click', () => Canvas.downloadOneLineSvg?.());
+    // Model database (.sqlite) Save / Open (P3: one-line store persistence).
+    document.getElementById('btnSaveDb')?.addEventListener('click', () => { saveModelDatabase(); });
+    const openDbInput = document.getElementById('fileOpenDb');
+    document.getElementById('btnOpenDb')?.addEventListener('click', () => openDbInput?.click());
+    openDbInput?.addEventListener('change', (e) => {
+      const file = e.target.files && e.target.files[0];
+      if (file) openModelDatabase(file);
+      e.target.value = '';
+    });
     document.getElementById('chkAlignSnap')?.addEventListener('change', (e) => Canvas.setAlignSnap?.(e.target.checked));
     document.getElementById('btnRotateCW').addEventListener('click', () => Canvas.rotateSelected(90));
     document.getElementById('btnRotateCCW').addEventListener('click', () => Canvas.rotateSelected(-90));
@@ -24970,6 +25094,45 @@ const App = (() => {
         document.addEventListener('mousemove', onMove);
         document.addEventListener('mouseup', onUp);
       });
+    }
+
+    // Left component-library resizer (mirrors the right panel; drives --lib-w so
+    // the canvas min-width calc stays correct). Width persists across sessions.
+    {
+      const resizer = document.getElementById('libraryResizer');
+      const panel = document.getElementById('componentLib');
+      if (resizer && panel) {
+        const applyLibW = (w) => {
+          const clamped = Math.max(140, Math.min(Math.round(window.innerWidth * 0.4), Math.round(w)));
+          document.documentElement.style.setProperty('--lib-w', clamped + 'px');
+          // Inline width beats the density-specific CSS (e.g. the compact-mode
+          // `#componentLib { width: 156px }`), which is more specific than the
+          // `var(--lib-w)` rule and would otherwise pin the panel.
+          panel.style.width = clamped + 'px';
+          try { localStorage.setItem('hysim.libW', String(clamped)); } catch { /* ignore */ }
+        };
+        try {
+          const saved = parseInt(localStorage.getItem('hysim.libW') || '', 10);
+          if (Number.isFinite(saved)) applyLibW(saved);
+        } catch { /* ignore */ }
+        resizer.addEventListener('mousedown', (e) => {
+          const startX = e.clientX, startW = panel.offsetWidth;
+          resizer.classList.add('dragging');
+          document.body.style.cursor = 'col-resize';
+          document.body.style.userSelect = 'none';
+          const onMove = (ev) => applyLibW(startW + (ev.clientX - startX));
+          const onUp = () => {
+            resizer.classList.remove('dragging');
+            document.body.style.cursor = '';
+            document.body.style.userSelect = '';
+            document.removeEventListener('mousemove', onMove);
+            document.removeEventListener('mouseup', onUp);
+          };
+          document.addEventListener('mousemove', onMove);
+          document.addEventListener('mouseup', onUp);
+          e.preventDefault();
+        });
+      }
     }
 
     _collectWeakLinkEvidence = collectWeakLinkEvidence;

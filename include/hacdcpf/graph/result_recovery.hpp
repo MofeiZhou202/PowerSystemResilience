@@ -80,6 +80,8 @@ void recover_switch_contracted_buses(
 /// Domain-safe variant: uses the domain-qualified maps in ContractionResult
 /// so that an AC bus and a DC bus that share the same numeric ID are never
 /// confused.  This is the preferred overload for hybrid AC/DC systems.
+/// Missing qualified values remain unavailable when legacy ownership is
+/// ambiguous; an AC voltage is never substituted for a missing DC voltage.
 void recover_switch_contracted_buses(
     FullNetworkVoltages&     voltages,
     const ContractionResult& contraction);

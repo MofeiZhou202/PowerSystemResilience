@@ -573,8 +573,18 @@ std::unordered_map<LoadRefKey, size_t, LoadRefKeyHash> build_load_position_map(
   return pos;
 }
 
-void validate_user_gec_inputs(const AnnualCarbonAnalysisResult& annual,
-                               const std::vector<AnnualUserGECInput>& users) {
+void validate_gec_hourly_inputs(const AnnualCarbonAnalysisResult& annual) {
+  if (annual.num_steps <= 0 || !std::isfinite(annual.step_duration_hr) ||
+      annual.step_duration_hr <= 0.0) {
+    throw std::invalid_argument("GEC accounting requires a positive finite horizon");
+  }
+  if (!annual.step_results.empty()) {
+    if (annual.step_results.size() != static_cast<size_t>(annual.num_steps) ||
+        std::any_of(annual.step_results.begin(), annual.step_results.end(),
+                    [](const auto& step) { return !step.pf_converged || !step.carbon_verified; })) {
+      throw std::invalid_argument("GEC accounting requires every carbon timestep to be verified");
+    }
+  }
   if (annual.hourly_load_energy_mwh.empty()) {
     throw std::invalid_argument(
         "annual.hourly_load_energy_mwh is required; enable keep_hourly_load_energy");
@@ -592,7 +602,36 @@ void validate_user_gec_inputs(const AnnualCarbonAnalysisResult& annual,
         annual.hourly_load_emissions_tco2[t].size() != annual.load_stats.size()) {
       throw std::invalid_argument("annual hourly load arrays must match load_stats order");
     }
+    for (size_t col = 0; col < annual.load_stats.size(); ++col) {
+      const double energy = annual.hourly_load_energy_mwh[t][col];
+      const double emissions = annual.hourly_load_emissions_tco2[t][col];
+      if (!std::isfinite(energy) || !std::isfinite(emissions) ||
+          energy < 0.0 || emissions < 0.0) {
+        throw std::invalid_argument(
+            "GEC accounting requires complete finite non-negative energy/emissions pairs");
+      }
+    }
   }
+}
+
+bool finite_gec_step(const auto& step) {
+  return std::isfinite(step.energy_mwh) &&
+         std::isfinite(step.gross_emissions_tco2) &&
+         std::isfinite(step.allocated_gec_mwh) &&
+         std::isfinite(step.net_emissions_tco2) &&
+         std::isfinite(step.gross_intensity_tco2_mwh) &&
+         std::isfinite(step.net_intensity_tco2_mwh);
+}
+
+bool finite_gec_summary(const auto& stats) {
+  return finite_gec_step(stats) && std::isfinite(stats.unused_gec_mwh) &&
+         std::isfinite(stats.avoided_emissions_tco2) &&
+         std::isfinite(stats.gec_coverage_ratio);
+}
+
+void validate_user_gec_inputs(const AnnualCarbonAnalysisResult& annual,
+                               const std::vector<AnnualUserGECInput>& users) {
+  validate_gec_hourly_inputs(annual);
   for (const auto& user : users) {
     if (user.loads.empty()) {
       throw std::invalid_argument("AnnualUserGECInput.loads must not be empty");
@@ -911,7 +950,6 @@ AnnualCarbonAnalysisResult compute_annual_carbon_analysis_impl(
 
     std::vector<double>* hourly_bus = nullptr;
     if (options.keep_hourly_bus_intensity) {
-      extend_hourly_width(result.hourly_bus_intensity_tco2_mwh, result.bus_stats.size(), nan);
       result.hourly_bus_intensity_tco2_mwh[t].resize(result.bus_stats.size(), nan);
       hourly_bus = &result.hourly_bus_intensity_tco2_mwh[t];
     }
@@ -919,27 +957,19 @@ AnnualCarbonAnalysisResult compute_annual_carbon_analysis_impl(
     for (const auto& row : ca.bus_carbon) {
       add_bus_result(row, false, step_duration_hr, result.bus_stats, bus_pos,
                      bus_accum, hourly_bus);
-      if (options.keep_hourly_bus_intensity) {
-        extend_hourly_width(result.hourly_bus_intensity_tco2_mwh, result.bus_stats.size(), nan);
-      }
     }
     for (const auto& row : ca.dc_bus_carbon) {
       add_bus_result(row, true, step_duration_hr, result.bus_stats, bus_pos,
                      bus_accum, hourly_bus);
-      if (options.keep_hourly_bus_intensity) {
-        extend_hourly_width(result.hourly_bus_intensity_tco2_mwh, result.bus_stats.size(), nan);
-      }
     }
 
     std::vector<double>* hourly_load = nullptr;
     if (options.keep_hourly_load_emissions) {
-      extend_hourly_width(result.hourly_load_emissions_tco2, result.load_stats.size(), nan);
       result.hourly_load_emissions_tco2[t].resize(result.load_stats.size(), nan);
       hourly_load = &result.hourly_load_emissions_tco2[t];
     }
     std::vector<double>* hourly_load_energy = nullptr;
     if (options.keep_hourly_load_energy) {
-      extend_hourly_width(result.hourly_load_energy_mwh, result.load_stats.size(), nan);
       result.hourly_load_energy_mwh[t].resize(result.load_stats.size(), nan);
       hourly_load_energy = &result.hourly_load_energy_mwh[t];
     }
@@ -948,23 +978,11 @@ AnnualCarbonAnalysisResult compute_annual_carbon_analysis_impl(
       add_load_result(row, false, step_duration_hr, result.load_stats, load_pos,
                       result.bus_stats, bus_pos, bus_accum, hourly_load,
                       hourly_load_energy);
-      if (options.keep_hourly_load_emissions) {
-        extend_hourly_width(result.hourly_load_emissions_tco2, result.load_stats.size(), nan);
-      }
-      if (options.keep_hourly_load_energy) {
-        extend_hourly_width(result.hourly_load_energy_mwh, result.load_stats.size(), nan);
-      }
     }
     for (const auto& row : ca.dc_load_carbon) {
       add_load_result(row, true, step_duration_hr, result.load_stats, load_pos,
                       result.bus_stats, bus_pos, bus_accum, hourly_load,
                       hourly_load_energy);
-      if (options.keep_hourly_load_emissions) {
-        extend_hourly_width(result.hourly_load_emissions_tco2, result.load_stats.size(), nan);
-      }
-      if (options.keep_hourly_load_energy) {
-        extend_hourly_width(result.hourly_load_energy_mwh, result.load_stats.size(), nan);
-      }
     }
 
     if (after_step) {
@@ -972,6 +990,8 @@ AnnualCarbonAnalysisResult compute_annual_carbon_analysis_impl(
     }
   }
 
+  // AUD-095: local writes grow only their current row; pad each table once
+  // after its stable column registry is final, preserving unknown samples.
   if (options.keep_hourly_bus_intensity) {
     extend_hourly_width(result.hourly_bus_intensity_tco2_mwh, result.bus_stats.size(), nan);
   }
@@ -1362,7 +1382,7 @@ bool validate_annual_user_gec_result(const AnnualUserGECResult& result,
     return std::abs(a - b) <= tol;
   };
   for (const auto& stats : result.user_stats) {
-    if (stats.energy_mwh < -tol ||
+    if (!finite_gec_summary(stats) || stats.energy_mwh < -tol ||
         stats.gross_emissions_tco2 < -tol ||
         stats.allocated_gec_mwh < -tol ||
         stats.unused_gec_mwh < -tol ||
@@ -1393,7 +1413,7 @@ bool validate_annual_user_gec_result(const AnnualUserGECResult& result,
     double net = 0.0;
     for (const auto& step_row : result.hourly_user_results) {
       const auto& step = step_row[ui];
-      if (step.energy_mwh < -tol ||
+      if (!finite_gec_step(step) || step.energy_mwh < -tol ||
           step.gross_emissions_tco2 < -tol ||
           step.allocated_gec_mwh < -tol ||
           step.net_emissions_tco2 < -tol ||
@@ -1688,18 +1708,7 @@ namespace {
 
 void validate_node_gec_inputs(const AnnualCarbonAnalysisResult& annual,
                                const std::vector<AnnualNodeGECInput>& nodes) {
-  if (annual.hourly_load_energy_mwh.empty()) {
-    throw std::invalid_argument(
-        "annual.hourly_load_energy_mwh is required; enable keep_hourly_load_energy");
-  }
-  if (annual.hourly_load_emissions_tco2.empty()) {
-    throw std::invalid_argument(
-        "annual.hourly_load_emissions_tco2 is required; enable keep_hourly_load_emissions");
-  }
-  if (annual.hourly_load_energy_mwh.size() != static_cast<size_t>(annual.num_steps) ||
-      annual.hourly_load_emissions_tco2.size() != static_cast<size_t>(annual.num_steps)) {
-    throw std::invalid_argument("annual hourly load arrays must match num_steps");
-  }
+  validate_gec_hourly_inputs(annual);
   for (const auto& node : nodes) {
     if (!std::isfinite(node.annual_gec_mwh) || node.annual_gec_mwh < -kTol) {
       throw std::invalid_argument("annual_gec_mwh must be finite and non-negative");
@@ -1958,7 +1967,7 @@ bool validate_annual_node_gec_result(const AnnualNodeGECResult& result, double t
     return std::abs(a - b) <= tol;
   };
   for (const auto& stats : result.node_stats) {
-    if (stats.energy_mwh < -tol ||
+    if (!finite_gec_summary(stats) || stats.energy_mwh < -tol ||
         stats.gross_emissions_tco2 < -tol ||
         stats.allocated_gec_mwh < -tol ||
         stats.unused_gec_mwh < -tol ||
@@ -1981,7 +1990,7 @@ bool validate_annual_node_gec_result(const AnnualNodeGECResult& result, double t
     double energy = 0.0, gross = 0.0, allocated = 0.0, net = 0.0;
     for (const auto& step_row : result.hourly_node_results) {
       const auto& step = step_row[ni];
-      if (step.energy_mwh < -tol || step.gross_emissions_tco2 < -tol ||
+      if (!finite_gec_step(step) || step.energy_mwh < -tol || step.gross_emissions_tco2 < -tol ||
           step.allocated_gec_mwh < -tol || step.net_emissions_tco2 < -tol ||
           step.allocated_gec_mwh > step.energy_mwh + tol) {
         return false;

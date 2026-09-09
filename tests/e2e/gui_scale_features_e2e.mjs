@@ -128,7 +128,10 @@ async function main() {
     // still refresh charts and should remain free of page errors.
     await page.route('https://cdn.plot.ly/**', (route) => route.fulfill({
       contentType: 'text/javascript',
-      body: 'window.Plotly={newPlot:()=>Promise.resolve(),react:()=>Promise.resolve(),Plots:{resize:()=>{}}};',
+      // Stub must cover every Plotly member the app calls (newPlot/react/purge/
+      // downloadImage/Plots.resize); an incomplete stub throws "X is not a
+      // function" as an uncaught pageerror and fails the run.
+      body: 'window.Plotly={newPlot:()=>Promise.resolve(),react:()=>Promise.resolve(),purge:()=>{},downloadImage:()=>Promise.resolve(),Plots:{resize:()=>{}}};',
     }));
     await page.goto(base + '/xjtu/', { waitUntil: 'domcontentloaded' });
     await page.waitForFunction(() =>

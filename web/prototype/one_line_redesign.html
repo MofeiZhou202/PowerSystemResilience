@@ -1,0 +1,569 @@
+<!doctype html>
+<html lang="zh">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>One-Line Redesign Prototype · Busbar-Centric AC/DC Editor</title>
+<!--
+  HySim-XJTU-HRPES — One-line diagram redesign PROTOTYPE (proof of concept).
+  Busbar-centric authoring canvas proposed in docs/planning/gui_one_line_redesign.md:
+    • resizable AC/DC busbars with taps; deterministic orthogonal bus-lane router
+    • node-breaker: circuit breakers / disconnectors on feeders & a bus-section tie
+    • IEC 60617 symbol PALETTE with click-to-place onto busbars
+    • load a REAL built-in case from a running run_gui_server (via one_line_store.js)
+    • result OVERLAYS (bus voltage bands, link loading %, flow arrows) — illustrative
+    • in-browser SQLite persistence (Save/Open .sqlite) via vendored sql.js
+
+  HOW TO RUN
+    • Double-click to open (file://): editor, palette, node-breaker, results work.
+    • Serve over HTTP for ELK auto-arrange AND for loading real cases:
+          python3 -m http.server 8000   →   http://localhost:8000/web/prototype/one_line_redesign.html
+    • "Load case": set the run_gui_server base URL (host:port), fetch /api/cases,
+      pick one. The model is imported losslessly via web/js/core/one_line_store.js.
+
+  NOT connected to the solver for math: result overlays are ILLUSTRATIVE and
+  labeled as such (they are not a power-flow solution).
+-->
+<script src="../vendor/elk.bundled.js" onerror="window.__elkMissing=true"></script>
+<script src="../js/core/one_line_store.js"></script>
+<script src="../vendor/sql-wasm.js"></script>
+<style>
+  :root{
+    --bg:#1a1d23; --panel:#2c313a; --ink:#dcdfe4; --sub:#8b93a1;
+    --border:#3e4451; --accent:#61afef; --hover:#353b46; --chip:#242832;
+  }
+  html[data-theme="light"]{
+    --bg:#eef2f7; --panel:#ffffff; --ink:#0f172a; --sub:#5b6472;
+    --border:#d8dee9; --accent:#2563eb; --hover:#e6ecf5; --chip:#eef2f7;
+  }
+  *{box-sizing:border-box}
+  html,body{height:100%;margin:0}
+  body{
+    font:13px/1.45 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,"PingFang SC","Microsoft YaHei",sans-serif;
+    background:var(--bg); color:var(--ink); overflow:hidden;
+  }
+  #app{display:grid; grid-template-rows:auto 1fr; height:100%}
+  header{
+    display:flex; align-items:center; gap:8px; padding:8px 14px; flex-wrap:wrap;
+    background:var(--panel); border-bottom:1px solid var(--border);
+  }
+  header .title{font-weight:700; font-size:14px; letter-spacing:.2px}
+  header .badge{font-size:11px; color:var(--sub); border:1px solid var(--border); border-radius:999px; padding:2px 9px}
+  header .spacer{flex:1}
+  .btn{background:var(--chip); color:var(--ink); border:1px solid var(--border); border-radius:7px; padding:6px 10px; cursor:pointer; font-size:12px}
+  .btn:hover{background:var(--hover)}
+  .btn.on{border-color:var(--accent); color:var(--accent)}
+  .btn:disabled{opacity:.45; cursor:not-allowed}
+  input,select{background:var(--chip); color:var(--ink); border:1px solid var(--border); border-radius:7px; padding:5px 8px; font-size:12px}
+  input#apiBase{width:186px}
+  main{display:grid; grid-template-columns:76px 1fr 268px; min-height:0}
+  #palette{background:var(--panel); border-right:1px solid var(--border); overflow:auto; padding:8px 6px}
+  #palette .ptitle{font-size:10px; text-transform:uppercase; letter-spacing:.5px; color:var(--sub); text-align:center; margin:2px 0 6px}
+  .ptile{width:100%; height:52px; margin-bottom:6px; border:1px solid var(--border); border-radius:8px; background:var(--chip); cursor:pointer; display:flex; flex-direction:column; align-items:center; justify-content:center; gap:2px}
+  .ptile:hover{background:var(--hover)}
+  .ptile.armed{border-color:var(--accent); box-shadow:0 0 0 2px var(--accent) inset}
+  .ptile svg{width:30px; height:26px}
+  .ptile span{font-size:9px; color:var(--sub)}
+  #stage{position:relative; min-width:0}
+  canvas{display:block; width:100%; height:100%; cursor:grab}
+  canvas.dragging{cursor:grabbing}
+  canvas.placing{cursor:crosshair}
+  #legend{position:absolute; left:12px; bottom:12px; background:var(--panel); border:1px solid var(--border); border-radius:9px; padding:9px 11px; font-size:11px; color:var(--sub); pointer-events:none; opacity:.96}
+  #legend b{color:var(--ink); font-weight:600}
+  #legend .row{display:flex; align-items:center; gap:7px; margin:3px 0}
+  #legend .sw{width:22px; height:0; border-top-width:4px; border-top-style:solid}
+  #banner{position:absolute; left:50%; top:10px; transform:translateX(-50%); background:#d6a15f; color:#1a1d23; padding:4px 12px; border-radius:999px; font-size:11px; font-weight:600; display:none}
+  aside{background:var(--panel); border-left:1px solid var(--border); padding:14px; overflow:auto}
+  aside h3{margin:0 0 4px; font-size:12px; text-transform:uppercase; letter-spacing:.6px; color:var(--sub)}
+  aside .hint{color:var(--sub); font-size:12px}
+  .kv{display:flex; justify-content:space-between; gap:10px; padding:5px 0; border-bottom:1px dashed var(--border)}
+  .kv .k{color:var(--sub)} .kv .v{font-weight:600; text-align:right}
+  .pill{display:inline-block; font-size:11px; padding:1px 8px; border-radius:999px; border:1px solid var(--border)}
+  #toast{position:absolute; left:50%; bottom:22px; transform:translateX(-50%); background:#e06c75; color:#fff; padding:8px 14px; border-radius:8px; font-size:12px; opacity:0; transition:opacity .2s; pointer-events:none; max-width:80%}
+  .help{color:var(--sub); font-size:11px; margin-top:10px; line-height:1.6}
+</style>
+</head>
+<body>
+<div id="app">
+  <header>
+    <span class="title">母线制单线图编辑器</span>
+    <span class="badge">PROTOTYPE · IEC 60617</span>
+    <span class="spacer"></span>
+    <input id="apiBase" placeholder="run_gui_server URL (host:port)" />
+    <button class="btn" id="btnCases">载入算例 Load cases</button>
+    <select id="caseSel" style="display:none"></select>
+    <button class="btn" id="btnSaveDb">保存 DB</button>
+    <input type="file" id="dbFile" accept=".sqlite" style="display:none" />
+    <button class="btn" id="btnOpenDb">打开 DB</button>
+    <button class="btn" id="btnResults">结果 Results</button>
+    <button class="btn on" id="btnProtect">保护 Protection</button>
+    <button class="btn" id="btnArrange">Auto-arrange (ELK)</button>
+    <button class="btn" id="btnLabels">标注 Labels</button>
+    <button class="btn" id="btnFit">适配 Fit</button>
+    <button class="btn" id="btnReset">重置 Reset</button>
+    <button class="btn" id="btnTheme">明/暗</button>
+  </header>
+  <main>
+    <div id="palette"><div class="ptitle">IEC 60617</div></div>
+    <div id="stage">
+      <canvas id="cv"></canvas>
+      <div id="legend"></div>
+      <div id="banner"></div>
+      <div id="toast"></div>
+    </div>
+    <aside>
+      <h3>属性 Properties</h3>
+      <div id="props"><div class="hint">点击母线或元件查看属性；点击左侧符号后再点母线可放置。<br>Click an element; click a palette symbol then a busbar to place.</div></div>
+      <div class="help">
+        • 左侧符号 → 点母线放置（IEC 调色板）<br>
+        • 元件沿母线拖动改变抽头；母线可移动/伸缩<br>
+        • 断路器/隔离开关画在引线上（节点-断路器）<br>
+        • “结果”叠加母线电压带/线路负载率/潮流箭头（示意）<br>
+        • “载入算例”从运行中的 run_gui_server 无损导入模型<br>
+        • 滚轮缩放，空白拖动平移
+      </div>
+    </aside>
+  </main>
+</div>
+<script>
+(function(){
+  'use strict';
+
+  const THEMES = {
+    dark:{ bg:'#1a1d23', grid:'#262b35', gridStrong:'#2f3542', ink:'#dcdfe4',
+      sub:'#8b93a1', line:'#6b7280', junction:'#c8ccd4', select:'#7cc7ee',
+      dc:'#56b6c2', hv:'#d19a66', mv:'#61afef', gen:'#98c379', load:'#d19a66',
+      pv:'#e5c07b', batt:'#e5c07b', grid_i:'#e06c75', conv:'#56b6c2', trafo:'#c678dd',
+      motor:'#56b6c2', shunt:'#abb2bf', wind:'#98c379', sgen:'#56b6c2', cb:'#e06c75',
+      vlo:'#e06c75', vhi:'#d19a66', vok:'#98c379', load0:'#98c379', load1:'#e5c07b', load2:'#e06c75' },
+    light:{ bg:'#f6f8fb', grid:'#e7edf5', gridStrong:'#dbe3ee', ink:'#0f172a',
+      sub:'#5b6472', line:'#94a3b8', junction:'#334155', select:'#2563eb',
+      dc:'#0e7490', hv:'#ea580c', mv:'#2563eb', gen:'#16a34a', load:'#ea580c',
+      pv:'#b45309', batt:'#b45309', grid_i:'#dc2626', conv:'#0e7490', trafo:'#7c3aed',
+      motor:'#0e7490', shunt:'#64748b', wind:'#16a34a', sgen:'#0e7490', cb:'#dc2626',
+      vlo:'#dc2626', vhi:'#ea580c', vok:'#16a34a', load0:'#16a34a', load1:'#b45309', load2:'#dc2626' }
+  };
+  let themeName='dark';
+  const C=()=>THEMES[themeName];
+
+  const STUB=16, BODY=22, BUS_T=6;
+  const SRC=new Set(['gen','grid','wind','sgen','pv','dcpv']);
+  let model, showLabels=true, showProtect=true, showResults=false, results=null;
+
+  function demoModel(){
+    return {
+      buses:[
+        { id:'B1', domain:'ac', name:'BUS-110', kv:110, x:200, y:150, length:520 },
+        { id:'B2', domain:'ac', name:'BUS-10',  kv:10,  x:150, y:400, length:520 },
+        { id:'B2B',domain:'ac', name:'BUS-10B', kv:10,  x:760, y:400, length:230 },
+        { id:'B3', domain:'dc', name:'DC-BUS ±20', kv:20, x:300, y:650, length:440 }
+      ],
+      devices:[
+        { id:'GR', kind:'grid', name:'Grid', busId:'B1', t:0.14, side:'above', rating:'2500 MVA' },
+        { id:'G1', kind:'gen',  name:'G1',   busId:'B1', t:0.52, side:'above', rating:'60 MW' },
+        { id:'G2', kind:'gen',  name:'G2',   busId:'B1', t:0.82, side:'above', rating:'40 MW' },
+        { id:'L1', kind:'load', name:'L1',   busId:'B2', t:0.24, side:'below', rating:'12 MW', protect:'cb' },
+        { id:'L2', kind:'load', name:'L2',   busId:'B2', t:0.52, side:'below', rating:'8 MW',  protect:'cb' },
+        { id:'PV', kind:'pv',   name:'PV1',  busId:'B2', t:0.80, side:'below', rating:'6 MWp', protect:'cb' },
+        { id:'WT', kind:'wind', name:'WT1',  busId:'B2B',t:0.55, side:'below', rating:'5 MW',  protect:'ds' },
+        { id:'DL', kind:'dcload',name:'DC-L',busId:'B3', t:0.24, side:'below', rating:'5 MW' },
+        { id:'BT', kind:'batt', name:'BESS', busId:'B3', t:0.55, side:'below', rating:'4 MW/8 MWh' },
+        { id:'DP', kind:'dcpv', name:'DC-PV',busId:'B3', t:0.82, side:'below', rating:'3 MWp' }
+      ],
+      links:[
+        { id:'T1',  kind:'trafo',   name:'T1 110/10', fromBusId:'B1', toBusId:'B2', channelX:300, rating:'63 MVA', protect:'cb' },
+        { id:'V1',  kind:'conv',    name:'VSC-1',     fromBusId:'B2', toBusId:'B3', channelX:460, rating:'20 MVA', protect:'cb' },
+        { id:'TIE', kind:'coupler', name:'Bus-Tie',   fromBusId:'B2', toBusId:'B2B',channelX:735, rating:'CB', protect:'cb' }
+      ]
+    };
+  }
+
+  const busById=id=>model.buses.find(b=>b.id===id);
+  const busEndX=b=>b.x+b.length;
+  const busRange=b=>[b.x,b.x+b.length];
+  const clamp=(v,a,z)=>Math.max(a,Math.min(z,v));
+  function deviceDock(d){ const b=busById(d.busId); return {x:b.x+d.t*b.length, y:b.y}; }
+  function deviceCenter(d){ const dk=deviceDock(d); const dir=d.side==='above'?-1:1; return {x:dk.x, y:dk.y+dir*(STUB+BODY)}; }
+
+  // Generalized orthogonal router: handles same-level (horizontal) and
+  // cross-level (vertical channel) links, with or without a body device.
+  function linkGeom(l){
+    const a=busById(l.fromBusId), b=busById(l.toBusId);
+    if(!a||!b) return null;
+    const hasBody = (l.kind==='trafo'||l.kind==='conv');
+    const sameLevel = Math.abs(a.y-b.y)<40;
+    if(hasBody){
+      const upper=a.y<=b.y?a:b, lower=a.y<=b.y?b:a;
+      const [ux0,ux1]=busRange(upper), [lx0,lx1]=busRange(lower);
+      const ov0=Math.max(ux0,lx0), ov1=Math.min(ux1,lx1);
+      const cx = ov0<=ov1 ? clamp(l.channelX, ov0+8, ov1-8)
+                          : clamp(l.channelX, Math.min(ux0,lx0)+8, Math.max(ux1,lx1)-8);
+      const fromX=clamp(cx,ux0+6,ux1-6), toX=clamp(cx,lx0+6,lx1-6);
+      const cy=(upper.y+lower.y)/2;
+      const upperDock={x:fromX,y:upper.y}, lowerDock={x:toX,y:lower.y};
+      const topTerm={x:cx,y:cy-BODY}, botTerm={x:cx,y:cy+BODY};
+      return { segments:[[upperDock,{x:fromX,y:topTerm.y},topTerm],[botTerm,{x:toX,y:botTerm.y},lowerDock]],
+        body:{x:cx,y:cy,kind:l.kind}, junctions:[upperDock,lowerDock], center:{x:cx,y:cy}, dir:{x:0,y:1} };
+    }
+    let pts, junctions, center, dir;
+    if(sameLevel){
+      const aLeft=(a.x+a.length/2)<=(b.x+b.length/2);
+      const ax=aLeft?a.x+a.length:a.x, bx=aLeft?b.x:b.x+b.length, y=a.y;
+      pts=[{x:ax,y},{x:bx,y}]; junctions=[{x:ax,y},{x:bx,y}]; center={x:(ax+bx)/2,y}; dir={x:1,y:0};
+    } else {
+      const upper=a.y<=b.y?a:b, lower=a.y<=b.y?b:a;
+      const cx=clamp(l.channelX, Math.min(a.x,b.x)+8, Math.max(busEndX(a),busEndX(b))-8);
+      const ux=clamp(cx,upper.x+6,busEndX(upper)-6), lx=clamp(cx,lower.x+6,busEndX(lower)-6);
+      const my=(upper.y+lower.y)/2;
+      pts=[{x:ux,y:upper.y},{x:ux,y:my},{x:cx,y:my},{x:lx,y:my},{x:lx,y:lower.y}];
+      junctions=[{x:ux,y:upper.y},{x:lx,y:lower.y}]; center={x:cx,y:my}; dir={x:0,y:1};
+    }
+    const body = (showProtect && l.protect) ? {x:center.x,y:center.y,kind:l.protect} : null;
+    return { segments:[pts], body, junctions, center, dir };
+  }
+
+  function busColor(b){ return b.domain==='dc'?C().dc:(b.kv>=110?C().hv:C().mv); }
+  function devColor(k){ const c=C(); return ({ grid:c.grid_i, gen:c.gen, load:c.load, pv:c.pv, dcpv:c.dc,
+    batt:c.batt, dcload:c.load, motor:c.motor, shunt:c.shunt, wind:c.wind, sgen:c.sgen,
+    trafo:c.trafo, conv:c.conv, line:c.line, switch:c.line, coupler:c.cb, cb:c.cb, ds:c.line })[k] || c.ink; }
+
+  // ---------------- canvas ----------------
+  const cv=document.getElementById('cv'), ctx=cv.getContext('2d');
+  let dpr=Math.max(1,window.devicePixelRatio||1);
+  const view={x:110,y:20,scale:1};
+  let selection=null, hover=null, placingKind=null;
+
+  function resize(){ const r=cv.getBoundingClientRect(); dpr=Math.max(1,window.devicePixelRatio||1);
+    cv.width=Math.round(r.width*dpr); cv.height=Math.round(r.height*dpr); render(); }
+  const S2W=(sx,sy)=>({x:(sx-view.x)/view.scale, y:(sy-view.y)/view.scale});
+
+  function line(p1,p2,color,w){ ctx.strokeStyle=color; ctx.lineWidth=w||2; ctx.beginPath(); ctx.moveTo(p1.x,p1.y); ctx.lineTo(p2.x,p2.y); ctx.stroke(); }
+  function poly(pts,color,w){ ctx.strokeStyle=color; ctx.lineWidth=w||2; ctx.lineJoin='round'; ctx.beginPath(); ctx.moveTo(pts[0].x,pts[0].y); for(let i=1;i<pts.length;i++) ctx.lineTo(pts[i].x,pts[i].y); ctx.stroke(); }
+  function dot(p,color,r){ ctx.fillStyle=color; ctx.beginPath(); ctx.arc(p.x,p.y,r||3.2,0,Math.PI*2); ctx.fill(); }
+  function label(t,x,y,color,size,weight,align){ ctx.fillStyle=color; ctx.font=(weight||500)+' '+(size||11)+'px -apple-system,"PingFang SC",sans-serif'; ctx.textAlign=align||'center'; ctx.textBaseline='middle'; ctx.fillText(t,x,y); }
+
+  // IEC 60617-style body shapes; terminal faces UP (bus side); glyphs drawn upright.
+  function drawBodyShape(kind,color){
+    ctx.strokeStyle=color; ctx.lineWidth=2; ctx.lineJoin='round';
+    line({x:0,y:-BODY},{x:0,y:-14},color,2);
+    switch(kind){
+      case 'gen': ctx.beginPath(); ctx.arc(0,2,13,0,Math.PI*2); ctx.stroke(); break;
+      case 'sgen': ctx.beginPath(); ctx.arc(0,2,13,0,Math.PI*2); ctx.stroke(); break;
+      case 'motor': ctx.beginPath(); ctx.arc(0,2,13,0,Math.PI*2); ctx.stroke(); break;
+      case 'wind': ctx.beginPath(); ctx.arc(0,2,12,0,Math.PI*2); ctx.stroke(); break;
+      case 'grid': ctx.strokeRect(-13,-11,26,26); ctx.beginPath(); ctx.moveTo(-8,2); ctx.quadraticCurveTo(-4,-6,0,2); ctx.quadraticCurveTo(4,10,8,2); ctx.stroke(); break;
+      case 'load': case 'dcload':
+        if(kind==='dcload'){ ctx.setLineDash([4,3]); line({x:0,y:-BODY},{x:0,y:-8},color,2); ctx.setLineDash([]); }
+        ctx.beginPath(); ctx.moveTo(-12,-6); ctx.lineTo(12,-6); ctx.lineTo(0,15); ctx.closePath(); ctx.stroke(); break;
+      case 'pv': case 'dcpv':
+        ctx.strokeRect(-15,-9,30,22); line({x:-15,y:-2},{x:15,y:-2},color,1.2);
+        line({x:-5,y:-9},{x:-9,y:13},color,1.2); line({x:5,y:-9},{x:1,y:13},color,1.2); break;
+      case 'batt':
+        ctx.strokeRect(-14,-8,28,22); line({x:-8,y:-2},{x:8,y:-2},color,2.4); line({x:-5,y:5},{x:5,y:5},color,1.4); break;
+      case 'shunt':
+        line({x:0,y:-14},{x:0,y:-4},color,2); line({x:-12,y:-4},{x:12,y:-4},color,2);
+        line({x:-9,y:2},{x:9,y:2},color,2); line({x:-6,y:8},{x:6,y:8},color,1.4); break;
+    }
+  }
+  function glyph(kind,cx,cy,color){
+    if(kind==='gen') label('G',cx,cy+2,color,13,700);
+    if(kind==='sgen') label('~',cx,cy+2,color,12,700);
+    if(kind==='motor') label('M',cx,cy+2,color,13,700);
+    if(kind==='wind') label('W',cx,cy+2,color,10,700);
+    if(kind==='dcpv') label('=',cx,cy-14,color,10,700);
+    if(kind==='dcload') label('=',cx,cy-16,color,9,700);
+  }
+  function drawLinkShape(kind,color){
+    ctx.strokeStyle=color; ctx.lineWidth=2; ctx.lineJoin='round';
+    line({x:0,y:-BODY},{x:0,y:-16},color,2); line({x:0,y:16},{x:0,y:BODY},color,2);
+    if(kind==='trafo'){ ctx.beginPath(); ctx.arc(0,-7,11,0,Math.PI*2); ctx.stroke(); ctx.beginPath(); ctx.arc(0,7,11,0,Math.PI*2); ctx.stroke(); }
+    else { ctx.strokeRect(-17,-16,34,32); line({x:-17,y:16},{x:17,y:-16},color,1.6); }
+  }
+  // Inline node-breaker devices on a stub/link (breaker = filled square, disconnector = open blade).
+  function drawInline(kind,color,horizontal){
+    ctx.save(); if(horizontal) ctx.rotate(Math.PI/2);
+    if(kind==='cb'){ ctx.fillStyle=C().bg; ctx.strokeStyle=color; ctx.lineWidth=2; ctx.beginPath(); ctx.rect(-6,-6,12,12); ctx.fill(); ctx.stroke(); }
+    else { ctx.strokeStyle=color; ctx.lineWidth=2; line({x:0,y:-7},{x:0,y:-3},color,2); line({x:0,y:7},{x:0,y:3},color,2); line({x:0,y:-3},{x:6,y:5},color,2); dot({x:0,y:-3},color,2.2); }
+    ctx.restore();
+  }
+
+  function drawStubProtect(d,dk,dir){
+    if(!showProtect || !d.protect) return;
+    ctx.save(); ctx.translate(dk.x, dk.y+dir*(STUB/2)); drawInline(d.protect, devColor(d.protect), false); ctx.restore();
+  }
+
+  function drawDevice(d){
+    const dk=deviceDock(d), dir=d.side==='above'?-1:1, c=deviceCenter(d), color=devColor(d.kind);
+    line(dk,{x:dk.x,y:dk.y+dir*STUB}, color, 2);
+    drawStubProtect(d,dk,dir);
+    ctx.save(); ctx.translate(c.x,c.y); if(dir<0) ctx.rotate(Math.PI); drawBodyShape(d.kind,color); ctx.restore();
+    glyph(d.kind,c.x,c.y,color); dot(dk,C().junction,3.4);
+    if(showLabels){ const ly=c.y+dir*(BODY+13); label(d.name,c.x,ly,C().ink,11,600); if(d.rating) label(d.rating,c.x,ly+13,C().sub,10,400); }
+    if(showResults && results) resultDeviceBadge(d,c,dir);
+    if(selection&&selection.type==='device'&&selection.id===d.id) selRing(c.x,c.y,26);
+    else if(hover&&hover.type==='device'&&hover.id===d.id) hoverRing(c.x,c.y,26);
+  }
+
+  function drawLink(l){
+    const g=linkGeom(l); if(!g) return; const color=devColor(l.kind);
+    const lw = (showResults && results && results.linkLoad[l.id]!=null) ? loadWidth(results.linkLoad[l.id]) : 2;
+    const lc = (showResults && results && results.linkLoad[l.id]!=null) ? loadColor(results.linkLoad[l.id]) : color;
+    g.segments.forEach(seg=>poly(seg,lc,lw));
+    if(g.body){ ctx.save(); ctx.translate(g.body.x,g.body.y);
+      if(g.body.kind==='trafo'||g.body.kind==='conv'){ drawLinkShape(g.body.kind,color); }
+      else { drawInline(g.body.kind, devColor(g.body.kind), g.dir.x!==0); }
+      ctx.restore();
+      if(l.kind==='conv'){ label('~',g.body.x-8,g.body.y-8,color,10,700); label('=',g.body.x+8,g.body.y+8,color,10,700); }
+    }
+    g.junctions.forEach(j=>dot(j,C().junction,3.4));
+    if(showResults && results && results.linkLoad[l.id]!=null) resultLinkBadge(l,g);
+    if(showLabels){ const off = g.body && (l.kind==='trafo'||l.kind==='conv') ? 26 : 6; label(l.name, g.center.x+off, g.center.y - (g.dir.x?12:0), C().ink,11,600,'left'); }
+    if(selection&&selection.type==='link'&&selection.id===l.id) selRing(g.center.x,g.center.y,26);
+    else if(hover&&hover.type==='link'&&hover.id===l.id) hoverRing(g.center.x,g.center.y,26);
+  }
+
+  function drawBus(b){
+    const color=busColor(b), [x0,x1]=busRange(b);
+    let barColor=color, barW=BUS_T;
+    if(showResults && results && results.busVm[b.id]!=null){ barColor=vmColor(results.busVm[b.id]); }
+    ctx.lineCap='round';
+    if(b.domain==='dc'){ line({x:x0,y:b.y-2},{x:x1,y:b.y-2},barColor,3.2); line({x:x0,y:b.y+2},{x:x1,y:b.y+2},barColor,3.2); }
+    else line({x:x0,y:b.y},{x:x1,y:b.y},barColor,barW);
+    ctx.lineCap='butt';
+    if(showLabels){ label(b.name,x0,b.y-22,C().ink,12,700,'left'); label(b.kv+(b.domain==='dc'?' kV DC':' kV'),x0,b.y-9,color,10,600,'left'); }
+    if(showResults && results && results.busVm[b.id]!=null) label(results.busVm[b.id].toFixed(3)+' pu', x1, b.y-9, vmColor(results.busVm[b.id]), 10, 700, 'right');
+    const selBus=selection&&selection.type==='bus'&&selection.id===b.id;
+    if(selBus||(hover&&hover.type==='bus'&&hover.id===b.id)){ handle(x0,b.y); handle(x1,b.y);
+      if(selBus){ ctx.strokeStyle=C().select; ctx.lineWidth=1; ctx.setLineDash([5,4]); ctx.strokeRect(x0-4,b.y-14,b.length+8,28); ctx.setLineDash([]); } }
+  }
+  function handle(x,y){ ctx.fillStyle=C().select; ctx.strokeStyle=C().bg; ctx.lineWidth=2; ctx.beginPath(); ctx.rect(x-4,y-4,8,8); ctx.fill(); ctx.stroke(); }
+  function selRing(x,y,r){ ctx.strokeStyle=C().select; ctx.lineWidth=1.5; ctx.setLineDash([5,4]); ctx.strokeRect(x-r,y-r,2*r,2*r); ctx.setLineDash([]); }
+  function hoverRing(x,y,r){ ctx.strokeStyle=C().select; ctx.globalAlpha=.5; ctx.lineWidth=1.2; ctx.strokeRect(x-r,y-r,2*r,2*r); ctx.globalAlpha=1; }
+
+  function drawGrid(){ const c=C(), step=40; const tl=S2W(0,0), br=S2W(cv.width/dpr,cv.height/dpr); ctx.lineWidth=1;
+    for(let gx=Math.floor(tl.x/step)*step; gx<br.x; gx+=step){ ctx.strokeStyle=(Math.round(gx/step)%5===0)?c.gridStrong:c.grid; ctx.beginPath(); ctx.moveTo(gx,tl.y); ctx.lineTo(gx,br.y); ctx.stroke(); }
+    for(let gy=Math.floor(tl.y/step)*step; gy<br.y; gy+=step){ ctx.strokeStyle=(Math.round(gy/step)%5===0)?c.gridStrong:c.grid; ctx.beginPath(); ctx.moveTo(tl.x,gy); ctx.lineTo(br.x,gy); ctx.stroke(); } }
+
+  function render(){ const c=C(); ctx.setTransform(dpr,0,0,dpr,0,0); ctx.fillStyle=c.bg; ctx.fillRect(0,0,cv.width,cv.height);
+    ctx.translate(view.x,view.y); ctx.scale(view.scale,view.scale);
+    drawGrid(); model.links.forEach(drawLink); model.buses.forEach(drawBus); model.devices.forEach(drawDevice); renderLegend(); }
+
+  // ---------------- results overlay (ILLUSTRATIVE) ----------------
+  function hash01(s){ let h=2166136261; for(let i=0;i<s.length;i++){ h^=s.charCodeAt(i); h=Math.imul(h,16777619); } return ((h>>>0)%1000)/1000; }
+  function makeIllustrativeResults(){
+    const busVm={}, linkLoad={};
+    model.buses.forEach(b=> busVm[b.id]=0.95+hash01(b.id)*0.12);          // 0.95..1.07
+    model.links.forEach(l=> linkLoad[l.id]=15+hash01(l.id)*105);          // 15..120 %
+    return { busVm, linkLoad, illustrative:true };
+  }
+  function vmColor(vm){ const c=C(); return vm<0.95?c.vlo:(vm>1.05?c.vhi:c.vok); }
+  function loadColor(p){ const c=C(); return p<60?c.load0:(p<90?c.load1:c.load2); }
+  function loadWidth(p){ return clamp(2+p/40, 2, 5.5); }
+  function resultLinkBadge(l,g){ const p=results.linkLoad[l.id]; const col=loadColor(p);
+    // flow arrow along the link direction at its center
+    const ang=Math.atan2(g.dir.y,g.dir.x)*180/Math.PI;
+    ctx.save(); ctx.translate(g.center.x,g.center.y); ctx.rotate(ang*Math.PI/180); ctx.fillStyle=col;
+    ctx.beginPath(); ctx.moveTo(-6,-4); ctx.lineTo(6,0); ctx.lineTo(-6,4); ctx.closePath(); ctx.fill(); ctx.restore();
+    label(p.toFixed(0)+'%', g.center.x - (g.dir.x?0:18), g.center.y + (g.dir.x?16:0), col, 10, 700); }
+  function resultDeviceBadge(d,c,dir){ /* device-level result badges reserved for real PF (P3) */ }
+
+  // ---------------- legend / props ----------------
+  function renderLegend(){ const c=C(), sw=(col)=>`<span class="sw" style="border-top-color:${col}"></span>`;
+    let html=`<div class="row">${sw(c.hv)}<span>AC · HV (≥110 kV)</span></div>`+
+      `<div class="row">${sw(c.mv)}<span>AC · MV</span></div>`+
+      `<div class="row">${sw(c.dc)}<span><b>DC</b> (double bar)</span></div>`+
+      `<div class="row">${sw(c.trafo)}<span>变压器/换流器</span></div>`;
+    if(showResults) html+=`<div class="row">${sw(c.vok)}<span>0.95–1.05 pu · <span style="color:${c.load2}">载荷↑</span></span></div>`;
+    document.getElementById('legend').innerHTML=html; }
+
+  function showProps(){ const el=document.getElementById('props');
+    if(!selection){ el.innerHTML='<div class="hint">点击元件或母线。Click an element.</div>'; return; }
+    const rows=[]; const kv=(k,v)=>rows.push(`<div class="kv"><span class="k">${k}</span><span class="v">${v}</span></div>`);
+    if(selection.type==='bus'){ const b=busById(selection.id);
+      kv('Type',`<span class="pill" style="color:${busColor(b)}">${b.domain==='dc'?'DC Busbar':'AC Busbar'}</span>`);
+      kv('Name',b.name); kv('kV',b.kv); kv('Length',Math.round(b.length)+' px');
+      kv('Taps', model.devices.filter(d=>d.busId===b.id).length + model.links.filter(l=>l.fromBusId===b.id||l.toBusId===b.id).length);
+      if(showResults&&results&&results.busVm[b.id]!=null) kv('Vm (示意)', results.busVm[b.id].toFixed(3)+' pu');
+    } else if(selection.type==='device'){ const d=model.devices.find(x=>x.id===selection.id);
+      kv('Type',`<span class="pill" style="color:${devColor(d.kind)}">${d.kind}</span>`); kv('Name',d.name);
+      if(d.rating) kv('Rating',d.rating); kv('Bus',busById(d.busId)?.name||d.busId); kv('Tap',(d.t*100|0)+'%');
+      if(d.protect) kv('Protection', d.protect==='cb'?'Breaker (CB)':'Disconnector (DS)');
+    } else { const l=model.links.find(x=>x.id===selection.id);
+      kv('Type',`<span class="pill" style="color:${devColor(l.kind)}">${l.kind}</span>`); kv('Name',l.name);
+      if(l.rating) kv('Rating',l.rating); kv('From',busById(l.fromBusId)?.name); kv('To',busById(l.toBusId)?.name);
+      if(l.protect) kv('Protection','Breaker (CB)');
+      if(showResults&&results&&results.linkLoad[l.id]!=null) kv('Loading (示意)', results.linkLoad[l.id].toFixed(0)+'%');
+    }
+    el.innerHTML=rows.join(''); }
+
+  // ---------------- hit test ----------------
+  function pick(w){
+    for(const d of model.devices){ const c=deviceCenter(d); if(Math.abs(w.x-c.x)<24&&Math.abs(w.y-c.y)<24) return {type:'device',id:d.id}; }
+    for(const l of model.links){ const g=linkGeom(l); if(g&&Math.abs(w.x-g.center.x)<24&&Math.abs(w.y-g.center.y)<24) return {type:'link',id:l.id}; }
+    for(const b of model.buses){ const [x0,x1]=busRange(b); if(Math.abs(w.y-b.y)<9){
+      if(Math.abs(w.x-x0)<7) return {type:'bus',id:b.id,handle:'l'};
+      if(Math.abs(w.x-x1)<7) return {type:'bus',id:b.id,handle:'r'};
+      if(w.x>x0-6&&w.x<x1+6) return {type:'bus',id:b.id,handle:null}; } }
+    return null;
+  }
+  function nearestBus(w){ let best=null,bd=1e9; for(const b of model.buses){ const [x0,x1]=busRange(b);
+    if(w.x<x0-30||w.x>x1+30) continue; const d=Math.abs(w.y-b.y); if(d<bd){ bd=d; best=b; } } return bd<70?best:null; }
+
+  // ---------------- interaction ----------------
+  let drag=null;
+  cv.addEventListener('mousedown', e=>{ const r=cv.getBoundingClientRect(); const w=S2W(e.clientX-r.left,e.clientY-r.top);
+    if(placingKind){ placeDevice(placingKind,w); return; }
+    const hit=pick(w);
+    if(hit){ selection={type:hit.type,id:hit.id}; showProps(); drag={hit,last:w}; cv.classList.add('dragging'); }
+    else { selection=null; showProps(); drag={pan:true,last:{x:e.clientX,y:e.clientY}}; cv.classList.add('dragging'); }
+    render(); });
+  window.addEventListener('mousemove', e=>{ const r=cv.getBoundingClientRect(); const sx=e.clientX-r.left, sy=e.clientY-r.top;
+    if(!drag){ const h=pick(S2W(sx,sy)); const key=h?h.type+h.id:null; const cur=hover?hover.type+hover.id:null; if(key!==cur){ hover=h?{type:h.type,id:h.id}:null; render(); } return; }
+    if(drag.pan){ view.x+=e.clientX-drag.last.x; view.y+=e.clientY-drag.last.y; drag.last={x:e.clientX,y:e.clientY}; render(); return; }
+    const w=S2W(sx,sy), h=drag.hit;
+    if(h.type==='device'){ const d=model.devices.find(x=>x.id===h.id); const b=busById(d.busId); d.t=clamp((w.x-b.x)/b.length,0.03,0.97); }
+    else if(h.type==='link'){ const l=model.links.find(x=>x.id===h.id); l.channelX=w.x; }
+    else if(h.type==='bus'){ const b=busById(h.id);
+      if(h.handle==='l'){ const nx=Math.min(w.x,busEndX(b)-80); b.length=busEndX(b)-nx; b.x=nx; }
+      else if(h.handle==='r'){ b.length=Math.max(80,w.x-b.x); }
+      else { b.x+=w.x-drag.last.x; b.y+=w.y-drag.last.y; } }
+    drag.last=w; showProps(); render(); });
+  window.addEventListener('mouseup', ()=>{ drag=null; cv.classList.remove('dragging'); });
+  window.addEventListener('keydown', e=>{ if(e.key==='Escape'){ setPlacing(null); } });
+  cv.addEventListener('wheel', e=>{ e.preventDefault(); const r=cv.getBoundingClientRect(); const sx=e.clientX-r.left, sy=e.clientY-r.top;
+    const before=S2W(sx,sy); view.scale=clamp(view.scale*(e.deltaY<0?1.1:1/1.1),0.3,3); view.x=sx-before.x*view.scale; view.y=sy-before.y*view.scale; render(); }, {passive:false});
+
+  let placeSeq=0;
+  function placeDevice(kind,w){ const b=nearestBus(w); if(!b){ toast('放置需靠近一条母线 · click near a busbar'); return; }
+    const id='new'+(++placeSeq); const t=clamp((w.x-b.x)/b.length,0.05,0.95);
+    model.devices.push({ id, kind, name:kind.toUpperCase()+placeSeq, busId:b.id, t, side:SRC.has(kind)?'above':'below', rating:'' });
+    selection={type:'device',id}; showProps(); render(); }
+
+  // ---------------- palette ----------------
+  const PALETTE=[['grid','Grid'],['gen','Gen'],['sgen','SGen'],['wind','Wind'],['motor','Motor'],
+    ['load','Load'],['pv','PV'],['batt','ESS'],['shunt','Shunt'],['dcload','DC-L'],['dcpv','DC-PV']];
+  function paletteSvg(kind){
+    // small IEC preview per tile
+    const col='currentColor'; const S=(inner)=>`<svg viewBox="-20 -20 40 40" fill="none" stroke="${col}" stroke-width="2">${inner}</svg>`;
+    switch(kind){
+      case 'gen': return S('<circle cx="0" cy="0" r="12"/><text x="0" y="4" text-anchor="middle" font-size="12" fill="'+col+'" stroke="none">G</text>');
+      case 'sgen': return S('<circle cx="0" cy="0" r="12"/><text x="0" y="4" text-anchor="middle" font-size="12" fill="'+col+'" stroke="none">~</text>');
+      case 'motor': return S('<circle cx="0" cy="0" r="12"/><text x="0" y="4" text-anchor="middle" font-size="12" fill="'+col+'" stroke="none">M</text>');
+      case 'wind': return S('<circle cx="0" cy="0" r="11"/><text x="0" y="4" text-anchor="middle" font-size="10" fill="'+col+'" stroke="none">W</text>');
+      case 'grid': return S('<rect x="-11" y="-11" width="22" height="22"/><path d="M-7,2 Q-3,-6 1,2 Q5,10 9,2"/>');
+      case 'load': return S('<path d="M-11,-8 L11,-8 L0,12 Z"/>');
+      case 'dcload': return S('<path d="M-11,-8 L11,-8 L0,12 Z" stroke-dasharray="4 3"/>');
+      case 'pv': return S('<rect x="-13" y="-9" width="26" height="18"/><line x1="-13" y1="0" x2="13" y2="0"/>');
+      case 'dcpv': return S('<rect x="-13" y="-9" width="26" height="18"/><line x1="-13" y1="0" x2="13" y2="0"/><text x="0" y="6" text-anchor="middle" font-size="7" fill="'+col+'" stroke="none">DC</text>');
+      case 'batt': return S('<rect x="-12" y="-8" width="24" height="18"/><line x1="-7" y1="-1" x2="7" y2="-1" stroke-width="3"/>');
+      case 'shunt': return S('<line x1="0" y1="-12" x2="0" y2="-4"/><line x1="-11" y1="-4" x2="11" y2="-4"/><line x1="-8" y1="2" x2="8" y2="2"/><line x1="-5" y1="8" x2="5" y2="8"/>');
+    }
+    return S('');
+  }
+  function buildPalette(){ const host=document.getElementById('palette');
+    PALETTE.forEach(([kind,name])=>{ const t=document.createElement('div'); t.className='ptile'; t.dataset.kind=kind;
+      t.style.color=devColor(kind); t.innerHTML=paletteSvg(kind)+`<span>${name}</span>`;
+      t.onclick=()=> setPlacing(placingKind===kind?null:kind); host.appendChild(t); }); }
+  function setPlacing(kind){ placingKind=kind; cv.classList.toggle('placing',!!kind);
+    document.querySelectorAll('.ptile').forEach(t=>t.classList.toggle('armed', t.dataset.kind===kind));
+    if(kind) toast('点击一条母线放置 '+kind+' · click a busbar'); }
+
+  // ---------------- load real case (via one_line_store.js) ----------------
+  const STORE = (window.HySimCore && window.HySimCore.OneLineStore) || null;
+  const KIND2SYM={ generator:'gen', external_grid:'grid', load:'load', flexible_load:'load', asymmetric_load:'load',
+    pv_system:'pv', dc_pv_array:'dcpv', storage:'batt', dc_storage:'batt', motor:'motor', shunt:'shunt',
+    renewable_gen:'wind', static_generator:'sgen', dc_load:'dcload', charger:'load', charging_station:'load',
+    mobile_storage:'batt', vpp:'gen', microgrid:'gen' };
+  const LINK2SYM={ transformer_2w:'trafo', transformer_3w:'trafo', vsc_converter:'conv', lcc_converter:'conv',
+    dcdc_converter:'conv', ac_branch:'line', dc_branch:'line', switch_comp:'switch', circuit_breaker:'coupler' };
+  function apiBase(){ const v=(document.getElementById('apiBase').value||'').trim(); return (v||location.origin).replace(/\/$/,''); }
+  async function loadCases(){ if(!STORE){ toast('one_line_store.js 未加载'); return; }
+    try{ const r=await fetch(apiBase()+'/api/cases'); const data=await r.json();
+      const cases=data.cases||data.builtin||data.items||(Array.isArray(data)?data:[]);
+      const names=cases.map(c=> typeof c==='string'?c:(c.name||c.case||c.id)).filter(Boolean);
+      if(!names.length){ toast('无内置算例返回'); return; }
+      const sel=document.getElementById('caseSel'); sel.innerHTML='<option value="">选择算例…</option>'+names.map(n=>`<option>${n}</option>`).join('');
+      sel.style.display=''; toast(names.length+' 个算例可载入'); }
+    catch(err){ toast('无法连接 run_gui_server（设置正确的 host:port 并用 HTTP 打开）'); } }
+  async function loadCase(name){ if(!name||!STORE) return;
+    try{ const r=await fetch(apiBase()+'/api/session/load_builtin',{ method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({case:name}) });
+      const data=await r.json(); const sys=data._system_json||data.system_json||data._raw_json;
+      if(!sys){ toast('返回缺少 _system_json'); return; }
+      const store=STORE.importSystemJson(sys); const bm=STORE.toBusbarModel(store);
+      bm.devices.forEach(d=> d.kind=KIND2SYM[d.kind]||'load');
+      bm.links.forEach(l=> l.kind=LINK2SYM[l.kind]||'line');
+      model=bm; selection=null; results=null; showResults=false; syncButtons();
+      if(!window.__elkMissing && typeof window.ELK==='function'){ await autoArrange(); } else { fit(); }
+      toast('已载入：'+name+'（无损导入）'); }
+    catch(err){ toast('载入失败：'+err.message); } }
+
+  // ---------------- ELK / fit / toast ----------------
+  let toastT; function toast(m){ const t=document.getElementById('toast'); t.textContent=m; t.style.opacity=1; clearTimeout(toastT); toastT=setTimeout(()=>t.style.opacity=0,2800); }
+  function banner(m){ const b=document.getElementById('banner'); if(m){ b.textContent=m; b.style.display='block'; } else b.style.display='none'; }
+  async function autoArrange(){ if(window.__elkMissing||typeof window.ELK!=='function'){ toast('ELK 不可用：用 HTTP 打开'); return; }
+    try{ const elk=new window.ELK();
+      const g={ id:'root', layoutOptions:{'elk.algorithm':'layered','elk.direction':'DOWN','elk.edgeRouting':'ORTHOGONAL','elk.spacing.nodeNode':'70','elk.layered.spacing.nodeNodeBetweenLayers':'150'},
+        children: model.buses.map(b=>({id:b.id,width:Math.max(160,b.length),height:44})),
+        edges: model.links.map((l,i)=>({id:'e'+i,sources:[l.fromBusId],targets:[l.toBusId]})) };
+      const res=await elk.layout(g); res.children.forEach(n=>{ const b=busById(n.id); if(b){ b.x=n.x+40; b.y=n.y+90; } });
+      model.links.forEach(l=>{ const a=busById(l.fromBusId); if(a) l.channelX=a.x+a.length/2; });
+      fit(); toast('ELK layered + orthogonal 布局已应用'); }
+    catch(err){ toast('ELK 布局失败（worker/CORS）'); } }
+  function fit(){ let x0=1e9,y0=1e9,x1=-1e9,y1=-1e9;
+    model.buses.forEach(b=>{ x0=Math.min(x0,b.x); x1=Math.max(x1,busEndX(b)); y0=Math.min(y0,b.y); y1=Math.max(y1,b.y); });
+    model.devices.forEach(d=>{ const c=deviceCenter(d); y0=Math.min(y0,c.y-34); y1=Math.max(y1,c.y+34); });
+    if(!isFinite(x0)){ view.x=110;view.y=20;view.scale=1; render(); return; }
+    x0-=70;x1+=70;y0-=60;y1+=60; const vw=cv.width/dpr, vh=cv.height/dpr;
+    view.scale=clamp(Math.min(vw/(x1-x0),vh/(y1-y0)),0.25,2);
+    view.x=(vw-(x1-x0)*view.scale)/2-x0*view.scale; view.y=(vh-(y1-y0)*view.scale)/2-y0*view.scale; render(); }
+
+  // ---------------- toolbar ----------------
+  function syncButtons(){ document.getElementById('btnResults').classList.toggle('on',showResults);
+    document.getElementById('btnProtect').classList.toggle('on',showProtect);
+    banner(showResults && results && results.illustrative ? '结果为示意值（未运行求解器）· Illustrative — not a power-flow solution' : ''); }
+  document.getElementById('btnTheme').onclick=()=>{ themeName=themeName==='dark'?'light':'dark'; document.documentElement.setAttribute('data-theme',themeName==='light'?'light':'dark'); document.querySelectorAll('.ptile').forEach(t=>t.style.color=devColor(t.dataset.kind)); render(); };
+  document.getElementById('btnLabels').onclick=()=>{ showLabels=!showLabels; render(); };
+  document.getElementById('btnProtect').onclick=()=>{ showProtect=!showProtect; syncButtons(); render(); };
+  document.getElementById('btnResults').onclick=()=>{ showResults=!showResults; if(showResults&&!results) results=makeIllustrativeResults(); syncButtons(); render(); };
+  document.getElementById('btnFit').onclick=fit;
+  document.getElementById('btnArrange').onclick=autoArrange;
+  document.getElementById('btnReset').onclick=()=>{ model=demoModel(); selection=null; results=null; showResults=false; setPlacing(null); syncButtons(); view.x=110;view.y=20;view.scale=1; showProps(); render(); };
+  document.getElementById('btnCases').onclick=loadCases;
+  document.getElementById('caseSel').onchange=e=> loadCase(e.target.value);
+  if(window.__elkMissing) document.getElementById('btnArrange').title='Serve over HTTP to enable ELK';
+
+  // ---------------- in-browser SQLite persistence (vendored sql.js) --------
+  // Produces / reads a real .sqlite file (same engine the server side owns).
+  let SQLJS=null;
+  if(typeof initSqlJs==='function'){ initSqlJs({locateFile:f=>'../vendor/'+f}).then(S=>{SQLJS=S;}).catch(()=>{}); }
+  const DB_SCHEMA=`CREATE TABLE layout(id INTEGER PRIMARY KEY CHECK(id=1), json TEXT NOT NULL);
+    CREATE TABLE bus(id TEXT, domain TEXT, kv REAL, x REAL, y REAL, length REAL);
+    CREATE TABLE device(id TEXT, kind TEXT, bus TEXT, t REAL, side TEXT);
+    CREATE TABLE link(id TEXT, kind TEXT, a TEXT, b TEXT);`;
+  function saveDb(){ if(!SQLJS){ toast('sql.js 未就绪（请用 HTTP 打开）'); return; }
+    const db=new SQLJS.Database(); db.run(DB_SCHEMA);
+    db.run('INSERT INTO layout(id,json) VALUES (1,?)',[JSON.stringify(model)]);
+    model.buses.forEach(b=>db.run('INSERT INTO bus VALUES (?,?,?,?,?,?)',[b.id,b.domain,b.kv,b.x,b.y,b.length]));
+    model.devices.forEach(d=>db.run('INSERT INTO device VALUES (?,?,?,?,?)',[d.id,d.kind,d.busId,d.t,d.side]));
+    model.links.forEach(l=>db.run('INSERT INTO link VALUES (?,?,?,?)',[l.id,l.kind,l.fromBusId,l.toBusId]));
+    const bytes=db.export(); db.close();
+    const a=document.createElement('a'); a.href=URL.createObjectURL(new Blob([bytes],{type:'application/octet-stream'}));
+    a.download='one_line.sqlite'; a.click(); URL.revokeObjectURL(a.href);
+    toast('已导出 one_line.sqlite（真实 SQLite 文件）'); }
+  function openDb(file){ if(!SQLJS){ toast('sql.js 未就绪'); return; }
+    const rd=new FileReader(); rd.onload=()=>{ try{ const db=new SQLJS.Database(new Uint8Array(rd.result));
+      const r=db.exec('SELECT json FROM layout WHERE id=1'); db.close();
+      if(!r.length){ toast('文件缺少 layout 表'); return; }
+      model=JSON.parse(r[0].values[0][0]); selection=null; results=null; showResults=false; setPlacing(null); syncButtons(); fit();
+      toast('已从 SQLite 载入布局'); }catch(e){ toast('打开失败：'+e.message); } };
+    rd.readAsArrayBuffer(file); }
+  document.getElementById('btnSaveDb').onclick=saveDb;
+  document.getElementById('btnOpenDb').onclick=()=>document.getElementById('dbFile').click();
+  document.getElementById('dbFile').onchange=e=>{ if(e.target.files[0]) openDb(e.target.files[0]); };
+
+  // ---------------- init ----------------
+  model=demoModel(); buildPalette(); window.addEventListener('resize',resize); resize(); render();
+})();
+</script>
+</body>
+</html>

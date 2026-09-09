@@ -30,14 +30,18 @@ std::string to_lower(std::string s) {
   return s;
 }
 
-std::vector<double> per_bus_generation_pu(const HybridPowerSystem& sys) {
-  const int n = static_cast<int>(sys.ac.buses.size());
-  std::vector<double> pg(static_cast<size_t>(n + 1), 0.0);
+std::unordered_map<int, double> per_bus_generation_pu(const HybridPowerSystem& sys) {
+  std::unordered_map<int, double> pg;
+  pg.reserve(sys.ac.buses.size());
+  for (const auto& bus : sys.ac.buses) {
+    if (bus.in_service) pg.emplace(bus.index, 0.0);
+  }
   for (const auto& g : sys.ac.generators) {
-    if (!g.in_service || g.bus < 1 || g.bus > n) {
+    const auto bus = pg.find(g.bus);
+    if (!g.in_service || bus == pg.end()) {
       continue;
     }
-    pg[static_cast<size_t>(g.bus)] += g.pg_mw / sys.base_mva;
+    bus->second += g.pg_mw / sys.base_mva;
   }
   return pg;
 }
@@ -190,12 +194,15 @@ double compute_total_participating_mismatch_pu(const SolverData& data,
     vdc[i] = result.vdc[static_cast<size_t>(i)];
   }
 
-  const Eigen::MatrixXcd ybus = Eigen::MatrixXcd(data.ybus);
   Eigen::VectorXd pcalc = Eigen::VectorXd::Zero(n);
-  for (int i = 0; i < n; ++i) {
-    for (int j = 0; j < n; ++j) {
-      const double g = ybus(i, j).real();
-      const double b = ybus(i, j).imag();
+  // P_i = sum_j Vi Vj (Gij cos(theta_ij) + Bij sin(theta_ij)).
+  // AUD-096 in docs/testing/module_code_audit.md: visit only Ybus nonzeros;
+  // column-major traversal preserves ascending-j accumulation for each row.
+  for (int j = 0; j < data.ybus.outerSize(); ++j) {
+    for (decltype(data.ybus)::InnerIterator entry(data.ybus, j); entry; ++entry) {
+      const int i = static_cast<int>(entry.row());
+      const double g = entry.value().real();
+      const double b = entry.value().imag();
       const double t = va[i] - va[j];
       const double c = std::cos(t);
       const double s = std::sin(t);
@@ -350,23 +357,22 @@ DistributedSlack create_participation_factors(const HybridPowerSystem& sys,
                                                const std::string& method,
                                                const std::vector<int>& participating_buses,
                                                const std::unordered_map<int, double>& droop_coeffs) {
-  const int nac = static_cast<int>(sys.ac.buses.size());
-  const std::vector<double> bus_pg = per_bus_generation_pu(sys);
+  const auto bus_pg = per_bus_generation_pu(sys);
 
   std::vector<int> buses;
   if (participating_buses.empty()) {
-    for (int i = 1; i <= nac; ++i) {
-      const auto& b = sys.ac.buses[static_cast<size_t>(i - 1)];
-      if ((b.bus_type == BusType::SLACK || b.bus_type == BusType::PV) &&
-          bus_pg[static_cast<size_t>(i)] > 0.0) {
-        buses.push_back(i);
+    for (const auto& b : sys.ac.buses) {
+      if (b.in_service &&
+          (b.bus_type == BusType::SLACK || b.bus_type == BusType::PV) &&
+          bus_pg.at(b.index) > 0.0) {
+        buses.push_back(b.index);
       }
     }
   } else {
     std::unordered_set<int> seen;
     seen.reserve(participating_buses.size());
     for (int bus : participating_buses) {
-      if (bus < 1 || bus > nac || seen.count(bus) != 0) {
+      if (!bus_pg.contains(bus) || seen.count(bus) != 0) {
         continue;
       }
       seen.insert(bus);
@@ -385,7 +391,7 @@ DistributedSlack create_participation_factors(const HybridPowerSystem& sys,
   max_p.reserve(buses.size());
 
   for (int bus : buses) {
-    const double capacity = std::max(bus_pg[static_cast<size_t>(bus)], 1e-4);
+    const double capacity = std::max(bus_pg.at(bus), 1e-4);
     if (mode == "capacity") {
       raw.push_back(capacity);
     } else if (mode == "droop") {

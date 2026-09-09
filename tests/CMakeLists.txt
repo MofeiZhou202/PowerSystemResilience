@@ -38,6 +38,7 @@ hacdcpf_add_test(test_unified_pf_upgrade  test_unified_pf_upgrade.cpp)
 hacdcpf_add_test(test_acopf_dcopf_crossval test_acopf_dcopf_crossval.cpp)
 hacdcpf_add_test(test_opf_solver_backends test_opf_solver_backends.cpp)
 hacdcpf_add_test(test_thread_pool test_thread_pool.cpp)
+hacdcpf_add_test(test_review_regressions test_review_regressions.cpp)
 hacdcpf_add_test(test_reactive_power_opt test_reactive_power_opt.cpp)
 hacdcpf_add_test(test_enhanced_solver     test_enhanced_solver.cpp)
 hacdcpf_add_test(test_uc_external_grid     test_uc_external_grid.cpp)
@@ -745,6 +746,12 @@ if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/run_gui_server.cpp")
 
   find_package(Python3 COMPONENTS Interpreter QUIET)
   if(Python3_Interpreter_FOUND)
+    add_test(NAME session_integrity_e2e
+      COMMAND "${Python3_EXECUTABLE}"
+              "${CMAKE_SOURCE_DIR}/tools/session_integrity_e2e.py"
+              --server "$<TARGET_FILE:run_gui_server>")
+    set_tests_properties(session_integrity_e2e PROPERTIES
+      LABELS "gui;e2e;concurrency" TIMEOUT 180 SKIP_RETURN_CODE 77)
     add_test(NAME market_bid_empirical_unit
       COMMAND "${Python3_EXECUTABLE}"
               "${CMAKE_SOURCE_DIR}/tests/test_market_bid_empirical.py")

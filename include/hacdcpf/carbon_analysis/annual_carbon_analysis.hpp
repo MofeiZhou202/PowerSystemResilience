@@ -271,6 +271,8 @@ AnnualCarbonAnalysisResult compute_annual_carbon_analysis(
 /// Callers must compute annual with keep_hourly_load_energy and
 /// keep_hourly_load_emissions enabled.  This does not modify physical bus/load
 /// carbon results.
+/// Rejects missing/non-finite/negative hourly energy-emission pairs and failed
+/// verification records. An unknown hour cannot be accounted as zero load.
 AnnualUserGECResult compute_annual_user_gec_accounting(
     const AnnualCarbonAnalysisResult& annual,
     const std::vector<AnnualUserGECInput>& users,
@@ -400,6 +402,9 @@ void save_annual_load_carbon_summary_json(const AnnualCarbonAnalysisResult& annu
 // ---------------------------------------------------------------------------
 
 /// Node-level annual GEC accounting.
+/// Requires complete finite non-negative hourly energy/emissions pairs and,
+/// when step diagnostics are present, verified carbon results at every step.
+/// Throws std::invalid_argument for incomplete input, as the user-level API does.
 AnnualNodeGECResult compute_annual_node_gec_accounting(
     const AnnualCarbonAnalysisResult& annual,
     const std::vector<AnnualNodeGECInput>& nodes,

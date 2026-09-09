@@ -212,7 +212,9 @@ include/hacdcpf/power\_flow/ac\_linearized\_pf.hpp:solve\_ac\_linearized\_dc）�
 
 \subsubsection*{数学模型与算法}
 \textbf{参与因子}（src/power\_flow/distributed\_slack\_solver.cpp:create\_participation\_factors）：默认参与母线为有实际发电（$P_g>0$）的 SLACK/PV
-母线（:create\_participation\_factors），空集抛 \texttt{invalid\_argument}（:create\_participation\_factors）；原始权重
+在运母线（:create\_participation\_factors）。发电聚合与参与列表均使用 AC 母线稳定
+\fld{index}，不把 ID 当作 vector 位置；显式列表过滤不在运、不存在和重复 ID。
+空集抛 \texttt{invalid\_argument}（:create\_participation\_factors）；原始权重
 \[
 \alpha_i^{0}=\max(P_{g,i},10^{-4})\;(\text{capacity}),\qquad
 \alpha_i^{0}=1/R_i\;(\text{droop},\ R_i>0\text{ 否则取容量}),\qquad
@@ -234,12 +236,20 @@ $\overline P_i=\max\big(|P_{\min,i}^{\Sigma}-P_{g,i}^{\mathrm{sched}}|,\,
 \[
 \Delta P_{\Sigma}=\sum_{i\in\text{全部 AC 母线}}\big(P_i^{\mathrm{calc}}-P_i^{\mathrm{spec}}\big)
 \]
-（\srcpath{compute\_total\_participating\_mismatch\_pu}；致密 $O(n^2)$ 复算，
+（\srcpath{compute\_total\_participating\_mismatch\_pu}；遍历 Ybus 非零元，按
+$P_i=\sum_{j:Y_{ij}\ne0}V_iV_j[G_{ij}\cos(\theta_i-\theta_j)+B_{ij}\sin(\theta_i-\theta_j)]$
+复算，时间 $O(n+\mathrm{nnz}(Y))$、附加向量空间 $O(n)$，不构造稠密 Ybus；
+列主序遍历保留各行按 $j$ 递增的累加顺序；
 含换流器 AC 注入 \srcpath{converter\_ac\_injection}，:compute\_total\_participating\_mismatch\_pu）。求和取全部已解 AC
 母线而非仅参与母线：非 slack 方程在数值容差内相消，剩余即全体 slack 母线提供的
 有功；只取参与母线会在物理 slack 不在参与集合时静默返回零（函数内注释，
 src/power\_flow/distributed\_slack\_solver.cpp:compute\_total\_participating\_mismatch\_pu）。按
 $\Delta P_i=\alpha_i\,\Delta P_{\Sigma}$ 分摊输出（:solve\_simplified）。
+
+AUD-092/096 的注册回归为 \srcpath{tests/test\_review\_regressions.cpp} 与
+\srcpath{tests/test\_advanced\_pf.cpp}；可复现局部性能对照为
+\srcpath{tools/review\_performance\_benchmark.py}，实测范围与误差见
+\srcpath{docs/testing/module\_code\_audit.md}，不把 mismatch 耗时解释为整次 PF 耗时。
 
 \textbf{限值变体} \srcpath{solve\_full\_jacobian}：每轮完整 Newton 求解后，用
 \srcpath{distribute\_with\_limits} 迭代裁剪重分摊——越限母线钉在发电机

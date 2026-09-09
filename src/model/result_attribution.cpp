@@ -4,6 +4,8 @@
 #include <cmath>
 #include <cstdlib>
 #include <optional>
+#include <span>
+#include <string_view>
 #include <unordered_map>
 
 #include "hacdcpf/power_flow/pv_power_curve.hpp"
@@ -64,18 +66,58 @@ void accumulate_terminal(RichComponentResult& row, const std::string& name,
   it->q_mvar += q;
 }
 
-RichComponentResult* find_row(RichResultAttribution& out,
-                              const std::string& type,
-                              const std::string& domain,
-                              int index) {
-  auto it = std::find_if(out.components.begin(), out.components.end(),
-                         [&](const RichComponentResult& row) {
-                           return row.component_type == type &&
-                                  row.domain == domain &&
-                                  row.component_index == index;
-                         });
-  return it == out.components.end() ? nullptr : &*it;
-}
+// AUD-097: call-local indexes replace repeated linear identity scans. Build
+// only after all result rows exist, and only for queried component families.
+// Type names are literals owned by this translation unit; row order stays fixed.
+class ResultRowIndex {
+ public:
+  explicit ResultRowIndex(RichResultAttribution& out) : out_(out) {}
+
+  std::span<const size_t> matching(std::string_view type, int index) {
+    const auto [family, inserted] = rows_.try_emplace(type);
+    if (inserted) {
+      for (size_t i = 0; i < out_.components.size(); ++i) {
+        const auto& row = out_.components[i];
+        if (row.component_type == type) family->second[row.component_index].push_back(i);
+      }
+    }
+    const auto rows = family->second.find(index);
+    return rows == family->second.end() ? std::span<const size_t>{} : rows->second;
+  }
+
+  RichComponentResult* find(std::string_view type, std::string_view domain,
+                            int index) {
+    for (const size_t position : matching(type, index)) {
+      auto& row = out_.components[position];
+      if (row.domain == domain) return &row;
+    }
+    return nullptr;
+  }
+
+ private:
+  RichResultAttribution& out_;
+  std::unordered_map<std::string_view,
+                     std::unordered_map<int, std::vector<size_t>>> rows_;
+};
+
+class PositionIndex {
+ public:
+  template <typename Collection>
+  explicit PositionIndex(const Collection& collection, bool needed = true) {
+    if (!needed) return;
+    positions_.reserve(collection.size());
+    for (size_t i = 0; i < collection.size(); ++i)
+      positions_.try_emplace(collection[i].index, i);
+  }
+
+  std::optional<size_t> find(int index) const {
+    const auto it = positions_.find(index);
+    return it == positions_.end() ? std::nullopt : std::optional<size_t>(it->second);
+  }
+
+ private:
+  std::unordered_map<int, size_t> positions_;
+};
 
 template <typename Collection, typename Initializer>
 void add_collection(RichResultAttribution& out, const Collection& collection,
@@ -104,21 +146,28 @@ int parse_component_index(const std::string& value) {
   return end != value.c_str() && *end == '\0' ? static_cast<int>(parsed) : 0;
 }
 
-double bus_voltage(const HybridPowerSystem& rich, const PowerFlowResult* pf,
-                   int bus, bool is_dc) {
-  if (is_dc) {
-    for (size_t i = 0; i < rich.dc.buses.size(); ++i) {
-      if (rich.dc.buses[i].index != bus) continue;
-      return pf && i < pf->vdc.size() ? pf->vdc[i] : rich.dc.buses[i].vm_pu;
-    }
-  } else {
-    for (size_t i = 0; i < rich.ac.buses.size(); ++i) {
-      if (rich.ac.buses[i].index != bus) continue;
-      return pf && i < pf->vm.size() ? pf->vm[i] : rich.ac.buses[i].vm_pu;
-    }
+class BusVoltages {
+ public:
+  BusVoltages(const HybridPowerSystem& rich, const PowerFlowResult* pf) {
+    ac_.reserve(rich.ac.buses.size());
+    dc_.reserve(rich.dc.buses.size());
+    for (size_t i = 0; i < rich.ac.buses.size(); ++i)
+      ac_.try_emplace(rich.ac.buses[i].index,
+                      pf && i < pf->vm.size() ? pf->vm[i] : rich.ac.buses[i].vm_pu);
+    for (size_t i = 0; i < rich.dc.buses.size(); ++i)
+      dc_.try_emplace(rich.dc.buses[i].index,
+                      pf && i < pf->vdc.size() ? pf->vdc[i] : rich.dc.buses[i].vm_pu);
   }
-  return 0.0;
-}
+
+  double get(int bus, bool is_dc) const {
+    const auto& domain = is_dc ? dc_ : ac_;
+    const auto it = domain.find(bus);
+    return it == domain.end() ? 0.0 : it->second;
+  }
+
+ private:
+  std::unordered_map<int, double> ac_, dc_;
+};
 
 RecoveryClass electrical_recovery(const ProjectionBundle& projection) {
   return projection.canonical.projection_certificate &&
@@ -127,48 +176,26 @@ RecoveryClass electrical_recovery(const ProjectionBundle& projection) {
              : RecoveryClass::Strong;
 }
 
-template <typename Collection>
-std::optional<size_t> position_for_index(const Collection& collection,
-                                         int component_index) {
-  const auto it = std::find_if(collection.begin(), collection.end(),
-                               [&](const auto& component) {
-                                 return component.index == component_index;
-                               });
-  if (it == collection.end()) return std::nullopt;
-  return static_cast<size_t>(std::distance(collection.begin(), it));
-}
-
 void attach_projection_sources(const ProjectionBundle& projection,
-                               RichResultAttribution& out) {
+                               RichResultAttribution& out,
+                               ResultRowIndex& rows) {
   if (!projection.canonical.projection_report) return;
+  static const std::unordered_map<std::string_view, std::string_view> source_types{
+      {"Transformer2W", "transformer_2w"}, {"Transformer3W", "transformer_3w"},
+      {"Switch", "switch"}, {"CircuitBreaker", "circuit_breaker"},
+      {"FlexibleLoad", "flexible_load"}, {"AsymmetricLoad", "asymmetric_load"},
+      {"AsynchronousMotor", "motor"}, {"EnergyRouter", "energy_router"},
+      {"VirtualPowerPlant", "vpp"}, {"Microgrid", "microgrid"},
+      {"MobileStorage", "mobile_storage"}};
   for (const auto& mapping : projection.canonical.projection_report->mappings) {
+    const auto type = source_types.find(mapping.source_type);
+    if (type == source_types.end()) continue;
     const int source_index = parse_component_index(mapping.source_id);
     const int canonical_index = parse_component_index(mapping.canonical_id);
-    for (auto& row : out.components) {
-      if (row.component_index != source_index) continue;
-      const bool type_matches =
-          (mapping.source_type == "Transformer2W" &&
-           row.component_type == "transformer_2w") ||
-          (mapping.source_type == "Transformer3W" &&
-           row.component_type == "transformer_3w") ||
-          (mapping.source_type == "Switch" && row.component_type == "switch") ||
-          (mapping.source_type == "CircuitBreaker" &&
-           row.component_type == "circuit_breaker") ||
-          (mapping.source_type == "FlexibleLoad" &&
-           row.component_type == "flexible_load") ||
-          (mapping.source_type == "AsymmetricLoad" &&
-           row.component_type == "asymmetric_load") ||
-          (mapping.source_type == "AsynchronousMotor" &&
-           row.component_type == "motor") ||
-          (mapping.source_type == "EnergyRouter" &&
-           row.component_type == "energy_router") ||
-          (mapping.source_type == "VirtualPowerPlant" &&
-           row.component_type == "vpp") ||
-          (mapping.source_type == "Microgrid" &&
-           row.component_type == "microgrid") ||
-          (mapping.source_type == "MobileStorage" &&
-           row.component_type == "mobile_storage");
-      if (!type_matches) continue;
+    // ProjectionReport has no source domain. Preserve its existing all-match
+    // provenance semantics; electrical row lookup still requires a domain.
+    for (const size_t position : rows.matching(type->second, source_index)) {
+      auto& row = out.components[position];
       row.canonical_sources.push_back(
           {mapping.canonical_type, canonical_index,
            mapping.participation_factor});
@@ -205,17 +232,10 @@ std::vector<int> CanonicalToRichOperator::ac_bus_reprojection_positions(
     }
     return positions;
   }
-  for (size_t i = 0; i < rich.ac.buses.size(); ++i) {
-    const auto it = std::find_if(
-        projection.canonical.ac.buses.begin(),
-        projection.canonical.ac.buses.end(), [&](const ACBus& bus) {
-          return bus.index == rich.ac.buses[i].index;
-        });
-    if (it != projection.canonical.ac.buses.end()) {
-      positions[i] = static_cast<int>(std::distance(
-          projection.canonical.ac.buses.begin(), it));
-    }
-  }
+  const PositionIndex canonical_buses(projection.canonical.ac.buses);
+  for (size_t i = 0; i < rich.ac.buses.size(); ++i)
+    if (const auto position = canonical_buses.find(rich.ac.buses[i].index))
+      positions[i] = static_cast<int>(*position);
   return positions;
 }
 
@@ -227,10 +247,13 @@ RichResultAttribution CanonicalToRichOperator::apply(
     const AttributionOptions& options) {
   RichResultAttribution out;
   const RecoveryClass electrical = electrical_recovery(projection);
+  const BusVoltages voltages(rich, rich_pf);
+  const PositionIndex generators(projection.canonical.ac.generators, opf_result != nullptr);
+  const PositionIndex grids(projection.canonical.ac.external_grids, opf_result != nullptr);
 
   add_collection(out, rich.ac.buses, "ac_bus", "AC", "AC Bus",
                  [&](auto& row, const auto& bus) {
-                   const double vm = bus_voltage(rich, rich_pf, bus.index, false);
+                   const double vm = voltages.get(bus.index, false);
                    set_value(row, "vm_pu", vm, "pu");
                    if (rich_pf && row.position < static_cast<int>(rich_pf->va.size()))
                      set_value(row, "va_rad", rich_pf->va[row.position], "rad");
@@ -240,7 +263,7 @@ RichResultAttribution CanonicalToRichOperator::apply(
   add_collection(out, rich.dc.buses, "dc_bus", "DC", "DC Bus",
                  [&](auto& row, const auto& bus) {
                    set_value(row, "vdc_pu",
-                             bus_voltage(rich, rich_pf, bus.index, true), "pu");
+                             voltages.get(bus.index, true), "pu");
                    row.recovery = RecoveryClass::Strong;
                    row.recovery_reason = "stable DC bus identity";
                  });
@@ -252,11 +275,11 @@ RichResultAttribution CanonicalToRichOperator::apply(
                      const auto& flow = rich_pf->branch_flows[row.position];
                      set_terminal(row, "from", branch.from_bus, false, flow.pf_mw,
                                   flow.qf_mvar,
-                                  bus_voltage(rich, rich_pf, branch.from_bus, false),
+                                  voltages.get(branch.from_bus, false),
                                   true, true, true);
                      set_terminal(row, "to", branch.to_bus, false, flow.pt_mw,
                                   flow.qt_mvar,
-                                  bus_voltage(rich, rich_pf, branch.to_bus, false),
+                                  voltages.get(branch.to_bus, false),
                                   true, true, true);
                      set_value(row, "loss_mw", flow.pf_mw + flow.pt_mw, "MW");
                      row.recovery = electrical;
@@ -265,8 +288,8 @@ RichResultAttribution CanonicalToRichOperator::apply(
                  });
   add_collection(out, rich.dc.branches, "dc_branch", "DC", "DC Line",
                  [&](auto& row, const auto& branch) {
-                   const double vf = bus_voltage(rich, rich_pf, branch.from_bus, true);
-                   const double vt = bus_voltage(rich, rich_pf, branch.to_bus, true);
+                   const double vf = voltages.get(branch.from_bus, true);
+                   const double vt = voltages.get(branch.to_bus, true);
                    if (branch.in_service && branch.r_pu > 1e-12) {
                      const double current = (vf - vt) / branch.r_pu;
                      const double pf = vf * current * rich.base_mva;
@@ -303,8 +326,7 @@ RichResultAttribution CanonicalToRichOperator::apply(
 
   add_collection(out, rich.ac.generators, "generator", "AC", "Generator",
                  [&](auto& row, const auto& generator) {
-                   const auto canonical_position = position_for_index(
-                       projection.canonical.ac.generators, generator.index);
+                   const auto canonical_position = generators.find(generator.index);
                    const double p = opf_result && canonical_position &&
                                             *canonical_position < opf_result->pg_mw.size()
                                         ? opf_result->pg_mw[*canonical_position]
@@ -316,15 +338,14 @@ RichResultAttribution CanonicalToRichOperator::apply(
                    set_value(row, "p_mw", p, "MW");
                    set_value(row, "q_mvar", q, "MVar");
                    set_terminal(row, "ac", generator.bus, false, p, q,
-                                bus_voltage(rich, rich_pf, generator.bus, false),
+                                voltages.get(generator.bus, false),
                                 true, true, true);
                    row.recovery = RecoveryClass::Strong;
                    row.recovery_reason = "stable generator identity";
                  });
   add_collection(out, rich.ac.external_grids, "external_grid", "AC",
                  "External Grid", [&](auto& row, const auto& grid) {
-                   const auto canonical_position = position_for_index(
-                       projection.canonical.ac.external_grids, grid.index);
+                   const auto canonical_position = grids.find(grid.index);
                    if (!opf_result || !canonical_position ||
                        *canonical_position >= opf_result->external_grid_p_mw.size() ||
                        *canonical_position >= opf_result->external_grid_q_mvar.size())
@@ -336,7 +357,7 @@ RichResultAttribution CanonicalToRichOperator::apply(
                    set_value(row, "p_mw", p, "MW");
                    set_value(row, "q_mvar", q, "MVar");
                    set_terminal(row, "ac", grid.bus, false, p, q,
-                                bus_voltage(rich, rich_pf, grid.bus, false),
+                                voltages.get(grid.bus, false),
                                 true, true, true);
                    row.recovery = RecoveryClass::Strong;
                    row.recovery_reason = "explicit external-grid OPF variable";
@@ -351,7 +372,7 @@ RichResultAttribution CanonicalToRichOperator::apply(
                    set_value(row, "p_mw", p, "MW");
                    set_value(row, "q_mvar", q, "MVar");
                    set_terminal(row, "ac", load.bus, false, -p, -q,
-                                bus_voltage(rich, rich_pf, load.bus, false),
+                                voltages.get(load.bus, false),
                                 true, true, true);
                    row.recovery = RecoveryClass::Strong;
                    row.recovery_reason = "authored load identity and time-step demand";
@@ -362,7 +383,7 @@ RichResultAttribution CanonicalToRichOperator::apply(
                        load.in_service ? load.p_mw * load.scaling : 0.0;
                    set_value(row, "p_mw", p, "MW");
                    set_terminal(row, "dc", load.bus, true, -p, 0.0,
-                                bus_voltage(rich, rich_pf, load.bus, true),
+                                voltages.get(load.bus, true),
                                 true, false, true);
                    row.recovery = RecoveryClass::Strong;
                    row.recovery_reason = "authored DC load identity and time-step demand";
@@ -392,7 +413,7 @@ RichResultAttribution CanonicalToRichOperator::apply(
                    set_value(row, "soc", storage.soc_init);
                    set_terminal(row, "ac", storage.bus, false, storage.p_mw,
                                 storage.q_mvar,
-                                bus_voltage(rich, rich_pf, storage.bus, false),
+                                voltages.get(storage.bus, false),
                                 true, true, true);
                    row.canonical_sources.push_back(
                        {"Storage", storage.index, 1.0});
@@ -406,7 +427,7 @@ RichResultAttribution CanonicalToRichOperator::apply(
                    set_value(row, "soc", storage.soc_init);
                    set_terminal(row, "dc", storage.bus, true, storage.p_mw,
                                 0.0,
-                                bus_voltage(rich, rich_pf, storage.bus, true),
+                                voltages.get(storage.bus, true),
                                 true, false, true);
                    row.canonical_sources.push_back(
                        {"DCStorage", storage.index, 1.0});
@@ -420,7 +441,7 @@ RichResultAttribution CanonicalToRichOperator::apply(
                    set_value(row, "soc", storage.soc_init);
                    set_terminal(row, "dc", storage.bus, true, storage.p_mw,
                                 0.0,
-                                bus_voltage(rich, rich_pf, storage.bus, true),
+                                voltages.get(storage.bus, true),
                                 true, false, true);
                    row.canonical_sources.push_back(
                        {"DCStorage", storage.index, 1.0});
@@ -497,11 +518,11 @@ RichResultAttribution CanonicalToRichOperator::apply(
                      if (it != rich_pf->vsc_transfers.end()) {
                        set_terminal(row, "ac", converter.bus_ac, false,
                                     it->p_ac_mw, it->q_ac_mvar,
-                                    bus_voltage(rich, rich_pf, converter.bus_ac, false),
+                                    voltages.get(converter.bus_ac, false),
                                     true, true, true);
                        set_terminal(row, "dc", converter.bus_dc, true,
                                     it->p_dc_mw, 0.0,
-                                    bus_voltage(rich, rich_pf, converter.bus_dc, true),
+                                    voltages.get(converter.bus_dc, true),
                                     true, false, true);
                        set_value(row, "loss_mw", it->loss_mw, "MW");
                        row.recovery = RecoveryClass::Strong;
@@ -520,11 +541,11 @@ RichResultAttribution CanonicalToRichOperator::apply(
                      if (it != rich_pf->dcdc_transfers.end()) {
                        set_terminal(row, "in", converter.bus_in, true,
                                     -it->p_in_mw, 0.0,
-                                    bus_voltage(rich, rich_pf, converter.bus_in, true),
+                                    voltages.get(converter.bus_in, true),
                                     true, false, true);
                        set_terminal(row, "out", converter.bus_out, true,
                                     it->p_out_mw, 0.0,
-                                    bus_voltage(rich, rich_pf, converter.bus_out, true),
+                                    voltages.get(converter.bus_out, true),
                                     true, false, true);
                        set_value(row, "loss_mw", it->loss_mw, "MW");
                        row.recovery = RecoveryClass::Strong;
@@ -562,11 +583,14 @@ RichResultAttribution CanonicalToRichOperator::apply(
                    set_value(row, "p_mw", microgrid.p_exchange_mw, "MW");
                  });
 
-  attach_projection_sources(projection, out);
+  ResultRowIndex rows(out);
+  attach_projection_sources(projection, out, rows);
 
   // Attribute expanded AC branch terminal powers to rich transformers and
   // non-collapsed switchgear using BranchExpandMap, never vector position.
   if (canonical_pf && projection.canonical.branch_expand_map) {
+    const PositionIndex transformers_2w(rich.ac.transformers_2w);
+    const PositionIndex transformers_3w(rich.ac.transformers_3w);
     std::unordered_map<int, const BranchFlow*> flow_by_branch_index;
     for (size_t i = 0; i < projection.canonical.ac.branches.size() &&
                        i < canonical_pf->branch_flows.size(); ++i) {
@@ -584,13 +608,12 @@ RichResultAttribution CanonicalToRichOperator::apply(
                          : entry.origin_type == BranchOriginType::Switch
                              ? "switch"
                              : "circuit_breaker";
-      RichComponentResult* row = find_row(out, type, "AC", entry.origin_index);
+      RichComponentResult* row = rows.find(type, "AC", entry.origin_index);
       if (!row) continue;
       if (entry.origin_type == BranchOriginType::Transformer3W) {
-        const auto transformer = std::find_if(
-            rich.ac.transformers_3w.begin(), rich.ac.transformers_3w.end(),
-            [&](const auto& item) { return item.index == entry.origin_index; });
-        if (transformer != rich.ac.transformers_3w.end()) {
+        const auto position = transformers_3w.find(entry.origin_index);
+        if (position) {
+          const auto* transformer = &rich.ac.transformers_3w[*position];
           const int from_bus = entry.pair_number < 2 ? transformer->hv_bus
                                                      : transformer->mv_bus;
           const int to_bus = entry.pair_number == 0 ? transformer->mv_bus
@@ -600,28 +623,27 @@ RichResultAttribution CanonicalToRichOperator::apply(
           const std::string to_name = entry.pair_number == 0 ? "mv" : "lv";
           accumulate_terminal(*row, from_name, from_bus, flow.pf_mw,
                               flow.qf_mvar,
-                              bus_voltage(rich, rich_pf, from_bus, false));
+                              voltages.get(from_bus, false));
           accumulate_terminal(*row, to_name, to_bus, flow.pt_mw,
                               flow.qt_mvar,
-                              bus_voltage(rich, rich_pf, to_bus, false));
+                              voltages.get(to_bus, false));
         }
       } else {
         int from_bus = entry.bus_from;
         int to_bus = entry.bus_to;
         if (entry.origin_type == BranchOriginType::Transformer2W) {
-          const auto transformer = std::find_if(
-              rich.ac.transformers_2w.begin(), rich.ac.transformers_2w.end(),
-              [&](const auto& item) { return item.index == entry.origin_index; });
-          if (transformer != rich.ac.transformers_2w.end()) {
+          const auto position = transformers_2w.find(entry.origin_index);
+          if (position) {
+            const auto* transformer = &rich.ac.transformers_2w[*position];
             from_bus = transformer->hv_bus;
             to_bus = transformer->lv_bus;
           }
         }
         set_terminal(*row, "from", from_bus, false, flow.pf_mw,
-                     flow.qf_mvar, bus_voltage(rich, rich_pf, from_bus, false),
+                     flow.qf_mvar, voltages.get(from_bus, false),
                      true, true, from_bus >= 0);
         set_terminal(*row, "to", to_bus, false, flow.pt_mw,
-                     flow.qt_mvar, bus_voltage(rich, rich_pf, to_bus, false),
+                     flow.qt_mvar, voltages.get(to_bus, false),
                      true, true, to_bus >= 0);
       }
       row->recovery = electrical;
@@ -652,10 +674,10 @@ RichResultAttribution CanonicalToRichOperator::apply(
         continue;
       }
       RichComponentResult* row =
-          find_row(out, "ac_branch", "AC", branch.index);
+          rows.find("ac_branch", "AC", branch.index);
       if (!row) continue;
-      const double vf = bus_voltage(rich, rich_pf, branch.from_bus, false);
-      const double vt = bus_voltage(rich, rich_pf, branch.to_bus, false);
+      const double vf = voltages.get(branch.from_bus, false);
+      const double vt = voltages.get(branch.to_bus, false);
       const double qf = -0.5 * branch.b_pu * base_mva * vf * vf;
       const double qt = -0.5 * branch.b_pu * base_mva * vt * vt;
       set_terminal(*row, "from", branch.from_bus, false, 0.0, qf, vf,
@@ -675,12 +697,12 @@ RichResultAttribution CanonicalToRichOperator::apply(
     DeviceTerminalFlows device_flows =
         compute_device_terminal_flows(rich, rich_pf->branch_flows);
     for (const auto& flow : device_flows.ac_switches) {
-      if (auto* row = find_row(out, "switch", "AC", flow.index)) {
+      if (auto* row = rows.find("switch", "AC", flow.index)) {
         set_terminal(*row, "from", flow.bus_from, false, flow.pf_mw,
-                     flow.qf_mvar, bus_voltage(rich, rich_pf, flow.bus_from, false),
+                     flow.qf_mvar, voltages.get(flow.bus_from, false),
                      true, true, true);
         set_terminal(*row, "to", flow.bus_to, false, flow.pt_mw,
-                     flow.qt_mvar, bus_voltage(rich, rich_pf, flow.bus_to, false),
+                     flow.qt_mvar, voltages.get(flow.bus_to, false),
                      true, true, true);
         row->recovery = flow.bus_from == flow.bus_to
                             ? RecoveryClass::AuditOnly
@@ -691,12 +713,12 @@ RichResultAttribution CanonicalToRichOperator::apply(
       }
     }
     for (const auto& flow : device_flows.ac_circuit_breakers) {
-      if (auto* row = find_row(out, "circuit_breaker", "AC", flow.index)) {
+      if (auto* row = rows.find("circuit_breaker", "AC", flow.index)) {
         set_terminal(*row, "from", flow.bus_from, false, flow.pf_mw,
-                     flow.qf_mvar, bus_voltage(rich, rich_pf, flow.bus_from, false),
+                     flow.qf_mvar, voltages.get(flow.bus_from, false),
                      true, true, true);
         set_terminal(*row, "to", flow.bus_to, false, flow.pt_mw,
-                     flow.qt_mvar, bus_voltage(rich, rich_pf, flow.bus_to, false),
+                     flow.qt_mvar, voltages.get(flow.bus_to, false),
                      true, true, true);
         row->recovery = flow.bus_from == flow.bus_to
                             ? RecoveryClass::AuditOnly
@@ -732,8 +754,7 @@ RichResultAttribution CanonicalToRichOperator::apply(
       double q = 0.0;
       for (const auto& grid : rich.ac.external_grids) {
         if (!grid.in_service || grid.bus != breaker.bus_from) continue;
-        const auto pos = position_for_index(
-            projection.canonical.ac.external_grids, grid.index);
+        const auto pos = grids.find(grid.index);
         if (!pos) continue;
         if (*pos < opf_result->external_grid_p_mw.size())
           p += opf_result->external_grid_p_mw[*pos];
@@ -742,8 +763,8 @@ RichResultAttribution CanonicalToRichOperator::apply(
       }
       p /= static_cast<double>(count);
       q /= static_cast<double>(count);
-      if (auto* row = find_row(out, "circuit_breaker", "AC", breaker.index)) {
-        const double vm = bus_voltage(rich, rich_pf, breaker.bus_from, false);
+      if (auto* row = rows.find("circuit_breaker", "AC", breaker.index)) {
+        const double vm = voltages.get(breaker.bus_from, false);
         set_terminal(*row, "from", breaker.bus_from, false, p, q, vm,
                      true, true, true);
         set_terminal(*row, "to", breaker.bus_to, false, -p, -q, vm,
@@ -774,9 +795,9 @@ RichResultAttribution CanonicalToRichOperator::apply(
       if (ref.original_index < 0 ||
           ref.original_index >= static_cast<int>(storage.size())) continue;
       const int rich_index = storage[static_cast<size_t>(ref.original_index)].index;
-      RichComponentResult* row = find_row(out, dc ? "dc_storage" : "storage",
+      RichComponentResult* row = rows.find(dc ? "dc_storage" : "storage",
                                           dc ? "DC" : "AC", rich_index);
-      if (!row && dc) row = find_row(out, "storage", "DC", rich_index);
+      if (!row && dc) row = rows.find("storage", "DC", rich_index);
       if (!row) continue;
       set_value(*row, "p_mw", opf_result->pstor_mw[k], "MW");
       if (!dc && k < opf_result->qstor_mvar.size())
@@ -803,7 +824,7 @@ RichResultAttribution CanonicalToRichOperator::apply(
                     canonical_components.ac.pv_systems.size()))
         rich_index = canonical_components.ac.pv_systems[ref.original_index].index;
       if (rich_index < 0) continue;
-      if (auto* row = find_row(out, pv ? "pv_system" : "renewable_generator",
+      if (auto* row = rows.find(pv ? "pv_system" : "renewable_generator",
                                "AC", rich_index)) {
         set_value(*row, "p_mw", opf_result->pren_mw[k], "MW");
         if (k < opf_result->qren_mvar.size())
