@@ -4,13 +4,19 @@
 #include <atomic>
 #include <cctype>
 #include <cmath>
+#include <cstdio>
+#include <cstdlib>
 #include <future>
 #include <limits>
 #include <numeric>
 #include <sstream>
 #include <stdexcept>
 #include <thread>
+#include <typeinfo>
 #include <unordered_map>
+#if defined(__GNUG__) || defined(__clang__)
+#include <cxxabi.h>  // demangled type name for non-std worker exceptions
+#endif
 
 #include "hacdcpf/util/parallel_execution.hpp"
 #include "hacdcpf/util/thread_pool.hpp"
@@ -1398,6 +1404,7 @@ static AnnualProductionSimResult solve_parallel_daily(
   std::atomic<int> feasible_days{0};
 
   auto solve_one_day = [&](int d) {
+   try {
     const int g0 = d * steps_per_day;
     const int g1 = std::min(g0 + steps_per_day, T_yr);
     const int day_steps = g1 - g0;
@@ -1434,6 +1441,29 @@ static AnnualProductionSimResult solve_parallel_daily(
         day_snaps[static_cast<size_t>(d)].push_back(std::move(snap));
       }
     }
+   } catch (const std::exception& e) {
+    // Convert a worker-thread failure into a clean, catchable error carrying the
+    // day context. Catching at the throw site (this module) and rethrowing a
+    // fresh std::runtime_error guarantees the caller's catch(std::exception&)
+    // matches even if the original type crossed a runtime/DSO boundary — the
+    // cause of the opaque "Unknown server error" the GUI showed for 时序生产模拟.
+    std::fprintf(stderr, "[annual] parallel day %d failed: %s\n", d + 1, e.what());
+    throw std::runtime_error("parallel daily production sim failed on day " +
+                             std::to_string(d + 1) + ": " + e.what());
+   } catch (...) {
+    std::string tn = "unknown type";
+#if defined(__GNUG__) || defined(__clang__)
+    if (const std::type_info* ti = abi::__cxa_current_exception_type()) {
+      int st = 0;
+      char* dem = abi::__cxa_demangle(ti->name(), nullptr, nullptr, &st);
+      tn = (st == 0 && dem) ? dem : ti->name();
+      std::free(dem);
+    }
+#endif
+    std::fprintf(stderr, "[annual] parallel day %d failed: non-standard exception (%s)\n", d + 1, tn.c_str());
+    throw std::runtime_error("parallel daily production sim failed on day " +
+                             std::to_string(d + 1) + ": non-standard exception (" + tn + ")");
+   }
   };
 
   if (parallel_info.effective) {

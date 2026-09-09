@@ -9794,7 +9794,11 @@ const App = (() => {
 
     const resolution = document.getElementById('annResolution')?.value || '6h';
     const dailyMode = document.getElementById('annDailyMode')?.value || 'scuc';
-    const parallel = document.getElementById('annParallel')?.checked ?? true;
+    // Parallel daily decomposition is only valid for per-day DynamicOPF (each day
+    // independent). SCUC/SCED couple days via commitment + ramp continuity, so
+    // parallel is not applicable there — keep the request honest so the UI, the
+    // result, and the backend agree (the backend also downgrades defensively).
+    const parallel = (document.getElementById('annParallel')?.checked ?? true) && dailyMode === 'dopf';
     const threads = parseInt(document.getElementById('annThreads')?.value, 10);
     const cyclicSoc = document.getElementById('annCyclicSoc')?.checked ?? true;
     // Reuse the shared solver / constraint controls from the time-series toolbar.
@@ -9851,6 +9855,9 @@ const App = (() => {
       data._wallSeconds = (performance.now() - t0) / 1000.0;
       data._dailyMode = dailyMode;   // remember the per-day mode for drill-down faithfulness
       data._cyclicSoc = cyclicSoc;
+      if (data.parallel_daily_downgraded && data.parallel_daily_downgrade_note) {
+        log(data.parallel_daily_downgrade_note, 'warn');
+      }
       log(`年度仿真完成: ${data.solver_name || ''}, 目标=$${Number(data.total_cost || 0).toFixed(0)}, 用时${data._wallSeconds.toFixed(1)}s`, 'success');
       setStatus('年度并行仿真完成');
       _lastAnnualData = data;
@@ -19108,6 +19115,24 @@ const App = (() => {
       btn.innerHTML = show ? '收起<br>年度设置 ▾' : '展开<br>年度设置 ▸';
     });
     document.getElementById('btnRunAnnualSim')?.addEventListener('click', runAnnualSim);
+    // Parallel daily decomposition only applies to per-day DynamicOPF; disable
+    // the control (with a hint) for the coupled SCUC/SCED modes so the constraint
+    // is clear before running instead of surfacing only as a post-run downgrade.
+    const syncAnnualParallel = () => {
+      const mode = document.getElementById('annDailyMode');
+      const par = document.getElementById('annParallel');
+      const threads = document.getElementById('annThreads');
+      const hint = document.getElementById('annParallelHint');
+      if (!mode || !par) return;
+      const isDopf = mode.value === 'dopf';
+      par.disabled = !isDopf;
+      if (threads) threads.disabled = !(isDopf && par.checked);
+      par.closest('.sub-label')?.classList.toggle('control-disabled', !isDopf);
+      if (hint) hint.textContent = isDopf ? '' : '（仅动态OPF）';
+    };
+    document.getElementById('annDailyMode')?.addEventListener('change', syncAnnualParallel);
+    document.getElementById('annParallel')?.addEventListener('change', syncAnnualParallel);
+    syncAnnualParallel();
     document.getElementById('btnExportAnnualSim')?.addEventListener('click', () => {
       if (!_lastAnnualData) { log('请先运行年度并行生产模拟', 'warn'); return; }
       downloadJsonFile(`annual_production_sim_${tsTagForFilename()}.json`, _lastAnnualData);
@@ -24914,12 +24939,21 @@ const App = (() => {
     document.getElementById('btnReroute')?.addEventListener('click', () => Canvas.rerouteConnections?.());
     // Busbar mode toggle (P1): resizable busbars + sliding taps + IEC 60617 symbols.
     const busbarBtn = document.getElementById('btnBusbarMode');
+    // Busbar max-length slider: live-adjust the resizable-bar cap (persisted in
+    // Canvas), only meaningful in busbar mode so it hides with it.
+    const busLenControl = document.getElementById('busLenControl');
+    const busLenRange = document.getElementById('busLenRange');
+    if (busLenRange && Canvas.getBusHalfMax) {
+      try { busLenRange.value = String(Canvas.getBusHalfMax()); } catch (e) { /* ignore */ }
+      busLenRange.addEventListener('input', () => Canvas.setBusHalfMax?.(busLenRange.value));
+    }
     if (busbarBtn) {
       let busbarOn = true;
       try { busbarOn = localStorage.getItem('busbarMode') !== '0'; } catch (e) { busbarOn = true; }
       const syncBusbarBtn = () => {
         busbarBtn.classList.toggle('active', busbarOn);
         busbarBtn.setAttribute('aria-pressed', busbarOn ? 'true' : 'false');
+        if (busLenControl) busLenControl.hidden = !busbarOn;
       };
       syncBusbarBtn();
       busbarBtn.addEventListener('click', () => {

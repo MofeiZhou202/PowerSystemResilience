@@ -9,6 +9,7 @@
 #include <cstdint>
 #include <cstdlib>
 #include <exception>
+#include <typeinfo>
 #include <filesystem>
 #include <fstream>
 #include <functional>
@@ -30,6 +31,9 @@
 
 #include <httplib.h>
 #include <pthread.h>
+#if defined(__GNUG__) || defined(__clang__)
+#include <cxxabi.h>  // abi::__cxa_current_exception_type for non-std diagnostics
+#endif
 #include <nlohmann/json.hpp>
 
 #include "hacdcpf/analysis/short_circuit.hpp"
@@ -10911,6 +10915,22 @@ json rpo_control_inventory_json(const hacdcpf::HybridPowerSystem& sys,
 
 }  // namespace
 
+// Demangled type name of the exception currently being handled. Only valid
+// inside a `catch (...)` block. Lets the server report a non-std exception's
+// concrete type instead of an opaque "Unknown server error".
+static std::string current_exception_type_name() {
+#if defined(__GNUG__) || defined(__clang__)
+  if (const std::type_info* ti = abi::__cxa_current_exception_type()) {
+    int st = 0;
+    char* dem = abi::__cxa_demangle(ti->name(), nullptr, nullptr, &st);
+    std::string name = (st == 0 && dem) ? dem : ti->name();
+    std::free(dem);
+    return name;
+  }
+#endif
+  return "unknown type";
+}
+
 // Worker threads with a large (16 MiB) stack. httplib's default ThreadPool uses
 // std::thread (~512 KiB stack on macOS), which several deep-recursion /
 // large-stack-frame handlers (the dynamics catalog, reliability / topology
@@ -11015,16 +11035,23 @@ int main(int argc, char** argv) {
   svr.set_idle_interval(0, 500000); // 0.5 sec idle check
 
   // Global exception handler — catch anything that escapes per-route handlers
-  svr.set_exception_handler([](const httplib::Request&, httplib::Response& res, std::exception_ptr ep) {
+  svr.set_exception_handler([](const httplib::Request& req, httplib::Response& res, std::exception_ptr ep) {
+    std::string detail = "Unknown server error";
     try {
       if (ep) std::rethrow_exception(ep);
     } catch (const std::exception& e) {
-      res.status = 500;
-      res.set_content(json{{"error", std::string("Server error: ") + e.what()}}.dump(), "application/json");
-      return;
-    } catch (...) {}
+      detail = std::string("Server error: ") + e.what();
+    } catch (...) {
+      // A non-std exception escaped a handler (commonly a vendored solver
+      // throwing a non-std type). Surface its demangled type so the client and
+      // the server log get something actionable, not an opaque message.
+      detail = std::string("Server error (non-standard exception: ") +
+               current_exception_type_name() + ")";
+    }
+    std::fprintf(stderr, "[exception] %s %s -> %s\n",
+                 req.method.c_str(), req.path.c_str(), detail.c_str());
     res.status = 500;
-    res.set_content(json{{"error", "Unknown server error"}}.dump(), "application/json");
+    res.set_content(json{{"error", detail}}.dump(), "application/json");
   });
 
   const std::string data_dir = [&]() {
@@ -25051,6 +25078,17 @@ int main(int argc, char** argv) {
           else
             opts.daily_mode = hacdcpf::analysis::DailySimMode::SCUC;
         }
+        // Parallel daily decomposition is only correct for per-day DynamicOPF
+        // (independent days). If requested with a coupled mode (SCUC/SCED, whose
+        // commitment + ramp continuity couple adjacent days), run the coupled
+        // sequential path instead of throwing — parallelism is an optimization,
+        // not a requirement — and tell the client it was downgraded.
+        bool parallel_daily_downgraded = false;
+        if (opts.enable_parallel_daily &&
+            opts.daily_mode != hacdcpf::analysis::DailySimMode::DynamicOPF) {
+          opts.enable_parallel_daily = false;
+          parallel_daily_downgraded = true;
+        }
         opts.parallel_threads = j.value("parallel_threads", 0);
         opts.enforce_daily_cyclic_soc = j.value("daily_cyclic_soc", true);
         opts.sced_reuse_scuc_commitment = j.value("sced_reuse_scuc_commitment", true);
@@ -25093,6 +25131,12 @@ int main(int argc, char** argv) {
         out["solver_name"] = result.solver_name;
         out["parallel_daily"] = opts.enable_parallel_daily;
         out["parallel_daily_effective"] = result.parallel_daily_effective;
+        out["parallel_daily_downgraded"] = parallel_daily_downgraded;
+        if (parallel_daily_downgraded) {
+          out["parallel_daily_downgrade_note"] =
+              "并行按日分解仅适用于逐日动态OPF（各日独立）；所选日内模式（SCUC/SCED）"
+              "通过机组组合与爬坡约束耦合相邻日，已自动改用耦合的顺序求解路径。";
+        }
         out["parallel_workers"] = result.parallel_workers;
         out["parallel_mode"] = result.parallel_mode;
         out["parallel_execution"] =

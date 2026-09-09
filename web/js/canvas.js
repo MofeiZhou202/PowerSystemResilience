@@ -1048,15 +1048,27 @@ const Canvas = (() => {
   // Reuse the existing BUS_TYPES / isBusType helpers (auto-layout section).
 
   // Auto-span half-length: cover every connected device's x-offset (min 40 =
-  // legacy 80px bar), using each incident connection's other-endpoint world x.
+  // legacy 80px bar), using each incident connection's other-endpoint world x,
+  // but capped by BUS_HALF_MAX so buses in large, spread-out systems don't grow
+  // enormous. A feeder beyond the cap routes to the clamped bar end (ETAP
+  // convention) via projectOntoBar. Kept in sync with the BUSBAR auto-layout's
+  // bar-widening cap so bars don't jump between layout and drag/re-render.
+  // User-adjustable max busbar half-length (persisted). Bars never exceed this,
+  // so large, spread-out systems stay readable; a far feeder routes to the
+  // clamped bar end. Applied by both busHalfLen and the BUSBAR auto-layout.
+  let BUS_HALF_MAX = (() => {
+    try { const v = parseInt(localStorage.getItem('busHalfMax') || '', 10);
+      if (Number.isFinite(v) && v >= 80 && v <= 1200) return v; } catch (e) { /* ignore */ }
+    return 320;   // default: ≤ 640px-wide bars
+  })();
   function busHalfLen(comp) {
-    let half = 40;
+    let span = 40;
     for (const conn of connectionsOf(comp.id)) {
       const otherId = conn.from.compId === comp.id ? conn.to.compId : conn.from.compId;
       const other = getComponent(otherId);
-      if (other) half = Math.max(half, Math.abs(other.x - comp.x) + 20);
+      if (other) span = Math.max(span, Math.abs(other.x - comp.x) + 20);
     }
-    return half;
+    return Math.min(span, BUS_HALF_MAX);
   }
 
   // Slide a bus endpoint to the other endpoint's x (clamped to the bar): the tap.
@@ -1102,6 +1114,19 @@ const Canvas = (() => {
     try { localStorage.setItem('busbarMode', on ? '1' : '0'); } catch (e) { /* ignore */ }
     _deenergizedCache = null;
     state.components.forEach(c => rerenderComponent(c));
+  }
+
+  // User-adjustable busbar max length (half, world px). Persisted; re-spans every
+  // bar and re-routes its feeders live so the change is visible without a relayout.
+  function getBusHalfMax() { return BUS_HALF_MAX; }
+  function setBusHalfMax(px) {
+    const v = Math.max(80, Math.min(1200, Math.round(Number(px) || 320)));
+    if (v === BUS_HALF_MAX) return;
+    BUS_HALF_MAX = v;
+    try { localStorage.setItem('busHalfMax', String(v)); } catch (e) { /* ignore */ }
+    if (!state.busbarMode) return;
+    state.components.forEach(c => { if (isBusType(c.type)) respanBusInPlace(c); });
+    state.connections.forEach(conn => rerenderConnection(conn));
   }
 
   // ==================== P4: energization coloring (busbar mode) =============
@@ -3548,7 +3573,9 @@ const Canvas = (() => {
     // children), giving a substation single-line look.  Other directions restore
     // the native ±40 bar so switching layouts stays clean.  The bar is the first
     // <line> in the bus glyph; editing x1/x2 leaves the centred label untouched.
-    const BAR_HALF = 40, BAR_MARGIN = 26, BAR_HALF_MAX = nodeGap * 3;
+    // Capped at BUS_HALF_MAX (same as busHalfLen) so large, spread-out systems
+    // keep readable bars; far feeders route to the clamped bar end.
+    const BAR_HALF = 40, BAR_MARGIN = 26, BAR_HALF_MAX = BUS_HALF_MAX;
     buses.forEach(bus => {
       const line = bus.el.querySelector('line');
       if (!line) return;
@@ -9179,6 +9206,8 @@ const Canvas = (() => {
     autoLayoutSelection,
     setConnectionStyle,
     setBusbarMode,
+    setBusHalfMax,
+    getBusHalfMax,
     setEnergizationColoring,
     enterSheet,
     exitToRoot: () => exitToLevel(0),

@@ -4,7 +4,7 @@
 <meta charset="UTF-8"/>
 <meta name="viewport" content="width=device-width,initial-scale=1.0"/>
 <title>HySim-XJTU-HRPES</title>
-<link rel="stylesheet" href="css/style.css?v=20260910-busconnect2"/>
+<link rel="stylesheet" href="css/style.css?v=20260911-buslen"/>
 <script src="https://cdn.plot.ly/plotly-2.27.0.min.js"></script>
 </head>
 <body>
@@ -58,6 +58,7 @@
   </select>
   <button id="btnReroute" class="toolbar-btn" title="重新整理所有连线">整理<br>连线</button>
   <button id="btnBusbarMode" class="toolbar-btn" title="母线模式：可伸缩母线 + 抽头 + IEC 60617 符号" aria-pressed="false">母线<br>模式</button>
+  <label id="busLenControl" class="toolbar-range" title="母线最大长度（仅母线模式）：拖动调整可伸缩母线的上限长度，适配母线较多的系统"><span class="tr-label">母线<br>长度</span><input type="range" id="busLenRange" min="120" max="900" step="20"/></label>
   <button id="btnExportSvg" class="toolbar-btn" title="导出当前单线图为 SVG（矢量，可打印）">导出<br>SVG</button>
   <button id="btnSaveDb" class="toolbar-btn" title="保存模型为 SQLite 数据库（.sqlite，与系统 JSON 无损互换，可移植）">保存<br>DB</button>
   <button id="btnOpenDb" class="toolbar-btn" title="从 SQLite 数据库打开模型（.sqlite）">打开<br>DB</button>
@@ -1296,9 +1297,10 @@
             <option value="dopf">动态 OPF</option>
           </select>
         </label>
-        <label class="sub-label sub-checkbox" title="启用按日并行：将全年分解为相互独立的日（每日周期SOC），多线程并行求解。Auto 会优先使用适合并行日分解的 SCIP，缺失时回退到 Native B&C；显式外部求解器可能安全串行">
+        <label class="sub-label sub-checkbox" title="启用按日并行：将全年分解为相互独立的日（每日周期SOC），多线程并行求解。仅“动态OPF”日内模型支持（各日独立）；SCUC/动态SCED 通过机组组合与爬坡约束耦合相邻日，需顺序求解">
           <input id="annParallel" type="checkbox" checked/>
           <span>按日并行</span>
+          <span id="annParallelHint" class="sub-hint"></span>
         </label>
         <label class="sub-label" title="并行线程数；0 表示使用全部可用核心">线程数
           <input id="annThreads" type="number" value="0" min="0" max="256" step="1"/>
@@ -4220,7 +4222,7 @@
   <script src="js/search_registry.js?v=20260709-phase5"></script>
   <script src="js/core/network_overview.js?v=20260719-webgl-lod-v1"></script>
   <script src="js/core/iec_symbols.js?v=20260908-busbar-p1"></script>
-  <script src="js/canvas.js?v=20260910-busconnect2"></script>
+  <script src="js/canvas.js?v=20260911-buslen"></script>
   <script src="js/core/one_line_store.js?v=20260910-store-p3"></script>
   <script src="js/core/analysis_contracts.js?v=20260714-market-v3"></script>
   <script src="js/core/task_manager.js?v=20260712-hysim-phase3-v1"></script>
@@ -4233,7 +4235,7 @@
   <script src="js/core/accessibility.js?v=20260712-hysim-phase5-v1"></script>
   <script src="js/core/runtime_diagnostics.js?v=20260712-hysim-phase6-v1"></script>
   <script src="vendor/sql-wasm.js?v=1.10.3"></script>
-  <script src="js/app.js?v=20260910-busconnect2"></script>
+  <script src="js/app.js?v=20260911-buslen"></script>
   <script src="js/core/market_navigation.js?v=20260907-market-guide"></script>
   <script src="js/core/market_activity.js?v=20260907-market-activity"></script>
   <script src="js/core/market_canvas.js?v=20260907-market-guide"></script>
