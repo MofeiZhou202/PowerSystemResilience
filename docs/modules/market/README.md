@@ -2,7 +2,7 @@
 
 本目录是 `src/market/` 的唯一模块文档目录。
 
-[智能仿真标签与价格代理](intelligent_simulation.md)：离线完整周Oracle、LMP分位数/尖峰标签、独立周验证与模型产物；固定IEEE118合成边界试验，不代表边界优化已验证。
+[智能仿真标签与价格代理](intelligent_simulation.md)：离线完整周Oracle、LMP分位数/尖峰标签、两轮独立周验证与模型产物；IEEE118合成压力试验保留分组基线负结果，尚未准入边界优化。
 
 本地与在线帮助使用同一份`docs/` Markdown，在线“帮助”可搜索“跨日继承”“SOC”或
 “性能”。[跨日状态契约](southern_execution_contract.md)明确机组连续

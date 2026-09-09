@@ -68,6 +68,9 @@ class LabelTests(unittest.TestCase):
                      lambda d: d['stages']['lmp']['price_consistency'].update(passed=False),
                      lambda d: d['stages']['lmp'].update(optimality_proven=False),
                      lambda d: d['stages']['scuc'].update(mip_gap=.1),
+                     lambda d: d['stages']['scuc'].update(max_residual=float('nan')),
+                     lambda d: d['stages']['scuc'].update(mip_gap=-1),
+                     lambda d: d.update(deficit_mwh=float('nan')),
                      lambda d: d['state_start'].update(storage=[2.]),
                      lambda d: d['nodes'].append(copy.deepcopy(d['nodes'][0]))]
         for mutate in mutations:

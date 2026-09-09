@@ -1,6 +1,8 @@
-# 智能仿真标签与第一版价格代理
+# 智能仿真标签与价格代理
 
-本文是离线工具的实现契约与实验记录。研究问题见[边界优化数学模型](../../theory/market_boundary_optimization_model.md)；生产出清仍遵循[南方执行契约](southern_execution_contract.md)。本轮仅建立固定 IEEE118 系统/边界/周初状态下的合成场景响应代理，没有执行 Bayesian/CMA-ES 边界优化。
+本文是离线工具的实现契约与实验记录。研究问题见[边界优化数学模型](../../theory/market_boundary_optimization_model.md)；生产出清仍遵循[南方执行契约](southern_execution_contract.md)。v1在固定 IEEE118 系统/边界/周初状态下建立合成场景响应代理；v2加入四类压力输入和线路限额扰动，系统与初态保持不变。两轮均未执行 Bayesian/CMA-ES 边界优化。
+
+下一轮补样的[理论设计](../../theory/market_surrogate_sampling_design.md)已单独记录，包含组内辨识、过渡定位、配对边界动作与独立留出样本量；目前没有据此启动新Oracle或训练。
 
 ## 1. 实验协议和理论依据
 
@@ -91,3 +93,86 @@ python3 -m unittest discover -s tests -p test_market_intelligence.py -v
 本轮保留失败门槛，未在测试后调参或改变阈值。下一阶段需预先固定新的压力/边界动作训练设计及新测试周，再评估可行域边缘和尖峰；当前模型只供筛选研究，所有候选仍需Oracle。本次56维输入是完整已给定情景的条件响应，不是证明日前能够获知后续真实路径。
 
 模型重新加载后的预测与留出报告逐值一致；CLI已实测拒绝不同case_hash和采样区间外输入。证据为模型目录`inference-validation.json`，正常调用输入/输出为`example-input.json/example-prediction.json`。
+
+## 6. 第二轮压力试验预注册
+
+在本轮新标签及测试结果产生前固定以下协议，保留v1模型、6周测试和门槛。新32周seed=20261000..20261031，按index%4轮换普通/供需紧张/线路受限/新能源富余；每组前6周训练、后2周留出。复用v1前18个训练周，旧6个测试周不再用于选择模型。尖峰阈值保持59.61200124564096，来源仍为独立校准周。
+
+| 组 | 负荷倍率 | 风光倍率 | 来水倍率 | 线路倍率 |
+|---|---|---|---|---|
+| 普通 | 0.9–1.1 | 0.9–1.1 | 0.9–1.1 | 1 |
+| 供需紧张 | 2.2–2.6 | 0.3–0.7 | 0.2–0.5 | 1 |
+| 线路受限 | 1.0–1.2 | 0.9–1.1 | 0.9–1.1 | 0.05–0.20 |
+| 新能源富余 | 0.1–0.3 | 1.5–2.0 | 0.9–1.1 | 1 |
+
+其他已存在因素保持原设定，每日独立均匀扰动（rho=0），8日输入/7日执行。压低线路限额是合成运行边界试验，不是修改物理额定值的许可；各组出现次数不表示真实风险概率。总装机约11,046 MW、基准负荷峰值约4,878 MW，故负荷2.2–2.6且新能源/来水减少可触及供给不足；限额缩小和低负荷分别探测网络瓶颈和消纳约束。预期至少出现可验证的正缺额/越限/弃电标签，若未出现则记录试验设计未覆盖，不调低事件阈值。
+
+模型候选使用原56维、或追加每个因素执行7日均值/标准差/min/max/最大日变动/第8日值的42个输入统计量。统计量不读取已出清状态或目标。它们编码周能量尺度及最坏日条件，在少样本下减少模型自行重建统计关系的难度；仍不宣称充分统计量。比较训练均值、Ridge(alpha=1/10/100，仅无界价格目标)和256棵Extra-Trees(leaf=1/2/4，两种特征)；有界比例/时长仅用均值/树，避免事后截断掩盖错误。训练3折按场景组分层，保证同一周不拆分；各目标按训练折MAE选择。新8周只报告一次，含全体和各组误差。各组仅2周，不能用总体改善冒充任一组准确。
+
+保持10%相对均值MAE改善门槛；额外报告R2及预测物理边界。二分类风险为缺额/越限/弃电积分>1e-6；缺额/越限为诊断事件，非实际事故。比较频率基线和Extra-Trees，训练折log loss选择，固定0.5分类阈值；报告Brier、log loss、混淆矩阵和漏判率。测试每类少于5个时不作可靠分类准入声明。
+
+成本预测以首轮24周608 s为参考，新32周双进程约811 s（14分钟），压力整数模型可能更慢。预测汇总指标<0.1 s/周；数值训练为小规模CPU树/岭回归，Oracle成本占主导。完整真实SCUC/SCED/LMP和原标签准入门槛保持，任何超时/无价格/失败样本保留为未认证，不伪装零风险。失效模式、实测耗时与预测差异另记在本节结果中。
+
+第二轮复现命令（隔离输出目录）：
+
+```bash
+python3 tools/market_intelligence/run_price_oracle.py --output output/market-intelligence/stress-full-v2 --weeks 32 --workers 2 --seed 20261000 --design stress
+output/market-intelligence/venv/bin/python tools/market_intelligence/train_stress_surrogate.py --dataset output/market-intelligence/stress-full-v2 --output output/market-intelligence/price-surrogate-v2
+output/market-intelligence/venv/bin/python -m unittest discover -s tests -p test_market_stress_surrogate.py -v
+```
+
+第二轮训练器将所有尝试的标签与失败原因保存到`all_labels.jsonl/failures.json`；可用目标的评估是完整合格周条件统计，失败样本不赋零值。一旦产生正式`report.json`，工具拒绝覆盖同一目录的评估结果。`model.joblib/report.json/report.md/test_predictions.json`均留档。v2预测使用`--model .../model.joblib --predict-input .../example-input.json`；支撑域是四组区间的并集，不能把它们的整体包围盒当作已采样区域。
+
+标签质量门额外拒绝NaN/Inf/负残差或负gap元数据，避免比较运算对NaN误放行。旧有效标签含义与schema_version=3保持；这类异常记录只会被拒绝。
+
+## 7. 第二轮结果与事后诊断
+
+32个新周全部完成，224个主定价阶段均有效且重复定价一致，标签准入32/32，失败0周。训练集为旧18周加新24周，测试为新8周（每组2周）。压力设计成功产生正缺额、正有功越限和弃电标签，但均为线性诊断Oracle结果，不是AC/N-1认证或真实市场风险概率。
+
+事后基线审计的数学定义如下。对目标j和预定义场景组g，仅用训练周计算
+
+$$
+\bar y_{g,j}=\frac{1}{|T_g|}\sum_{i\in T_g}y_{i,j},\qquad
+E_j^{\rm group}=\frac{1}{|V|}\sum_{i\in V}|y_{i,j}-\bar y_{g(i),j}|.
+$$
+
+此均值是组内平方损失常数解；这里只将其作为简单对照报告MAE，不声称它是MAE的最优常数。组别来自预先固定的输入采样区间，不读取测试目标；四组差异可能使全局均值基线过弱。`audit_stratum_baseline.py`只复算已冻结预测的误差，不重新拟合、选模型或修改预声明门槛。成本为O((训练周数+测试周数)×目标数)，本地CPU线性求和；不是性能优化，速度改善预测不适用。复现预期为与首次独立手算的10项MAE差≤1e-8，同时原模型、标签、report.json和test_predictions.json哈希不变；该容差仅检验复算，不是预测精度准入。以下为事后诊断，不能改称预注册检验。
+
+
+**结论：全局均值门槛通过不等于具备可用的边界优化精度。** 10项指标均通过原定全局均值相对改善10%门槛，但与按预定义场景类型计算的训练均值相比，8项更差；另外两项（缺额、利用率）仅改善4.9%、8.1%。后者是事后诊断，不替换原报告的预声明门槛。当前模型不能准入Bayesian/CMA-ES边界优化。
+
+| 目标 | v2留出MAE | 分组训练均值MAE | 相对分组基线改善 |
+|---|---:|---:|---:|
+| price.mean | 569.164 | 227.735 | -149.9% |
+| price.p95 | 519.347 | 211.104 | -146.0% |
+| price.p99 | 697.138 | 167.797 | -315.5% |
+| price.cvar99 | 477.054 | 156.343 | -205.1% |
+| price.spike_fraction | 0.0308447 | 0.024568 | -25.5% |
+| price.spike_duration_hr | 4.45044 | 2.5599 | -73.9% |
+| metrics.load_loss_mwh | 4548.95 | 4781.37 | 4.9% |
+| metrics.line_overload_integral_mwh | 6432.69 | 2011.87 | -219.7% |
+| metrics.renewable_utilization | 0.0208126 | 0.0226355 | 8.1% |
+| metrics.renewable_curtailment_mwh | 2618.36 | 2445.65 | -7.1% |
+
+价格水平MAE单位为currency/MWh；缺额、越限积分及弃电量为MWh；占比/利用率为0–1；时长为h。新8周尖峰占比MAE为3.084个百分点、时长MAE为4.450 h。混合压力样本含100000 currency/MWh诊断罚价尺度，全局均值基线MAE很大，容易产生夸大的相对改善观感。分组误差与R2完整保留在report.json，各组仅2周，不能据此证明稳定组内泛化。
+
+相同2个新普通测试周上，冻结v1与v2平均价格MAE从10.081升至25.347，弃电量MAE从0.212升至159.898 MWh。v2没有全面替代v1。缺额事件分类为TN=6、TP=2；越限与弃电均为TN=4、TP=4，三项FP/FN均为0，但各类样本不足，可靠分类准入仍为false，事件分数未经概率校准。
+
+偏差复核：标签解析、能量与价格一致性、特征单元测试及冻结预测重载未发现公式偏离；岭回归训练折又经独立增广最小二乘核查（见下）。计算速度不能解释预测误差。证据支持的主要假设问题是普通训练24周、每个压力组仅6周，组间距离大，树模型易学习分组而组内变化仍欠拟合。此为诊断解释，尚未证明唯一成因。下一轮应先固定组内/过渡区域采样、分组基线与误差门槛，再采集全新测试周；本轮没有用这8周重新选模型或调参。
+
+Oracle总wall为1088.214 s（18分08秒），对比预期811 s，慢34.2%。普通/紧张/线路受限/富余各组平均单周wall为47.618/99.761/84.344/35.741 s；沿用普通周单价的成本假设低估压力求解负担，尚无阶段级配对证据将差值归因于某一种求解器操作。训练16.880 s，预热回归指标批量推断0.009370 s/周，满足预期<0.1 s/周；不含I/O、冷加载、分类器或真实出清，不能称为已验证的出清加速倍数。
+
+训练日志出现NumPy/scikit-learn矩阵乘法的divide/overflow/invalid警告。`audit_ridge_numerics.py`仅用训练集，对4个价格目标×3个alpha×3折共36次Ridge拟合独立求解增广最小二乘，最大预测差2.765e-10，CV MAE差≤1.001e-11，满足预设1e-5绝对容差。最终10项回归均选Extra-Trees；全部输出有限。警告的库层根因未证实，不宣称已修复。
+
+验证包括7项标签解析/变异/身份测试、4项压力特征/分组/支撑域测试；推断重载逐值一致，错误case、域外与缺失特征均拒绝。事后基线复算与首次独立计算差≤1e-8，冻结模型、标签、原始报告和测试预测哈希不变。没有为本轮Python工具重建C++或重跑全套C++测试。
+
+
+复核命令（不重新训练）：
+
+```bash
+output/market-intelligence/venv/bin/python tools/market_intelligence/validate_stress_model.py output/market-intelligence/price-surrogate-v2
+output/market-intelligence/venv/bin/python tools/market_intelligence/audit_ridge_numerics.py output/market-intelligence/price-surrogate-v2
+python3 tools/market_intelligence/audit_stratum_baseline.py output/market-intelligence/price-surrogate-v2
+```
+
+数值证据分别为模型目录的`inference-validation.json`、`ridge-numerical-audit.json`和`stratum-baseline-audit.json`；原始Oracle位于`output/market-intelligence/stress-full-v2/`。`provenance.json`保存运行manifest中的HEAD与最终源码/产物哈希；运行期间仓库HEAD从5041bcdb变为ef54df20，Oracle始终使用同一既有二进制哈希，不能将当前HEAD解释为干净重建的二进制来源。

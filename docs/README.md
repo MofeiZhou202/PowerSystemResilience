@@ -27,10 +27,12 @@ GUI“帮助”目录，可搜索“跨日继承”“SOC”“性能”；在�
 计算阶段分开，明确七工作区、输入版本、执行依赖、图形分析和验收路径。
 文档为目标设计；现有GUI/API行为仍以模块执行契约为准。
 
-[智能仿真标签与价格代理](modules/market/intelligent_simulation.md)：完整周Oracle、LMP标签、独立周验证和离线模型复现。
+[智能仿真标签与价格代理](modules/market/intelligent_simulation.md)：完整周Oracle、LMP标签、两轮独立周验证、压力场景代理及分组基线负结果。
 
 [周尺度市场边界优化模型](theory/market_boundary_optimization_model.md)：定义代理模型与
 Bayesian Optimization/CMA-ES 使用的随机双层问题、输入输出、风险目标、标签口径和 Oracle 复核边界。
+
+[组内与过渡区域采样理论](theory/market_surrogate_sampling_design.md)：参数规划切换结构、边界动作配对、误差/成本预算、主动学习与独立留出设计；属于下一轮理论方案，尚未执行新采样。
 
 [通用AC/DC混合市场引擎运行时契约](reference/market_simulation_runtime.md)：
 报价→SCUC→固定组合SCED/LMP→可选LODF N-1割→非线性AC/DC认证→结算→实时双结算→重复博弈；

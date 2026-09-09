@@ -2,6 +2,8 @@
 
 本文定义代理模型与 Bayesian Optimization/CMA-ES 使用的研究问题。它是外层研究模型，不改变当前 SCUC/SCED、LMP、AC 或 N-1 求解器的生产契约；最终候选必须由真实市场链复核。当前出清方程和结果口径见[市场模拟数学模型](market_simulation_mathematical_models.md)与[南方执行契约](../modules/market/southern_execution_contract.md)。
 
+第二轮代理诊断后的下一步设计见[组内与过渡区域采样理论](market_surrogate_sampling_design.md)：区分边界动作与外生轨迹，推导配对试验、采样预算和新留出周的准入条件；该设计尚未执行。
+
 ## 1. 随机双层问题
 
 单个周样本的输入为

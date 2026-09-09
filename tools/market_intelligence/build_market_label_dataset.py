@@ -112,6 +112,12 @@ def extract(path, spike_threshold=None):
                 for stage_name in ('scuc', 'sced', 'lmp'):
                     stage = day['stages'][stage_name]
                     row['stage_quality'].append({'day': i, 'stage': stage_name, **stage})
+                    for field in ('max_residual', 'mip_gap', 'requested_mip_gap', 'objective'):
+                        value = stage.get(field)
+                        if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value):
+                            raise ValueError('invalid_stage_numeric_metadata')
+                    if stage['max_residual'] < 0 or stage['mip_gap'] < 0 or stage['requested_mip_gap'] < 0:
+                        raise ValueError('negative_stage_quality_metadata')
                     if stage['max_residual'] is None or stage['max_residual'] > TOL:
                         raise ValueError('residual_not_accepted')
                     if stage['mip_gap'] is None or stage['mip_gap'] > stage['requested_mip_gap'] + 1e-12:
@@ -148,6 +154,9 @@ def extract(path, spike_threshold=None):
                     line_over[str(line['id'])] = line_over.get(str(line['id']), 0.) + sum(ov)*DT
                     max_over = max(max_over, max(ov))
                     day_over = [a+b for a, b in zip(day_over, ov)]
+                if any(not isinstance(day.get(k), (int, float)) or not math.isfinite(day[k])
+                       for k in ('deficit_mwh', 'overload_mwh')):
+                    raise ValueError('invalid_energy_metadata')
                 if abs(sum(day_loss)*DT-day['deficit_mwh']) > TOL or abs(sum(day_over)*DT-day['overload_mwh']) > TOL:
                     raise ValueError('energy_recompute_mismatch')
                 deficits += sum(day_loss)*DT

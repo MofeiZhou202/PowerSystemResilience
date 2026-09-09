@@ -6,6 +6,57 @@ This is the living handoff for verified build state and active engineering work.
 Update it in place; do not create dated copies. Source, registered tests, and
 the current Git worktrees remain authoritative.
 
+## Market Stress Oracle and Second Surrogate
+
+Follow-up sampling theory is documented in
+`docs/theory/market_surrogate_sampling_design.md`: conditional simulation versus
+boundary-action identification, parametric-programming regions, paired common
+scenarios, learning-curve/cost allocation, transition learning and independent
+family-grouped holdouts. It explicitly distinguishes target and adaptive
+sampling distributions and derives zero-miss binomial sample requirements.
+This is a theoretical proposal only: no new Oracle, retraining, new performance
+claim or change to the frozen v2 evaluation. Bibliographic metadata for the
+three linked papers was checked against Crossref; no full-text systematic
+literature review is claimed.
+
+The second offline experiment is complete: 32 new synthetic IEEE118 weeks
+(seed 20261000–20261031), 224 valid and dual-consistent main LMP stages, zero
+ineligible weeks. Ordinary/scarcity/congestion/surplus inputs now yield
+nonzero deficit, active-flow overload and renewable curtailment labels.
+Training uses 18 old plus 24 new weeks; 8 new holdouts, two per stratum, remain
+frozen. Old test weeks were not used for selection. Contract, design and
+negative findings: `docs/modules/market/intelligent_simulation.md` sections 6–7.
+
+All 10 regressors pass the original global-mean 10% MAE gate, but a posthoc
+training-stratum-mean baseline beats the model on 8/10 targets. The other two
+improve only 4.9%/8.1%. Thus this is not admitted for Bayesian/CMA-ES boundary
+optimization. Overall spike-fraction MAE is 0.030845 (3.084 percentage points),
+duration MAE 4.450 h. On the two new ordinary weeks, average-price MAE worsens
+from frozen v1's 10.081 to 25.347 currency/MWh, and curtailment MAE from 0.212
+to 159.898 MWh. Three event classifiers make no errors on these eight weeks,
+but have only 2/4/4 positives and no reliable or calibrated probability claim.
+No test-driven retraining or replacement of the original gate was performed.
+
+Oracle wall 1088.214 s versus predicted 811 s; scarcity/congestion weeks are
+slower than ordinary weeks. Training 16.880 s, warm batched regression
+prediction 0.009370 s/week versus predicted <0.1 s (no I/O, classifier or
+actual clearing). Artifacts: `output/market-intelligence/stress-full-v2/` and
+`output/market-intelligence/price-surrogate-v2/`. Existing Release binary hash
+is unchanged from v1 below; no rebuild. Per-run HEAD changed from 5041bcdb
+to ef54df20 during execution; final source and artifact hashes are recorded
+in the stress Oracle directory's `provenance.json` without asserting a clean
+source-to-binary build.
+
+7 label tests and 4 stress-feature/split/support tests pass. Inference reload
+matches frozen predictions; wrong case, missing feature and inputs outside
+the union of sampled strata are rejected. Posthoc baseline audit reproduces
+the original diagnostic to 1e-8 with unchanged frozen-artifact hashes.
+Ridge candidates emitted NumPy/scikit-learn matmul numerical warnings:
+36 training-fold fits agree with independent augmented least squares to
+2.765e-10, CV score differences <=1.001e-11 (tolerance 1e-5). All selected
+regressors are Extra-Trees. Warning root cause remains unproven, not fixed.
+No C++ or production GUI changes or full C++ suite run in this experiment.
+
 ## Market Price Oracle and First Surrogate
 
 Offline tools in `tools/market_intelligence/` now generate isolated weekly

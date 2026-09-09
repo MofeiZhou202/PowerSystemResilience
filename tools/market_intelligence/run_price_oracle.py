@@ -61,14 +61,18 @@ def api(base, route, body=None):
         return json.load(res)
 
 
-def run_one(index, args, binary_hash):
+def run_one(index, args, binary_hash, experiment=None):
     folder = args.output / f'week-{index:03d}'
     folder.mkdir(parents=True, exist_ok=True)
     source = json.loads((args.input / 'southern_market.json').read_text())['boundary']
-    config = json.loads((args.input / 'market_forecast.json').read_text())['job']['config']
-    config['sample_count'] = 1
-    config['seed'] = args.seed + index
-    design = apply_design(config, index, args.design)
+    if experiment is None:
+        config = json.loads((args.input / 'market_forecast.json').read_text())['job']['config']
+        config['sample_count'] = 1
+        config['seed'] = args.seed + index
+        design = apply_design(config, index, args.design)
+    else:
+        config = json.loads(json.dumps(experiment['config']))
+        design = experiment['metadata']
     op = config['operation']
     op.update(explain=args.recovery, explain_trigger='always', recovery_pricing='full')
     op['solver_options'].update(solver='gurobi', threads=2, time_limit_sec=120, mip_gap=0.01)
@@ -110,7 +114,11 @@ def run_one(index, args, binary_hash):
                 raise TimeoutError('Oracle server startup')
             loaded = api(base, 'southern_market', {'action': 'save', 'revision': state['revision'], 'boundary': source})
             run = api(base, 'market_forecast', {'action': 'generate', 'revision': loaded['revision'], 'config': config})
-            save(folder / 'input.json.gz', api(base, 'market_forecast?export=1')['job'])
+            generated = api(base, 'market_forecast?export=1')['job']
+            save(folder / 'input.json.gz', generated)
+            if experiment is not None:
+                # Preflight-v3: validate the actual generated paths before spending Oracle time.
+                args.validate_input(generated, experiment)
             for day in range(7):
                 run = api(base, 'market_forecast', {'action': 'step', 'run_id': run['run_id'], 'scenario': 0, 'day': day})
                 status = run['job']['scenarios'][0]['status']
@@ -161,6 +169,8 @@ def main():
     p.add_argument('--recovery', action='store_true', help='also price all counterfactual explanations')
     p.add_argument('--design', choices=['pilot', 'stress'], default='pilot')
     args = p.parse_args()
+    if args.design == 'stress' and (args.weeks != 32 or args.seed != 20261000 or args.recovery):
+        p.error('Frozen stress protocol requires 32 weeks, seed 20261000 and no recovery explanations')
     if not (1 <= args.workers <= 2 and 1 <= args.weeks <= 128):
         p.error('workers must be 1..2 and weeks 1..128')
     args.server = args.server.resolve()
