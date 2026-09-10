@@ -6,6 +6,35 @@ This is the living handoff for verified build state and active engineering work.
 Update it in place; do not create dated copies. Source, registered tests, and
 the current Git worktrees remain authoritative.
 
+## Hydro Transition Surrogate Iteration
+
+Completed hydro-transition-v2: 36/36 full-price weekly Oracles / 252 main LMP
+days, 8 training and 4 fixed independent test families. Four/eight-family models
+were saved and hashed before the analysis read test labels; no post-test tuning.
+Primary physics+GP test MAE 6.568845 MWh vs same-cohort context trees 216.143499
+(96.9609% lower); max error 26.763566, meaningful misses 0/6, candidate regret 0
+on four test weeks. Research gate passed; no production admission. Pure physical
+formula is near roundoff on this tiny test, but one training action has a
+149.155 MWh residual and opposite sign due to omitted realized thermal energy.
+Independent full daily accounting verifies this; binding constraint cause remains
+unisolated. Keep this counterexample; do not infer full-domain exactness.
+
+Frozen model artifacts and local predict_hydro.py enforce original base, operation
+contract, quotas, bids, input ranges and station1 day2/day5 action. Nine of twelve
+test candidates lie outside the finite training-coordinate box; flags and Oracle
+confirmation remain mandatory. GP standard deviation is uncalibrated. No new
+HTTP/GUI, automatic background learning or multi-station optimizer deployment.
+
+Oracle wall 1957.343 s vs predicted 2200 s, mean 108.511 worker-s; 8-family fit
+0.035832 s. Cached prediction median 0.021958 ms, full features + prediction
+2.545000 ms: local microbenchmarks, not service SLA or solver acceleration.
+19 hydro + 18 existing Python tests pass. Independent validation checks 36 raw
+weeks / 96 predictions, water residual <=9.239e-7 m³, renewable residual
+<=2.058e-11 MWh, metric difference <=2.842e-14; saved-model inference matches
+12 held-out candidates. Figures pass geometry/perceptual checks. Original Release
+binary reused without C++ changes/rebuild. Theory §10–11 / module record §10;
+artifacts hydro-transition-v2 and hydro-transition-analysis-v2.
+
 ## Hydro Allocation Research Scope
 
 User confirmed the primary task: hold each hydro station's weekly energy fixed
@@ -16,15 +45,31 @@ reservoir daily min/max MWh overrides and carries hydrological states across
 days. Station-to-generator-to-reservoir identity must be explicitly mapped;
 shared-reservoir groups are not automatically actual station identities.
 
-The design distinguishes target from realized daily energy, fixed renewable
-availability from consumption gain, terminal water and in-transit release
-state comparability, and quick surrogate estimates from asynchronous full Oracle
-verification. Current features lack hydro allocation actions, and current labels
-lack the required hydro-energy/spill/terminal-water audits. No hydro-specific
-Oracle, retraining, online API or GUI was executed in this scope clarification;
-existing hydrology test sources were read but not rerun. Proposed online <=1 s
-and 3 h offline budgets are design examples, not measured service guarantees or
-user-confirmed exact limits. The full preflight results below remain unchanged.
+The hydro-specific pipeline completed 30 full-price weekly evaluations / 210 main
+LMP days across 6 new external families and 5 station1 day2/day5 actions each.
+All pass generic pricing and independent hydro audits. Explicit synthetic station
+mapping, 7-day exact energy overrides, common terminal levels/release tails and
+full input/reference/action identity are implemented via existing market_operation
+API. No C++ solver changes or online GUI/API deployment.
+
+Only family2 has significant gain: shifting 300 MWh from day5 to day2 reduces
+solar curtailment by 300 MWh (+0.301496 percentage points), with fixed realized
+weekly hydro/terminal water and zero diagnostic deficit/overload. Five families
+have zero gain on all actions. 3-fold 2/3/4-family development training yields
+Ridge MAE 37.500/37.500/69.453 MWh and trees 37.500/37.500/61.011, versus no-gain
+37.500 throughout; all maximum errors are 300 MWh. No generalization admission,
+formal sample-size extrapolation, adaptive new cohort or production model.
+Next sampling must address response/curtailment-transition coverage; mean-error
+alone misses the sole useful family. See theory §9 and module record §9.
+
+Oracle call wall totals 1799.209 s vs predicted 1800 s; worker mean 118.490 s,
+P90 168.238 s, fitting 0.295 s. 3 h capacity examples are not approved exact
+budgets or enough-sample guarantees. 10 hydro + 18 existing Python tests pass;
+existing Release SI/D-day hydro test passes 13 assertions. No C++ rebuild.
+Independent audit: 30 raw weeks, 216 predictions, water residual <=1.289e-6 m³,
+renewable residual <=1.455e-11 MWh, metric reconstruction difference <=1.421e-14.
+Plots pass geometric/perceptual review. Artifacts: hydro-pilot-v1 and
+hydro-analysis-v1 under output/market-intelligence; complete provenance recorded.
 
 ## Market Identification Preflight
 

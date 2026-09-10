@@ -226,3 +226,66 @@ Oracle双进程wall2712.082 s（45分12秒），相对预测1500 s偏高80.8%；
 `validate_identification_report.py`从11520条预测独立复算720组开发指标，最大差5.821e-11（容差1e-8），并检查120个低信息预测误差下界、家族隔离及训练基线。两张10面板曲线PNG/PDF通过文本/边界几何检查及整图、分面目检；曲线只表示开发误差，不是盲测置信区间。18项相关单元测试通过，文档锚点检查0失败；本轮未改生产C++、未重建或重跑全套C++测试。
 
 当前结论：保留完整轨迹，避免继续只用周水平加样；后续应比较更充分的时序/状态代理和直接Δo模型，围绕缺额/拥塞/未饱和尖峰切换安排独立配对家族。须先根据本曲线确定工程容限与预算，再固定序贯补样协议。当前只完成前置辨识，没有部署新代理、启动主动补样或Bayesian/CMA-ES。
+
+
+## 9. 水电分配专项动作与独立审计
+
+理论与冻结协议见[水电分配设计](../../theory/hydro_renewable_allocation.md)§8。新增Python工具通过既有生产路由 `/api/session/market_operation` 的 `start` / `step` 执行完整SCUC→SCED→LMP周任务，不修改C++求解器或在线GUI/API。
+
+- `hydro_allocation.py`：显式合成站—稳定机组ID—水库ID映射；固定每站周电量、编译7个日电量上下限等式；共同周末水位与必要下泄尾向量；独立96点积分与SI水量守恒审计。只准入每站恰好一个水库关联群的合成试验，其他映射显式拒绝。
+- `run_hydro_oracle.py`：冻结6外生周×5动作=30评价，支持 `--prepare-only` 和 `--limit` 前缀检查、身份一致的断点续跑；完整身份含参考8日轨迹、动作、终端合同、映射和二进制版本。原样保存operation响应和规范化输入，再以显式adapter接入旧通用标签审计；水电标签schema为hydro-v1。
+- `analyze_hydro.py`：直接配对消纳增益，缺额/越限变化单列；按外生家族划分3折，2/3/4家族学习曲线，零增益基线、Ridge与ExtraTrees；只有完整数值审计家族进入主曲线，不用失败值填零。
+- `validate_hydro.py`：从原始Oracle响应独立重算整周水库存变化、滞后到达、发电耗水、新能源电量，并从留出预测重算误差与分组隔离。
+- `plot_hydro.py`：从开发结果生成PNG/PDF误差—成本图，保留各折差异；不得把小开发集当作逐例置信区间。
+
+数值一致性门槛：日电量/周电量1e-3 MWh、水量与终态库容1 m³、下泄尾1e-6 m³/s、新能源积分1e-6 MWh。`train_eligible`只表示完整价格链和数值审计通过；schedule-only线性诊断仍允许缺额与越限，不能据此准入实际调度。实际周水电、弃水、期末库水与在途水均审计；其他设备终端等价性不额外承诺，储能沿用既有每日终值约束。
+
+执行示例：
+
+```bash
+output/market-intelligence/venv/bin/python tools/market_intelligence/run_hydro_oracle.py
+output/market-intelligence/venv/bin/python tools/market_intelligence/analyze_hydro.py
+output/market-intelligence/venv/bin/python tools/market_intelligence/validate_hydro.py
+```
+
+本轮使用已有Release二进制，未重新构建；数值结果应以 `output/market-intelligence/hydro-pilot-v1/` 的manifest/原始响应和 `hydro-analysis-v1/` 的审计报告为准。30次冻结评价/210个主定价日全部通过。最大日电量误差7.535e-10 MWh、周误差7.385e-10 MWh，逐时水量残差1.313e-6 m³；共同终态库容偏差0 m³、下泄尾偏差2.500e-11 m³/s。独立整周重算30份原始响应，新能源电量误差≤1.455e-11 MWh；216条留出预测重算误差指标差≤1.421e-14。
+
+唯一有实质弃电的家族2，基准弃光5605.609191 MWh；站1从第5日移出150/300 MWh到第2日，对应减少150/300 MWh弃光，300 MWh对应消纳率提高0.301496个百分点，反向转移增加同等弃光。该家族全部方案缺额/越限诊断为0。其余5家族20个非零动作消纳增益均近零；部分周仍有线路越限，不能因数值审计通过而准入生产调度。
+
+2/3/4训练家族对应10/15/20评价，平均训练Oracle成本17.695/31.481/39.497 worker-min。零增益基线MAE均37.500 MWh；Ridge为37.500/37.500/69.453，树为37.500/37.500/61.011；全部最大留出误差300 MWh。唯一有信号周被留出时，训练没有非零响应；包含该周训练又向零响应周预测虚假收益。没有泛化或学习收敛证据，不部署生产模型，不外推正式训练总周数。
+
+Oracle两次调用墙钟合计1799.209 s，预测1800 s；30评价worker合计3554.690 s，单周均值118.490 s、P90 168.238 s，拟合0.295 s。双进程3小时按均值约182次、按P90约128次，仅为容量示例。训练规模还需有效响应/切换区覆盖、增益工程误差与漏判门槛、独立安全阈值及预算共同决定；本轮未自动启动序贯补样。
+
+10专项+18既有Python测试通过；已有Release SI/D-day hydro用例13断言通过，未重建C++或运行完整C++回归。PNG/PDF误差—成本图和两幅裁图通过几何/视觉检查。原始/分析文件哈希与环境见实验目录provenance.json，理论与补样判断见水电设计§9。
+
+
+## 10. 切换区域与物理残差代理（hydro-transition-v2）
+
+依据水电设计§10，新增 `hydro_physics.py` 的日电量正部基准及固定核GP残差，
+`run_hydro_transition.py` 冻结12外生周×3动作（36次完整周评价），8周训练、4周独立测试。
+两种训练规模4/8家族的模型在 `analyze_hydro_transition.py` 首次读取测试标签前保存并计算哈希，
+不使用新测试标签调参；原v1数据仅作理论开发依据，未直接混入本轮拟合。
+
+逐日物理可用新能源按min(pmax,forecast×scale)乘available和1−must_off积分，
+以聚合电量富余正部差作为消纳增益基准；它忽略日内、网络、机组及储能损耗耦合，
+并非一般弃电下界或完整Oracle替代。GP标准差未校准为工程误差界。
+
+`predict_hydro.py` 是本地研究分析入口：加载冻结8训练周模型，校验基准/模型哈希、
+12站固定周配额、原报价、无故障以及站1日2/日5的−300..300 MWh动作范围；
+同时拒绝超过冻结风光/来水/线路倍数、其余日负荷支持或两动作日电量富余±600 MWh范围的输入，并核对原运行合同。生成的候选仍需Oracle确认，坐标包围盒内也不承诺可行性或精度。新在线HTTP/GUI未部署。
+运行示例（模型产物生成后）：
+
+```bash
+output/market-intelligence/venv/bin/python tools/market_intelligence/run_hydro_transition.py
+output/market-intelligence/venv/bin/python tools/market_intelligence/analyze_hydro_transition.py
+output/market-intelligence/venv/bin/python tools/market_intelligence/validate_hydro_transition.py
+output/market-intelligence/venv/bin/python tools/market_intelligence/predict_hydro.py --spec output/market-intelligence/hydro-transition-v2/week-006/input.json
+```
+
+36/36周评价与252主定价日有效。8训练周/4独立测试周上的主模型physics_gp MAE为6.568845 MWh、最大误差26.763566 MWh，相对同批旧上下文树216.143499 MWh降低96.9609%；6个≥50 MWh响应无漏判，4周候选选择后悔值0。本轮研究进步门槛通过，但不是工程生产准入。纯物理公式在这4周上误差近舍入量；训练家族10却存在149.155 MWh残差和错误方向。独立能量核算发现基准日5额外149.155 MWh火电出力，说明日电量松弛缺少日内机组响应。原测试和冻结模型保持不变，未用测试后调参制造改进。
+
+Oracle墙钟1957.343 s（预测2200 s），单周108.511 worker-s，8家族拟合0.035832 s；缓存预测中位数0.021958 ms、完整特征+预测中位数2.545000 ms，均为本地微基准，不是HTTP SLA。gp-4/8.npz、trees-4/8.joblib和model-freeze.json已保存；CLI对4测试周12候选的重载预测一致。9/12测试候选超出有限训练坐标包围盒，输出保留外推提醒和Oracle确认要求。该包围盒不是可行域或概率支持证明。
+
+`validate_hydro_transition.py`独立复算36份原始响应和96条预测，最大整周水量残差9.239e-7 m³、新能源电量残差2.058e-11 MWh、误差指标差2.842e-14；`audit_hydro_physics_residual.py`保存物理残差的完整日电量归因（具体约束因果尚未隔离）。19项水电专项+18既有Python测试通过，图与分面裁图通过几何/视觉检查。尚未部署在线HTTP/GUI或Bayesian/CMA-ES多站优化；下一批应覆盖日内形状/火电响应遗漏信息，详细理论和失配复核见水电设计§11。
+数据与结果分别隔离在 `output/market-intelligence/hydro-transition-v2/` 和
+`hydro-transition-analysis-v2/`；继续使用原Release二进制，未改C++求解器、容差或定价范围。
