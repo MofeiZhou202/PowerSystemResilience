@@ -20,15 +20,16 @@ def main():
     p.add_argument('--source',type=Path,default=ROOT/'output/market-intelligence/hydro-temporal-v3')
     p.add_argument('--server',type=Path,default=ROOT/'build/macos-release/tests/run_gui_server')
     p.add_argument('--prepare-only',action='store_true')
+    p.add_argument('--gap',type=float,choices=(1e-4,1e-5),default=1e-4)
     args=p.parse_args();args.output.mkdir(parents=True,exist_ok=True)
     original=json.loads((args.source/'design.json').read_text());design=copy.deepcopy(original)
-    design.update(protocol='hydro-temporal-label-precision-v1',planned_evaluations=2,independent_families=1,
+    design.update(protocol='hydro-temporal-label-precision-v1' if args.gap==1e-4 else 'hydro-temporal-label-precision-gap-1e-5',planned_evaluations=2,independent_families=1,
         predicted_wall_sec=350,source_indices=[3,4],source_design_sha256=digest(original),
         scope='Training-only paired solver-gap sensitivity; not new test validation')
     design['specs']=[copy.deepcopy(original['specs'][i]) for i in (3,4)]
     for s in design['specs']:
         if s['split']!='train':raise ValueError('Precision audit must not select test labels')
-        s['config']['solver_options']['mip_gap']=1e-4
+        s['config']['solver_options']['mip_gap']=args.gap
     if hashlib.sha256(args.server.read_bytes()).hexdigest()!=design['binary_sha256']:
         raise ValueError('Oracle binary changed')
     path=args.output/'design.json'
@@ -48,7 +49,7 @@ def main():
     result={'accepted_tighter_labels':bool(accepted),'source_indices':[3,4],'old_gain_mwh':old_gain,
         'new_gain_mwh':new_gain,'absolute_gain_change_mwh':abs(new_gain-old_gain) if accepted else None,
         'stable_within_25_mwh':abs(new_gain-old_gain)<=25 if accepted else None,
-        'requested_old_gap':.01,'requested_new_gap':1e-4,'wall_sec':summary['wall_sec'],
+        'requested_old_gap':.01,'requested_new_gap':args.gap,'wall_sec':summary['wall_sec'],
         'worker_sum_sec':summary['worker_sum_sec'],'predicted_wall_sec':350,
         'source_label_issues':[l['quality']['issues'] if l else ['No label produced'] for l in labels],
         'production_precision_certified':False,'original_model_or_test_labels_modified':False}

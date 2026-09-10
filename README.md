@@ -8,7 +8,7 @@
 ## 文档同步状态（2026-09-10）
 
 - 市场离线智能仿真支持完整周LMP标签、压力代理与前置辨识试验：固定输入下比较日序和线路边界动作，按家族绘制开发误差—成本曲线。第二版仍落后于分组基线，尚未准入边界优化；理论、代码及数值状态见[智能仿真记录](docs/modules/market/intelligent_simulation.md)。
-- 水电专项支持固定周电量的7日分配与终端水资源审计；新增36次切换区域Oracle后，物理+GP在4独立测试周MAE 6.57 MWh（同批上下文树216.14），本地完整特征+推断约2.55 ms；仅支持当前研究范围，候选仍需Oracle确认，见[水电专项结果](docs/theory/hydro_renewable_allocation.md)。
+- 水电专项完成等日电量、不同日内形状/火电条件的72次周评价及4次精度复算；主模型消纳增益MAE 64.50 MWh、网络对照57.98 MWh，均未达25 MWh研究门槛，本地完整请求P95约20–25 ms。单配对收紧Oracle间隙后标签变化299.42 MWh，进一步收紧变化2.29 MWh；须先验证标签收敛与可执行性，再用新留出周验收，尚未生产准入，见[水电专项结果](docs/theory/hydro_renewable_allocation.md)。
 
 - 本地市场手册与GUI在线帮助统一覆盖[周月跨日状态继承](docs/modules/market/southern_execution_contract.md)、
   [操作教程](docs/guides/market_simulation_workflow.zh.md)及性能验收。在线“帮助”可搜索

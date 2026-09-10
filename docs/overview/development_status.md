@@ -6,21 +6,74 @@ This is the living handoff for verified build state and active engineering work.
 Update it in place; do not create dated copies. Source, registered tests, and
 the current Git worktrees remain authoritative.
 
+## Strict Hydro Label Convergence and Prospective Holdout (running)
+
+Theory §14 / intelligent simulation §12: four old training-only representative
+pairs at gaps 1e−5 and 1e−6 completed: 16 evaluations / 112 LMP days audited,
+maximum paired-gain difference 5.128e−11 MWh, constituent curtailment difference
+0.263208 MWh. The ≤5 MWh label stability gate passes; one pair still has 0.186468
+MWh diagnostic flow violations. Wall 820.943 s vs predicted ≤1200 s.
+A new frozen design has 4 training and 2 new test roots, 4 shape/condition variants,
+2 actions and 2 gap levels (96 evaluations). Narrower line factors [0.8,1];
+input-designed 150 MWh benefits plus hinge-switch/reverse cases. Training completed: 64 evaluations / 448 LMP days, 16 stable pairs; 14 pairs pass
+the diagnostic flow/balance screen, 2 retain 0.032925 MWh overflow per candidate.
+Eight models were frozen before prospective testing. Held-out primary MAE/max
+0.069642/0.246703 MWh, 0/8 high-benefit misses, maximum local inference 51.429 ms;
+all 8 test pairs are stable and pass the diagnostic screen. Original gates pass,
+but every actual nonzero gain is approximately 150 MWh: this is a weak constant-
+response test, not production certification. A new frozen-model challenge with
+3 new roots and expected hinge gains 110/90/−150 MWh is running (48 Oracles),
+without refitting or changing the original results. Theory §15 / module §13.
+
+Forty-two hydro Python tests pass. New strict runner, model freeze/inference
+and independent validation preserve original v3 outputs and reject held-out
+execution before training freeze. Existing Release binary reused, no C++ rebuild.
+Four isolated servers × 2 threads on 16 logical cores; predicted convergence
+wall ≤1200 s, later batch ≤6500 s. Artifacts: hydro-strict-v4.
+
 ## Equal-energy Intraday / Thermal-condition Supplement
 
-hydro-temporal-v3 is running: 6 independent exogenous roots × 2 load shapes ×
-2 thermal operating packages × 3 actions = 72 weekly evaluations; 4 training
-roots and 2 fixed test roots, with all siblings kept together. User research
-thresholds: gain MAE ≤25 MWh, max ≤50 MWh, no missed ≥100 MWh positive benefits,
-full local analysis ≤1 s. No production admission. Theory §12 / module §11.
+Completed hydro-temporal-v3: 72 full-price weekly evaluations / 504 main LMP
+days, plus 4 precision reruns / 28 LMP days. Six independent exogenous roots ×
+2 load shapes × 2 thermal operating packages × 3 actions; 4 training roots and
+2 fixed test roots, with all siblings kept together. Fixed station weekly energy,
+node daily load energy and terminal water contract. This is a sequential rolling
+linear diagnostic Oracle, not a jointly optimal week or AC/N-1 certification.
 
-Frozen design hash bf946889becd373edd6f27a840bc7790b06c932335ac2516a6c35801cbbb6df2.
-First 6 full-price Oracles pass; independent first-4 audit checks 28 LMP days,
-1848 chronological generator states, full energy/water/UC execution constraints.
-29 hydro Python tests (19 existing + 10 temporal) and 18 existing label/stress/identification tests pass. Existing Release binary reused, no C++ rebuild.
-Complete cohort, model fitting, test metrics and full audit remain pending.
-Raw storage charging is negative injection; independent accounting was corrected
-to net consumption = −(charge + discharge), with source/equation evidence.
+Research accuracy gates fail: on 16 nonzero held-out actions, primary temporal_gp
+MAE/max = 64.496/214.473 MWh versus daily_gp 117.537/250.570. Pre-test secondary
+network_gp gives 57.975/205.201; complete 8-day context gives 66.916/234.905.
+All models were frozen before test-label reads; no post-test refitting. No true
+positive benefit reaches 100 MWh (maximum 87.226), so no-miss performance is
+unverified. Full local validated request P95 is 19.51/22.39/24.85 ms for temporal,
+network and complete models; the 1 s local speed gate passes, HTTP SLA untested.
+
+Main new finding: tightening gap on one training baseline/action pair changes
+gain from −481.875 (1e−2) to −182.451 (1e−4) to −180.164 MWh (1e−5).
+Adjacent changes are 299.424 and 2.287 MWh; only this pair is locally stable at
+the last two levels. All original labels/models remain frozen for diagnostics.
+Do not deploy 1%-gap models or interpret loose-solution violations as proof of
+input infeasibility. Thirty-nine main solutions, including 12/24 test candidates,
+have diagnostic flow violations; all 3 positive test actions fail that screen.
+Four constrained test families have no passing candidate, including baseline.
+
+Independent audit verifies 72 raw weeks, 504 LMP days and 33264 generator state
+links, plus both precision pairs. Main maximum energy/water residuals are
+3.121e−8 MWh / 5.344e−5 m³, with no stage limit reached. Raw storage charging is
+negative injection; independent accounting was corrected to −(charge + discharge).
+Thirty hydro Python tests and 18 label/stress/identification tests pass; existing
+Release binary reused, no C++ rebuild or full C++ regression. Figures pass geometry
+and visual review. Main call wall time 5271.19 s versus predicted 6000 s.
+
+Next design must establish label convergence across representative pairs and add
+feasible high-benefit cases on new held-out roots. The current ±180 MWh surplus
+region with ±300 MWh actions bounds positive daily-hinge benefit at 60 MWh;
+it was unsuitable for testing ≥100 MWh recall. More input factors alone did not
+improve this small-cohort GP; theory §13 records the mismatch and limits.
+No production admission or adequate-total-sample claim. Theory §12–13 / module §11;
+artifacts under output/market-intelligence/hydro-temporal-v3 (provenance.json),
+hydro-temporal-analysis-v3 (summary.md), hydro-complete-context-analysis-v1,
+and hydro-label-precision-v1/v2 (v2/convergence.json compares adjacent gaps).
 
 ## Hydro Transition Surrogate Iteration
 
@@ -32,8 +85,9 @@ Primary physics+GP test MAE 6.568845 MWh vs same-cohort context trees 216.143499
 on four test weeks. Research gate passed; no production admission. Pure physical
 formula is near roundoff on this tiny test, but one training action has a
 149.155 MWh residual and opposite sign due to omitted realized thermal energy.
-Independent full daily accounting verifies this; binding constraint cause remains
-unisolated. Keep this counterexample; do not infer full-domain exactness.
+Independent full daily accounting verifies this. The v3 input audit subsequently
+identified the exact singleton import constraint at bus116 / branch183 / unit54
+(theory §12.4). Keep this counterexample; do not infer full-domain exactness.
 
 Frozen model artifacts and local predict_hydro.py enforce original base, operation
 contract, quotas, bids, input ranges and station1 day2/day5 action. Nine of twelve

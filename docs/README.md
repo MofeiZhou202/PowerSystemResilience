@@ -29,7 +29,7 @@ GUI“帮助”目录，可搜索“跨日继承”“SOC”“性能”；在�
 
 [智能仿真标签与价格代理](modules/market/intelligent_simulation.md)：完整周Oracle、LMP标签、两轮独立周验证、压力场景代理及分组基线负结果。
 
-[水电电量分配与新能源消纳](theory/hydro_renewable_allocation.md)：已确认固定各站周电量、优化7日分配；已接通合成站映射、7日电量动作与独立水量审计；已完成30次前置及36次切换区域完整周评价；物理+GP在4独立测试周MAE 6.57 MWh，本地快速推断可用，仍需Oracle验证与更广运行状态覆盖；§12记录正在执行的等日电量日内形状/火电条件交叉补样及研究门槛。
+[水电电量分配与新能源消纳](theory/hydro_renewable_allocation.md)：固定各站周电量、优化7日分配；§12–13记录已完成的72次等日电量日内形状/火电条件交叉评价及4次精度复算。主模型MAE 64.50、网络对照57.98 MWh，未达25 MWh门槛；本地请求P95约20–25 ms。单训练配对揭示1%gap标签不稳定，需严格Oracle收敛验证及新的可行/高收益留出周；不声明生产精度。§14新增已授权执行的多配对严格标签检查与全新留出周协议，数值结果待完成。
 
 [周尺度市场边界优化模型](theory/market_boundary_optimization_model.md)：定义代理模型与
 Bayesian Optimization/CMA-ES 使用的随机双层问题、输入输出、风险目标、标签口径和 Oracle 复核边界。

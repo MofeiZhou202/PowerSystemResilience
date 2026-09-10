@@ -4,7 +4,7 @@
 
 下一轮补样的[理论设计](../../theory/market_surrogate_sampling_design.md)单独记录，包含组内辨识、过渡定位、配对边界动作与独立留出样本量；其§9对应本模块的前置辨识工具，正式序贯补样尚未执行。
 
-最新研究范围已明确为[固定各站周水电电量、优化7日分配以改善新能源消纳](../../theory/hydro_renewable_allocation.md)。在线快速分析、离线数小时学习是新专项要求；当前线限额代理不能直接预测水电配额动作，需新增动作输入、电量/水量审计和独立验证，尚未部署专项服务。
+最新研究范围已明确为[固定各站周水电电量、优化7日分配以改善新能源消纳](../../theory/hydro_renewable_allocation.md)。在线快速分析、离线数小时学习是新专项要求；水电专项已具备动作输入、电量/水量审计及本地代理入口（§9–11），研究精度尚未达标，尚未部署专项服务。
 
 ## 1. 实验协议和理论依据
 
@@ -286,7 +286,7 @@ output/market-intelligence/venv/bin/python tools/market_intelligence/predict_hyd
 
 Oracle墙钟1957.343 s（预测2200 s），单周108.511 worker-s，8家族拟合0.035832 s；缓存预测中位数0.021958 ms、完整特征+预测中位数2.545000 ms，均为本地微基准，不是HTTP SLA。gp-4/8.npz、trees-4/8.joblib和model-freeze.json已保存；CLI对4测试周12候选的重载预测一致。9/12测试候选超出有限训练坐标包围盒，输出保留外推提醒和Oracle确认要求。该包围盒不是可行域或概率支持证明。
 
-`validate_hydro_transition.py`独立复算36份原始响应和96条预测，最大整周水量残差9.239e-7 m³、新能源电量残差2.058e-11 MWh、误差指标差2.842e-14；`audit_hydro_physics_residual.py`保存物理残差的完整日电量归因（具体约束因果尚未隔离）。19项水电专项+18既有Python测试通过，图与分面裁图通过几何/视觉检查。尚未部署在线HTTP/GUI或Bayesian/CMA-ES多站优化；下一批应覆盖日内形状/火电响应遗漏信息，详细理论和失配复核见水电设计§11。
+`validate_hydro_transition.py`独立复算36份原始响应和96条预测，最大整周水量残差9.239e-7 m³、新能源电量残差2.058e-11 MWh、误差指标差2.842e-14；`audit_hydro_physics_residual.py`保存物理残差的完整日电量归因（随后由§11的节点输入容量下界隔离该反例）。19项水电专项+18既有Python测试通过，图与分面裁图通过几何/视觉检查。尚未部署在线HTTP/GUI或Bayesian/CMA-ES多站优化；下一批应覆盖日内形状/火电响应遗漏信息，详细理论和失配复核见水电设计§11。
 数据与结果分别隔离在 `output/market-intelligence/hydro-transition-v2/` 和
 `hydro-transition-analysis-v2/`；继续使用原Release二进制，未改C++求解器、容差或定价范围。
 
@@ -320,9 +320,12 @@ output/market-intelligence/venv/bin/python tools/market_intelligence/validate_hy
 output/market-intelligence/venv/bin/python tools/market_intelligence/predict_hydro_temporal.py --candidate output/market-intelligence/hydro-temporal-v3/week-048/input.json
 ```
 
-试验期间先完成前6周可执行性检查，全部合格；前4周独立审计28个有效LMP日、1848个
-机组日首状态链接，电量残差≤3.129e−10 MWh、水量残差≤4.843e−7 m³，未出现阶段limit。
-新增7项测试及原19项水电测试通过。完整72周、拟合及独立验证尚在执行，未报告精度通过。
+72/72主评价与504个主LMP日通过数值标签审计；独立重算33264个机组状态链接。
+最大电量残差3.121e−8 MWh、水量残差5.344e−5 m³、储能递推残差8.740e−13 MWh；
+0个阶段limit，最大实际gap为0.00988674。主批总worker耗时10333.25 s，
+累计调用墙钟5271.19 s（预估6000 s），单周平均143.52 worker-s。
+30项水电专项及18项既有标签/压力/辨识Python测试通过；未重建或全量回归C++。
+
 完整日电量审计按市场API的负充电注入口径：净耗电=−Σ(charge_mw+discharge_mw)Δt；
 旧反例储能为零，不改变旧数值结果。本轮审计先发现符号不符再按源码修正，见理论§12.3。
 
@@ -333,6 +336,114 @@ output/market-intelligence/venv/bin/python tools/market_intelligence/predict_hyd
 
 `benchmark_hydro_temporal.py` 另外验证模型重新加载与24个测试候选一致、拒绝未支持
 输入，以及100次完整候选校验+特征+预测耗时；部署HTTP并发性能不在该测试内。
-`audit_hydro_label_precision.py` 以更紧1e−4 gap复算主设计训练索引3/4的两周配对，
-报告标签收益变化是否≤25 MWh；原主设计和测试标签保持冻结，不据此回填更好看的结果。
-其独立审计与数值结果仍待执行。新增工具均沿用full定价及原Release二进制。
+`audit_hydro_label_precision.py` 分别以1e−4、1e−5 gap复算训练索引3/4的配对，
+两档均使用full定价及原Release二进制，独立审计各14个LMP日通过。
+相同基准、周配置和二进制（仅请求gap变化）下，收益依次为−481.875、−182.451、
+−180.164 MWh，相邻差299.424、2.287 MWh。原1%gap解的基准/动作越限为
+21.55/30.67 MWh，两档紧gap解均为数值零。此为一个训练配对的局部收敛，
+不是全域精度认证；逐日滚动状态可随前日解变化，不能把各日目标差当作同一MILP比较。
+原主设计、模型和测试标签保持冻结；新增结果未回填。两档额外调用墙钟209.92/207.55 s，
+分别低于预估350 s。相邻gap结论读取 `hydro-label-precision-v2/convergence.json`；
+各档report仍与原1%结果比较。
+
+输入侧复核新增 `hydro_complete_context.py` 与 `analyze_hydro_complete_context.py`：
+原特征遗漏第8日预测及部分日期的线路/来水因子，现保留原模型作为消融，另训练完整
+8日作者化上下文的complete_gp对照。该模型在主报告读取任何测试标签前分阶段冻结，
+没有改写原主模型、抽样或标签。信息恢复测试证明8×5因子可精确恢复，并覆盖只改
+第8日或第1日线路时旧特征不变的反例。仅对本次四个固定边界与已声明自由输入成立。
+
+```bash
+output/market-intelligence/venv/bin/python tools/market_intelligence/analyze_hydro_complete_context.py --phase train
+output/market-intelligence/venv/bin/python tools/market_intelligence/analyze_hydro_complete_context.py --phase evaluate
+output/market-intelligence/venv/bin/python tools/market_intelligence/predict_hydro_temporal.py --model-kind complete_gp --model output/market-intelligence/hydro-complete-context-analysis-v1 --candidate output/market-intelligence/hydro-temporal-v3/week-048/input.json
+```
+
+48训练评价已齐备，complete_gp的2/4独立周拟合在读取测试标签前冻结；训练Oracle成本
+3485.415/7008.375 worker秒，拟合0.000435/0.002804秒。固定2个留出外生周、
+16个非零动作的结果如下（MWh）：
+
+| 模型 | 2训练周MAE | 4训练周MAE | 4训练周最大误差 |
+|---|---:|---:|---:|
+| daily_gp | 113.475 | 117.537 | 250.570 |
+| temporal_gp（原定主模型） | 116.751 | 64.496 | 214.473 |
+| network_gp（预冻结对照） | 105.436 | 57.975 | 205.201 |
+| complete_gp（预冻结对照） | 105.982 | 66.916 | 234.905 |
+
+主模型相对同批日电量GP的MAE下降45.13%，但25/50 MWh精度门槛均失败。
+完整上下文对照MAE比网络对照高15.42%，与预期至少改善10%相反；已按理论§13
+完成实现、信息恢复和核相似度复核，保留失配，不作测试后调参。40个外生因子只有
+4个独立训练上下文，且1%gap标签不稳定，不能唯一归因为某一种过拟合原因。
+`validate_hydro_complete_context.py` 独立重建48条预测，误差指标差≤1.706e−13 MWh；
+主分析独立重建288条预测，差≤2.843e−14 MWh。
+
+100次预加载模型的完整本地校验+特征+预测P95：主模型19.506 ms、网络22.386 ms、
+完整上下文24.851 ms，最大均低于26 ms；24候选重载预测一致。未覆盖HTTP和并发SLA。
+所有24测试候选超出有限训练特征包围盒，但仍在作者化输入域内；该包围盒不代表可行域。
+测试最大正收益87.226 MWh，没有≥100 MWh真阳性，不漏判要求未验证，不能将0/0写成通过。
+当前±180 MWh富余区域配合±300 MWh动作的日电量近似正收益上界只有60 MWh，
+新设计须分别覆盖切换区域与高收益区域，先由严格Oracle确认可执行性和真实收益。
+
+`audit_hydro_admission.py` 将数值标签有效性与当前解缺额/越限筛查分开：
+39/72主解有线路越限，含12/24测试候选；3个正收益测试动作全部未通过该筛查。
+4个受限测试候选家族连基准也未通过，不能假定存在安全基准回退。
+阈值沿用1e−3 MWh数值容差，不能替代工程安全要求，更不能据当前解判定输入物理不可行。
+本轮Oracle是逐日滚动线性诊断模型，不是七日联合最优，也未完成AC/N-1认证。
+
+主模型和1%gap标签仅作研究诊断，所有本地模型继续返回Oracle确认要求及未生产准入。
+下一步优先在多个代表性配对上确认严格标签收敛并分配标签/代理误差预算，再用稳定标签
+训练及新留出周验证；不能据当前两点成本曲线承诺正式总周数。数值、冻结哈希、审计和
+环境证据见 `output/market-intelligence/hydro-temporal-v3/provenance.json`，综合报告见
+`output/market-intelligence/hydro-temporal-analysis-v3/summary.md`，理论见§12–13。
+
+
+## 12. 严格Oracle标签与前瞻留出周
+
+用户授权按理论§14执行。`run_hydro_strict.py` 冻结四个旧训练代表配对，比较1e−5/1e−6，
+共16次周评价；收益差与各周弃电量差均≤5 MWh才允许后续补样。复算已完成：
+最大增益差5.128e−11 MWh、弃电量变化0.263208 MWh，112个LMP日独立审计通过；
+墙钟820.943秒（预估≤1200）。一个代表配对仍有约0.186468 MWh越限，单列为诊断违约。
+新设计为4训练根/2全新测试根×4形状/火电条件×2动作，每候选双gap，共96次周评价。
+线路倍数支持为[.8,1]，高收益组预期能量松弛收益150 MWh；实际可执行性仍须Oracle。
+
+`analyze_hydro_strict.py` 先按稳定训练标签拟合并冻结2/4根的四种固定核GP；
+`hydro_strict_model.py` 校验完整候选、动作、8日外生输入及严格求解合同。
+测试阶段要求模型哈希通过、所有测试目录尚不存在，再记录启动身份；
+`validate_hydro_strict.py` 从原始轨迹复核双gap标签、GP训练方程、测试隔离与验收指标。
+`predict_hydro_strict.py` 提供本地候选入口，`plot_hydro_strict.py` 绘制双gap标签成本曲线。
+数值稳定、诊断平衡/潮流筛查和生产安全分别报告；不静默剔除不稳定或违约样本。
+重复完整试验须选新的 `--output` 目录，分析工具的 `--input` 指向该目录；已有模型拒绝
+重复拟合，已有结果可运行只读验证。
+
+```bash
+output/market-intelligence/venv/bin/python tools/market_intelligence/run_hydro_strict.py --phase convergence
+output/market-intelligence/venv/bin/python tools/market_intelligence/run_hydro_strict.py --phase train
+output/market-intelligence/venv/bin/python tools/market_intelligence/analyze_hydro_strict.py --phase train
+output/market-intelligence/venv/bin/python tools/market_intelligence/run_hydro_strict.py --phase test
+output/market-intelligence/venv/bin/python tools/market_intelligence/analyze_hydro_strict.py --phase evaluate
+output/market-intelligence/venv/bin/python tools/market_intelligence/validate_hydro_strict.py
+output/market-intelligence/venv/bin/python tools/market_intelligence/predict_hydro_strict.py --candidate output/market-intelligence/hydro-strict-v4/gap-1e-6/week-032/input.json
+```
+
+42项水电Python测试通过（新增12项），含反向动作/高收益设计、守恒、整根隔离、
+误差抵消假稳定、无可行基准、不允许测试先于训练、非法边界/配额/求解精度拒绝。
+新训练64次评价/448个LMP日已完成，16配对全部稳定，14配对通过诊断平衡/潮流筛查；
+其余两对各有0.032925 MWh越限，保留未删除。8份模型已在测试启动前冻结。新留出
+32次评价全部数值有效且稳定，8个配对均通过诊断筛查；主模型MAE0.069642、最大
+0.246703 MWh，8个≥100 MWh案例无漏判，本地完整请求最大51.429 ms，原研究门槛通过。
+但8个实际收益全部约150 MWh，常数预测也能通过，不能据此认定非恒定映射精度或生产准入。
+独立原始轨迹/GP方程/测试时序/224条预测核验通过；切换审计显示8个测试配对均存在
+实际火电承诺变化，且原始节点/线路积分重算一致。原Release二进制复用，未改建C++。产物在
+`output/market-intelligence/hydro-strict-v4/`，旧v3保留冻结。
+
+
+## 13. 非恒定收益挑战（执行中）
+
+按理论§15，保持全部v4模型、训练代码与原验收报告冻结，新增3个独立外生根，
+输入能量先验收益分别110/90/−150 MWh，覆盖阈值两侧和不利动作，48次双gap周评价。
+`run_hydro_strict_challenge.py` 在挑战Oracle前冻结设计、原模型哈希和自身分析源码；
+拒绝测试后改变源码/设计，不重新拟合模型。新增“收益等于δ”参照检验平台区弱测试。
+当前挑战执行中，不提前宣称挑战通过；文件隔离在 `hydro-strict-v4/challenge-v1/`。
+
+```bash
+output/market-intelligence/venv/bin/python tools/market_intelligence/run_hydro_strict_challenge.py
+```
