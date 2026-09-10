@@ -289,3 +289,50 @@ Oracle墙钟1957.343 s（预测2200 s），单周108.511 worker-s，8家族拟�
 `validate_hydro_transition.py`独立复算36份原始响应和96条预测，最大整周水量残差9.239e-7 m³、新能源电量残差2.058e-11 MWh、误差指标差2.842e-14；`audit_hydro_physics_residual.py`保存物理残差的完整日电量归因（具体约束因果尚未隔离）。19项水电专项+18既有Python测试通过，图与分面裁图通过几何/视觉检查。尚未部署在线HTTP/GUI或Bayesian/CMA-ES多站优化；下一批应覆盖日内形状/火电响应遗漏信息，详细理论和失配复核见水电设计§11。
 数据与结果分别隔离在 `output/market-intelligence/hydro-transition-v2/` 和
 `hydro-transition-analysis-v2/`；继续使用原Release二进制，未改C++求解器、容差或定价范围。
+
+## 11. 等日电量的日内形状与机组运行条件补样
+
+理论协议见 `docs/theory/hydro_renewable_allocation.md` §12。本轮用户选择研究门槛：
+增益MAE≤25 MWh、最大误差≤50 MWh、真实收益≥100 MWh时不得漏判、在线分析≤1秒。
+不是生产准入声明。相同外生周整体划分，6周×2形状×2火电条件×3水电动作共72周Oracle；
+前4个外生周训练、后2个测试。不能将同周变体视为独立周来夸大置信度。
+
+新增工具 `hydro_temporal.py`、`run_hydro_temporal.py`、`analyze_hydro_temporal.py`、
+`validate_hydro_temporal.py`、`predict_hydro_temporal.py`。
+复用 `run_hydro_oracle.py` 时可从冻结设计中选择整份边界，内容哈希纳入配对身份；
+原有v1/v2不设置该字段，行为保持兼容。初始状态仅在周初作者化，随后使用SCED真实递推。
+负荷区域/节点P/Q同步循环平移6小时，每节点日电量守恒，风光容量截断后可用轨迹不变。
+火电联合干预包将pmin设为20%容量、最小开停机4小时、爬坡设为原值25%，周初开机15分钟；
+装机容量和报价段不变。它是合成柔性压力试验，不能单独归因为初始开机状态。
+
+代理采用固定日能量物理项加残差GP；增广输入仅含求解前日内净负荷与火电状态/运行条件。
+两种训练规模（2/4独立周）、日能量与增广GP在读测试标签前全部冻结。
+本地推理严格验证四个边界版本、动作/水资源可比、日因子范围与求解契约；返回
+`requires_oracle_confirmation=true`、`production_admitted=false` 和训练坐标包围盒外标记。
+没有新增HTTP服务或自动执行水电分配。
+
+执行入口：
+
+```bash
+output/market-intelligence/venv/bin/python tools/market_intelligence/run_hydro_temporal.py
+output/market-intelligence/venv/bin/python tools/market_intelligence/analyze_hydro_temporal.py
+output/market-intelligence/venv/bin/python tools/market_intelligence/validate_hydro_temporal.py
+output/market-intelligence/venv/bin/python tools/market_intelligence/predict_hydro_temporal.py --candidate output/market-intelligence/hydro-temporal-v3/week-048/input.json
+```
+
+试验期间先完成前6周可执行性检查，全部合格；前4周独立审计28个有效LMP日、1848个
+机组日首状态链接，电量残差≤3.129e−10 MWh、水量残差≤4.843e−7 m³，未出现阶段limit。
+新增7项测试及原19项水电测试通过。完整72周、拟合及独立验证尚在执行，未报告精度通过。
+完整日电量审计按市场API的负充电注入口径：净耗电=−Σ(charge_mw+discharge_mw)Δt；
+旧反例储能为零，不改变旧数值结果。本轮审计先发现符号不符再按源码修正，见理论§12.3。
+
+训练阶段增加了两个已在测试揭盲前冻结的网络对照（network_physics/network_gp），
+主模型temporal_gp不变。其输入是无水电/储能/可控负荷单节点的方向性送入容量与净负荷，
+用于构造必需本地火电下界；旧v2训练反例已被节点116/线路183/火电54逐时精确解释。
+这不等于一般网络或弃电的认证界。完整推导及适用限制见理论§12.4。
+
+`benchmark_hydro_temporal.py` 另外验证模型重新加载与24个测试候选一致、拒绝未支持
+输入，以及100次完整候选校验+特征+预测耗时；部署HTTP并发性能不在该测试内。
+`audit_hydro_label_precision.py` 以更紧1e−4 gap复算主设计训练索引3/4的两周配对，
+报告标签收益变化是否≤25 MWh；原主设计和测试标签保持冻结，不据此回填更好看的结果。
+其独立审计与数值结果仍待执行。新增工具均沿用full定价及原Release二进制。

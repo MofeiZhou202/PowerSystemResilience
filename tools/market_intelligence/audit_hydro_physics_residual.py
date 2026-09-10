@@ -31,7 +31,8 @@ def main():
                 thermal=sum(sum(g['power_mw'])*.25 for g in day['resources']['generators'] if g['kind']=='thermal')
                 renewable=[g for g in day['resources']['generators'] if g['kind'] in ('wind','solar','renewable')]
                 cur=sum(sum(g['curtailment_mw'])*.25 for g in renewable)
-                storage=sum((sum(s['charge_mw'])-sum(s['discharge_mw']))*.25 for s in day['resources']['storage'])
+                # Raw charge_mw is negative injection; hydro theory §12.3.
+                storage=-sum((sum(s['charge_mw'])+sum(s['discharge_mw']))*.25 for s in day['resources']['storage'])
                 hydro=sum(design['specs'][index]['quotas'][str(s['id'])][d] for s in design['mapping'])
                 av=sum(sum(g['renewable_available_mw'])*.25 for g in renewable)
                 load=sum(sum(a['load_mw'][:96])*.25 for a in boundary['areas'])*spec['external_days'][d]['load_scale']

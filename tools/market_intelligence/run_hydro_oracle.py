@@ -94,6 +94,14 @@ def run_one(index, args, design):
     folder = args.output/f'week-{index:03d}'
     folder.mkdir(parents=True, exist_ok=True)
     source = json.loads((args.input/'southern_market.json').read_text())['boundary']
+    # Hydro theory §12: shape/state variants are authored once, then carried
+    # chronologically. Full base contents participate in the existing identity.
+    if 'boundary_key' in spec:
+        if digest(source) != design['source_sha256']:
+            raise ValueError('Source fixture differs from frozen variant design')
+        source = design['boundaries'][spec['boundary_key']]
+        if digest(source) != spec['boundary_sha256']:
+            raise ValueError('Frozen shape/state boundary hash mismatch')
     identity = sample_identity(source, spec['config'], mapping, spec['quotas'], spec['terminal'], design['binary_sha256'])
     manifest_path = folder/'manifest.json'
     if manifest_path.exists():
@@ -143,7 +151,7 @@ def run_one(index, args, design):
             scenario['id'] = 0
             # Explicit adapter: base from normalized saved input; scenario is raw API output.
             job = {'base': normalized, 'config': {'seed': 20261210+spec['family']}, 'scenarios': [scenario],
-                   'limitations': ['hydro-pilot-v1 synthetic station convention; conditional scenario analysis'],
+                   'limitations': [design['protocol']+' synthetic station convention; conditional scenario analysis'],
                    'hydro': {'binary_sha256': design['binary_sha256'], 'adapter': 'market_operation API + saved normalized boundary'}}
             save(folder/'job.json.gz', job)
             label = audit_file(folder, spec, mapping)

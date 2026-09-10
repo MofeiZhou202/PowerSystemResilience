@@ -6,6 +6,22 @@ This is the living handoff for verified build state and active engineering work.
 Update it in place; do not create dated copies. Source, registered tests, and
 the current Git worktrees remain authoritative.
 
+## Equal-energy Intraday / Thermal-condition Supplement
+
+hydro-temporal-v3 is running: 6 independent exogenous roots × 2 load shapes ×
+2 thermal operating packages × 3 actions = 72 weekly evaluations; 4 training
+roots and 2 fixed test roots, with all siblings kept together. User research
+thresholds: gain MAE ≤25 MWh, max ≤50 MWh, no missed ≥100 MWh positive benefits,
+full local analysis ≤1 s. No production admission. Theory §12 / module §11.
+
+Frozen design hash bf946889becd373edd6f27a840bc7790b06c932335ac2516a6c35801cbbb6df2.
+First 6 full-price Oracles pass; independent first-4 audit checks 28 LMP days,
+1848 chronological generator states, full energy/water/UC execution constraints.
+29 hydro Python tests (19 existing + 10 temporal) and 18 existing label/stress/identification tests pass. Existing Release binary reused, no C++ rebuild.
+Complete cohort, model fitting, test metrics and full audit remain pending.
+Raw storage charging is negative injection; independent accounting was corrected
+to net consumption = −(charge + discharge), with source/equation evidence.
+
 ## Hydro Transition Surrogate Iteration
 
 Completed hydro-transition-v2: 36/36 full-price weekly Oracles / 252 main LMP
