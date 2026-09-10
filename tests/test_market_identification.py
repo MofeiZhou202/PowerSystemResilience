@@ -8,6 +8,7 @@ import numpy as np
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]/'tools/market_intelligence'))
 from run_identification_oracle import build_design, validate_input, FACTORS
+from analyze_identification import representations, grouped_folds, ridge_predict, pair_floor
 
 
 class IdentificationDesignTests(unittest.TestCase):
@@ -55,6 +56,47 @@ class IdentificationDesignTests(unittest.TestCase):
             bad = copy.deepcopy(job)
             mutate(bad['scenarios'][0]['config'])
             with self.assertRaises(ValueError):validate_input(bad, spec)
+
+    def test_coordinates_detect_order_without_lookahead_leak(self):
+        specs = self.design['specs']
+        rows = [{'features': {f'd{d}.{f}': day[f] for d, day in enumerate(spec['expected_days'])
+                              for f in FACTORS}} for spec in (specs[0], specs[2])]
+        x = representations(rows)
+        self.assertEqual(x['low5'].shape, (2, 5))
+        self.assertEqual(x['temporal17'].shape, (2, 17))
+        self.assertEqual(x['full56'].shape, (2, 56))
+        np.testing.assert_array_equal(x['low5'][0], x['low5'][1])
+        np.testing.assert_allclose(x['orderless42'][0], x['orderless42'][1], atol=1e-12, rtol=0)
+        self.assertGreater(np.max(abs(x['temporal17'][0]-x['temporal17'][1])), .01)
+        rows[0]['price'] = {'mean': 999999}
+        np.testing.assert_array_equal(representations(rows)['temporal17'], x['temporal17'])
+
+    def test_family_nested_splits(self):
+        covered = []
+        for order, valid in grouped_folds():
+            self.assertEqual(len(order), 8)
+            self.assertEqual(len(valid), 4)
+            self.assertFalse(set(order) & set(valid))
+            self.assertTrue(set(order[:4]) <= set(order[:6]) <= set(order[:8]))
+            covered.extend(valid)
+        self.assertEqual(sorted(covered), list(range(12)))
+
+    def test_compression_lower_bound(self):
+        a, b = np.array([1., 5., -7.]), np.array([5., 5., 3.])
+        mae, mse = pair_floor(a, b)
+        np.testing.assert_array_equal(mae, [2., 0., 5.])
+        np.testing.assert_array_equal(mse, [4., 0., 25.])
+        for estimate in (a, b, (a+b)/2, np.zeros(3)):
+            self.assertTrue(np.all((abs(a-estimate)+abs(b-estimate))/2 >= mae))
+            self.assertTrue(np.all(((a-estimate)**2+(b-estimate)**2)/2 >= mse))
+
+    def test_ridge_matches_closed_form_shrinkage(self):
+        x = np.array([[-1.], [0.], [1.]])
+        pred = ridge_predict(x, x[:, 0], np.array([[-2.], [2.]]))
+        np.testing.assert_allclose(pred, [-6/13, 6/13], atol=1e-12, rtol=0)
+        a = ridge_predict(x, x[:, 0]+3, np.array([[2.]]))
+        b = ridge_predict(x, x[:, 0]+3, np.array([[2.], [10000.]]))
+        np.testing.assert_allclose(a, b[:1], atol=1e-12, rtol=0)
 
 
 if __name__ == '__main__':

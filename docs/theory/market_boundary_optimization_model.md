@@ -2,7 +2,9 @@
 
 本文定义代理模型与 Bayesian Optimization/CMA-ES 使用的研究问题。它是外层研究模型，不改变当前 SCUC/SCED、LMP、AC 或 N-1 求解器的生产契约；最终候选必须由真实市场链复核。当前出清方程和结果口径见[市场模拟数学模型](market_simulation_mathematical_models.md)与[南方执行契约](../modules/market/southern_execution_contract.md)。
 
-第二轮代理诊断后的下一步设计见[组内与过渡区域采样理论](market_surrogate_sampling_design.md)：区分边界动作与外生轨迹，推导配对试验、采样预算和新留出周的准入条件；该设计尚未执行。
+第二轮代理诊断后的设计见[组内与过渡区域采样理论](market_surrogate_sampling_design.md)：区分边界动作与外生轨迹，推导配对试验、采样预算和新留出周的准入条件；其§9前置辨识已经完成，正式序贯补样尚未执行。
+
+用户已将当前主目标收敛为[水电电量分配对新能源消纳的影响](hydro_renewable_allocation.md)：固定各站周电量、优化7日分配，在线快速分析与离线数小时学习分工。本文件的多边界多目标形式保留为一般理论，当前专项不再要求全部价格指标具备高预测精度。
 
 ## 1. 随机双层问题
 

@@ -6,6 +6,75 @@ This is the living handoff for verified build state and active engineering work.
 Update it in place; do not create dated copies. Source, registered tests, and
 the current Git worktrees remain authoritative.
 
+## Hydro Allocation Research Scope
+
+User confirmed the primary task: hold each hydro station's weekly energy fixed
+and optimize allocation across seven days to improve wind/solar utilization.
+Online analysis is required; offline learning/labeling may take several hours.
+Design is in `docs/theory/hydro_renewable_allocation.md`. Existing code admits
+reservoir daily min/max MWh overrides and carries hydrological states across
+days. Station-to-generator-to-reservoir identity must be explicitly mapped;
+shared-reservoir groups are not automatically actual station identities.
+
+The design distinguishes target from realized daily energy, fixed renewable
+availability from consumption gain, terminal water and in-transit release
+state comparability, and quick surrogate estimates from asynchronous full Oracle
+verification. Current features lack hydro allocation actions, and current labels
+lack the required hydro-energy/spill/terminal-water audits. No hydro-specific
+Oracle, retraining, online API or GUI was executed in this scope clarification;
+existing hydrology test sources were read but not rerun. Proposed online <=1 s
+and 3 h offline budgets are design examples, not measured service guarantees or
+user-confirmed exact limits. The full preflight results below remain unchanged.
+
+## Market Identification Preflight
+
+The frozen `preflight-v3` experiment is complete. User selected error-versus-cost
+curves before setting engineering tolerances: 12 Latin-hypercube input families
+crossed with two daily orders and two line limits (10% tightening), plus two
+identical-input replays. All 50 weekly evaluations / 350 main LMP stages pass;
+48 unique weeks are grouped in 12 families, not 50 independent observations.
+All paired exogenous/reference trajectories and initial states match, and
+applied directional-limit reconstruction error is zero. Theory and full results:
+`docs/theory/market_surrogate_sampling_design.md` section 9 and
+`docs/modules/market/intelligent_simulation.md` section 8.
+
+Input low5 plus intercept has rank 6/6, condition number 2.022. Reversing the
+first seven days preserves low5 and orderless42 exactly but changes output:
+empirical same-coordinate average MAE floors are 2621.765 MWh for deficit,
+7914.845 MWh for active-flow overload, and 615.679 currency/MWh for mean price.
+Two identical-input replays have zero difference on all 10 targets; this is
+not a global numerical-stability certificate. Temporal17 preserves some order
+and helps some metrics, but is not established as sufficient or universally best.
+
+Nested 4/6/8-family development training uses 16/24/32 weekly evaluations, costing
+27.988/44.441/56.758 average Oracle worker-minutes per fold. Full56 trees' spike
+fraction MAE falls 22.657/16.097/12.264 percentage points, but deficit MAE is
+94985.4/118133.7/83589.2 MWh. Action-delta deficit MAE at 8 families is 4407.793
+MWh versus 133.945 MWh for predicting no change. 47/48 nonrepeat evaluations
+have spike duration 168 h, so its low error reflects saturation. No deployment,
+engineering gate, final blind test, adaptive sampling or boundary optimization
+is claimed. Do not compare v2/v3 MAEs directly: their evaluation distributions
+differ. Learning curves have only three development sizes; no sample-size
+extrapolation or convergence law is fitted.
+
+Oracle wall is 2712.082 s (45m12s) versus predicted 1500 s (+80.8%); curve fitting
+17.818 s versus predicted <120 s. Cost audit finds average nonrepeat worker
+106.422 s/week vs v2's 66.866; SCUC/SCED/LMP mean solve times are
+44.977/40.264/14.247 s vs 26.944/21.884/11.119. Worker minus operation runtime
+is about 4 s in both cohorts. Existing input/label checks and independent metric
+reconstruction pass; the old cost-distribution assumption did not transfer to
+new inputs. This is descriptive cohort evidence, not a paired solver speed test.
+
+Tools in `tools/market_intelligence/`: `run_identification_oracle.py`,
+`analyze_identification.py`, `validate_identification_report.py`,
+`audit_identification_cost.py` and `plot_identification.py`. Isolated artifacts:
+`output/market-intelligence/identification-v3/` and `identification-analysis-v3/`.
+Independent audit reconstructed 720 metric groups from 11520 predictions to
+5.821e-11 (tolerance 1e-8), including split and baseline checks and 120 compression
+bounds. Seven identification + seven label + four stress tests pass. Both
+PNG/PDF figures (10 panels) pass geometric and visual checks; doc anchors have
+zero failures. No C++ production changes, rebuild or full C++ suite run.
+
 ## Market Stress Oracle and Second Surrogate
 
 Follow-up sampling theory is documented in
@@ -14,8 +83,9 @@ boundary-action identification, parametric-programming regions, paired common
 scenarios, learning-curve/cost allocation, transition learning and independent
 family-grouped holdouts. It explicitly distinguishes target and adaptive
 sampling distributions and derives zero-miss binomial sample requirements.
-This is a theoretical proposal only: no new Oracle, retraining, new performance
-claim or change to the frozen v2 evaluation. Bibliographic metadata for the
+The preflight subset is now completed as described above; adaptive acquisition,
+GP-based allocation and final blind-test admission remain theoretical proposals.
+There is no change to the frozen v2 evaluation. Bibliographic metadata for the
 three linked papers was checked against Crossref; no full-text systematic
 literature review is claimed.
 

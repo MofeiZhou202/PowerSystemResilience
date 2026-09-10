@@ -29,10 +29,12 @@ GUI“帮助”目录，可搜索“跨日继承”“SOC”“性能”；在�
 
 [智能仿真标签与价格代理](modules/market/intelligent_simulation.md)：完整周Oracle、LMP标签、两轮独立周验证、压力场景代理及分组基线负结果。
 
+[水电电量分配与新能源消纳](theory/hydro_renewable_allocation.md)：已确认固定各站周电量、优化7日分配；定义消纳增益、配对评价、水资源可比性及离线学习/在线分析设计，专项实现尚未完成。
+
 [周尺度市场边界优化模型](theory/market_boundary_optimization_model.md)：定义代理模型与
 Bayesian Optimization/CMA-ES 使用的随机双层问题、输入输出、风险目标、标签口径和 Oracle 复核边界。
 
-[组内与过渡区域采样理论](theory/market_surrogate_sampling_design.md)：参数规划切换结构、边界动作配对、误差/成本预算、主动学习与独立留出设计；属于下一轮理论方案，尚未执行新采样。
+[组内与过渡区域采样理论](theory/market_surrogate_sampling_design.md)：参数规划切换结构、边界动作配对、误差/成本预算、主动学习与独立留出设计；§9固定前置辨识协议，正式序贯补样尚未执行。
 
 [通用AC/DC混合市场引擎运行时契约](reference/market_simulation_runtime.md)：
 报价→SCUC→固定组合SCED/LMP→可选LODF N-1割→非线性AC/DC认证→结算→实时双结算→重复博弈；

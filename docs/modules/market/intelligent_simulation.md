@@ -2,7 +2,9 @@
 
 本文是离线工具的实现契约与实验记录。研究问题见[边界优化数学模型](../../theory/market_boundary_optimization_model.md)；生产出清仍遵循[南方执行契约](southern_execution_contract.md)。v1在固定 IEEE118 系统/边界/周初状态下建立合成场景响应代理；v2加入四类压力输入和线路限额扰动，系统与初态保持不变。两轮均未执行 Bayesian/CMA-ES 边界优化。
 
-下一轮补样的[理论设计](../../theory/market_surrogate_sampling_design.md)已单独记录，包含组内辨识、过渡定位、配对边界动作与独立留出样本量；目前没有据此启动新Oracle或训练。
+下一轮补样的[理论设计](../../theory/market_surrogate_sampling_design.md)单独记录，包含组内辨识、过渡定位、配对边界动作与独立留出样本量；其§9对应本模块的前置辨识工具，正式序贯补样尚未执行。
+
+最新研究范围已明确为[固定各站周水电电量、优化7日分配以改善新能源消纳](../../theory/hydro_renewable_allocation.md)。在线快速分析、离线数小时学习是新专项要求；当前线限额代理不能直接预测水电配额动作，需新增动作输入、电量/水量审计和独立验证，尚未部署专项服务。
 
 ## 1. 实验协议和理论依据
 
@@ -176,3 +178,51 @@ python3 tools/market_intelligence/audit_stratum_baseline.py output/market-intell
 ```
 
 数值证据分别为模型目录的`inference-validation.json`、`ridge-numerical-audit.json`和`stratum-baseline-audit.json`；原始Oracle位于`output/market-intelligence/stress-full-v2/`。`provenance.json`保存运行manifest中的HEAD与最终源码/产物哈希；运行期间仓库HEAD从5041bcdb变为ef54df20，Oracle始终使用同一既有二进制哈希，不能将当前HEAD解释为干净重建的二进制来源。
+
+## 8. 前置辨识与开发学习曲线（preflight-v3）
+
+用户选择先给出误差—成本曲线，工程误差门槛暂不指定。[采样理论§9](../../theory/market_surrogate_sampling_design.md)在Oracle产生新标签前固定了12家族×2日序×2线路动作及2次重复，共50个周评价。家族是开发划分单位，不把配对和重复计作独立样本。不使用旧测试周，也未设置新的最终盲测。
+
+`run_identification_oracle.py`生成并冻结design.json；复用`run_price_oracle.py::run_one`的独立HTTP进程和真实7日出清链，新增可选实验配置及生成输入校验回调。原pilot/stress调用方式不变。全部fixed边际显式填写8日轨迹，生成后必须检查实际days/reference_days等于设计、无额外bid_scale/停运/局部时窗修改，核对通过后才开始出清。`--prepare-only`只冻结设计，后续运行拒绝与已有设计或二进制身份不符的配置。
+
+`analyze_identification.py`逐周保留schema3标签，检查相同系统和初态、实际方向限额、配对的非线路轨迹；日序反转下比较low5和orderless42不变性。temporal17的时序分量是六种外生因素各两个DCT-II系数：sqrt(2/7)Σ_d x_d cos(πk(d+1/2)/7)，k=1,2。全56维保留完整8日输入。反转对的标签差给出低维确定性模型在该二点上的MAE/MSE下界；不将两种形状宣称为完整条件分布。
+
+3折按家族划分，4/6/8个嵌套训练家族共16/24/32个周评价；模型为固定均值/中位数与三种表示的Extra-Trees/Ridge。增广最小二乘实现Ridge，所有缩放仅用训练折。保存逐点预测、各折MAE/RMSE、物理输出界、配对动作差值误差及零变化基线；成本按实际训练周worker-seconds累加。相邻规模的MAE下降/新增worker-minute仅是开发经验斜率，不外推精度保证。
+
+复现命令：
+
+```bash
+output/market-intelligence/venv/bin/python tools/market_intelligence/run_identification_oracle.py --prepare-only
+output/market-intelligence/venv/bin/python tools/market_intelligence/run_identification_oracle.py
+output/market-intelligence/venv/bin/python tools/market_intelligence/analyze_identification.py
+output/market-intelligence/venv/bin/python tools/market_intelligence/validate_identification_report.py output/market-intelligence/identification-analysis-v3
+output/market-intelligence/venv/bin/python tools/market_intelligence/audit_identification_cost.py
+output/market-intelligence/venv/bin/python tools/market_intelligence/analyze_identification.py --report-only
+output/market-intelligence/venv/bin/python -m unittest discover -s tests -p test_market_identification.py -v
+output/market-intelligence/venv/bin/python -m pip install -r tools/market_intelligence/requirements-plot.txt
+output/market-intelligence/venv/bin/python tools/market_intelligence/plot_identification.py output/market-intelligence/identification-analysis-v3 --style-kernel /Users/tianyangzhao/.codex/skills/figure-style/kernel.py
+```
+
+绘图依赖固定matplotlib3.9.4，`--style-kernel`指向本地已安装figure-style技能的kernel.py；不影响市场求解器依赖。图中细线为三个开发折、粗线为其平均，不是置信区间；输出PNG/PDF和几何检查记录，并进行图像目检。新增7项测试覆盖配对输入、日序统计不变、回放输入变异拒绝、时序坐标、家族隔离、误差下界和岭回归闭式缩减恒等式。
+
+### 8.1 实测结果与适用结论
+
+50次周评价全部完成，350个日主定价有效且重复对偶一致，50/50通过schema3标签准入。非重复物理样本48个、独立设计家族12个。24组边界配对均核验实际及参考非线路输入相同、初态相同，方向限额执行复算最大误差0 MW。low5加截距的标准化设计矩阵秩6/6、条件数2.022；仅证明局部线性设计不退化。24组反转配对在low5与规范化求和顺序的orderless42上逐值相同；14组日序配对、14组动作配对的导出机组online序列发生变化。
+
+同低维坐标二点平均MAE下界为价格均值615.679 currency/MWh、缺额2621.765 MWh、越限积分7914.845 MWh、尖峰占比0.005566（0.557个百分点）；最大单对分别4153.763、23009.863、78237.422、0.055514。两次相同输入重复的全部10项标签差为0，但不构成全域数值稳定保证。下界是所选反转二点上的经验约束，不是目标市场分布上的不可约误差估计。它证明周水平与无序统计不足；并不证明temporal17已经充分。
+
+| 训练家族数 | 每折训练周数 | 训练成本/worker-min | full56树尖峰占比MAE/百分点 | full56树缺额MAE/MWh | full56树越限MAE/MWh |
+|---|---:|---:|---:|---:|---:|
+|4|16|27.988|22.657|94985.4|165605.3|
+|6|24|44.441|16.097|118133.7|125100.9|
+|8|32|56.758|12.264|83589.2|97185.2|
+
+成本为三折训练子集实际worker-time之平均，不含开发周与重复。相同开发家族下部分指标随样本增加改善，但缺额非单调，弃电量反而变差；不能用三点曲线外推达到任意误差需要的总周数。8家族树模型缺额MAE：low5=71306.0、temporal17=58193.8、full56=83589.2 MWh；时序表示有局部收益却非全面占优，价格及越限等仍表现不同。Ridge出现负能量/越界比例等结果已在bounds_ok中保留，未事后裁剪或认作合格模型。
+
+动作辨识尚未准入：full56树在8家族的缺额Δ预测MAE=4407.793 MWh，零变化基线=133.945 MWh；越限Δ误差20941.351 MWh，仅略好于零变化基线21272.746 MWh。总量模型不能直接当可信边界敏感度代理。48个非重复评价中47个尖峰时长饱和到168 h，另一个164.25 h；时长的小MAE不是过渡精度证据。固定阈值没有改变。这批Q的分布不同于v2，不作跨轮MAE直接优劣比较。
+
+Oracle双进程wall2712.082 s（45分12秒），相对预测1500 s偏高80.8%；曲线拟合17.818 s满足预期<120 s。按理论偏差顺序核查，输入/公式/家族划分和独立误差复算均通过；48个非重复周平均worker=106.422 s，v2为66.866 s。SCUC/SCED/LMP平均solve_wall_sec从26.944/21.884/11.119变为44.977/40.264/14.247 s。每周worker与operation runtime差均约4 s，差异主要在出清阶段，支持旧成本分布不可直接迁移的解释；这是不同输入队列比较，不证明某个求解算法退化，阶段计时字段也不重复相加。
+
+`validate_identification_report.py`从11520条预测独立复算720组开发指标，最大差5.821e-11（容差1e-8），并检查120个低信息预测误差下界、家族隔离及训练基线。两张10面板曲线PNG/PDF通过文本/边界几何检查及整图、分面目检；曲线只表示开发误差，不是盲测置信区间。18项相关单元测试通过，文档锚点检查0失败；本轮未改生产C++、未重建或重跑全套C++测试。
+
+当前结论：保留完整轨迹，避免继续只用周水平加样；后续应比较更充分的时序/状态代理和直接Δo模型，围绕缺额/拥塞/未饱和尖峰切换安排独立配对家族。须先根据本曲线确定工程容限与预算，再固定序贯补样协议。当前只完成前置辨识，没有部署新代理、启动主动补样或Bayesian/CMA-ES。
