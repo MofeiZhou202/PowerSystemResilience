@@ -14,7 +14,6 @@
  * 实际：KKT 最优在 x+y=4 边界上，令 d(2x+3y)/dy=3>2，所以 y 尽量小 → y=1,x=3，obj=9。
  */
 
-#include <cassert>
 #include <cmath>
 #include <cstdio>
 
@@ -57,7 +56,8 @@ int main() {
 
     double obj = result.objective_value;
     std::printf("最优目标值: %.6f  (期望: 9.000000)\n", obj);
-    assert(std::abs(obj - 9.0) < 1e-4);
+    // R1 acceptance must remain active in Release builds (NDEBUG).
+    if (!std::isfinite(obj) || std::abs(obj - 9.0) >= 1e-4) return 2;
 
     std::printf("consumer_example 运行成功。\n");
     return 0;

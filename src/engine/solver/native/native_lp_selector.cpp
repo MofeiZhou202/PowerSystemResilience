@@ -1,6 +1,9 @@
 #include "mipsolvers/engine/solver/native/native_lp_selector.hpp"
 
+#include <algorithm>
 #include <atomic>
+#include <chrono>
+#include <cmath>
 #include <condition_variable>
 #include <cstdio>
 #include <cstdlib>
@@ -9,21 +12,18 @@
 #include <system_error>
 #include <thread>
 #include <utility>
+#include <vector>
 
 #include "mipsolvers/engine/kernel/ipm/ipm_lp_solver.hpp"
 #include "mipsolvers/engine/kernel/lp_kernel/dual_simplex.hpp"
-#include "mipsolvers/engine/presolve/lp_presolve.hpp"
 
 namespace mipsolvers::engine {
 namespace {
 
-// Shared rendezvous for the concurrent LP portfolio. Held via shared_ptr by the
-// caller and both worker threads so a detached loser can safely publish its
-// result even after the caller has already returned the winner.
 struct PortfolioSlot {
   std::mutex m;
   std::condition_variable cv;
-  std::atomic<bool> cancel{false};  // set once a winner is chosen → stop the loser
+  std::atomic<bool> cancel{false};
   int finished{0};
   bool have_winner{false};
   SolveResult winner;
@@ -32,11 +32,10 @@ struct PortfolioSlot {
 void publish(const std::shared_ptr<PortfolioSlot>& slot, SolveResult r) {
   std::lock_guard<std::mutex> lk(slot->m);
   ++slot->finished;
-  // Take the first successful result; if both kernels fail, take the last.
   if (!slot->have_winner && (r.stats.success || slot->finished == 2)) {
     slot->winner = std::move(r);
     slot->have_winner = true;
-    slot->cancel.store(true, std::memory_order_relaxed);  // cancel the loser
+    slot->cancel.store(true, std::memory_order_relaxed);
   }
   slot->cv.notify_all();
 }
@@ -58,19 +57,14 @@ bool NativeDualSimplexLPAdapter::supports(ProblemClass cls) const {
 SolveResult NativeDualSimplexLPAdapter::solve_lp(const LPModel& prob) const {
   SimplexOptions opt;
   opt.lp_kernel_backend = LpKernelBackend::ExperimentalNative;
-  opt.dual_edge_weight_initialization =
-      DualEdgeWeightInitialization::FullExact;  // ExactDSE
-  opt.use_highs_presolve = true;  // best-geomean NETLIB configuration
+  opt.dual_edge_weight_initialization = DualEdgeWeightInitialization::FullExact;
+  opt.use_highs_presolve = true;
   opt.time_limit_sec = time_limit_sec_;
   opt.cancel_flag = cancel_flag_;
   SolveResult r = solve_lp_with_basis(prob, opt).result;
-  // solve_lp_with_basis reports stats.objective in the internal minimize
-  // convention (objective_const - max_objective). The public adapter contract,
-  // matching the HiGHS/IPM adapters, is the user objective c·x — independent of
-  // Sense. Recompute it from the returned original-space solution.
-  if (r.stats.success && r.x.size() == prob.c.size()) {
+  // Public objective is c*x in the user's sense, unlike the internal minimum.
+  if (r.stats.success && r.x.size() == prob.c.size())
     r.stats.objective = prob.c.dot(r.x);
-  }
   return r;
 }
 
@@ -84,90 +78,78 @@ bool NativeAutoLPAdapter::supports(ProblemClass cls) const {
 }
 
 SolveResult NativeAutoLPAdapter::solve_lp(const LPModel& prob) const {
-  // Concurrent portfolio: race the dual-simplex-DSE kernel against the IPM and
-  // return the first successful result. No native LP kernel dominates the
-  // NETLIB set (dual simplex wins small/medium, IPM wins large/dense/wide) and
-  // the winner is not predictable from sparsity structure alone, so the race
-  // realizes the per-instance min(T_DSE, T_IPM). Both kernels are audited, so
-  // either result is correct. See docs/lp_kernel_selector_2026-08-11.md.
-  const double tl = time_limit_sec_;
+  // R4 in docs/archive/windows_remediation_2026-09-11.md:
+  // race against the reliable direct IPM path, with one call-wide deadline.
+  // Cancellation is cooperative; an active library factorization must finish.
+  const auto start = std::chrono::steady_clock::now();
+  const bool limited = time_limit_sec_ > 0.0 && std::isfinite(time_limit_sec_);
+  auto remaining = [&]() {
+    return limited ? std::max(0.0, time_limit_sec_ -
+        std::chrono::duration<double>(std::chrono::steady_clock::now() - start).count())
+        : 0.0;
+  };
+  auto timeout = [&]() {
+    SolveResult r;
+    r.stats.solver_name = name();
+    r.stats.status = "Time limit";
+    return r;
+  };
   auto slot = std::make_shared<PortfolioSlot>();
-  const LpPresolveOpportunityEstimate presolve_estimate =
-      lp_presolve_estimate_adaptive_opportunity(prob);
-  const bool run_native_presolve =
-      presolve_estimate.valid && presolve_estimate.should_run;
-
-  if (const char* dbg = std::getenv("MIPSOLVERS_LP_SELECTOR_DEBUG");
-      dbg && *dbg) {
-    std::fprintf(stderr,
-                 "LP-PORTFOLIO presolve-estimate valid=%d run=%d small=%d "
-                 "q=%.6f projected_fixed=%ld tightened=%ld projectable_rows=%ld "
-                 "singleton_eq=%ld density=%.6f ms=%.3f\n",
-                 static_cast<int>(presolve_estimate.valid),
-                 static_cast<int>(presolve_estimate.should_run),
-                 static_cast<int>(presolve_estimate.small_model),
-                 presolve_estimate.structural_potential,
-                 presolve_estimate.projected_fixed_cols,
-                 presolve_estimate.projected_bound_tightenings,
-                 presolve_estimate.projectable_rows,
-                 presolve_estimate.singleton_equality_cols,
-                 presolve_estimate.singleton_equality_density,
-                 presolve_estimate.estimate_ms);
-  }
-
-  auto dse_worker = [slot, lp = prob, tl]() {
+  auto worker = [&](bool ipm) {
     SolveResult r;
     try {
-      r = NativeDualSimplexLPAdapter(tl, &slot->cancel).solve_lp(lp);
+      const double budget = remaining();
+      if (limited && budget <= 0.0) {
+        r = timeout();
+      } else if (ipm) {
+        IPMLPOptions opt;
+        opt.presolve = false;
+        opt.time_limit_sec = budget;
+        opt.cancel_flag = &slot->cancel;
+        r = NativeIPMLPAdapter(opt).solve_lp(prob);
+      } else {
+        r = NativeDualSimplexLPAdapter(budget, &slot->cancel).solve_lp(prob);
+      }
     } catch (...) {
-      r.stats.success = false;
-      r.stats.status = "NativeDualSimplex exception";
+      r.stats.status = ipm ? "NativeIPMLP exception" : "NativeDualSimplex exception";
     }
     publish(slot, std::move(r));
   };
-  auto ipm_worker = [slot, lp = prob, tl, run_native_presolve,
-                     activity_snapshot =
-                         presolve_estimate.activity_snapshot]() {
-    SolveResult r;
-    try {
-      IPMLPOptions opt;  // defaults == native-ipm-direct
-      // The read-only Jacobi P3 projection rejects the Section 8.25 bandwidth
-      // losers before building adjacency. Derivation and holdout: Sections
-      // 8.26-8.28 of native_presolve_lp_2026-08-18.md.
-      opt.presolve = run_native_presolve;
-      opt.time_limit_sec = tl;
-      opt.cancel_flag = &slot->cancel;
-      r = NativeIPMLPAdapter(opt).solve_lp(lp, activity_snapshot);
-    } catch (...) {
-      r.stats.success = false;
-      r.stats.status = "NativeIPMLP exception";
-    }
-    publish(slot, std::move(r));
-  };
-
+  std::vector<std::thread> workers;
+  workers.reserve(2);
+  SolveResult out;
   try {
-    std::thread(dse_worker).detach();
-    std::thread(ipm_worker).detach();
+    workers.emplace_back(worker, false);
+    workers.emplace_back(worker, true);
   } catch (const std::system_error&) {
-    // Thread creation failed: fall back to a synchronous IPM solve (the prior
-    // default LP path). Any worker already launched publishes harmlessly.
+    slot->cancel.store(true, std::memory_order_relaxed);
+    for (auto& thread : workers) thread.join();
+    const double budget = remaining();
+    if (limited && budget <= 0.0) return timeout();
     IPMLPOptions opt;
-    opt.presolve = run_native_presolve;
-    opt.time_limit_sec = tl;
-    return NativeIPMLPAdapter(opt).solve_lp(
-        prob, presolve_estimate.activity_snapshot);
+    opt.presolve = false;
+    opt.time_limit_sec = budget;
+    return NativeIPMLPAdapter(opt).solve_lp(prob);
   }
-
-  std::unique_lock<std::mutex> lk(slot->m);
-  slot->cv.wait(lk, [&] { return slot->have_winner; });
-  SolveResult out = slot->winner;
-  lk.unlock();
-
-  if (const char* dbg = std::getenv("MIPSOLVERS_LP_SELECTOR_DEBUG");
-      dbg && *dbg) {
-    std::fprintf(stderr, "LP-PORTFOLIO winner=%s\n",
-                 out.stats.solver_name.c_str());
+  {
+    std::unique_lock<std::mutex> lock(slot->m);
+    bool ready = true;
+    if (limited) {
+      ready = slot->cv.wait_until(lock,
+          start + std::chrono::duration<double>(time_limit_sec_),
+          [&] { return slot->have_winner; });
+    } else {
+      slot->cv.wait(lock, [&] { return slot->have_winner; });
+    }
+    out = ready ? slot->winner : timeout();
+    slot->cancel.store(true, std::memory_order_relaxed);
   }
+  // Both workers borrow this call's model and deadline; always join before return.
+  for (auto& thread : workers) thread.join();
+  out.stats.runtime_sec = std::chrono::duration<double>(
+      std::chrono::steady_clock::now() - start).count();
+  if (const char* debug = std::getenv("MIPSOLVERS_LP_SELECTOR_DEBUG"); debug && *debug)
+    std::fprintf(stderr, "LP-PORTFOLIO direct-ipm winner=%s\n", out.stats.solver_name.c_str());
   return out;
 }
 

@@ -902,6 +902,10 @@ struct StandardFormLP : StandardFormMatrixStorage {
   Eigen::VectorXd b;
   Eigen::VectorXd c_max;
   Eigen::VectorXd lb_shift;
+  // Original variable j = lb_shift[j] + positive[j] - negative[j].
+  // Empty for the conventional finite-lower-bound layout; -1 means no split.
+  // Derivation: docs/archive/windows_remediation_2026-09-11.md R2.
+  std::vector<int> negative_col;
   // Upper bounds for each column in shifted space (var_ub[j] = ub_j - lb_shift_j).
   // +inf for unbounded variables and slack/surplus/artificial columns.
   Eigen::VectorXd var_ub;

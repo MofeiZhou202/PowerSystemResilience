@@ -45,6 +45,7 @@
 #include "mipsolvers/engine/kernel/ipm/ipm_lp_solver.hpp"
 #include "mipsolvers/engine/kernel/ipm/lcqp_solver.hpp"
 #include "mipsolvers/engine/kernel/lp_kernel/dual_simplex.hpp"
+#include "mipsolvers/engine/kernel/linear_algebra/linear_solver.hpp"
 #include "mipsolvers/engine/problem_types.hpp"
 #include "mipsolvers/engine/solver/external/adapters.hpp"
 #include "mipsolvers/engine/solver/native/lp/pdlp_solver.hpp"
@@ -1001,7 +1002,8 @@ void write_json(const fs::path& path, const Config& cfg,
                            {"max_iterations", cfg.max_iterations},
                            {"objective_tolerance", kObjectiveTolerance},
                            {"normalized_feasibility_tolerance", kFeasibilityTolerance},
-                           {"single_threaded_highs", true}};
+                           {"single_threaded_highs", true},
+                           {"mkl_max_threads", mipsolvers::engine::mkl_max_threads()}};
   for (const auto& c : cases) {
     root["cases"].push_back({{"name", c.name}, {"path", c.path.string()},
                               {"load_ms", c.load_ms}});

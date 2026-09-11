@@ -1,3 +1,4 @@
+#include "../linear_algebra/lp_factor_timing.hpp"
 #include "mipsolvers/engine/kernel/kkt/kkt_system.hpp"
 
 #include <algorithm>
@@ -83,6 +84,7 @@ Eigen::SparseMatrix<double> assemble_augmented_kkt(
     const Eigen::SparseMatrix<double>& jg,
     double delta_w,
     double delta_c) {
+  lp_timing::Scope timing(lp_timing::Kind::Assembly);
   const int n = static_cast<int>(w.rows());
   const int meq = static_cast<int>(jg.rows());
   const int dim = n + meq;
@@ -199,6 +201,7 @@ bool assemble_augmented_kkt_cached(SparseKKTCache& cache,
                                    const Eigen::SparseMatrix<double>& jg,
                                    double delta_w, double delta_c,
                                    const Eigen::VectorXd* dual_diagonal = nullptr) {
+  lp_timing::Scope timing(lp_timing::Kind::Assembly);
   const int n = static_cast<int>(w.rows());
   const int meq = static_cast<int>(jg.rows());
   const bool structure_changed = !augmented_structure_matches(cache, w, jg);
@@ -249,6 +252,7 @@ bool assemble_augmented_kkt_dual_block_cached(
     SparseKKTCache& cache, const Eigen::SparseMatrix<double>& w,
     const Eigen::SparseMatrix<double>& jg, double primal_reg,
     const Eigen::SparseMatrix<double>& dual_block) {
+  lp_timing::Scope timing(lp_timing::Kind::Assembly);
   const int n = static_cast<int>(w.rows());
   const int meq = static_cast<int>(jg.rows());
   const bool structure_changed =

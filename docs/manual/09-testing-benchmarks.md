@@ -4,6 +4,8 @@
 
 本章面向需要在现场验证构建正确性、复现性能数字的工程师，回答四个问题：测试怎么跑、NETLIB 基准结论是什么、Windows 平台当前验证状态如何、基准如何复现。求解算法本身的原理见 [求解器与引擎](05-solvers-engines.md) 和 [数值方法](06-numerical-methods.md)，构建选项见 [安装与部署](02-installation-deploy.md)。
 
+2026-09-11 的离线复评见 [9.6 节](#96-windows-离线复评2026-09-11)。以下 2026-08 的机器、测试数量与线程化结果是历史快照，不能直接代替当前提交的验证。
+
 ## 9.1 测试体系
 
 ### 9.1.1 构成与统计口径
@@ -305,3 +307,60 @@ tests\Release\miplib2017_benchmark.exe `
 - 配对几何均值、全集几何均值、全量总时间回答三个不同问题，不能互相替代（见 9.3.3）。
 - 隔离子进程运行与单进程运行的绝对时间不可混算。
 - 测试失败排查见 [故障排查](10-troubleshooting.md)。
+
+## 9.6 Windows 离线复评（2026-09-11）
+
+以下是修复前提交 `75c6e1922839d4775c27eacda833df386e95f476` 的基线快照，Windows 11 / i9-12900H / MSVC 19.44 Release，本地 sequential oneMKL，未联网。完整协议、命令、构建选项、失败复核及优化建议见 [离线评估记录](../archive/windows_offline_evaluation_2026-09-11.md)；修复与线程实验须使用相应工作区补丁，不能仅凭相同 HEAD 复现。
+
+- CTest：19/19 通过，14 unit + 3 integration + 2 benchmark；SCUC/Python 未启用。
+- NETLIB 90 × 3：原生 IPM direct 和 HiGHS simplex 均 270/270 准确；关闭 crossover 的 HiGHS IPM 为 264/270，问题为 ganges / greenbea。
+- Native-Auto 单独批次为 264/270 准确：greenbea 超时，tuff 返回不准确的 Optimal；tuff 在原生双单纯形加 HiGHS presolve 路径也复现。不能仅凭 CTest 通过或 success 字段发布自动求解结果。
+- HS071：本地 Ipopt 5/5 准确，禁用 fallback 的原生 NLP 0/5；SOCP/SDP quick 为 24/24 optimal；MILP 小型根节点冒烟为 21/21 成功，不代表大规模分支树性能。
+- 该基线 CMake 对 Windows MKL 构建无条件要求 SEQUENTIAL；INTEL 线程层命令会被 SDK 检查拒绝。完整功能 SDK 的外部消费者还因缺失 `MIPSolvers::MKL` 导出目标生成失败；bundled 目标存在 MSVC 不支持 GNU `ar -M` 的产物缺失问题。
+
+原生 IPM 三个长尾占 90 例中位数耗时总和约 63.08%。若未来能将它们各降时一半，条件预测全集降时约 31.54%；这不是本次已实施的加速结果。原始数据保存在 `reports/windows_eval_20260911/`。
+
+## 9.7 LP 分解计时与 INTEL 线程稳定性协议
+
+理论依据与预先固定的验收规则见 [Windows 修复推导 R6](../archive/windows_remediation_2026-09-11.md)。在同一 Release 构建上执行：
+
+```powershell
+python tools/windows_lp_stability.py --stage overhead --output reports/windows_stability_20260911
+python tools/windows_lp_stability.py --stage stability --output reports/windows_stability_20260911
+python tools/windows_lp_stability.py --stage gates --output reports/windows_stability_20260911
+```
+
+各阶段按上述顺序执行，不同时运行其他求解器或构建。脚本设置 `OMP_NUM_THREADS=1`、`MKL_DYNAMIC=FALSE`，分别验证 `MKL_NUM_THREADS=2/4`，并从基准 JSON 的 `mkl_max_threads` 核对运行时设置。完整日志、原模型准确性、进程峰值工作集与二进制 SHA256 均保存在输出目录。复测应使用新的输出目录，以免覆盖原始证据。
+
+`stability` 对 dfl001、greenbea、maros-r7 做 20 组独立进程测量，奇数组 2/4、偶数组 4/2；预热进程不计入样本。报告中位数、nearest-rank P95（20 个样本的第 19 个）、最大值及 IQR/中位数。三案例总时间先在每个区组内相加，再计算分布；它不等于三个案例的中位数之和。P95 是本工作站的样本估计，不是跨机器的尾延迟保证；每个新进程仍包含首次库调用。
+
+LP 计时默认关闭，手动诊断时设置 `MIPSOLVERS_LP_FACTOR_TIMING=1`。每个 `solve_lp_impl` 变体在标准错误输出一行 `LP-FACTOR` JSON，包括失败后重跑的变体。字段含义：
+
+| 字段 | 含义 |
+|---|---|
+| `assembly_ms` | 已覆盖的矩阵装配、图结构与散射索引准备，扣除嵌套分析和分解 |
+| `symbolic_ms` | 后端符号分析 API，含分解内部触发的延迟分析 |
+| `numeric_ms` | 数值分解 API，含该 API 内部的格式准备，扣除符号分析 |
+| `other_ms` | 变体总耗时减前三项，含回代、残差、全局化及未单列准备 |
+| `variant_ms` | 单次变体墙钟时间，等于前四项之和 |
+| `retry_ms` / `retries` | LP 正则化重分解的时间与次数；时间与上述分类重叠，不能再次加总；不包含外层变体重跑和后端自适应尝试 |
+| `*_calls` | 相应已插桩 API 区间的调用次数，不等同于 MKL 内部调用次数 |
+
+仅统计调用线程的区间墙钟，不将 MKL 工作线程的 CPU 时间相加。该诊断不覆盖 macOS Accelerate 内部的分解细分；本次验收范围为 Windows 后端。旧 `setup_sub_normal_only` 输出只覆盖普通方程部分路径，不能据此判断 augmented 路径未发生分解。
+
+### 9.7.1 本轮实测与运行建议
+
+完整数字、源码/二进制身份、预测偏差调查见 [INTEL/2、INTEL/4 稳定性报告](../archive/windows_lp_stability_2026-09-11.md)。两档每例20次，均60/60准确：
+
+| 案例 | 2线程中位数/P95 ms | 4线程中位数/P95 ms |
+|---|---:|---:|
+| dfl001 | 3340.85 / 3386.57 | 2230.12 / 2263.49 |
+| greenbea | 2695.12 / 4482.84 | 2675.41 / 4151.26 |
+| maros-r7 | 1091.88 / 1131.19 | 933.15 / 974.09 |
+| 区组三例合计 | 7182.50 / 8874.88 | 5853.92 / 7301.95 |
+
+4线程区组合计中位数降18.50%，P95降17.72%，通过预定性能门；本机LP direct推荐INTEL/4。4对2的原预测为5–15%，超出预测的调查已写回R6。greenbea迭代轨迹仍不稳定，不能声称消除了该长尾。
+
+关闭计时后，两档NETLIB IPM/Auto各90×3均准确，合计1080/1080；HS071原生/Ipopt各档5次，合计20/20准确。全集IPM总时间降4.53%，Auto反增10.44%，因此Auto/混合负载先保留2线程；本次没有证明4线程对所有模块普遍有益。两档计时开关三对观测差异中位数+0.609%/+1.338%，但同配置也出现轨迹差异，尚不能从中隔离纯计时开销。
+
+最终全目标重链接后，在INTEL/4、OMP=1、计时关闭下串行运行完整CTest，**20/20通过**（14 unit、4 integration、2 benchmark），305.41秒。SCUC/Python未启用。源码与测试保留于本地工作区，完整证据目录见报告。

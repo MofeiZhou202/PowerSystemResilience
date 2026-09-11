@@ -1,3 +1,4 @@
+#include "lp_factor_timing.hpp"
 // ═══════════════════════════════════════════════════════════════════════════
 // CholmodLDLT — implementation (SuiteSparse CHOLMOD, int64 cholmod_l_* API).
 //
@@ -72,6 +73,7 @@ CholmodLDLT& CholmodLDLT::operator=(CholmodLDLT&& other) noexcept {
 
 bool CholmodLDLT::analyze(int64_t m, const int* outer, const int* inner,
                           const double* values, int64_t nnz) {
+  lp_timing::Scope timing(lp_timing::Kind::Symbolic);
 #ifdef MIPSOLVERS_HAVE_CHOLMOD
   if (!impl_->started || m <= 0 || nnz < 0 || values == nullptr) return false;
   impl_->m = m;
@@ -119,6 +121,7 @@ bool CholmodLDLT::analyze(int64_t m, const int* outer, const int* inner,
 }
 
 bool CholmodLDLT::factorize(const double* values) {
+  lp_timing::Scope timing(lp_timing::Kind::Numeric);
 #ifdef MIPSOLVERS_HAVE_CHOLMOD
   if (!impl_->L || values == nullptr) return false;
   impl_->A.x = const_cast<double*>(values);

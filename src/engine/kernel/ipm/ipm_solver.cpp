@@ -1786,8 +1786,8 @@ bool augmented_factor_has_correct_inertia(const AugmentedNewtonCache& c) {
 // indefinite backend reports a different, *available* inertia (negative
 // curvature on null(Jg) or a rank deficiency) the resulting direction is not a
 // descent step and drives the filter into a grossly infeasible trial, so the
-// solve must defer to inertia correction. An unavailable inertia (backend
-// returns -1) preserves the legacy fast path unchanged.
+// solve must defer to inertia correction. Unavailable inertia is not a
+// certificate either (windows_remediation_2026-09-11.md R3).
 bool exact_condensed_factor_inertia_ok(const SparseKKTCache& cache, int meq) {
   if (!cache.solver) return false;
   const int negative = cache.solver->negative_eigenvalues();
@@ -1797,9 +1797,7 @@ bool exact_condensed_factor_inertia_ok(const SparseKKTCache& cache, int meq) {
               << ", expected_negative=" << meq
               << ", deficiency=" << deficiency << '\n';
   }
-  if (negative >= 0 && negative != meq) return false;
-  if (deficiency > 0) return false;
-  return true;
+  return negative == meq && deficiency == 0;
 }
 
 // Factor + solve the augmented Newton step with Wächter–Biegler δ_W
@@ -1981,9 +1979,16 @@ void interiorize_initial_point(const std::vector<VariableMeta>& vars, Eigen::Vec
 
     const bool has_lb = is_effectively_finite(lb);
     const bool has_ub = is_effectively_finite(ub);
+    // Wächter--Biegler (2006), Sec. 3.6; Windows remediation R3a.
+    // A roundoff-only interior point creates unresolved barrier curvature.
+    constexpr double bound_push = 0.01;
+    constexpr double bound_fraction = 0.01;
     if (has_lb && has_ub) {
-      const double lower_interior = std::nextafter(lb, ub);
-      const double upper_interior = std::nextafter(ub, lb);
+      const double fraction = bound_fraction * (ub - lb);
+      const double lower_interior = std::max(std::nextafter(lb, ub),
+          lb + std::min(bound_push * std::max(1.0, std::abs(lb)), fraction));
+      const double upper_interior = std::min(std::nextafter(ub, lb),
+          ub - std::min(bound_push * std::max(1.0, std::abs(ub)), fraction));
       if (!(lower_interior < upper_interior)) {
         x[i] = std::midpoint(lb, ub);
         continue;
@@ -1991,10 +1996,10 @@ void interiorize_initial_point(const std::vector<VariableMeta>& vars, Eigen::Vec
       x[i] = std::clamp(x[i], lower_interior, upper_interior);
     } else if (has_lb) {
       x[i] = std::max(
-          x[i], std::nextafter(lb, std::numeric_limits<double>::infinity()));
+          x[i], lb + bound_push * std::max(1.0, std::abs(lb)));
     } else if (has_ub) {
       x[i] = std::min(
-          x[i], std::nextafter(ub, -std::numeric_limits<double>::infinity()));
+          x[i], ub - bound_push * std::max(1.0, std::abs(ub)));
     }
   }
 }
@@ -3112,11 +3117,8 @@ FilterSolveOutcome solve_nlp_filter_impl(
                   << " augmented KKT factor: start (dim="
                   << w.rows() + state.jg.rows() << ")\n" << std::flush;
       }
-      // Reject a reported inertia mismatch. If this backend cannot report
-      // inertia, retain the exact fast path only for a caller-audited Phase-I
-      // point or an unresolved normal-feasibility trajectory. Cold infeasible
-      // rows receive a violation-scaled slack above, so M/S cannot become large
-      // solely because their initial slack was at roundoff resolution.
+      // An exact candidate requires a measured inertia certificate; otherwise
+      // use the corrected factorization (Windows remediation R3).
       const bool exact_condensed_fast_path =
           opt.primal_feasible_start ||
           rs.primal_feas >
@@ -3360,17 +3362,9 @@ FilterSolveOutcome solve_nlp_filter_impl(
       const double slope_k =
           barrier_descent_slope(state.grad, dx, s, ds, mu_bar);
 
-      // Once the barrier direction ceases to be a descent direction while
-      // primal feasibility is still outside the caller's gate, its remaining
-      // role is purely normal restoration.  Hand that state to the dedicated
-      // restoration model instead of accepting successively smaller filter
-      // steps that cannot make objective progress.
-      if (opt.use_restoration_phase && slope_k >= 0.0 &&
-          rs.primal_feas > opt.tol_primal) {
-        snapshot_outcome(false, total_iters + 1,
-                         "Filter: accepted-step collapse", rs);
-        return result;
-      }
+      // Wächter--Biegler (2006), Sec. 2; Windows remediation R3b:
+      // an h-type step may increase phi while sufficiently reducing theta.
+      // Let the filter/switching tests decide before entering restoration.
 
       bool accepted = false;
       bool accepted_was_f_type = false;

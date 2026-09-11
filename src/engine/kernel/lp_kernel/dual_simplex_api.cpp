@@ -51,11 +51,18 @@ StandardFormLP build_standard_form_lp(const LPModel& lp) {
     int sign{1};  // +1 if not flipped, -1 if flipped
   };
 
+  // R2 in docs/archive/windows_remediation_2026-09-11.md: free x=p-q,
+  // upper-only x=u-q. Retain existing positive-column indices and append q.
+  int negative_columns = 0;
+  for (int i = 0; i < n; ++i)
+    if (!has_finite_lower_bound(lp.vars[i].lb)) ++negative_columns;
+  if (negative_columns > 0) sf.negative_col.assign(n, -1);
   // Compute lb_shift.
   for (int i = 0; i < n; ++i) {
     sf.original_types.push_back(lp.vars[i].type);
     sf.lb_shift[i] =
-        has_finite_lower_bound(lp.vars[i].lb) ? lp.vars[i].lb : 0.0;
+        has_finite_lower_bound(lp.vars[i].lb) ? lp.vars[i].lb :
+        (has_finite_upper_bound(lp.vars[i].ub) ? lp.vars[i].ub : 0.0);
   }
 
   // Count rows: inequality + equality only (upper bounds handled implicitly).
@@ -159,7 +166,8 @@ StandardFormLP build_standard_form_lp(const LPModel& lp) {
     }
   }
 
-  const int cols = n + n_slack + n_surplus + n_artificial;
+  const int negative_offset = n + n_slack + n_surplus + n_artificial;
+  const int cols = negative_offset + negative_columns;
 
   // The source matrices are already column-major and their row indices are
   // sorted. Build the standard-form CSC directly in final column order rather
@@ -212,6 +220,21 @@ StandardFormLP build_standard_form_lp(const LPModel& lp) {
     sf.A.startVec(col);
     sf.A.insertBackByOuterInner(col, row) = 1.0;
   }
+  int next_negative = negative_offset;
+  for (int j = 0; j < n; ++j) {
+    if (has_finite_lower_bound(lp.vars[j].lb)) continue;
+    const int col = next_negative++;
+    sf.negative_col[j] = col;
+    sf.A.startVec(col);
+    for (Eigen::SparseMatrix<double>::InnerIterator it(lp.A, j); it; ++it)
+      if (std::abs(it.value()) > 1e-15)
+        sf.A.insertBackByOuterInner(col, it.row()) =
+            -rows[it.row()].sign * it.value();
+    for (Eigen::SparseMatrix<double>::InnerIterator it(lp.Aeq, j); it; ++it)
+      if (std::abs(it.value()) > 1e-15)
+        sf.A.insertBackByOuterInner(col, m_ineq + it.row()) =
+            -rows[m_ineq + it.row()].sign * it.value();
+  }
   sf.A.finalize();
 
   // Build the shared-value CSR row view used by GMI cuts.
@@ -236,6 +259,8 @@ StandardFormLP build_standard_form_lp(const LPModel& lp) {
   sf.objective_const = c_min.dot(sf.lb_shift);
   sf.c_max = Eigen::VectorXd::Zero(cols);
   sf.c_max.head(n) = -c_min;
+  for (int j = 0; j < static_cast<int>(sf.negative_col.size()); ++j)
+    if (sf.negative_col[j] >= 0) sf.c_max[sf.negative_col[j]] = c_min[j];
 
   // Populate var_ub: upper bounds for each column in shifted space.
   // Original variables: ub - lb_shift (or +inf if unbounded).
@@ -767,6 +792,12 @@ void update_standard_form_cost(StandardFormLP& sf,
   if (cols > n_orig) {
     sf.c_max.segment(n_orig, cols - n_orig).setZero();
   }
+  for (int j = 0; j < static_cast<int>(sf.negative_col.size()); ++j) {
+    const int col = sf.negative_col[j];
+    if (col >= 0)
+      sf.c_max[col] = c_min[j] *
+          (sf.col_scale.size() == cols ? sf.col_scale[col] : 1.0);
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -875,6 +906,25 @@ void update_standard_form_bounds(StandardFormLP& sf,
                                  const LPModel& lp,
                                  const Eigen::VectorXd& node_lb,
                                  const Eigen::VectorXd& node_ub) {
+  // A finite bound can change a split variable's representation. Rebuild the
+  // complete canonical model; incremental callers must invalidate their basis.
+  // Equivalence and layout contract: windows_remediation_2026-09-11.md R2.
+  bool rebuild = !sf.negative_col.empty();
+  for (int j = 0; j < sf.n_original; ++j)
+    rebuild = rebuild || !has_finite_lower_bound(node_lb[j]);
+  if (rebuild) {
+    if (sf.A.rows() != lp.A.rows() + lp.Aeq.rows())
+      throw std::invalid_argument("Bound layout rebuild requires all active rows in LPModel");
+    LPModel bounded = lp;
+    for (int j = 0; j < sf.n_original; ++j) {
+      bounded.vars[j].lb = node_lb[j];
+      bounded.vars[j].ub = node_ub[j];
+    }
+    const bool scaled = sf.col_scale.size() != 0;
+    sf = build_standard_form_lp(bounded);
+    if (scaled) ruiz_scale_standard_form(sf, 10);
+    return;
+  }
   const int n = sf.n_original;
   const int m_ineq = static_cast<int>(lp.A.rows());
   const int m_eq = static_cast<int>(lp.Aeq.rows());
@@ -997,6 +1047,7 @@ bool update_standard_form_bounds_incremental(
     const LPModel& lp,
     const std::vector<BoundChangeInfo>& changes) {
   if (changes.empty()) return true;
+  if (!sf.negative_col.empty()) return false;
   const int n = sf.n_original;
   const int m_ineq = static_cast<int>(lp.A.rows());
   const double sign = (lp.sense == Sense::Minimize) ? 1.0 : -1.0;
@@ -1048,6 +1099,8 @@ bool update_standard_form_bounds_incremental(
     }
     StagedBounds& state = staged_for(j);
     if (bc.is_lb) {
+      // R2: a change of representation requires a complete model rebuild.
+      if (!has_finite_lower_bound(bc.new_value)) return false;
       const double expected = canonical_lower_shift(bc.old_value);
       if (!bounds_match(state.lower_shift, expected)) return false;
       state.lower_shift = canonical_lower_shift(bc.new_value);

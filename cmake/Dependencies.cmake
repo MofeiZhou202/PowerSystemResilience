@@ -619,6 +619,14 @@ if(MIPSOLVERS_USE_MKL AND NOT APPLE AND NOT MIPSOLVERS_HAVE_MKL_PARDISO)
       ${MIPSOLVERS_MKL_LP64_LIB} ${MIPSOLVERS_MKL_THREAD_LIB} ${MIPSOLVERS_MKL_CORE_LIB})
     if(WIN32 AND MIPSOLVERS_MKL_THREADING STREQUAL "INTEL")
       # mkl_intel_thread requires the Intel OpenMP runtime on Windows.
+      # R1: do not let a prior system discovery escape an explicit local root.
+      if(MIPSOLVERS_MKL_ROOT)
+        set(_MKL_IOMP5MD "${MIPSOLVERS_MKL_ROOT}/lib/libiomp5md.lib")
+        set(_MKL_IOMP5MD_DLL "${MIPSOLVERS_MKL_ROOT}/bin/libiomp5md.dll")
+        if(NOT EXISTS "${_MKL_IOMP5MD}" OR NOT EXISTS "${_MKL_IOMP5MD_DLL}")
+          message(FATAL_ERROR "The staged oneMKL INTEL bundle is missing its OpenMP runtime")
+        endif()
+      endif()
       find_library(_MKL_IOMP5MD NAMES libiomp5md
         HINTS ${_MKL_HINTS} "$ENV{INTEL_COMPILER_ROOT}"
         PATH_SUFFIXES lib lib/intel64 redist/intel64/compiler)

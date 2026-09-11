@@ -86,6 +86,11 @@ Eigen::VectorXd extract_solution(const StandardFormLP& sf, const Eigen::VectorXd
   } else {
     x += x_std.head(sf.n_original);
   }
+  for (int j = 0; j < static_cast<int>(sf.negative_col.size()); ++j) {
+    const int col = sf.negative_col[j];
+    if (col >= 0) x[j] -= x_std[col] *
+        (sf.col_scale.size() > 0 ? sf.col_scale[col] : 1.0);
+  }
   return x;
 }
 
@@ -95,6 +100,11 @@ Eigen::VectorXd extract_primal_ray(const StandardFormLP& sf,
   Eigen::VectorXd ray = ray_std.head(sf.n_original);
   if (sf.col_scale.size() == sf.A.cols()) {
     ray.array() *= sf.col_scale.head(sf.n_original).array();
+  }
+  for (int j = 0; j < static_cast<int>(sf.negative_col.size()); ++j) {
+    const int col = sf.negative_col[j];
+    if (col >= 0) ray[j] -= ray_std[col] *
+        (sf.col_scale.size() > 0 ? sf.col_scale[col] : 1.0);
   }
   const double norm = ray.size() > 0 ? ray.lpNorm<Eigen::Infinity>() : 0.0;
   if (norm > 0.0 && std::isfinite(norm)) ray /= norm;
@@ -531,6 +541,16 @@ void populate_dual_certificate(const StandardFormLP& sf,
   }
   const double dual_tol = 1e-10;
   for (int j = 0; j < n_orig; ++j) {
+    // R2: a free variable has no box multiplier; for x=u-q the lower
+    // multiplier of q is the original upper multiplier (dc/dq=-dc/dx).
+    const int negative = sf.negative_col.empty() ? -1 : sf.negative_col[j];
+    if (negative >= 0) {
+      if (sf.var_ub[j] == 0.0 && reduced_costs.size() > negative) {
+        const double scale = have_col_scale ? sf.col_scale[negative] : 1.0;
+        result.box_dual_ub[j] = std::max(0.0, -reduced_costs[negative] / scale);
+      }
+      continue;
+    }
     double col_dual = 0.0;
     if (reduced_costs.size() > j) {
       const double col_scale = have_col_scale ? sf.col_scale[j] : 1.0;
