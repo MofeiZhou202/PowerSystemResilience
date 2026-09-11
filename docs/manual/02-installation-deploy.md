@@ -339,3 +339,13 @@ ctest --test-dir build-win --build-config Release --output-on-failure --parallel
 > 注：`CMakePresets.json` 的 `base` 预设将 `MIPSOLVERS_USE_GUROBI` 显式置为 `OFF`，即通过预设构建时默认不探测 Gurobi；如需启用请在 configure 时显式传 `-DMIPSOLVERS_USE_GUROBI=ON`。
 
 下一步阅读：[快速上手](03-quickstart.md) 构建第一个模型，或参阅 [测试与基准](09-testing-benchmarks.md) 了解完整的测试标签与基准流程。
+
+### Windows/main 集成 SDK
+
+`release/windows-self-contained` 的集成 SDK 保留静态 sequential oneMKL。
+安装配置会以包内归档重建 Ipopt 所需的 `MIPSolvers::MKL` 链接目标；
+UMFPACK/KLU/CHOLMOD 的公共头文件安装于
+`include/mipsolvers-deps/suitesparse`，并由导出目标传递 include 路径。
+消费者可直接链接 `mipsolvers::umfpack_vendored`、`mipsolvers::klu_vendored`。
+实际构建参数、成功范围与残留限制见
+[集成验证](09-testing-benchmarks.md#windowsmain-integration-validation)。

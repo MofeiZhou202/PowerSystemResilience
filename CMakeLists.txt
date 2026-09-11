@@ -1188,6 +1188,25 @@ if(TARGET klu_vendored)
     EXPORT mipsolversTargets
     ARCHIVE DESTINATION ${CMAKE_INSTALL_LIBDIR})
 endif()
+if(TARGET umfpack_vendored AND TARGET klu_vendored)
+  # Exported SuiteSparse libraries are also direct consumer dependencies
+  # (e.g. Eigen::UmfPackLU/KLU in Simulation OPF). Ship their public headers
+  # and propagate only package-relative include paths.
+  set(_ms_ss_install "${CMAKE_INSTALL_INCLUDEDIR}/mipsolvers-deps/suitesparse")
+  install(FILES "${CMAKE_CURRENT_SOURCE_DIR}/suitesparse/SuiteSparse_config/SuiteSparse_config.h"
+    DESTINATION "${_ms_ss_install}")
+  foreach(_ms_ss_component AMD CAMD COLAMD CCOLAMD CHOLMOD UMFPACK KLU BTF)
+    install(DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}/suitesparse/${_ms_ss_component}/Include/"
+      DESTINATION "${_ms_ss_install}" FILES_MATCHING PATTERN "*.h")
+  endforeach()
+  foreach(_ms_ss_target cholmod_vendored umfpack_vendored klu_vendored)
+    target_include_directories(${_ms_ss_target} INTERFACE
+      "$<INSTALL_INTERFACE:${_ms_ss_install}>")
+  endforeach()
+  unset(_ms_ss_install)
+  unset(_ms_ss_component)
+  unset(_ms_ss_target)
+endif()
 if(MIPSOLVERS_FMT_VENDORED)
   # Vendored fmt is exported with the package so consumers need no system fmt.
   # Public mipsolvers headers include <fmt/...>, so ship the headers too

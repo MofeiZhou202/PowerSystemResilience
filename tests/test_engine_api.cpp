@@ -280,6 +280,19 @@ TEST_CASE("IpoptAdapter returns NLP multipliers in engine KKT convention",
   CHECK(result.constraint_duals[1] == Approx(-1.5).margin(1e-5));
   CHECK(result.box_dual_lb[1] >= 0.0);
   CHECK(result.box_dual_ub[0] >= 0.0);
+
+  NLPModel warm = nlp;
+  warm.x0 = result.x;
+  warm.constraint_dual_start = result.constraint_duals;
+  warm.box_dual_lb_start = result.box_dual_lb;
+  warm.box_dual_ub_start = result.box_dual_ub;
+  warm.solver_options.primal_dual_warm_start = true;
+  const SolveResult repeated = ipopt.solve_nlp(warm);
+  REQUIRE(repeated.stats.success);
+  CHECK(repeated.stats.warm_start_used);
+  CHECK(repeated.stats.iterations <= result.stats.iterations);
+  CHECK(repeated.constraint_duals[0] == Approx(3.0).margin(1e-5));
+  CHECK(repeated.constraint_duals[1] == Approx(-1.5).margin(1e-5));
 }
 
 TEST_CASE("IpoptAdapter unscales active variable-bound multipliers",
@@ -314,6 +327,49 @@ TEST_CASE("IpoptAdapter unscales active variable-bound multipliers",
   CHECK(std::abs(result.box_dual_lb[0] *
                  (result.x[0] - nlp.vars[0].lb)) <=
         nlp.solver_options.complementarity_tolerance);
+}
+
+TEST_CASE("IpoptAdapter reuses complete primal-dual NLP starts",
+          "[engine][api][ipopt][warm-start]") {
+  IpoptAdapter ipopt;
+  REQUIRE(ipopt.available());
+
+  NLPModel base = make_rosenbrock_nlp();
+  base.solver_options.tolerance = 1e-10;
+  base.solver_options.acceptable_tolerance = 1e-9;
+  const SolveResult solved = ipopt.solve_nlp(base);
+  REQUIRE(solved.stats.success);
+  REQUIRE(solved.constraint_duals.size() == 1);
+  REQUIRE(solved.box_dual_lb.size() == 2);
+  REQUIRE(solved.box_dual_ub.size() == 2);
+
+  NLPModel warm = base;
+  warm.x0 = solved.x;
+  warm.constraint_dual_start = solved.constraint_duals;
+  warm.box_dual_lb_start = solved.box_dual_lb;
+  warm.box_dual_ub_start = solved.box_dual_ub;
+  warm.solver_options.primal_dual_warm_start = true;
+  const SolveResult repeated = ipopt.solve_nlp(warm);
+
+  REQUIRE(repeated.stats.success);
+  CHECK(repeated.stats.warm_start_used);
+  CHECK(repeated.stats.iterations <= solved.stats.iterations);
+  CHECK((repeated.x - solved.x).lpNorm<Eigen::Infinity>() <= 1e-7);
+}
+
+TEST_CASE("IpoptAdapter rejects incomplete primal-dual NLP starts",
+          "[engine][api][ipopt][warm-start]") {
+  IpoptAdapter ipopt;
+  REQUIRE(ipopt.available());
+
+  NLPModel nlp = make_rosenbrock_nlp();
+  nlp.solver_options.primal_dual_warm_start = true;
+  nlp.constraint_dual_start = Eigen::VectorXd::Zero(1);
+  const SolveResult result = ipopt.solve_nlp(nlp);
+
+  CHECK_FALSE(result.stats.success);
+  CHECK(result.stats.status.find("Invalid NLP primal-dual warm start") !=
+        std::string::npos);
 }
 #endif
 

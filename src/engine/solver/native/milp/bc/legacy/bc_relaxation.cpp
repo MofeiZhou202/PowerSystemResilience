@@ -207,6 +207,10 @@ class DirectHighsLpBasisOps : public BasisOps {
   Eigen::VectorXd ftran(const Eigen::VectorXd& rhs) const override {
     Eigen::VectorXd out = Eigen::VectorXd::Zero(m_);
     if (!highs_ || rhs.size() != m_) return out;
+    if (!highs_dimension_matches()) {
+      return Eigen::VectorXd::Constant(
+          m_, std::numeric_limits<double>::quiet_NaN());
+    }
     std::vector<double> h_rhs(static_cast<std::size_t>(m_), 0.0);
     std::vector<double> h_out(static_cast<std::size_t>(m_), 0.0);
     for (int i = 0; i < m_; ++i) h_rhs[static_cast<std::size_t>(i)] = rhs[i];
@@ -222,6 +226,10 @@ class DirectHighsLpBasisOps : public BasisOps {
   Eigen::VectorXd btran(const Eigen::VectorXd& rhs) const override {
     Eigen::VectorXd out = Eigen::VectorXd::Zero(m_);
     if (!highs_ || rhs.size() != m_) return out;
+    if (!highs_dimension_matches()) {
+      return Eigen::VectorXd::Constant(
+          m_, std::numeric_limits<double>::quiet_NaN());
+    }
     std::vector<double> h_rhs(static_cast<std::size_t>(m_), 0.0);
     std::vector<double> h_out(static_cast<std::size_t>(m_), 0.0);
     for (int i = 0; i < m_; ++i) h_rhs[static_cast<std::size_t>(i)] = rhs[i];
@@ -236,7 +244,7 @@ class DirectHighsLpBasisOps : public BasisOps {
 
   bool basis_inverse_row(int row, Eigen::VectorXd& out) const override {
     out = Eigen::VectorXd::Zero(m_);
-    if (!highs_ || row < 0 || row >= m_) return false;
+    if (!highs_dimension_matches() || row < 0 || row >= m_) return false;
     std::vector<double> row_vec(static_cast<std::size_t>(m_), 0.0);
     HighsInt row_num_nz = 0;
     std::vector<HighsInt> row_indices(static_cast<std::size_t>(m_), 0);
@@ -258,7 +266,7 @@ class DirectHighsLpBasisOps : public BasisOps {
       int row,
       std::vector<std::pair<int, double>>& out) const override {
     out.clear();
-    if (!highs_ || row < 0 || row >= m_) return false;
+    if (!highs_dimension_matches() || row < 0 || row >= m_) return false;
     HVector row_ep;
     row_ep.setup(static_cast<HighsInt>(m_));
     if (highs_->getBasisInverseRowSparse(static_cast<HighsInt>(row),
@@ -371,6 +379,13 @@ class DirectHighsLpBasisOps : public BasisOps {
   bool supports_incremental_rows() const override { return true; }
 
  private:
+  bool highs_dimension_matches() const {
+    // HiGHS basis buffers use the live model row dimension. See
+    // docs/miplib2017_benchmark_protocol_2026-08-25.md,
+    // "Stability-gate mismatch and re-derivation".
+    return highs_ && highs_->getNumRow() == static_cast<HighsInt>(m_);
+  }
+
   struct Transaction {
     HighsInt rows{0};
     HighsInt cols{0};

@@ -418,7 +418,9 @@ bool highs_status_has_solution(HighsModelStatus status) {
 std::optional<SolveResult> solve_lp_with_embedded_highs(const LPModel& prob,
                                                         bool with_integer_markers,
                                                         const std::string& solver_name,
-                                                        const Eigen::VectorXd* mip_start) {
+                                                        const Eigen::VectorXd* mip_start,
+                                                        bool pricing = false,
+                                                        double pricing_time_limit = kHighsInf) {
   const auto t0 = std::chrono::steady_clock::now();
   SolveResult out;
   out.stats.solver_name = solver_name;
@@ -500,6 +502,16 @@ std::optional<SolveResult> solve_lp_with_embedded_highs(const LPModel& prob,
   highs.setOptionValue("output_flag", highs_log_on);
   highs.setOptionValue("log_to_console", highs_log_on);
   highs.setOptionValue("threads", 1);
+  // Fixed ordered-LP price selection; docs/solvers.md, deterministic pricing.
+  if (pricing && (highs.setOptionValue("solver", "simplex") == HighsStatus::kError ||
+      highs.setOptionValue("simplex_strategy", 1) == HighsStatus::kError ||
+      highs.setOptionValue("parallel", "off") == HighsStatus::kError ||
+      highs.setOptionValue("random_seed", 0) == HighsStatus::kError ||
+      highs.setOptionValue("presolve", "on") == HighsStatus::kError ||
+      highs.setOptionValue("time_limit", pricing_time_limit) == HighsStatus::kError)) {
+    out.stats.status = "HiGHS rejected deterministic pricing options";
+    return out;
+  }
   if (with_integer_markers) {
     highs.setOptionValue("mip_rel_gap", 1e-4);
   }
@@ -1231,8 +1243,10 @@ class CallbackTNLP final : public Ipopt::TNLP {
         return false;
       }
       for (int i = 0; i < n_; ++i) {
-        z_L[i] = 0.0;
-        z_U[i] = 0.0;
+        z_L[i] = prob_.solver_options.primal_dual_warm_start
+            ? prob_.box_dual_lb_start[i] : 0.0;
+        z_U[i] = prob_.solver_options.primal_dual_warm_start
+            ? prob_.box_dual_ub_start[i] : 0.0;
       }
     }
 
@@ -1240,8 +1254,21 @@ class CallbackTNLP final : public Ipopt::TNLP {
       if (lambda == nullptr || m != m_) {
         return false;
       }
-      for (int i = 0; i < m_; ++i) {
-        lambda[i] = 0.0;
+      if (prob_.solver_options.primal_dual_warm_start) {
+        // Ipopt TNLP rows are [equalities | h(x)<=0], whereas the engine's
+        // public dual contract is [inequalities | equalities]. The sign is
+        // unchanged because both use L=f+lambda'g+mu'h with mu>=0.
+        // Ipopt TNLP::get_starting_point; Waechter--Biegler (2006), Sec. 3.1.
+        for (int i = 0; i < meq_; ++i) {
+          lambda[i] = prob_.constraint_dual_start[mineq_ + i];
+        }
+        for (int i = 0; i < mineq_; ++i) {
+          lambda[meq_ + i] = prob_.constraint_dual_start[i];
+        }
+      } else {
+        for (int i = 0; i < m_; ++i) {
+          lambda[i] = 0.0;
+        }
       }
     }
     return true;
@@ -1631,6 +1658,7 @@ class CallbackTNLP final : public Ipopt::TNLP {
     out.stats.unscaled_dual_feas = unscaled_dual_inf_;
     out.stats.unscaled_complementarity = unscaled_complementarity_;
     out.stats.residual_inf = std::max(primal_inf_, dual_inf_);
+    out.stats.warm_start_used = prob_.solver_options.primal_dual_warm_start;
 
     switch (app_status) {
       case Ipopt::Solve_Succeeded:
@@ -1788,6 +1816,19 @@ bool HighsAdapter::available() const {
 
 const std::string& HighsAdapter::executable() const {
   return executable_;
+}
+
+SolveResult HighsAdapter::solve_pricing_lp(const LPModel& prob, double time_limit_sec) const {
+  if (!std::isfinite(time_limit_sec) || time_limit_sec <= 0)
+    throw std::invalid_argument("Invalid pricing time limit");
+#ifdef HACDCPF_HAVE_HIGHS_LIB
+  Highs::resetGlobalScheduler(/*blocking=*/true);
+  if (auto result = solve_lp_with_embedded_highs(prob, false, name(), nullptr, true, time_limit_sec))
+    return *result;
+#else
+  (void)prob;
+#endif
+  return unavailable_result(name(), "deterministic pricing requires embedded HiGHS");
 }
 
 SolveResult HighsAdapter::solve_lp(const LPModel& prob) const {
@@ -2505,6 +2546,34 @@ SolveResult IpoptAdapter::solve_nlp(const NLPModel& prob_in) const {
     return out;
   }
 
+  if (prob.solver_options.primal_dual_warm_start) {
+    Eigen::VectorXd equality_values;
+    Eigen::VectorXd inequality_values;
+    if (prob.g) prob.g(prob.x0, equality_values);
+    if (prob.h) prob.h(prob.x0, inequality_values);
+    const int constraint_count = static_cast<int>(
+        equality_values.size() + inequality_values.size());
+    const bool valid_dimensions =
+        prob.constraint_dual_start.size() == constraint_count &&
+        prob.box_dual_lb_start.size() == n_vars &&
+        prob.box_dual_ub_start.size() == n_vars;
+    const bool valid_values = valid_dimensions &&
+        prob.constraint_dual_start.allFinite() &&
+        prob.box_dual_lb_start.allFinite() &&
+        prob.box_dual_ub_start.allFinite() &&
+        (inequality_values.size() == 0 ||
+         (prob.constraint_dual_start.head(inequality_values.size()).array() >=
+          0.0).all()) &&
+        (prob.box_dual_lb_start.array() >= 0.0).all() &&
+        (prob.box_dual_ub_start.array() >= 0.0).all();
+    if (!valid_dimensions || !valid_values) {
+      out.stats.status =
+          "Invalid NLP primal-dual warm start: expected finite constraint "
+          "duals [inequalities|equalities] and nonnegative bound duals";
+      return out;
+    }
+  }
+
   Ipopt::SmartPtr<Ipopt::TNLP> nlp = new CallbackTNLP(prob);
   Ipopt::SmartPtr<Ipopt::IpoptApplication> app = IpoptApplicationFactory();
 
@@ -2522,6 +2591,28 @@ SolveResult IpoptAdapter::solve_nlp(const NLPModel& prob_in) const {
   // perturb coupled equality constraints without recomputing the primal-dual
   // endpoint.
   app->Options()->SetNumericValue("bound_relax_factor", 0.0);
+  if (prob.solver_options.adaptive_barrier) {
+    app->Options()->SetStringValue("mu_strategy", "adaptive");
+  }
+  if (prob.solver_options.primal_dual_warm_start) {
+    // Ipopt's warm-start initializer perturbs a supplied KKT point into the
+    // strict interior. A common small push preserves nearby active sets while
+    // avoiding zero slack/multiplier pairs. Ipopt
+    // IpWarmStartIterateInitializer.cpp; Waechter--Biegler (2006), Sec. 3.1.
+    const double warm_start_push =
+        std::isfinite(prob.solver_options.warm_start_push) &&
+                prob.solver_options.warm_start_push > 0.0
+            ? prob.solver_options.warm_start_push : 1e-8;
+    app->Options()->SetStringValue("warm_start_init_point", "yes");
+    app->Options()->SetNumericValue("warm_start_bound_push", warm_start_push);
+    app->Options()->SetNumericValue("warm_start_bound_frac", warm_start_push);
+    app->Options()->SetNumericValue(
+        "warm_start_slack_bound_push", warm_start_push);
+    app->Options()->SetNumericValue(
+        "warm_start_slack_bound_frac", warm_start_push);
+    app->Options()->SetNumericValue(
+        "warm_start_mult_bound_push", warm_start_push);
+  }
   // Keep the adapter boundary deterministic for malformed configuration.
   // Passing NaN/Inf through SetNumericValue makes Ipopt fail during option
   // initialisation, while zero/negative tolerances are outside its contract.
@@ -3505,10 +3596,10 @@ static int gurobi_scuc_cut_callback(
 GurobiAdapter::GurobiAdapter() {
 #ifdef HACDCPF_HAVE_GUROBI
   GRBenv* env = nullptr;
-  if (GRBloadenv(&env, nullptr) == 0 && env != nullptr) {
-    // Suppress console output.
+  if (GRBemptyenv(&env) == 0 && env != nullptr) {
     GRBsetintparam(env, "OutputFlag", 0);
-    env_ = env;
+    if (GRBstartenv(env) == 0) env_ = env;
+    else GRBfreeenv(env);
   }
 #endif
 }
@@ -3517,6 +3608,20 @@ GurobiAdapter::~GurobiAdapter() {
 #ifdef HACDCPF_HAVE_GUROBI
   if (env_) {
     GRBfreeenv(static_cast<GRBenv*>(env_));
+  }
+#endif
+}
+
+GurobiAdapter::GurobiAdapter(GurobiOptions options) : GurobiAdapter() {
+  if (!std::isfinite(options.time_limit_sec) || options.time_limit_sec <= 0 ||
+      !std::isfinite(options.mip_gap) || options.mip_gap < 0 || options.mip_gap > 1 || options.threads < 0 || options.threads > 1024 || options.method < -1 || options.method > 5 || options.crossover < -1 || options.crossover > 4)
+    throw std::invalid_argument("Invalid Gurobi time limit, MIP gap, threads or method");
+  options_ = options;
+#ifdef HACDCPF_HAVE_GUROBI
+  if (env_) {
+    auto* env = static_cast<GRBenv*>(env_);
+    if (GRBsetdblparam(env,"TimeLimit",options.time_limit_sec) || GRBsetdblparam(env,"MIPGap",options.mip_gap) ||
+        GRBsetintparam(env,"Threads",options.threads) || GRBsetintparam(env,"Method",options.method) || GRBsetintparam(env,"Crossover",options.crossover)) throw std::invalid_argument("Gurobi rejected solve options");
   }
 #endif
 }
@@ -3535,7 +3640,43 @@ bool GurobiAdapter::available() const {
 #endif
 }
 
+SolveResult GurobiAdapter::solve_pricing_lp(const LPModel& prob) {
+  // Fixed algorithm by ordered LP size, never concurrent algorithm selection.
+  // Versioned pricing policy and full-dual repeatability: docs/solvers.md.
+  auto options = options_.value_or(GurobiOptions{});
+  const bool large=prob.c.size()>=1000000;
+  options.method = large ? 2 : 1; options.threads = large ? 8 : 1; options.crossover = large ? 0 : -1;
+  options_ = options;
+#ifdef HACDCPF_HAVE_GUROBI
+  if (env_) {
+    auto* env = static_cast<GRBenv*>(env_);
+    if (GRBresetparams(env) || GRBsetintparam(env,"OutputFlag",0) ||
+        GRBsetdblparam(env,"OptimalityTol",1e-8))
+      throw std::runtime_error("Gurobi rejected deterministic pricing options");
+  }
+#endif
+  return solve_lp(prob);
+}
+
+SolveResult GurobiAdapter::solve_relaxation_lp(const LPModel& prob, double relative_tolerance) {
+  // Inexact barrier for separately certified LP lower bounds; docs/solvers.md.
+  // Never use this entry point to certify prices or original primal feasibility.
+  if(!std::isfinite(relative_tolerance)||relative_tolerance<1e-8||relative_tolerance>1e-2)
+    throw std::invalid_argument("Invalid relaxation barrier tolerance");
+  auto options=options_.value_or(GurobiOptions{});
+  options.method=2;options.crossover=0;options_=options;
+#ifdef HACDCPF_HAVE_GUROBI
+  if(env_ && GRBsetdblparam(static_cast<GRBenv*>(env_),"BarConvTol",relative_tolerance))
+    throw std::runtime_error("Gurobi rejected relaxation barrier tolerance");
+#endif
+  return solve_lp(prob);
+}
+
 SolveResult GurobiAdapter::solve_lp(const LPModel& prob) const {
+  if (options_) {
+    MIPModel linear; linear.linear_part = prob;
+    return solve_milp(linear);
+  }
   SolveResult out;
   out.stats.solver_name = name();
 #ifndef HACDCPF_HAVE_GUROBI
@@ -3775,7 +3916,13 @@ SolveResult GurobiAdapter::solve_qp(const QPModel& prob) const {
   return out;
 }
 
+namespace {
+thread_local GurobiSolveTiming gurobi_solve_timing;
+}
+GurobiSolveTiming last_gurobi_solve_timing() { return gurobi_solve_timing; }
+
 SolveResult GurobiAdapter::solve_milp(const MIPModel& prob) const {
+  gurobi_solve_timing = {};
   SolveResult out;
   out.stats.solver_name = name();
 #ifndef HACDCPF_HAVE_GUROBI
@@ -3798,6 +3945,8 @@ SolveResult GurobiAdapter::solve_milp(const MIPModel& prob) const {
   const int n = static_cast<int>(lp.vars.size());
   const int m_ineq = static_cast<int>(lp.A.rows());
   const int m_eq = static_cast<int>(lp.Aeq.rows());
+  std::vector<int> upper_rows(m_ineq), lower_rows(m_ineq, -1), equality_rows(m_eq);
+  int loaded_rows = 0;
   const double obj_sign = (lp.sense == Sense::Maximize) ? -1.0 : 1.0;
 
   // Prepare variable metadata.
@@ -3851,6 +4000,7 @@ SolveResult GurobiAdapter::solve_milp(const MIPModel& prob) const {
     Eigen::SparseMatrix<double, Eigen::RowMajor> A_rm(lp.A);
     for (int i = 0; i < m_ineq; ++i) {
       if (skip_ineq_row[static_cast<std::size_t>(i)] != 0) continue;
+      upper_rows[i] = loaded_rows++;
       std::vector<int> ind;
       std::vector<double> val;
       for (Eigen::SparseMatrix<double, Eigen::RowMajor>::InnerIterator it(A_rm, i); it; ++it) {
@@ -3863,6 +4013,7 @@ SolveResult GurobiAdapter::solve_milp(const MIPModel& prob) const {
                    GRB_LESS_EQUAL, lp.b[i], nullptr);
       const double lhs = lp_row_lhs_or_neg_inf(lp, i);
       if (std::isfinite(lhs)) {
+        lower_rows[i] = loaded_rows++;
         GRBaddconstr(model, static_cast<int>(ind.size()), ind.data(), val.data(),
                      GRB_GREATER_EQUAL, lhs, nullptr);
       }
@@ -3873,6 +4024,7 @@ SolveResult GurobiAdapter::solve_milp(const MIPModel& prob) const {
   {
     Eigen::SparseMatrix<double, Eigen::RowMajor> Aeq_rm(lp.Aeq);
     for (int i = 0; i < m_eq; ++i) {
+      equality_rows[i] = loaded_rows++;
       std::vector<int> ind;
       std::vector<double> val;
       for (Eigen::SparseMatrix<double, Eigen::RowMajor>::InnerIterator it(Aeq_rm, i); it; ++it) {
@@ -4201,6 +4353,19 @@ SolveResult GurobiAdapter::solve_milp(const MIPModel& prob) const {
       if (endp != tl_env && tl > 0.0)
         GRBsetdblparam(model_env, "TimeLimit", tl);
     }
+    // Per-instance options win over legacy environment defaults; docs/solvers.md.
+    if (options_) {
+      GRBsetdblparam(model_env, "TimeLimit", options_->time_limit_sec);
+      GRBsetdblparam(model_env, "MIPGap", options_->mip_gap);
+      GRBsetdblparam(model_env, "MIPGapAbs", 0);
+      GRBsetintparam(model_env, "Threads", options_->threads);
+      // Gurobi 13 Method parameter; dedicated barrier vs concurrent LP policy
+      // and fixed performance acceptance protocol are documented in docs/solvers.md.
+      GRBsetintparam(model_env, "Method", options_->method);
+      GRBsetintparam(model_env, "Crossover", options_->crossover);
+      GRBsetdblparam(model_env, "FeasibilityTol", 1e-8);
+      GRBsetdblparam(model_env, "IntFeasTol", 1e-8);
+    }
 
     // Output to stderr when MIPSOLVERS_GUROBI_VERBOSE is set.
     if (std::getenv("MIPSOLVERS_GUROBI_VERBOSE") != nullptr)
@@ -4294,7 +4459,24 @@ SolveResult GurobiAdapter::solve_milp(const MIPModel& prob) const {
     GRBsetcallbackfunc(model, gurobi_scuc_cut_callback, &cut_data);
   }
 
-  GRBoptimize(model);
+  // Wall intervals bracket the actual C API calls, not inferred search phases.
+  // See docs/solvers.md, Gurobi timing; optimize includes lazy model updates.
+  const auto optimize_start = std::chrono::steady_clock::now();
+  gurobi_solve_timing.model_import_sec = std::chrono::duration<double>(optimize_start-t0).count();
+  const int optimize_error = GRBoptimize(model);
+  const auto extract_start = std::chrono::steady_clock::now();
+  gurobi_solve_timing.optimize_sec = std::chrono::duration<double>(extract_start-optimize_start).count();
+  struct ExtractionTimer {
+    std::chrono::steady_clock::time_point start;
+    ~ExtractionTimer() {
+      gurobi_solve_timing.result_extract_sec = std::chrono::duration<double>(std::chrono::steady_clock::now()-start).count();
+    }
+  } extraction_timer{extract_start};
+  if (optimize_error != 0) {
+    out.stats.status = "Gurobi optimize error=" + std::to_string(optimize_error);
+    out.stats.runtime_sec = std::chrono::duration<double>(std::chrono::steady_clock::now()-t0).count();
+    GRBfreemodel(model); return out;
+  }
 
   int status = 0;
   GRBgetintattr(model, "Status", &status);
@@ -4305,11 +4487,18 @@ SolveResult GurobiAdapter::solve_milp(const MIPModel& prob) const {
   if (status == GRB_OPTIMAL) {
     out.stats.success = true;
     out.stats.status = "Optimal";
-  } else if ((status == GRB_TIME_LIMIT || status == GRB_NODE_LIMIT) && has_incumbent) {
-    out.stats.success = true;
-    out.stats.status = (status == GRB_TIME_LIMIT) ? "Time limit" : "Node limit";
+  } else if (status == GRB_TIME_LIMIT || status == GRB_NODE_LIMIT || status == GRB_ITERATION_LIMIT ||
+             status == GRB_SOLUTION_LIMIT || status == GRB_INTERRUPTED || status == GRB_WORK_LIMIT || status == GRB_MEM_LIMIT) {
+    out.stats.success = has_incumbent;
+    out.stats.status = status == GRB_TIME_LIMIT ? "TimeLimit" : status == GRB_NODE_LIMIT ? "NodeLimit" :
+      status == GRB_ITERATION_LIMIT ? "IterationLimit" : status == GRB_SOLUTION_LIMIT ? "SolutionLimit" :
+      status == GRB_INTERRUPTED ? "Interrupt" : status == GRB_WORK_LIMIT ? "WorkLimit" : "MemoryLimit";
   } else if (status == GRB_INFEASIBLE) {
     out.stats.status = "Infeasible";
+  } else if (status == GRB_INF_OR_UNBD) {
+    out.stats.status = "UnboundedOrInfeasible";
+  } else if (status == GRB_UNBOUNDED) {
+    out.stats.status = "Unbounded";
   } else {
     out.stats.status = "Gurobi status=" + std::to_string(status);
   }
@@ -4319,20 +4508,25 @@ SolveResult GurobiAdapter::solve_milp(const MIPModel& prob) const {
     GRBgetdblattr(model, "ObjVal", &objval);
     out.stats.objective = obj_sign * objval;
     out.x.resize(n);
-    GRBgetdblattrarray(model, "X", 0, n, out.x.data());
+    if (GRBgetdblattrarray(model, "X", 0, n, out.x.data()) != 0) {
+      out.x.resize(0); out.stats.success = false; out.stats.status = "Gurobi solution extraction failed";
+    }
     double mip_gap = 0.0;
     if (GRBgetdblattr(model, "MIPGap", &mip_gap) == 0)
       out.stats.mip_gap = mip_gap;
 
     // Extract constraint duals (Pi) for pure LP problems.
-    if (prob.binary_idx.empty() && prob.integer_idx.empty()) {
+    if (status == GRB_OPTIMAL && prob.binary_idx.empty() && prob.integer_idx.empty() && !separate_gurobi_network) {
+      // Numerical quality, not a lower-bound certificate; docs/solvers.md.
+      GRBgetdblattr(model,"DualVio",&out.stats.dual_feas);
+      GRBgetdblattr(model,"ConstrVio",&out.stats.primal_feas);
       const int m_total = m_ineq + m_eq;
-      out.constraint_duals.resize(m_total);
-      if (GRBgetdblattrarray(model, "Pi", 0, m_total,
-                             out.constraint_duals.data()) == 0) {
-        out.constraint_duals *= obj_sign;
-      } else {
-        out.constraint_duals.resize(0);
+      std::vector<double> pi(loaded_rows);
+      if (GRBgetdblattrarray(model, "Pi", 0, loaded_rows, pi.data()) == 0) {
+        out.constraint_duals.resize(m_total);
+        for (int i = 0; i < m_ineq; ++i)
+          out.constraint_duals[i] = obj_sign*(pi[upper_rows[i]] + (lower_rows[i] >= 0 ? pi[lower_rows[i]] : 0));
+        for (int i = 0; i < m_eq; ++i) out.constraint_duals[m_ineq+i] = obj_sign*pi[equality_rows[i]];
       }
     }
   }

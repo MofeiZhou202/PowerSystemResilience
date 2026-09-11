@@ -112,6 +112,14 @@ if(WIN32 AND "@MIPSOLVERS_HAVE_MKL_PARDISO@")
     message(FATAL_ERROR
       "Corrupt mipsolvers package: static oneMKL link closure is empty")
   endif()
+  # ipopt_local exports its static LINK_ONLY dependency on this target.
+  # Recreate it from the same validated package-relative archives; a consumer
+  # must not need the build machine's oneMKL installation to resolve Ipopt.
+  if(NOT TARGET MIPSolvers::MKL)
+    add_library(MIPSolvers::MKL INTERFACE IMPORTED)
+    set_target_properties(MIPSolvers::MKL PROPERTIES
+      INTERFACE_LINK_LIBRARIES "${_mipsolvers_mkl_libraries}")
+  endif()
   set_property(TARGET mipsolvers::mipsolvers APPEND PROPERTY
     INTERFACE_LINK_LIBRARIES "${_mipsolvers_mkl_libraries}")
   unset(_mipsolvers_mkl_libraries)

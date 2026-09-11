@@ -5,6 +5,7 @@
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
+#include <cstring>
 #include <limits>
 #include <vector>
 
@@ -216,6 +217,19 @@ class EigenKluSolver::Impl {
   bool numeric_ready{false};
 };
 
+namespace {
+// Optional fill-reducing ordering override for the KLU symbolic analysis.
+// KLU ordering codes: 0=AMD (default, tuned for circuit/power matrices),
+// 1=COLAMD, 3=CHOLMOD (nested dissection / NESDIS or METIS when available).
+// Returns -1 to leave KLU's default. Applied before analyzePattern().
+int klu_ordering_from_env() {
+  const char* v = std::getenv("MIPSOLVERS_KLU_ORDERING");
+  if (v == nullptr) return -1;
+  const int ord = std::atoi(v);
+  return (ord == 0 || ord == 1 || ord == 3) ? ord : -1;
+}
+}  // namespace
+
 EigenKluSolver::EigenKluSolver() = default;
 EigenKluSolver::~EigenKluSolver() = default;
 
@@ -231,6 +245,8 @@ void EigenKluSolver::analyze_pattern(const Eigen::SparseMatrix<double>& a) {
   }
   if (!impl_) impl_ = std::make_unique<Impl>();
   impl_->invalidate_numeric();
+  const int ord = klu_ordering_from_env();
+  if (ord >= 0) impl_->solver.kluCommon().ordering = ord;
   impl_->solver.analyzePattern(a);
 }
 
@@ -245,6 +261,8 @@ bool EigenKluSolver::factorize(const Eigen::SparseMatrix<double>& a) {
   if (needs_analyze) {
     // analyze_pattern() was not called; run it now so that KLU
     // has a symbolic factorization before the numerical step.
+    const int ord = klu_ordering_from_env();
+    if (ord >= 0) impl_->solver.kluCommon().ordering = ord;
     impl_->solver.analyzePattern(a);
   }
   impl_->solver.factorize(a);
@@ -948,7 +966,11 @@ void MumpsSolver::analyze_pattern(const Eigen::SparseMatrix<double>& a) {
   p.par.icntl[2] = -1;
   p.par.icntl[3] = 0;
   p.par.icntl[6] = 7;   // ICNTL(7) ordering: auto (METIS/PORD nested dissection)
-  p.par.icntl[7] = 0;   // ICNTL(8) scaling: none (caller equilibrates already)
+  // ICNTL(8)=77 lets MUMPS choose symmetric scaling. This is a diagonal
+  // congruence for SYM=2, so Sylvester inertia is preserved while mixed-unit
+  // KKT rows no longer trip numerical-null-pivot detection.
+  // MUMPS 5.7.3 User Guide, Sections 3.9 and 5.2.4.
+  p.par.icntl[7] = 77;
   p.par.icntl[19] = 0;  // ICNTL(20): centralized dense RHS
   p.par.icntl[20] = 0;  // ICNTL(21): centralized solution
   p.par.icntl[23] = 1;  // ICNTL(24): detect numerical null pivots
@@ -1105,6 +1127,33 @@ int MumpsSolver::estimated_deficiency() const {
 // AUDIT-NAV: 所有原生 Newton/KKT 路径的默认稀疏后端在此决定；审核部署差异时
 // 先核对编译宏和返回顺序，再核对各后端的 analyze/factorize/solve 契约。
 std::unique_ptr<SparseLinearSolver> make_default_sparse_solver() {
+  // Runtime override for benchmarking/diagnostics. Opt-in via the environment,
+  // so the compiled default (below) is unchanged unless explicitly requested.
+  // MUMPS is intentionally omitted: it is a symmetric-indefinite LDLᵀ backend
+  // (lower triangle only) for KKT systems, not the unsymmetric Newton/power-flow
+  // Jacobian. An unknown/unavailable value falls through to the default.
+  if (const char* forced = std::getenv("MIPSOLVERS_LINEAR_BACKEND")) {
+#ifdef HACDCPF_HAVE_KLU
+    if (std::strcmp(forced, "klu") == 0)
+      return std::make_unique<EigenKluSolver>();
+#endif
+#ifdef HACDCPF_HAVE_UMFPACK
+    if (std::strcmp(forced, "umfpack") == 0)
+      return std::make_unique<EigenUmfPackSolver>();
+#endif
+#ifdef HACDCPF_HAVE_SUPERLU
+    if (std::strcmp(forced, "superlu") == 0)
+      return std::make_unique<SuperLUSolver>();
+#endif
+#ifdef HACDCPF_HAVE_MKL_PARDISO
+    if (std::strcmp(forced, "pardiso") == 0)
+      return std::make_unique<MKLPardisoSolver>();
+#endif
+    if (std::strcmp(forced, "eigen") == 0 ||
+        std::strcmp(forced, "sparselu") == 0)
+      return std::make_unique<EigenSparseLUSolver>();
+  }
+
   // Note: MumpsSolver is deliberately NOT the generic default — it factors
   // singular rank-deficient systems without flagging (it accepts tiny
   // pivots), which would defeat the δ_W/δ_C inertia-escalation machinery the

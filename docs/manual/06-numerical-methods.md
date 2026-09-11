@@ -69,6 +69,14 @@ K(v) = P·diag(v)·Pᵀ + R
 
 **KLU 固定模式数值重分解**。缓存型电力潮流 Newton 在首次完整 KLU 分解后，可对后续同模式 Jacobian 使用 `klu_refactor`。该路径固定首次主元顺序且不重新选主元，因此只在压缩列 `Ap/Ai` 逐项相同时启用；模式变化、奇异或固定主元失败均重新执行符号分析和完整分解。一次性 LE 和通用非缓存 NLE 不使用此优化。完整契约与成本模型见 [KLU numeric refactor 推导](../archive/klu_numeric_refactor_2026-08-20.md)。
 
+**Windows/main 集成边界**。增广 KKT 采用合同变换
+`T=diag(I,I,sqrt(mu/s))`，解 `T K T z=T rhs` 后以 `T z` 恢复原方向，保留
+Windows 公共线性求解残差检查、精确系统优先的正则化与原坐标终止检查。
+可选 active-set KKT polish 只在完整严格终止检查通过时替换 barrier 解，
+否则保留已认证的原解；并不放宽 primal、dual、complementarity 门槛。
+模型、父提交、验证命令和实测结果见
+[Windows/main integration validation](09-testing-benchmarks.md#windowsmain-integration-validation)。
+
 **索引宽度**。2³¹ 的天花板不是维度 `n`（`n = 10⁶` 轻松装下），而是**因子非零数**：百万阶基矩阵的 `nnz(L)+nnz(U)` 可超过 `int` 上限并*静默*回绕。约定：分解接口先升到 64 位——UMFPACK 用 `umfpack_dl_*`、HiGHS 用 `HIGHSINT64`、CHOLMOD 用 `cholmod_l_*`；内部 CCS/CSR 缓存的*索引值*可保持 32 位（均 `< n`），但一切*计数*与接口数组必须 64 位，一切窄化转换必须显式守卫（响亮失败，不截断）。
 
 ---

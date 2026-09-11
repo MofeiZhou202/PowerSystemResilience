@@ -14,6 +14,7 @@ class HighsAdapter final : public SolverAdapter {
   std::string name() const override;
   bool supports(ProblemClass cls) const override;
   SolveResult solve_lp(const LPModel& prob) const override;
+  SolveResult solve_pricing_lp(const LPModel& prob, double time_limit_sec) const;
   SolveResult solve_milp(const MIPModel& prob) const override;
 
   bool available() const;
@@ -59,9 +60,27 @@ class ScipAdapter final : public SolverAdapter {
 };
 
 /// Gurobi adapter using the native C API (requires libgurobi linked at build time).
+struct GurobiOptions {
+  double time_limit_sec{3600};
+  double mip_gap{1e-9};
+  int threads{0};
+  int method{-1};
+  int crossover{-1};
+};
+
+// Last solve_milp (including configured solve_lp) on the calling thread.
+// Null means the phase was not reached. See docs/solvers.md, Gurobi timing.
+struct GurobiSolveTiming {
+  std::optional<double> model_import_sec;
+  std::optional<double> optimize_sec;
+  std::optional<double> result_extract_sec;
+};
+GurobiSolveTiming last_gurobi_solve_timing();
+
 class GurobiAdapter final : public SolverAdapter {
  public:
   GurobiAdapter();
+  explicit GurobiAdapter(GurobiOptions options);
   ~GurobiAdapter() override;
 
   GurobiAdapter(const GurobiAdapter&) = delete;
@@ -70,12 +89,15 @@ class GurobiAdapter final : public SolverAdapter {
   std::string name() const override;
   bool supports(ProblemClass cls) const override;
   SolveResult solve_lp(const LPModel& prob) const override;
+  SolveResult solve_pricing_lp(const LPModel& prob);
+  SolveResult solve_relaxation_lp(const LPModel& prob, double relative_tolerance);
   SolveResult solve_qp(const QPModel& prob) const override;
   SolveResult solve_milp(const MIPModel& prob) const override;
 
   bool available() const;
 
  private:
+  std::optional<GurobiOptions> options_;
 #ifdef HACDCPF_HAVE_GUROBI
   void* env_{nullptr};  // GRBenv* (opaque to avoid header dependency)
 #endif

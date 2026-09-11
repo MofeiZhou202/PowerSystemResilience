@@ -305,3 +305,128 @@ tests\Release\miplib2017_benchmark.exe `
 - 配对几何均值、全集几何均值、全量总时间回答三个不同问题，不能互相替代（见 9.3.3）。
 - 隔离子进程运行与单进程运行的绝对时间不可混算。
 - 测试失败排查见 [故障排查](10-troubleshooting.md)。
+
+
+## Windows/main integration validation
+
+The integration combines Windows parent `75c6e192` with main `5eac6be0`.
+The model remains the original NLP KKT system. For main's augmented congruence
+`T = diag(I, I, sqrt(mu/s))`, solve `T K T z = T rhs` and recover `dx,dy = T z`.
+The Windows common KKT solve retains its backward-error certificate; only the
+coordinate transformation is added. References: Waechter--Biegler (2006),
+Sections 2.2 and 3.1; chapter 6, scaling, inertia and iterative refinement.
+
+Conflict policy: retain Windows exact-first regularization, representable
+positive floors, caller-coordinate feasibility and strict termination gates,
+and guarded boolean KLU refactorization. Combine Ipopt acceptable-iteration
+control with main's adaptive barrier and complete primal-dual warm-start API.
+Main's optional active-set polish must also pass the Windows strict gates.
+Retain Windows Newton-direction/corrector policy instead of reinstating main's
+removed extra centrality-correction loop. First-attempt/restoration budgets
+and diagnostics are imported from main. This is not bit-identical to either
+parent and historical timings do not certify the merge.
+
+Prediction fixed before validation: zero changes to requested accuracy gates;
+all existing admitted regression assertions must pass. An explicit primary
+budget of N allows at most N initial iterations. Congruence adds O(m_ineq)
+scaling work and storage; no wall-time speedup is predicted on a shared machine.
+Assumptions: positive finite interior iterates and matching matrix/vector
+index spaces. Validate engine API, IPM, numerical stability, linear algebra,
+LP/MILP and AML suites, then Simulation resilience, market pricing and OPF
+integration. Preserve failures and investigate the implementation before
+relaxing any mathematical gate. Build and measured results follow below.
+
+The first configure required the existing staged static ZLIB prefix. The first
+compile exposed duplicate base/KLU refactor declarations and a duplicate KLU
+definition produced by Git's automatic merge. Removed only the duplicate
+main entries, retaining the Windows pattern validation and transactional
+failure path. This is an integration error, not a change to the numerical
+model or a reason to relax its acceptance gates.
+
+The next build exposed a truncated warm-start test caused by conflict
+resolution. Restored main's complete near-feasible and rejected-start tests
+alongside the Windows audit case; no assertions or tolerances were removed.
+The first SDK consumer configure exposed an unresolved `MIPSolvers::MKL`
+link target from exported `ipopt_local`. The package config now recreates that
+target from its already validated bundled static MKL archives. This preserves
+the existing sequential/LP64 link model and predicts zero external MKL paths
+required by a consumer; the downstream Release link verifies this contract.
+
+Initial IPM regression: 50/54 cases passed, with 10 assertions in four imported
+cases failing. Inspection against both parents showed test-assumption drift:
+Windows `mu_init=0` means automatic initialization, so constructing supplied
+dual vectors from that default creates inadmissible zero multipliers. Its
+central-start tolerances inherit strict caller tolerances, whereas these main
+fixtures intentionally start with 0.005 bound violation and 0.01 slack residual.
+The fixtures now explicitly supply main's intended `mu_init=0.1` and audit
+tolerances (0.01 primal, 0.5 relative centrality); production defaults and final
+KKT gates are unchanged. The one-variable quadratic diagnostic also enters a
+Windows full-derivative certification path once; its oracle now expects that
+one evaluation instead of main's zero. All other assertions are retained.
+
+Final standalone CTest coverage: all 21 registrations passed (20 in one run,
+IPM separately after the fixture correction: 54 cases, 368 assertions).
+The SDK consumer then exposed missing SuiteSparse public headers despite
+exported UMFPACK/KLU libraries. The full SDK install now includes their public
+component headers and exports a package-relative include directory. This is a
+packaging closure fix; no factorization implementation is changed.
+
+Reproduce the standalone configuration with Visual Studio 17 2022, x64,
+`MIPSOLVERS_BUILD_TESTS=ON`, `MIPSOLVERS_BUILD_SCUC=ON`,
+`MIPSOLVERS_BUILD_LOCAL_IPOPT=ON`, `MIPSOLVERS_IPOPT_LINEAR_SOLVER=pardisomkl`,
+`MIPSOLVERS_MKL_ROOT=<local static MKL prefix>`, `MIPSOLVERS_USE_MKL=ON`,
+`MIPSOLVERS_USE_GUROBI=OFF`, `MIPSOLVERS_USE_PAPILO=OFF`,
+`MIPSOLVERS_ENABLE_IPO=OFF`, `MIPSOLVERS_USE_PREBUILT_THIRD_PARTY=OFF`,
+`MIPSOLVERS_BUILD_BUNDLED_ARCHIVE=OFF`, `ZLIB_ROOT=<local static ZLIB prefix>`
+and `ZLIB_USE_STATIC_LIBS=ON`; build with `--config Release --parallel 3`.
+The optional GNU MRI bundled-archive target is disabled for this MSVC SDK
+validation; individual exported static libraries are the validated artifact.
+The successful ALL_BUILD follows a transient executable lock when a test was
+still running during relink; serializing the final build cleared that lock.
+
+[Machine-readable evidence](windows-integration-evidence.json) records all
+21 commands/results and their complete test summaries. The 20-test run took
+296.26 s wall; final IPM took 11.75 s (12.23 s CTest wall). These ran alongside
+compilation and cannot rank solver speed. Gurobi and PaPILO were disabled at
+configuration and are outside this coverage. The accuracy prediction holds
+for the admitted assertions; no cross-platform or wall-time speedup was tested.
+
+### Downstream result and publication boundary
+
+Simulation `b0b852a9` built its full core and four test executables with this
+installed SDK, full dependency profile, ETAP and Ipopt enabled, MSVC Release
+without native-architecture/IPO optimizations. Source compilation used `/MP3`;
+the final numerical tests ran sequentially after compilation. Commands:
+`cmake --build <simulation-build> --config Release --parallel 3 --target
+test_resilience_assessment test_southern_market test_opf_solver_backends
+test_three_phase_hybrid_opf`, then each executable with
+`--reporter junit --out <report.xml>`.
+
+| Suite | Assertions | Failed assertions | Skipped | JUnit seconds |
+|---|---:|---:|---:|---:|
+| resilience assessment | 584 | 0 | 0 | 1.649 |
+| Southern market | 29404 | 0 | 6 | 74.859 |
+| OPF solver backends | 721 | 6 (one case) | 0 | 40.913 |
+| three-phase hybrid OPF | 164 | 1 (one case) | 0 | 0.287 |
+
+Two downstream cases therefore violate the initial all-regressions-pass
+prediction. Both pass when rerun against the preserved pure-main `5eac6be0`
+build (6/6 and 28/28 assertions). The merged build reports:
+
+- GUI Auto showcase `ieee24_3area_acdc_expanded`: Ipopt iteration limit,
+  primal `3.41241842849e-6`, stationarity `0.00352618561813499`.
+- GUI Auto showcase `multiscale_comprehensive_acdc`: Ipopt iteration limit,
+  primal `1.36737322097e-6`, stationarity `0.01203573543262182`.
+- Native graph-reduced primal-dual transport: accepted-step collapse,
+  primal `8.008e-7`, dual `0.289586`, complementarity `0.1`.
+
+The conflicting Windows strict-bound/termination policies and Native
+globalization choices differ from main; this paired comparison establishes
+regression but does not isolate a single causal change. No tolerance was
+relaxed and no failed result relabeled successful. Publish as a source-branch
+integration with these explicit limitations. Simulation remains pinned to
+pure main `5eac6be0`; this merge is not a validated drop-in replacement.
+Neither a new installer nor a repeated all-module performance matrix is
+certified by this publication. Raw logs are under the Simulation workspace's
+`build/windows-branch-publication/`; retained downstream values and failure
+messages are included in the linked machine-readable evidence.

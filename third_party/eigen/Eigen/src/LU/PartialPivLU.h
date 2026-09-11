@@ -483,7 +483,11 @@ struct partial_lu_impl
         A_0.row(i).swap(A_0.row(piv));
       }
 
-      if(trows)
+      // Golub & Van Loan, Matrix Computations, 4th ed., Algorithm 3.4.1:
+      // once the trailing panel has zero columns, its triangular solve and
+      // Schur update are empty operations even if a rectangular panel leaves
+      // trailing rows. Avoid constructing a writable zero-width Eigen Ref.
+      if(trows && tsize)
       {
         // apply permutations to A_2
         for(Index i=k;i<k+bs; ++i)

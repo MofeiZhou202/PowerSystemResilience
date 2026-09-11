@@ -27,6 +27,12 @@ enum class NewtonFormulation { Auto, Condensed, Augmented };
 /// ignored when `globalization == Merit`.
 struct IPMOptions {
   int max_iter{400};
+  // Optional cap for the first filter-IPM attempt before the existing
+  // feasibility-restoration path is tried. A value <= 0 uses max_iter. The
+  // restoration problem has its own budget and the primal-dual retry retains
+  // the full max_iter budget.
+  // Waechter--Biegler (2006), Sections 2.4 and 3.3.
+  int primary_max_iter_before_restoration{0};
   double tol_primal{1e-6};
   /// Stationarity tolerance in the solver's historical metric. With
   /// multiplier_relative_stationarity enabled this is ||grad L||inf divided
@@ -129,6 +135,10 @@ struct IPMOptions {
   // individually).
   bool use_second_order_correction{true};
   bool use_restoration_phase{true};
+  // Feasibility restoration only needs to produce a better normal point; this
+  // cap does not reduce the original NLP retry's max_iter convergence budget.
+  // Waechter--Biegler (2006), Section 3.3.
+  int restoration_max_iter{200};
   bool scale_problem{true};
   // Positive values select a caller scaling target. Nonpositive normalizes
   // derivative infinity norms to the unit scale.
@@ -187,6 +197,8 @@ struct IPMDetail {
   double augmented_symbolic_nonzeros{0.0};
   int symbolic_analyses{0};
   int numeric_factorizations{0};
+  int initial_attempt_iterations{0};
+  int initial_attempt_factorizations{0};
   int linear_solves{0};
   int primary_factorizations{0};
   int inertia_retry_factorizations{0};

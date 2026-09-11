@@ -256,6 +256,25 @@ public:
 
 ### 7.1.7 C++ 最小完整示例
 
+Windows/main 集成后的 NLP 接口同时保留以下控制：
+
+- `NLPSolverOptions::acceptable_iterations=0` 默认禁用 Ipopt 的连续 acceptable
+  退出；`adaptive_barrier=false` 默认使用 monotone barrier，可显式开启 adaptive。
+- `primal_dual_warm_start=true` 要求 `NLPModel::x0` 与三个完整对偶向量：
+  `constraint_dual_start=[非线性不等式 | 等式]`，以及按原变量顺序排列的
+  `box_dual_lb_start`、`box_dual_ub_start`。缺失、维度错误或无效的对偶数据必须拒绝。
+  当前适配器仍会将缺失或维度错误的 `x0` 补为边界感知初值，因此调用方应显式
+  传入原始 KKT 点，不能用 `warm_start_used` 推断原始 primal 向量通过了完整校验。
+  `warm_start_push` 默认 `1e-8`；`SolveStats::warm_start_used` 记录该路径。
+  此契约适用于编入 Ipopt 库的进程内路径。
+- Native `IPMOptions::primary_max_iter_before_restoration=0` 默认不单独限制
+  首次尝试；正值限制首次 filter 尝试，restoration 使用自身预算。诊断字段
+  `IPMDetail::initial_attempt_iterations` 和 `initial_attempt_factorizations`
+  分别记录首次迭代和数值分解数。它不是整个求解链的总预算。
+
+对应实现为 `problem_types.hpp`、`external/adapters.cpp` 和
+`kernel/ipm/ipm_solver.cpp`；回归入口为 `test_engine_api` 与 `test_ipm_solver`。
+
 ```cpp
 #include "mipsolvers/engine/engine.hpp"
 

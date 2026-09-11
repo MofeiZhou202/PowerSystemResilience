@@ -200,6 +200,46 @@ corrector rhs in this form is `[0; 0; −M⁻¹ε]` (derive by substituting the
 correction equations), and SOC re-uses the same rhs with the equality
 block replaced.
 
+The implementation factors a symmetrically equilibrated but algebraically
+identical form. With
+
+```
+T = diag(I, I, sqrt(M/S)),
+Tᵀ K_aug T = [ H+δ_W I, J_gᵀ, J_hᵀ sqrt(M/S);
+                J_g,      −δ_C I, 0;
+                sqrt(M/S)J_h, 0, −I ].
+```
+
+The transformed right-hand-side tail is `sqrt(M/S) r_h`, and the physical
+multiplier direction is recovered as `dμ = sqrt(M/S) dμ_scaled`. This diagonal
+congruence preserves Sylvester inertia and the exact Newton direction, while
+removing `s_i/μ_i` from the factor pivots. MUMPS `SYM=2` also uses its symmetric
+automatic scaling (`ICNTL(8)=77`), which is another inertia-preserving diagonal
+equilibration. In `NewtonFormulation::Auto`, exhaustion of condensed inertia
+correction may switch to this augmented system; an explicitly forced condensed
+form still fails loudly instead of changing formulation.
+
+**2026-09-04 comparison with the prediction.** The first H13 result contradicted the prediction
+that augmented factorization would close the condensed inertia failure: MUMPS
+reported 97 numerical null pivots, and `δ_W` escalation could not affect them.
+The `sqrt(M/S)` congruence reduced the count to 46, identifying the remaining
+deficiency as equality-side row scaling rather than curvature or incorrect
+elimination. Enabling MUMPS symmetric scaling removed the false deficiency; H13
+then converged in 14 rather than failing after 60 condensed factorizations.
+The four-decade inequality-row regression in `test_numerical_stability` checks
+the resulting augmented solution against the unscaled reference. The eight-
+decade variant is not claimed: it exposed globalization sensitivity outside the
+current OPF scaling regime even though the factor congruence remains exact.
+Release validation through the HySim consumer command
+`./build/macos-release/phase_hybrid_opf_benchmark all parambench native quiet`
+measured primal-dual-slack/primal-only median speedups of 5.661x, 2.848x, 1.383x,
+and 1.488x on H13/H34/H123/H8500, with numeric factorizations changing from
+47/27/30/100 to 4/7/20/131. The geometric mean of the four speedups was 2.400x,
+above the fixed required value of 1.20x. This used Release, AppleClang 21,
+arm64 macOS 26.5.2, dirty HySim
+`ef5f1f6b` and MIPSolvers `a5d614b`; the source CSV is
+`output/benchmarks/paper_native_ipm_parametric_warmbench.csv` in HySim.
+
 **Guidance.**  The augmented form (`IPMOptions::use_augmented_newton`) is
 the right choice when `J_h` is wide/dense or `nnz(J_hᵀJ_h) ≫ nnz(J_h)`;
 the condensed form wins when the extra `m_ineq` factorization dimension
@@ -774,3 +814,92 @@ The private HFactor port also retains every nonzero produced by factorization,
 triangular solves, and FT replay. Upstream `kHighsTiny` dropping remains in the
 embedded HiGHS target, but is incompatible with checking native solves against
 the true explicit basis matrix at an unchanged backward-error bound.
+
+---
+
+## 16. Terminal active-set KKT crossover for nonlinear programs
+
+A finite-barrier point can satisfy the requested complementarity tolerance while
+remaining (O(\mu)) from an active inequality boundary. NativeIPM therefore
+attempts an optional active-set Newton crossover when an ordinary filter solve
+converges. Under strict complementarity, active slacks are (O(\mu)) with
+multipliers bounded away from zero, whereas inactive multipliers are (O(\mu))
+with slacks bounded away from zero. The implementation uses a
+(\sqrt{\mu})-scale separator and solves the limiting equality-constrained KKT
+system (Nocedal and Wright, 2006, Sections 16.3 and 19.6).
+
+Candidate rows are ordered by central-path confidence. Structural row rank is
+selected by maximum matching on the sparse Jacobian bipartite graph (Duff,
+1981), after which sparse LDLT inertia and solve-residual checks provide the
+numerical certificate. At most eight dual-sign repairs and eight active-set
+Newton steps are attempted, so degeneracy cannot make this optional crossover
+unbounded. Multiplier projection alone is never sufficient: at least one
+active-set Newton step must be accepted, and the full unperturbed primal, dual,
+and complementarity residuals must satisfy the user tolerances. If any rank,
+inertia, sign, line-search, or final KKT check fails, the already converged
+barrier point is retained (Fletcher, 1987, Section 10.3).
+
+`kMinPositive` remains a denominator-regularization threshold; trial slacks and
+multipliers are accepted whenever they are finite and strictly positive, even
+below that threshold. After a rejected crossover, the filter path may use one
+additional barrier decade,
+`max(mu_min, 0.01 * tol_complementarity)`, consistent with the first-order
+central-path displacement in (\mu). The regression with one active and 64
+inactive inequalities at scale (10^4) verifies that the solver reaches the
+limiting active boundary and reports `Converged after active-set KKT polish`.
+
+---
+
+## 17. Complete Ipopt warm starts require row-order and bound-dual mapping
+
+The public NLP multiplier order is
+`[nonlinear inequalities | equalities]`, whereas the Ipopt TNLP starting-point
+callback expects `[equalities | nonlinear inequalities]`. When
+`NLPSolverOptions::primal_dual_warm_start` is enabled, `CallbackTNLP` performs
+this permutation without changing signs, because both formulations use
+`f + lambda' g + mu' h` for `h(x) <= 0` and `mu >= 0`. It also passes the
+variable lower- and upper-bound multipliers `z_L` and `z_U`. Ipopt reconstructs
+its internal inequality slacks; Native IPM slack vectors are not part of the
+TNLP starting-point contract (Wachter and Biegler, 2006, Section 3.1; Ipopt
+`TNLP::get_starting_point`).
+
+The adapter rejects incomplete dimensions, nonfinite values, negative
+inequality multipliers, and negative bound multipliers. With a valid complete
+start it enables `warm_start_init_point` and uses a common `1e-8` bound, slack,
+and multiplier push. Unit tests return and reapply a KKT point containing both
+an equality and an active nonlinear inequality, so the two row conventions are
+checked in both directions.
+
+The HySim four-feeder parametric OPF benchmark holds the graph-reduced model,
+generated row set, `+0.1%` load perturbation, Ipopt options, and five alternating
+repeats fixed. Median primal-dual/primal-only times are `2.064/3.522`,
+`4.400/7.178`, `6.451/12.664`, and `274.799/743.846 ms` on
+H13/H34/H123/H8500. The corresponding speedups are `1.707x`, `1.632x`,
+`1.963x`, and `2.707x`, with a `1.961x` geometric mean. This is dirty-worktree
+Apple M4 Max evidence, not a clean pinned-release result.
+
+### Windows integration verification boundary
+
+The integration of Windows `75c6e192` and main `5eac6be0` retains the Windows
+strict caller-coordinate gates and exact-first KKT regularization. Augmented
+congruence solves `T K T z=T rhs` and recovers `T z`; optional active-set polish
+also passes the strict gate before replacing a certified barrier point.
+The first imported-test failures came from default-policy assumptions: Windows
+automatic `mu_init=0` cannot be used to construct positive supplied duals, and
+near-feasible warm-start tests must state their intended 0.01/0.5 audit policies.
+The fixtures now state those policies, leaving production defaults and final
+accuracy gates unchanged. Windows also counts one full-derivative certificate
+in the one-variable quadratic diagnostic. Final IPM: 54 cases / 368 assertions
+passed. Full commands, parent revisions, errors and remaining scope are in
+[the maintained integration record](../manual/09-testing-benchmarks.md#windowsmain-integration-validation).
+
+Downstream mismatch: the all-regressions-pass prediction does not hold for two
+Simulation OPF cases. The full SDK compiles and resilience/market suites pass,
+but the GUI Auto showcase reaches Ipopt's iteration limit and Native
+graph-reduced primal-dual transport reports accepted-step collapse. Both pass
+on pure main in a paired rerun. The integration retains materially different
+Windows strict-bound/termination and Native globalization policies; causality
+is not isolated, so no mathematical threshold or solver policy is changed in
+response. Simulation's dependency pin remains pure main. These residuals,
+commands and failed assertions are recorded in the maintained integration
+record, and must be resolved before declaring downstream OPF compatibility.

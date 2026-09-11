@@ -468,6 +468,62 @@ TEST_CASE("Filter IPM satisfies the full inequality Newton equations",
   CHECK(detail.complementarity < 1e-8);
 }
 
+TEST_CASE("Filter IPM crosses a converged barrier point to the active-set KKT limit",
+          "[ipm][nlp][active-set-polish][regression]") {
+  constexpr int kInactiveRows = 64;
+  NLPModel nlp;
+  nlp.sense = Sense::Minimize;
+  nlp.vars.push_back({VarType::Continuous, -1e20, 1e20, "dispatch"});
+  nlp.x0 = Eigen::VectorXd::Zero(1);
+  nlp.f = [](const Eigen::VectorXd& x) {
+    const double residual = x[0] - 2.0;
+    return 0.5 * residual * residual;
+  };
+  nlp.grad = [](const Eigen::VectorXd& x, Eigen::VectorXd& gradient) {
+    gradient = Eigen::VectorXd::Constant(1, x[0] - 2.0);
+  };
+  nlp.lagrangian_hess = [](const Eigen::VectorXd&, const Eigen::VectorXd&,
+                            const Eigen::VectorXd*,
+                            Eigen::SparseMatrix<double>& hessian) {
+    hessian.resize(1, 1);
+    hessian.insert(0, 0) = 1.0;
+  };
+  nlp.h = [](const Eigen::VectorXd& x, Eigen::VectorXd& inequality) {
+    inequality.resize(1 + kInactiveRows);
+    inequality[0] = x[0] - 1.0;
+    for (int row = 1; row < inequality.size(); ++row) {
+      inequality[row] = x[0] - (1e4 + row);
+    }
+  };
+  nlp.jac_h = [](const Eigen::VectorXd&,
+                  Eigen::SparseMatrix<double>& jacobian) {
+    jacobian.resize(1 + kInactiveRows, 1);
+    for (int row = 0; row < jacobian.rows(); ++row) {
+      jacobian.insert(row, 0) = 1.0;
+    }
+  };
+
+  IPMOptions options;
+  options.max_iter = 100;
+  options.tol_primal = 1e-6;
+  options.tol_dual = 1e-6;
+  options.tol_complementarity = 1e-6;
+  options.tol_accept = 0.0;
+  options.scale_problem = false;
+  options.use_restoration_phase = false;
+  NativeIPMAdapter solver(options);
+  const auto [result, detail] = solver.solve_nlp_detail(nlp);
+
+  INFO(result.stats.status);
+  REQUIRE(result.stats.success);
+  CHECK(result.stats.status == "Converged after active-set KKT polish");
+  CHECK(detail.active_set_polish_factorizations > 0);
+  CHECK(result.x[0] == Approx(1.0).margin(1e-10));
+  CHECK(result.stats.primal_feas <= options.tol_primal);
+  CHECK(result.stats.dual_feas <= options.tol_dual);
+  CHECK(detail.complementarity <= options.tol_complementarity);
+}
+
 TEST_CASE("Native IPM acceptable tolerance requires full KKT feasibility",
           "[ipm][nlp][regression]") {
   NLPModel nlp;
@@ -1503,6 +1559,317 @@ TEST_CASE("Native IPM audits a complete central warm start",
   CHECK_FALSE(rejected_detail.central_warm_start_accepted);
   CHECK(rejected_detail.central_warm_start_rejection_reason.find("slack") !=
         std::string::npos);
+}
+
+TEST_CASE("Native IPM accepts a complete near-feasible central warm start",
+          "[ipm][nlp][initialization][central-warm-start]") {
+  double first_x = std::numeric_limits<double>::quiet_NaN();
+  NLPModel nlp;
+  nlp.sense = Sense::Minimize;
+  nlp.vars.push_back({VarType::Continuous, 0.0, 1.0, "dispatch"});
+  nlp.x0 = Eigen::VectorXd::Constant(1, -5e-3);
+  nlp.f = [&first_x](const Eigen::VectorXd& x) {
+    if (!std::isfinite(first_x)) first_x = x[0];
+    return 0.5 * x.squaredNorm();
+  };
+  nlp.grad = [](const Eigen::VectorXd& x, Eigen::VectorXd& gradient) {
+    gradient = x;
+  };
+  nlp.hess = [](const Eigen::VectorXd&,
+                Eigen::SparseMatrix<double>& hessian) {
+    hessian.resize(1, 1);
+    hessian.setIdentity();
+  };
+
+  IPMOptions options;
+  // This fixture supplies s_i * mu_i = 0.1, independently of the automatic
+  // barrier default. See manual/09-testing-benchmarks.md, Windows integration.
+  options.mu_init = 0.1;
+  options.central_warm_start = true;
+  options.central_warm_start_primal_tolerance = 1e-2;
+  options.central_warm_start_centrality_tolerance = 0.5;
+  options.equality_dual_start.resize(0);
+  options.slack_start = Eigen::VectorXd::Constant(2, 5e-3);
+  options.slack_start[1] = 1.005;
+  options.inequality_dual_start =
+      Eigen::VectorXd::Constant(2, options.mu_init / 5e-3);
+  options.inequality_dual_start[1] = options.mu_init / 1.005;
+  options.max_iter = 5;
+  options.tol_primal = 1e-8;
+  options.tol_dual = 1e-8;
+  options.tol_complementarity = 1e-8;
+  options.tol_accept = 0.0;
+  options.scale_problem = false;
+  options.use_restoration_phase = false;
+  const auto [result, detail] =
+      NativeIPMAdapter(options).solve_nlp_detail(nlp);
+  (void)result;
+
+  CHECK(detail.central_warm_start_requested);
+  CHECK(detail.central_warm_start_accepted);
+  CHECK(detail.central_warm_start_rejection_reason.empty());
+  CHECK(detail.central_warm_start_original_primal_violation ==
+        Approx(5e-3));
+  CHECK(detail.central_warm_start_primal_residual == Approx(1e-2));
+  CHECK(detail.central_warm_start_centrality == Approx(0.0).margin(1e-14));
+  CHECK(detail.central_warm_start_max_inequality_dual == Approx(20.0));
+  CHECK(std::isfinite(detail.central_warm_start_dual_residual));
+  CHECK(first_x == Approx(-5e-3).margin(1e-15));
+  if (detail.first_step_accepted) {
+    CHECK(detail.first_step_primal_alpha > 0.0);
+    CHECK(detail.first_step_primal_alpha <= 1.0);
+    CHECK(detail.first_step_dual_alpha > 0.0);
+    CHECK(std::isfinite(detail.first_step_barrier_objective_before));
+    CHECK(std::isfinite(detail.first_step_barrier_objective_after));
+  }
+
+  IPMOptions magnitude_limited = options;
+  magnitude_limited.central_warm_start_max_inequality_dual = 10.0;
+  const auto [rejected_result, magnitude_detail] =
+      NativeIPMAdapter(magnitude_limited).solve_nlp_detail(nlp);
+  (void)rejected_result;
+  CHECK_FALSE(magnitude_detail.central_warm_start_accepted);
+  CHECK(magnitude_detail.central_warm_start_max_inequality_dual ==
+        Approx(20.0));
+  CHECK(magnitude_detail.central_warm_start_rejection_reason.find(
+            "magnitude") != std::string::npos);
+}
+
+TEST_CASE("Rejected central warm starts are exact cold starts",
+          "[ipm][nlp][initialization][central-warm-start]") {
+  const auto first_evaluation = [](bool request_central,
+                                   bool complete_slack,
+                                   double multiplier,
+                                   IPMDetail& detail) {
+    std::vector<double> evaluated_x;
+    NLPModel nlp;
+    nlp.sense = Sense::Minimize;
+    nlp.vars.push_back({VarType::Continuous, 0.0, 1.0, "dispatch"});
+    nlp.x0 = Eigen::VectorXd::Constant(1, -5e-3);
+    nlp.f = [&evaluated_x](const Eigen::VectorXd& x) {
+      evaluated_x.push_back(x[0]);
+      return 0.5 * x.squaredNorm();
+    };
+    nlp.grad = [](const Eigen::VectorXd& x, Eigen::VectorXd& gradient) {
+      gradient = x;
+    };
+    nlp.hess = [](const Eigen::VectorXd&,
+                  Eigen::SparseMatrix<double>& hessian) {
+      hessian.resize(1, 1);
+      hessian.setIdentity();
+    };
+
+    IPMOptions options;
+    options.central_warm_start_primal_tolerance = 1e-2;
+    options.central_warm_start_centrality_tolerance = 0.5;
+    options.central_warm_start = request_central;
+    options.equality_dual_start.resize(0);
+    options.inequality_dual_start = Eigen::VectorXd::Constant(2, multiplier);
+    if (complete_slack) {
+      options.slack_start.resize(2);
+      options.slack_start << 5e-3, 1.005;
+    }
+    options.max_iter = 1;
+    options.tol_accept = 0.0;
+    options.scale_problem = false;
+    options.use_restoration_phase = false;
+    auto solved = NativeIPMAdapter(options).solve_nlp_detail(nlp);
+    detail = std::move(solved.second);
+    REQUIRE(evaluated_x.size() >= static_cast<std::size_t>(
+        request_central ? 2 : 1));
+    // A requested central start is audited once at raw x0 before the filter
+    // sees its initialization point.
+    return evaluated_x[request_central ? 1 : 0];
+  };
+
+  IPMDetail cold_detail;
+  const double cold_x = first_evaluation(false, false, 0.0, cold_detail);
+  IPMDetail incomplete_detail;
+  const double incomplete_x =
+      first_evaluation(true, false, 20.0, incomplete_detail);
+  CHECK_FALSE(incomplete_detail.central_warm_start_accepted);
+  CHECK(incomplete_detail.central_warm_start_rejection_reason.find("slack") !=
+        std::string::npos);
+  CHECK(incomplete_x == Approx(cold_x).margin(1e-15));
+
+  IPMDetail noncentral_detail;
+  const double noncentral_x =
+      first_evaluation(true, true, 1.0, noncentral_detail);
+  CHECK_FALSE(noncentral_detail.central_warm_start_accepted);
+  CHECK(noncentral_detail.central_warm_start_rejection_reason.find(
+            "centrality") != std::string::npos);
+  CHECK(noncentral_x == Approx(cold_x).margin(1e-15));
+}
+
+TEST_CASE("Fixed-variable reduction maps central bound warm starts",
+          "[ipm][nlp][initialization][central-warm-start][fixed-variable]") {
+  double first_free_x = std::numeric_limits<double>::quiet_NaN();
+  NLPModel nlp;
+  nlp.sense = Sense::Minimize;
+  nlp.vars = {
+      {VarType::Continuous, 2.0, 2.0, "fixed"},
+      {VarType::Continuous, 0.0, 1.0, "free"}};
+  nlp.x0.resize(2);
+  nlp.x0 << 2.0, -5e-3;
+  nlp.f = [&first_free_x](const Eigen::VectorXd& x) {
+    if (!std::isfinite(first_free_x)) first_free_x = x[1];
+    return 0.5 * x.squaredNorm();
+  };
+  nlp.grad = [](const Eigen::VectorXd& x, Eigen::VectorXd& gradient) {
+    gradient = x;
+  };
+  nlp.hess = [](const Eigen::VectorXd&,
+                Eigen::SparseMatrix<double>& hessian) {
+    hessian.resize(2, 2);
+    hessian.setIdentity();
+  };
+
+  IPMOptions options;
+  options.mu_init = 0.1;
+  options.central_warm_start_primal_tolerance = 1e-2;
+  options.central_warm_start_centrality_tolerance = 0.5;
+  options.central_warm_start = true;
+  options.equality_dual_start.resize(0);
+  options.slack_start.resize(4);
+  options.slack_start << 5e-3, 5e-3, 5e-3, 1.005;
+  options.inequality_dual_start =
+      (options.mu_init * options.slack_start.cwiseInverse()).eval();
+  options.max_iter = 1;
+  options.tol_accept = 0.0;
+  options.scale_problem = false;
+  options.use_restoration_phase = false;
+  const auto [result, detail] =
+      NativeIPMAdapter(options).solve_nlp_detail(nlp);
+  (void)result;
+
+  CHECK(detail.central_warm_start_requested);
+  CHECK(detail.central_warm_start_accepted);
+  CHECK(detail.fixed_variables_eliminated == 1);
+  CHECK(first_free_x == Approx(-5e-3).margin(1e-15));
+}
+
+TEST_CASE("Filter diagnostics report coherent trial accounting",
+          "[ipm][nlp][diagnostics]") {
+  NLPModel nlp;
+  nlp.sense = Sense::Minimize;
+  nlp.vars.push_back({VarType::Continuous, -1e20, 1e20, "state"});
+  nlp.x0 = Eigen::VectorXd::Ones(1);
+  nlp.f = [](const Eigen::VectorXd& x) { return 0.5 * x.squaredNorm(); };
+  nlp.grad = [](const Eigen::VectorXd& x, Eigen::VectorXd& gradient) {
+    gradient = x;
+  };
+  nlp.hess = [](const Eigen::VectorXd&,
+                Eigen::SparseMatrix<double>& hessian) {
+    hessian.resize(1, 1);
+    hessian.setIdentity();
+  };
+
+  IPMOptions options;
+  options.max_iter = 5;
+  options.tol_accept = 0.0;
+  options.scale_problem = false;
+  options.use_restoration_phase = false;
+  const auto [result, detail] =
+      NativeIPMAdapter(options).solve_nlp_detail(nlp);
+
+  INFO(result.stats.status);
+  REQUIRE(result.stats.success);
+  CHECK(detail.trial_value_evaluations >=
+        detail.accepted_steps + detail.rejected_steps);
+  CHECK(detail.trial_rejections_before_derivatives <=
+        detail.rejected_steps);
+  // For f(x)=x^2/2, Newton reaches x=0 in one step; the Windows residual
+  // certificate evaluates its derivatives once (manual chapter 9).
+  CHECK(detail.trial_full_derivative_evaluations == 1);
+  if (detail.numeric_factorizations > 0) {
+    CHECK(detail.linear_solver_backend != "unselected");
+  }
+}
+
+TEST_CASE("Filter IPM bounds primary work before restoration",
+          "[ipm][nlp][restoration][budget]") {
+  NLPModel nlp;
+  nlp.sense = Sense::Minimize;
+  nlp.vars.push_back({VarType::Continuous, -2.0, 2.0, "state"});
+  nlp.x0 = Eigen::VectorXd::Constant(1, 0.25);
+  nlp.f = [](const Eigen::VectorXd& x) { return 0.5 * x.squaredNorm(); };
+  nlp.grad = [](const Eigen::VectorXd& x, Eigen::VectorXd& gradient) {
+    gradient = x;
+  };
+  nlp.hess = [](const Eigen::VectorXd&,
+                Eigen::SparseMatrix<double>& hessian) {
+    hessian.resize(1, 1);
+    hessian.insert(0, 0) = 1.0;
+  };
+  nlp.g = [](const Eigen::VectorXd& x, Eigen::VectorXd& equality) {
+    equality = Eigen::VectorXd::Constant(1, x[0] * x[0] - 1.0);
+  };
+  nlp.jac_g = [](const Eigen::VectorXd& x,
+                  Eigen::SparseMatrix<double>& jacobian) {
+    jacobian.resize(1, 1);
+    jacobian.insert(0, 0) = 2.0 * x[0];
+  };
+
+  IPMOptions options;
+  options.max_iter = 20;
+  options.primary_max_iter_before_restoration = 1;
+  options.restoration_max_iter = 1;
+  options.tol_accept = 0.0;
+  options.scale_problem = false;
+  const auto [result, detail] =
+      NativeIPMAdapter(options).solve_nlp_detail(nlp);
+  (void)result;
+
+  CHECK(detail.initial_attempt_iterations <= 1);
+  CHECK(detail.initial_attempt_factorizations >= 0);
+  CHECK(detail.restoration_factorizations > 0);
+  CHECK(detail.numeric_factorizations >=
+        detail.initial_attempt_factorizations);
+}
+
+TEST_CASE("Fixed-variable reduction audits restored starts in original coordinates",
+          "[ipm][nlp][initialization][fixed-variable]") {
+  bool observed_expanded_coordinates = false;
+  NLPModel nlp;
+  nlp.sense = Sense::Minimize;
+  nlp.vars = {
+      {VarType::Continuous, 2.0, 2.0, "fixed"},
+      {VarType::Continuous, 0.0, 1.0, "free"}};
+  nlp.x0.resize(2);
+  nlp.x0 << 2.0, -5e-5;
+  nlp.f = [](const Eigen::VectorXd& x) { return 0.5 * x.squaredNorm(); };
+  nlp.grad = [](const Eigen::VectorXd& x, Eigen::VectorXd& gradient) {
+    gradient = x;
+  };
+  nlp.hess = [](const Eigen::VectorXd&,
+                Eigen::SparseMatrix<double>& hessian) {
+    hessian.resize(2, 2);
+    hessian.setIdentity();
+  };
+  nlp.original_constraint_violation =
+      [&observed_expanded_coordinates](const Eigen::VectorXd& x) {
+        observed_expanded_coordinates =
+            x.size() == 2 && std::abs(x[0] - 2.0) <= 1e-15;
+        return std::abs(x[1]);
+      };
+
+  IPMOptions options;
+  options.primal_feasible_start = true;
+  options.max_iter = 1;
+  options.tol_primal = 1e-4;
+  options.tol_dual = 1e-4;
+  options.tol_complementarity = 1e-4;
+  options.tol_accept = 0.0;
+  options.scale_problem = false;
+  options.use_restoration_phase = false;
+  const auto [result, detail] =
+      NativeIPMAdapter(options).solve_nlp_detail(nlp);
+  (void)result;
+
+  CHECK(observed_expanded_coordinates);
+  CHECK(detail.primal_feasible_start_requested);
+  CHECK(detail.primal_feasible_start_accepted);
+  CHECK(detail.fixed_variables_eliminated == 1);
 }
 
 TEST_CASE("Filter IPM uses inertia correction on a nonconvex objective",

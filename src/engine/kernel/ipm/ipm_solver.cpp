@@ -1495,7 +1495,8 @@ struct AugmentedNewtonCache {
   std::vector<int> jh_bot;  // nnz(Jh): value index of Jh(r,c) at (c, n+meq+r)
   std::vector<int> diag_w;  // n: value index of (i,i)                 [+δ_W]
   std::vector<int> diag_c;  // meq: value index of (n+i,n+i)          [-δ_C]
-  std::vector<int> diag_s;  // miq: value index of (n+meq+i,n+meq+i)  [-s_i/μ_i]
+  std::vector<int> diag_s;  // miq: value index of (n+meq+i,n+meq+i)  [-1]
+  Eigen::VectorXd inequality_scaling;  // sqrt(mu_i / s_i)
 };
 
 struct NewtonStructureProfile {
@@ -1696,7 +1697,12 @@ bool augmented_newton_structure_matches(const AugmentedNewtonCache& c,
          std::memcmp(c.jh_inner.data(), jh.innerIndexPtr(), jh_nnz * sizeof(int)) == 0;
 }
 
-// Assemble [H + δ_W I, Jgᵀ, Jhᵀ; Jg, -δ_C I, 0; Jh, 0, -SM⁻¹] into the cache.
+// Assemble the symmetrically equilibrated augmented system into the cache.
+// Applying T=diag(I,I,sqrt(M/S)) by congruence to
+// [H,Jg',Jh'; Jg,-delta_C I,0; Jh,0,-SM^-1] gives an inequality block -I
+// and coupling sqrt(M/S)Jh. Sylvester inertia and the Newton direction are
+// preserved while the slack/multiplier ratio no longer appears on a pivot.
+// Waechter--Biegler (2006), Sections 2.2 and 3.1.
 bool assemble_augmented_newton(AugmentedNewtonCache& c,
                                const Eigen::SparseMatrix<double>& h,
                                const Eigen::SparseMatrix<double>& jg,
@@ -1722,17 +1728,22 @@ bool assemble_augmented_newton(AugmentedNewtonCache& c,
     v[c.jg_bot[static_cast<size_t>(k)]] += gv[k];
   }
   const double* jhv = jh.valuePtr();
+  c.inequality_scaling.resize(miq);
+  for (int i = 0; i < miq; ++i) {
+    const double si = std::max(s[i], kMinPositive);
+    const double mui = std::max(mu_ineq[i], kMinPositive);
+    c.inequality_scaling[i] = std::sqrt(mui / si);
+  }
   for (int k = 0; k < c.jh_nnz; ++k) {
-    v[c.jh_top[static_cast<size_t>(k)]] += jhv[k];
-    v[c.jh_bot[static_cast<size_t>(k)]] += jhv[k];
+    const int row = jh.innerIndexPtr()[k];
+    const double scaled_value = jhv[k] * c.inequality_scaling[row];
+    v[c.jh_top[static_cast<size_t>(k)]] += scaled_value;
+    v[c.jh_bot[static_cast<size_t>(k)]] += scaled_value;
   }
   for (int i = 0; i < n; ++i) v[c.diag_w[static_cast<size_t>(i)]] += delta_w;
   for (int i = 0; i < meq; ++i) v[c.diag_c[static_cast<size_t>(i)]] -= delta_c;
-  for (int i = 0; i < miq; ++i) {
-    // -S·M⁻¹ diagonal: -s_i / μ_i (μ_i floored away from zero).
-    const double mui = std::max(mu_ineq[i], kMinPositive);
-    v[c.diag_s[static_cast<size_t>(i)]] -= s[i] / mui;
-  }
+  for (int i = 0; i < miq; ++i)
+    v[c.diag_s[static_cast<size_t>(i)]] -= 1.0;
   return !structure_changed;
 }
 
@@ -1743,13 +1754,19 @@ bool solve_augmented_newton(AugmentedNewtonCache& c,
                             Eigen::VectorXd& dx,
                             Eigen::VectorXd& dlambda,
                             Eigen::VectorXd& dmu) {
+  if (c.inequality_scaling.size() != c.miq) return false;
+  // T K T z = T rhs; recover the original direction as T z.
+  // Preserve the Windows common backward-error audit after main's symmetric
+  // congruence scaling (Waechter--Biegler 2006, Sections 2.2 and 3.1).
+  Eigen::VectorXd scaled_rhs = rhs;
+  scaled_rhs.tail(c.miq).array() *= c.inequality_scaling.array();
   Eigen::VectorXd combined_dual;
-  if (!solve_kkt_sparse(c.kkt, rhs, dx, combined_dual) ||
+  if (!solve_kkt_sparse(c.kkt, scaled_rhs, dx, combined_dual) ||
       combined_dual.size() != c.meq + c.miq) {
     return false;
   }
   dlambda = combined_dual.head(c.meq);
-  dmu = combined_dual.tail(c.miq);
+  dmu = c.inequality_scaling.cwiseProduct(combined_dual.tail(c.miq));
   return dx.size() == c.n;
 }
 
@@ -1818,7 +1835,8 @@ bool factor_solve_augmented_newton(
     const Eigen::VectorXd& rhs,
     Eigen::VectorXd& dx,
     Eigen::VectorXd& dlambda,
-    Eigen::VectorXd& dmu) {
+    Eigen::VectorXd& dmu,
+    bool verbose = false) {
   ensure_augmented_inertia_backend(c);
   if (!require_descent_inertia) {
     const bool pattern_unchanged = assemble_augmented_newton(
@@ -2117,8 +2135,8 @@ bool evaluate_trial_point(const NLPModel& prob,
                           const Eigen::VectorXd& mu_trial,
                           std::string& status,
                           TrialPoint& trial) {
-  if ((s_trial.size() > 0 && (s_trial.array() <= kMinPositive).any()) ||
-      (mu_trial.size() > 0 && (mu_trial.array() <= kMinPositive).any())) {
+  if ((s_trial.size() > 0 && (s_trial.array() <= 0.0).any()) ||
+      (mu_trial.size() > 0 && (mu_trial.array() <= 0.0).any())) {
     return false;
   }
 
@@ -2221,8 +2239,8 @@ bool evaluate_filter_trial_values(const NLPModel& prob,
                                   const Eigen::VectorXd& mu_trial,
                                   std::string& status,
                                   TrialPoint& trial) {
-  if ((s_trial.size() > 0 && (s_trial.array() <= kMinPositive).any()) ||
-      (mu_trial.size() > 0 && (mu_trial.array() <= kMinPositive).any())) {
+  if ((s_trial.size() > 0 && (s_trial.array() <= 0.0).any()) ||
+      (mu_trial.size() > 0 && (mu_trial.array() <= 0.0).any())) {
     return false;
   }
   NLPState trial_state;
@@ -2370,6 +2388,445 @@ struct FilterSolveOutcome {
   double first_step_barrier_objective_before{0.0};
   double first_step_barrier_objective_after{0.0};
 };
+
+struct ActiveSetPolishOutcome {
+  bool converged{false};
+  Eigen::VectorXd x;
+  Eigen::VectorXd s;
+  Eigen::VectorXd lambda;
+  Eigen::VectorXd mu;
+  NLPState state;
+  ResidualSummary residuals;
+  int iterations{0};
+  int symbolic_analyses{0};
+  int numeric_factorizations{0};
+  int linear_solves{0};
+};
+
+Eigen::SparseMatrix<double> stack_active_jacobian(
+    const NLPState& state, const std::vector<int>& active) {
+  const int meq = static_cast<int>(state.jg.rows());
+  const int n = static_cast<int>(state.jg.cols());
+  std::vector<Eigen::Triplet<double>> triplets;
+  triplets.reserve(static_cast<std::size_t>(state.jg.nonZeros()) +
+                   static_cast<std::size_t>(state.jh.nonZeros()));
+  for (int col = 0; col < state.jg.outerSize(); ++col) {
+    for (Eigen::SparseMatrix<double>::InnerIterator it(state.jg, col); it;
+         ++it) {
+      triplets.emplace_back(it.row(), it.col(), it.value());
+    }
+  }
+  for (int k = 0; k < static_cast<int>(active.size()); ++k) {
+    const int source_row = active[static_cast<std::size_t>(k)];
+    for (int col = 0; col < state.jh.outerSize(); ++col) {
+      const double value = state.jh.coeff(source_row, col);
+      if (value != 0.0) {
+        triplets.emplace_back(meq + k, col, value);
+      }
+    }
+  }
+  Eigen::SparseMatrix<double> jacobian(
+      meq + static_cast<int>(active.size()), n);
+  jacobian.setFromTriplets(triplets.begin(), triplets.end());
+  jacobian.makeCompressed();
+  return jacobian;
+}
+
+bool select_independent_active_rows(
+    const NLPState& state, const Eigen::VectorXd& s,
+    const Eigen::VectorXd& mu, double path_scale,
+    std::vector<int>& active) {
+  const int n = static_cast<int>(state.jg.cols());
+  std::stable_sort(active.begin(), active.end(), [&](int lhs, int rhs) {
+    const auto confidence = [&](int row) {
+      return std::min(mu[row] / path_scale,
+                      path_scale / std::max(s[row], kMinPositive));
+    };
+    return confidence(lhs) > confidence(rhs);
+  });
+
+  const int meq = static_cast<int>(state.jg.rows());
+  std::vector<std::vector<int>> row_columns(
+      static_cast<std::size_t>(meq + active.size()));
+  for (int col = 0; col < state.jg.outerSize(); ++col) {
+    for (Eigen::SparseMatrix<double>::InnerIterator it(state.jg, col); it;
+         ++it) {
+      if (it.value() != 0.0) {
+        row_columns[static_cast<std::size_t>(it.row())].push_back(col);
+      }
+    }
+  }
+  std::vector<int> active_position(
+      static_cast<std::size_t>(state.jh.rows()), -1);
+  for (int position = 0; position < static_cast<int>(active.size());
+       ++position) {
+    active_position[static_cast<std::size_t>(
+        active[static_cast<std::size_t>(position)])] = position;
+  }
+  for (int col = 0; col < state.jh.outerSize(); ++col) {
+    for (Eigen::SparseMatrix<double>::InnerIterator it(state.jh, col); it;
+         ++it) {
+      const int position = active_position[static_cast<std::size_t>(it.row())];
+      if (position >= 0 && it.value() != 0.0) {
+        row_columns[static_cast<std::size_t>(meq + position)].push_back(col);
+      }
+    }
+  }
+
+  // Structural row rank is the maximum matching of the Jacobian bipartite
+  // graph. Equalities enter first and are never discarded; active candidates
+  // then enter in central-path confidence order. The subsequent sparse LDLT
+  // inertia and solve-residual checks remain the numerical-rank certificate.
+  // Duff (1981), ACM Trans. Math. Softw. 7(2), 235--250.
+  std::vector<int> column_match(static_cast<std::size_t>(n), -1);
+  std::vector<int> column_seen(static_cast<std::size_t>(n), -1);
+  const auto augment = [&](const auto& self, int row, int stamp) -> bool {
+    for (int col : row_columns[static_cast<std::size_t>(row)]) {
+      if (column_seen[static_cast<std::size_t>(col)] == stamp) continue;
+      column_seen[static_cast<std::size_t>(col)] = stamp;
+      const int matched_row = column_match[static_cast<std::size_t>(col)];
+      if (matched_row < 0 || self(self, matched_row, stamp)) {
+        column_match[static_cast<std::size_t>(col)] = row;
+        return true;
+      }
+    }
+    return false;
+  };
+  int stamp = 0;
+  for (int row = 0; row < meq; ++row) {
+    if (!augment(augment, row, stamp++)) return false;
+  }
+
+  std::vector<int> independent;
+  independent.reserve(active.size());
+  for (int position = 0; position < static_cast<int>(active.size());
+       ++position) {
+    if (meq + static_cast<int>(independent.size()) >= n) break;
+    if (augment(augment, meq + position, stamp++)) {
+      independent.push_back(active[static_cast<std::size_t>(position)]);
+    }
+  }
+  active = std::move(independent);
+  return !active.empty();
+}
+
+// Crossover from the central path to the limiting active-set KKT system.
+// Under strict complementarity, active slacks are O(mu_bar) with multipliers
+// bounded away from zero, while inactive multipliers are O(mu_bar) with
+// slacks bounded away from zero.  A sqrt(mu)-scale separator therefore
+// identifies only constraints for which both sides of that asymptotic split
+// agree.  This routine is deliberately a certificate path: it never publishes
+// a point unless the full, unperturbed NLP KKT residuals pass the user gates.
+// See Nocedal--Wright (2006), Secs. 16.3 and 19.6, for active-set KKT systems
+// and the central-path limit under strict complementarity.
+bool try_active_set_kkt_polish(
+    const NLPModel& prob, const IPMOptions& opt,
+    const std::vector<int>& lb_cols, const std::vector<int>& ub_cols,
+    const Eigen::VectorXd& x_start, const Eigen::VectorXd& s_start,
+    const Eigen::VectorXd& lambda_start, const Eigen::VectorXd& mu_start,
+    const ResidualSummary& start_residuals, ActiveSetPolishOutcome& out) {
+  if (!prob.lagrangian_hess || x_start.size() == 0 ||
+      s_start.size() != mu_start.size() ||
+      start_residuals.primal_feas >
+          std::max(1e-7, 10.0 * opt.tol_primal) ||
+      start_residuals.dual_feas > opt.tol_dual) {
+    return false;
+  }
+
+  const double path_scale = std::sqrt(std::max(
+      {opt.tol_complementarity, start_residuals.complementarity,
+       64.0 * std::numeric_limits<double>::epsilon()}));
+  const double slack_threshold = 10.0 * path_scale;
+  const double multiplier_threshold = 0.1 * path_scale;
+  std::vector<int> active;
+  active.reserve(static_cast<std::size_t>(s_start.size()));
+  for (int i = 0; i < s_start.size(); ++i) {
+    if (s_start[i] <= slack_threshold &&
+        mu_start[i] >= multiplier_threshold) {
+      active.push_back(i);
+    }
+  }
+  if (opt.verbose) {
+    std::cerr << "[NativeIPM] active-set polish: active=" << active.size()
+              << "/" << s_start.size() << ", separator=" << path_scale
+              << ", start=(" << start_residuals.primal_feas << ", "
+              << start_residuals.dual_feas << ", "
+              << start_residuals.complementarity << ")\n";
+  }
+  if (active.empty()) return false;
+
+  NLPState selection_state;
+  std::string selection_status;
+  if (!evaluate_nlp_state(prob, x_start, lb_cols, ub_cols,
+                          selection_state, selection_status)) {
+    return false;
+  }
+  const std::vector<int> active_candidates = active;
+
+  Eigen::VectorXd x = x_start;
+  Eigen::VectorXd lambda = lambda_start;
+  Eigen::VectorXd mu = Eigen::VectorXd::Zero(mu_start.size());
+
+  SparseInertiaKKTCache polish_cache;
+  polish_cache.preferred_free_columns = prob.equality_free_columns;
+  polish_cache.augmented.refinement_tolerance = 1e-11;
+  const auto record_polish_work = [&]() {
+    out.symbolic_analyses = polish_cache.augmented.symbolic_analyses;
+    out.numeric_factorizations =
+        polish_cache.augmented.numeric_factorizations;
+    out.linear_solves = polish_cache.augmented.linear_solves;
+  };
+  double delta_w_last = 0.0;
+  const Eigen::VectorXd dual_contribution =
+      selection_state.jg.transpose() * lambda_start +
+      selection_state.jh.transpose() * mu_start;
+  const Eigen::SparseMatrix<double> identity =
+      diagonal_sparse(Eigen::VectorXd::Ones(x.size()));
+  InertiaSettings projection_settings;
+  projection_settings.mu = std::max(opt.tol_complementarity,
+                                     start_residuals.complementarity);
+  const int selection_meq = static_cast<int>(selection_state.g.size());
+  std::vector<unsigned char> excluded(
+      static_cast<std::size_t>(mu_start.size()), 0);
+  bool projection_accepted = false;
+  // Crossover is optional: bound the number of alternative working-set
+  // factorizations so degeneracy cannot dominate a successful barrier solve.
+  // The main IPM point remains the certified fallback (Fletcher 1987, Sec. 10.3).
+  constexpr std::size_t kMaxDualSignRepairs = 8;
+  const std::size_t max_projection_attempts = std::min(
+      active_candidates.size() + 1, kMaxDualSignRepairs + 1);
+  for (std::size_t projection_attempt = 0;
+       projection_attempt < max_projection_attempts; ++projection_attempt) {
+    active.clear();
+    for (int row : active_candidates) {
+      if (excluded[static_cast<std::size_t>(row)] == 0) {
+        active.push_back(row);
+      }
+    }
+    const std::size_t eligible_count = active.size();
+    if (!select_independent_active_rows(selection_state, s_start, mu_start,
+                                        path_scale, active)) {
+      break;
+    }
+    if (opt.verbose && active.size() != eligible_count) {
+      std::cerr << "[NativeIPM] active-set rank filter: retained="
+                << active.size() << "/" << eligible_count << '\n';
+    }
+    const Eigen::SparseMatrix<double> selection_jacobian =
+        stack_active_jacobian(selection_state, active);
+    InertiaStatus projection_inertia;
+    delta_w_last = 0.0;
+    if (!factor_kkt_inertia_corrected_sparse(
+            identity, selection_jacobian, projection_settings, delta_w_last,
+            polish_cache, projection_inertia)) {
+      break;
+    }
+    Eigen::VectorXd projection_rhs(x.size() + selection_jacobian.rows());
+    projection_rhs.head(x.size()) = dual_contribution;
+    projection_rhs.tail(selection_jacobian.rows()).setZero();
+    Eigen::VectorXd projection_remainder;
+    Eigen::VectorXd projected_duals;
+    if (!solve_kkt_inertia_corrected_sparse(
+            polish_cache, projection_rhs, projection_remainder,
+            projected_duals)) {
+      break;
+    }
+
+    int most_negative_position = -1;
+    double most_negative_value = -path_scale;
+    for (int k = 0; k < static_cast<int>(active.size()); ++k) {
+      const double value = projected_duals[selection_meq + k];
+      if (value < most_negative_value) {
+        most_negative_value = value;
+        most_negative_position = k;
+      }
+    }
+    if (most_negative_position >= 0) {
+      const int rejected_row =
+          active[static_cast<std::size_t>(most_negative_position)];
+      excluded[static_cast<std::size_t>(rejected_row)] = 1;
+      if (opt.verbose) {
+        std::cerr << "[NativeIPM] active-set dual-sign filter: remove row="
+                  << rejected_row << ", multiplier=" << most_negative_value
+                  << '\n';
+      }
+      continue;
+    }
+
+    lambda = projected_duals.head(selection_meq);
+    mu.setZero();
+    for (int k = 0; k < static_cast<int>(active.size()); ++k) {
+      mu[active[static_cast<std::size_t>(k)]] =
+          std::max(0.0, projected_duals[selection_meq + k]);
+    }
+    projection_accepted = true;
+    break;
+  }
+  if (!projection_accepted) {
+    if (opt.verbose) {
+      std::cerr << "[NativeIPM] active-set polish rejected: no full-rank "
+                   "dual-feasible working set\n";
+    }
+    record_polish_work();
+    return false;
+  }
+  delta_w_last = 0.0;
+  constexpr int kMaxPolishIterations = 8;
+  for (int iteration = 0; iteration < kMaxPolishIterations; ++iteration) {
+    NLPState state;
+    std::string status;
+    if (!evaluate_nlp_state(prob, x, lb_cols, ub_cols, state, status)) {
+      record_polish_work();
+      return false;
+    }
+    Eigen::VectorXd s(state.h.size());
+    for (int i = 0; i < s.size(); ++i) {
+      s[i] = std::max(-state.h[i], kMinPositive);
+    }
+    const Eigen::VectorXd r_dual =
+        state.grad + state.jg.transpose() * lambda +
+        state.jh.transpose() * mu;
+    const ResidualSummary residuals = summarize_residuals(
+        r_dual, state.g, state.h + s, x, s, lambda, mu);
+    if (opt.verbose) {
+      std::cerr << "[NativeIPM] active-set polish iter=" << iteration
+                << ": primal=" << residuals.primal_feas
+                << ", dual=" << residuals.dual_feas
+                << ", complementarity=" << residuals.complementarity
+                << '\n';
+    }
+    // The multiplier projection alone can satisfy the slack-form KKT test
+    // while x still lies at a finite-barrier point. Require one Newton solve
+    // with h_active(x)=0 before certifying a crossover to the limiting KKT
+    // system; see Nocedal--Wright (2006), Sec. 16.3.
+    if (iteration > 0 &&
+        residuals.primal_feas <= opt.tol_primal &&
+        residuals.dual_feas <= opt.tol_dual &&
+        residuals.complementarity <= opt.tol_complementarity) {
+      out.converged = true;
+      out.x = x;
+      out.s = std::move(s);
+      out.lambda = lambda;
+      out.mu = mu;
+      out.state = std::move(state);
+      out.residuals = residuals;
+      out.iterations = iteration;
+      record_polish_work();
+      return true;
+    }
+
+    const int meq = static_cast<int>(state.g.size());
+    const Eigen::SparseMatrix<double> active_jacobian =
+        stack_active_jacobian(state, active);
+    Eigen::VectorXd active_constraints(meq + static_cast<int>(active.size()));
+    if (meq > 0) active_constraints.head(meq) = state.g;
+    for (int k = 0; k < static_cast<int>(active.size()); ++k) {
+      active_constraints[meq + k] =
+          state.h[active[static_cast<std::size_t>(k)]];
+    }
+
+    const Eigen::VectorXd mu_nonlinear =
+        nonlinear_inequality_multipliers(mu, state.n_nonlinear_ineq);
+    Eigen::SparseMatrix<double> hessian;
+    if (!build_lagrangian_hessian(prob, x, lambda, &mu_nonlinear,
+                                  hessian, status)) {
+      record_polish_work();
+      return false;
+    }
+    InertiaSettings settings;
+    settings.mu = std::max(opt.tol_complementarity,
+                           start_residuals.complementarity);
+    InertiaStatus inertia;
+    if (!factor_kkt_inertia_corrected_sparse(
+            hessian, active_jacobian, settings, delta_w_last,
+            polish_cache, inertia)) {
+      if (opt.verbose) {
+        std::cerr << "[NativeIPM] active-set polish rejected: KKT rank/inertia "
+                     "certificate failed (rows="
+                  << active_jacobian.rows() << ", cols="
+                  << active_jacobian.cols() << ")\n";
+      }
+      record_polish_work();
+      return false;
+    }
+    Eigen::VectorXd rhs(x.size() + active_constraints.size());
+    rhs << -r_dual, -active_constraints;
+    Eigen::VectorXd dx;
+    Eigen::VectorXd dy;
+    if (!solve_kkt_inertia_corrected_sparse(polish_cache, rhs, dx, dy) ||
+        dy.size() != active_constraints.size()) {
+      if (opt.verbose) {
+        std::cerr << "[NativeIPM] active-set polish rejected: certified KKT "
+                     "solve residual failed\n";
+      }
+      record_polish_work();
+      return false;
+    }
+
+    Eigen::VectorXd dlambda = dy.head(meq);
+    Eigen::VectorXd dmu = Eigen::VectorXd::Zero(mu.size());
+    for (int k = 0; k < static_cast<int>(active.size()); ++k) {
+      dmu[active[static_cast<std::size_t>(k)]] = dy[meq + k];
+    }
+    double alpha_dual = 1.0;
+    for (int row : active) {
+      if (dmu[row] < 0.0) {
+        alpha_dual = std::min(alpha_dual, -0.995 * mu[row] / dmu[row]);
+      }
+    }
+
+    const double current_gate = std::max(
+        {residuals.primal_feas / std::max(opt.tol_primal, 1e-16),
+         residuals.dual_feas / std::max(opt.tol_dual, 1e-16),
+         residuals.complementarity /
+             std::max(opt.tol_complementarity, 1e-16)});
+    bool accepted = false;
+    double alpha = std::min(1.0, alpha_dual);
+    for (int backtrack = 0; backtrack < 16; ++backtrack, alpha *= 0.5) {
+      const Eigen::VectorXd trial_x = x + alpha * dx;
+      const Eigen::VectorXd trial_lambda = lambda + alpha * dlambda;
+      const Eigen::VectorXd trial_mu = mu + alpha * dmu;
+      if ((trial_mu.array() < 0.0).any()) continue;
+      NLPState trial_state;
+      if (!evaluate_nlp_state(prob, trial_x, lb_cols, ub_cols,
+                              trial_state, status)) {
+        continue;
+      }
+      Eigen::VectorXd trial_s(trial_state.h.size());
+      for (int i = 0; i < trial_s.size(); ++i) {
+        trial_s[i] = std::max(-trial_state.h[i], kMinPositive);
+      }
+      const Eigen::VectorXd trial_r_dual =
+          trial_state.grad + trial_state.jg.transpose() * trial_lambda +
+          trial_state.jh.transpose() * trial_mu;
+      const ResidualSummary trial_residuals = summarize_residuals(
+          trial_r_dual, trial_state.g, trial_state.h + trial_s,
+          trial_x, trial_s, trial_lambda, trial_mu);
+      const double trial_gate = std::max(
+          {trial_residuals.primal_feas / std::max(opt.tol_primal, 1e-16),
+           trial_residuals.dual_feas / std::max(opt.tol_dual, 1e-16),
+           trial_residuals.complementarity /
+               std::max(opt.tol_complementarity, 1e-16)});
+      if (trial_gate < current_gate * (1.0 - 1e-4 * alpha)) {
+        x = trial_x;
+        lambda = trial_lambda;
+        mu = trial_mu;
+        accepted = true;
+        break;
+      }
+    }
+    if (!accepted) {
+      if (opt.verbose) {
+        std::cerr << "[NativeIPM] active-set polish rejected: full KKT gate "
+                     "did not decrease\n";
+      }
+      record_polish_work();
+      return false;
+    }
+  }
+  record_polish_work();
+  return false;
+}
 
 FilterSolveOutcome solve_nlp_filter_impl(
     const NLPModel& prob, const IPMOptions& opt,
@@ -2893,6 +3350,24 @@ FilterSolveOutcome solve_nlp_filter_impl(
       const double dual_condition = stationarity_condition(
           rs, lambda, mu_ineq, opt.multiplier_relative_stationarity);
       if (strict_termination(rs, opt)) {
+        ActiveSetPolishOutcome polish;
+        const bool polish_converged = try_active_set_kkt_polish(
+            prob, opt, lb_cols, ub_cols, x, s, lambda, mu_ineq, rs, polish);
+        retired_symbolic_analyses += polish.symbolic_analyses;
+        retired_numeric_factorizations += polish.numeric_factorizations;
+        active_set_polish_factorizations += polish.numeric_factorizations;
+        retired_linear_solves += polish.linear_solves;
+        if (polish_converged && strict_termination(polish.residuals, opt)) {
+          x = std::move(polish.x);
+          s = std::move(polish.s);
+          lambda = std::move(polish.lambda);
+          mu_ineq = std::move(polish.mu);
+          state = std::move(polish.state);
+          snapshot_outcome(
+              true, total_iters + polish.iterations + 1,
+              "Converged after active-set KKT polish", polish.residuals);
+          return result;
+        }
         snapshot_outcome(true, total_iters + 1, "Converged", rs);
         return result;
       }
@@ -3349,6 +3824,7 @@ FilterSolveOutcome solve_nlp_filter_impl(
           (mu_ineq.size() == 0) ? 1.0
                                 : max_positive_step(mu_ineq, dmu_ineq, tau);
 
+
       const double theta_k = compute_theta(state.g, state.h, s);
       const double theta_min = parameterized_switching_filter
           ? opt.filter_theta_min_scale * std::max(1.0, theta_k)
@@ -3489,6 +3965,10 @@ FilterSolveOutcome solve_nlp_filter_impl(
         }
         if (!slack_valid) {
           ++rejected_steps;
+          if (opt.verbose && alpha == alpha0) {
+            std::cerr << "[NativeIPM] iter=" << total_iters
+                      << " full step rejected: corrected slack is not positive\n";
+          }
           alpha *= 0.5;
           continue;
         }
@@ -5267,9 +5747,22 @@ std::pair<SolveResult, IPMDetail> NativeIPMAdapter::solve_nlp_detail(const NLPMo
       transform_filter_options_to_scaled_coordinates(sf, active_opt);
     }
 
+    // Waechter--Biegler (2006), Sections 2.4 and 3.3: restoration is a
+    // globalization phase, not merely a step after the iteration budget. Bound only
+    // the first filter attempt so a stalled infeasible central path can enter
+    // restoration early; restoration has an independent budget and the
+    // final primal-dual retry keeps the original max_iter.
+    if (active_opt.use_restoration_phase &&
+        active_opt.primary_max_iter_before_restoration > 0) {
+      active_opt.max_iter = std::min(
+          active_opt.max_iter,
+          active_opt.primary_max_iter_before_restoration);
+    }
     FilterSolveOutcome fo = solve_nlp_filter_impl(
         *active_prob, active_opt, do_scale ? &sf : nullptr,
         opt_.tol_primal);
+    const int initial_attempt_iterations = fo.iterations;
+    const int initial_attempt_factorizations = fo.numeric_factorizations;
     int solve_chain_numeric_factorizations = fo.numeric_factorizations;
     int solve_chain_symbolic_analyses = fo.symbolic_analyses;
     int solve_chain_linear_solves = fo.linear_solves;
@@ -5346,7 +5839,10 @@ std::pair<SolveResult, IPMDetail> NativeIPMAdapter::solve_nlp_detail(const NLPMo
         rst_opt.use_second_order_correction = false;
         rst_opt.scale_problem = false;
         rst_opt.globalization = Globalization::Filter;
-        rst_opt.max_iter = std::max(0, opt_.max_iter - fo.iterations);
+        rst_opt.max_iter = std::min(
+            opt_.max_iter, std::max(1, opt_.restoration_max_iter));
+        rst_opt.primal_feasible_start = false;
+        rst_opt.preserve_initial_point = false;
 
         FilterSolveOutcome rf = solve_nlp_filter_impl(rb.model, rst_opt);
         restoration_factorizations += rf.numeric_factorizations;
@@ -5609,11 +6105,13 @@ std::pair<SolveResult, IPMDetail> NativeIPMAdapter::solve_nlp_detail(const NLPMo
     }
 
     // A scaled-space solution can be close to, but not yet inside, the strict
-    // original-scale KKT gate. A line-search collapse at an already feasible
-    // primal point is the same structural state: restoration has no normal
-    // residual to repair, while the dual/tangential trajectory still has work
-    // left. Continue with the same unscaled primal-dual central state and a
-    // fresh filter, rather than cold-starting or invoking restoration.
+    // original-scale KKT test. A line-search collapse or deliberate primary
+    // budget cap at an already feasible primal point is the same structural
+    // state: restoration has no normal residual to repair, while the
+    // dual/tangential trajectory still has work left. Continue with the same
+    // unscaled primal-dual central state and a fresh filter, rather than
+    // cold-starting or invoking restoration. Waechter--Biegler (2006),
+    // Sections 2.4 and 3.3.
     const int remaining_iterations = opt_.max_iter - fo.iterations;
     const bool original_primal_gate_passed = original_coordinates_audited &&
         fo.final_residuals.primal_feas <= opt_.tol_primal;
@@ -5780,6 +6278,8 @@ std::pair<SolveResult, IPMDetail> NativeIPMAdapter::solve_nlp_detail(const NLPMo
     detail.numeric_factorizations = solve_chain_numeric_factorizations +
         std::max(0, fo.numeric_factorizations -
                         selected_base_numeric_factorizations);
+    detail.initial_attempt_iterations = initial_attempt_iterations;
+    detail.initial_attempt_factorizations = initial_attempt_factorizations;
     detail.linear_solves = solve_chain_linear_solves +
         std::max(0, fo.linear_solves - selected_base_linear_solves);
     detail.primary_factorizations = solve_chain_primary_factorizations +

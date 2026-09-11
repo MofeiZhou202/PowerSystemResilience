@@ -611,6 +611,17 @@ BCResult result = solve_milp_bc(mip, opt, ws, cbs);
 
 #### Solution and cut pools
 
+Cut-pool signatures accept the complete IEEE 754 input domain. Finite values
+retain the HiGHS mantissa/exponent hash; positive infinity, negative infinity,
+and NaN receive distinct stable tags before any integer conversion. Equality
+checks still resolve ordinary hash collisions, so this changes neither cut
+identity nor finite-model numerics while keeping unbounded rows sanitizer-safe.
+The vendored Eigen partial-pivot LU also skips the mathematically empty trailing
+Schur update when a rectangular recursive panel has rows but zero columns. This
+preserves the original pivot sequence while avoiding a writable zero-width
+`Ref` under UBSan. A trial replacement with rank-revealing full-pivot LU was
+rejected because it changed the downstream KKT Newton trajectory.
+
 | Field | Default | Description |
 |---|---|---|
 | `cut_pool_max_size` | 2 000 | Maximum global cut pool size |
