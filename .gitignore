@@ -147,3 +147,9 @@ third_party/oneapi-mkl/
 .github/
 
 tests/data/
+
+# Track the repository-local theory workflow for offline use.
+!/.github/
+!/.github/skills/
+/.github/skills/*
+!/.github/skills/theory-guided-coding/
