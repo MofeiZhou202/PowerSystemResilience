@@ -30,6 +30,9 @@ theory-guided 规则，所有算法/数值改动必须以这些推导文档为�
 | [lp_tail_elimination_2026-08-18.md](../archive/lp_tail_elimination_2026-08-18.md) | LP 长尾歼灭工作流：NETLIB 90 全口径领先的量化预测与 measured-vs-predicted 记录 |
 | [native_presolve_lp_2026-08-18.md](../archive/native_presolve_lp_2026-08-18.md) | 原生 LP presolve 立项推导与设计：桥死亡实测、成本模型、量化预测与 P0-P4 分阶段验收协议 |
 | [ipm_structural_performance_2026-08-06.md](../archive/ipm_structural_performance_2026-08-06.md) | IPM 结构化性能分析（2026-08-06 快照） |
+| [windows_offline_evaluation_2026-09-11.md](../archive/windows_offline_evaluation_2026-09-11.md) | Windows 离线复评：预注册协议、NETLIB/锥/NLP/MILP 实测、自动路径失败与 SDK 消费审计、增强建议及条件预测 |
+| [windows_remediation_2026-09-11.md](../archive/windows_remediation_2026-09-11.md) | Windows 修复理论与偏差记录：标准型、NLP 全局化、Auto 截止时间、SDK 闭包及 R6 分解计时/线程稳定性协议 |
+| [windows_lp_stability_2026-09-11.md](../archive/windows_lp_stability_2026-09-11.md) | LP 装配/符号/数值分解计时、INTEL/2与4的20组P95、全集/NLP验收及Windows运行建议范围 |
 | [lp_kernel_selector_2026-08-11.md](../archive/lp_kernel_selector_2026-08-11.md) | LP 内核选择器：成本模型与并发组合 portfolio 的决策记录 |
 | [native_ipm_windows_integration_2026-08-13.md](../archive/native_ipm_windows_integration_2026-08-13.md) | 原生 IPM 的 Windows 集成记录 |
 | [klu_numeric_refactor_2026-08-20.md](../archive/klu_numeric_refactor_2026-08-20.md) | 固定模式 LE/NLE 的 KLU 数值重分解契约、成本模型、回退事务与验收协议 |

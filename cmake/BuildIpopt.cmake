@@ -96,6 +96,15 @@ else()
           "${MIPSOLVERS_MKL_THREAD_LIB}"
           "${MIPSOLVERS_MKL_CORE_LIB}")
         if(MIPSOLVERS_MKL_THREADING STREQUAL "INTEL")
+          # R1: an explicit local bundle also owns the runtime dependency.
+          if(MIPSOLVERS_MKL_ROOT)
+            set(_MIPSOLVERS_IPOPT_IOMP5MD "${MIPSOLVERS_MKL_ROOT}/lib/libiomp5md.lib")
+            set(_MIPSOLVERS_IPOPT_IOMP5MD_DLL "${MIPSOLVERS_MKL_ROOT}/bin/libiomp5md.dll")
+            if(NOT EXISTS "${_MIPSOLVERS_IPOPT_IOMP5MD}" OR
+               NOT EXISTS "${_MIPSOLVERS_IPOPT_IOMP5MD_DLL}")
+              message(FATAL_ERROR "The staged oneMKL INTEL bundle is missing its OpenMP runtime")
+            endif()
+          else()
           find_library(_MIPSOLVERS_IPOPT_IOMP5MD NAMES libiomp5md
             HINTS "$ENV{INTEL_COMPILER_ROOT}"
                   "C:/Program Files (x86)/Intel/oneAPI/compiler/latest"
@@ -104,6 +113,7 @@ else()
             HINTS "$ENV{INTEL_COMPILER_ROOT}"
                   "C:/Program Files (x86)/Intel/oneAPI/compiler/latest"
             PATH_SUFFIXES bin redist/intel64/compiler)
+          endif()
           if(NOT _MIPSOLVERS_IPOPT_IOMP5MD OR
              NOT _MIPSOLVERS_IPOPT_IOMP5MD_DLL)
             message(FATAL_ERROR

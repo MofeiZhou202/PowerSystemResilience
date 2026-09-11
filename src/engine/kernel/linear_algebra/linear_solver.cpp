@@ -1,3 +1,4 @@
+#include "lp_factor_timing.hpp"
 #include "mipsolvers/engine/kernel/linear_algebra/linear_solver.hpp"
 
 #include <algorithm>
@@ -87,6 +88,7 @@ const char* EigenSparseLUSolver::backend_name() const {
 }
 
 void EigenSparseLUSolver::analyze_pattern(const Eigen::SparseMatrix<double>& a) {
+  lp_timing::Scope timing(lp_timing::Kind::Symbolic);
   empty_system_ = is_empty_square_system(a);
   if (empty_system_) return;
   solver_.analyzePattern(a);
@@ -94,12 +96,13 @@ void EigenSparseLUSolver::analyze_pattern(const Eigen::SparseMatrix<double>& a) 
 }
 
 bool EigenSparseLUSolver::factorize(const Eigen::SparseMatrix<double>& a) {
+  lp_timing::Scope timing(lp_timing::Kind::Numeric);
   empty_system_ = is_empty_square_system(a);
   if (empty_system_) return true;
   if (!analysis_done_) {
     // analyze_pattern() was not called; run it now so that
     // Eigen::SparseLU::m_analysisIsOk is set before factorize() is called.
-    solver_.analyzePattern(a);
+    { lp_timing::Scope symbolic(lp_timing::Kind::Symbolic); solver_.analyzePattern(a); }
     analysis_done_ = true;
   }
   solver_.factorize(a);
@@ -135,6 +138,7 @@ const char* EigenUmfPackSolver::backend_name() const {
 }
 
 void EigenUmfPackSolver::analyze_pattern(const Eigen::SparseMatrix<double>& a) {
+  lp_timing::Scope timing(lp_timing::Kind::Symbolic);
   empty_system_ = is_empty_square_system(a);
   if (empty_system_) return;
   if (!impl_) impl_ = std::make_unique<Impl>();
@@ -142,6 +146,7 @@ void EigenUmfPackSolver::analyze_pattern(const Eigen::SparseMatrix<double>& a) {
 }
 
 bool EigenUmfPackSolver::factorize(const Eigen::SparseMatrix<double>& a) {
+  lp_timing::Scope timing(lp_timing::Kind::Numeric);
   empty_system_ = is_empty_square_system(a);
   if (empty_system_) return true;
   const bool needs_analyze = !impl_;
@@ -149,7 +154,7 @@ bool EigenUmfPackSolver::factorize(const Eigen::SparseMatrix<double>& a) {
   if (needs_analyze) {
     // analyze_pattern() was not called; run it now so that UMFPACK
     // has a symbolic factorization before the numerical step.
-    impl_->solver.analyzePattern(a);
+    { lp_timing::Scope symbolic(lp_timing::Kind::Symbolic); impl_->solver.analyzePattern(a); }
   }
   impl_->solver.factorize(a);
   return impl_->solver.info() == Eigen::Success;
@@ -238,6 +243,7 @@ const char* EigenKluSolver::backend_name() const {
 }
 
 void EigenKluSolver::analyze_pattern(const Eigen::SparseMatrix<double>& a) {
+  lp_timing::Scope timing(lp_timing::Kind::Symbolic);
   empty_system_ = is_empty_square_system(a);
   if (empty_system_) {
     if (impl_) impl_->invalidate_numeric();
@@ -251,6 +257,7 @@ void EigenKluSolver::analyze_pattern(const Eigen::SparseMatrix<double>& a) {
 }
 
 bool EigenKluSolver::factorize(const Eigen::SparseMatrix<double>& a) {
+  lp_timing::Scope timing(lp_timing::Kind::Numeric);
   empty_system_ = is_empty_square_system(a);
   if (empty_system_) {
     if (impl_) impl_->invalidate_numeric();
@@ -263,7 +270,7 @@ bool EigenKluSolver::factorize(const Eigen::SparseMatrix<double>& a) {
     // has a symbolic factorization before the numerical step.
     const int ord = klu_ordering_from_env();
     if (ord >= 0) impl_->solver.kluCommon().ordering = ord;
-    impl_->solver.analyzePattern(a);
+    { lp_timing::Scope symbolic(lp_timing::Kind::Symbolic); impl_->solver.analyzePattern(a); }
   }
   impl_->solver.factorize(a);
   const bool ok = impl_->solver.info() == Eigen::Success;
@@ -331,6 +338,7 @@ const char* SuperLUSolver::backend_name() const {
 }
 
 void SuperLUSolver::analyze_pattern(const Eigen::SparseMatrix<double>& a) {
+  lp_timing::Scope timing(lp_timing::Kind::Symbolic);
   empty_system_ = is_empty_square_system(a);
   if (empty_system_) return;
   if (!impl_) impl_ = std::make_unique<Impl>();
@@ -338,13 +346,14 @@ void SuperLUSolver::analyze_pattern(const Eigen::SparseMatrix<double>& a) {
 }
 
 bool SuperLUSolver::factorize(const Eigen::SparseMatrix<double>& a) {
+  lp_timing::Scope timing(lp_timing::Kind::Numeric);
   empty_system_ = is_empty_square_system(a);
   if (empty_system_) return true;
   if (!impl_) {
     // analyze_pattern() was not called; run it now so that
     // Eigen::SuperLU::m_analysisIsOk is set before factorize() is called.
     impl_ = std::make_unique<Impl>();
-    impl_->solver.analyzePattern(a);
+    { lp_timing::Scope symbolic(lp_timing::Kind::Symbolic); impl_->solver.analyzePattern(a); }
   }
   impl_->solver.factorize(a);
   return impl_->solver.info() == Eigen::Success;
@@ -387,6 +396,7 @@ const char* MKLPardisoSolver::backend_name() const {
 }
 
 void MKLPardisoSolver::analyze_pattern(const Eigen::SparseMatrix<double>& a) {
+  lp_timing::Scope timing(lp_timing::Kind::Symbolic);
   empty_system_ = is_empty_square_system(a);
   if (empty_system_) return;
   if (!impl_) impl_ = std::make_unique<Impl>();
@@ -394,13 +404,14 @@ void MKLPardisoSolver::analyze_pattern(const Eigen::SparseMatrix<double>& a) {
 }
 
 bool MKLPardisoSolver::factorize(const Eigen::SparseMatrix<double>& a) {
+  lp_timing::Scope timing(lp_timing::Kind::Numeric);
   empty_system_ = is_empty_square_system(a);
   if (empty_system_) return true;
   if (!impl_) {
     // analyze_pattern() was not called; run it now so that
     // Eigen::PardisoLU::m_analysisIsOk is set before factorize() is called.
     impl_ = std::make_unique<Impl>();
-    impl_->solver.analyzePattern(a);
+    { lp_timing::Scope symbolic(lp_timing::Kind::Symbolic); impl_->solver.analyzePattern(a); }
   }
   impl_->solver.factorize(a);
   return impl_->solver.info() == Eigen::Success;
@@ -463,6 +474,7 @@ const char* MKLPardisoLLTSolver::backend_name() const {
 
 void MKLPardisoLLTSolver::analyze_pattern(
     const Eigen::SparseMatrix<double>& a) {
+  lp_timing::Scope timing(lp_timing::Kind::Symbolic);
   empty_system_ = is_empty_square_system(a);
   if (empty_system_) return;
   if (!impl_) impl_ = std::make_unique<Impl>();
@@ -471,11 +483,12 @@ void MKLPardisoLLTSolver::analyze_pattern(
 
 bool MKLPardisoLLTSolver::factorize(
     const Eigen::SparseMatrix<double>& a) {
+  lp_timing::Scope timing(lp_timing::Kind::Numeric);
   empty_system_ = is_empty_square_system(a);
   if (empty_system_) return true;
   if (!impl_) {
     impl_ = std::make_unique<Impl>();
-    impl_->solver.analyzePattern(a);
+    { lp_timing::Scope symbolic(lp_timing::Kind::Symbolic); impl_->solver.analyzePattern(a); }
   }
   impl_->solver.factorize(a);
   return impl_->solver.info() == Eigen::Success;
@@ -539,6 +552,7 @@ const char* MKLPardisoLDLTSolver::backend_name() const {
 
 void MKLPardisoLDLTSolver::analyze_pattern(
     const Eigen::SparseMatrix<double>& a) {
+  lp_timing::Scope timing(lp_timing::Kind::Symbolic);
   empty_system_ = is_empty_square_system(a);
   if (empty_system_) return;
   if (!impl_) impl_ = std::make_unique<Impl>();
@@ -547,11 +561,12 @@ void MKLPardisoLDLTSolver::analyze_pattern(
 
 bool MKLPardisoLDLTSolver::factorize(
     const Eigen::SparseMatrix<double>& a) {
+  lp_timing::Scope timing(lp_timing::Kind::Numeric);
   empty_system_ = is_empty_square_system(a);
   if (empty_system_) return true;
   if (!impl_) {
     impl_ = std::make_unique<Impl>();
-    impl_->solver.analyzePattern(a);
+    { lp_timing::Scope symbolic(lp_timing::Kind::Symbolic); impl_->solver.analyzePattern(a); }
   }
   impl_->solver.factorize(a);
   return impl_->solver.info() == Eigen::Success;
@@ -918,6 +933,7 @@ const char* MumpsSolver::backend_name() const {
 }
 
 void MumpsSolver::analyze_pattern(const Eigen::SparseMatrix<double>& a) {
+  lp_timing::Scope timing(lp_timing::Kind::Symbolic);
   std::lock_guard<std::recursive_mutex> _lk(g_mumps_api_mutex);
   empty_system_ = is_empty_square_system(a);
   if (empty_system_) return;
@@ -989,6 +1005,7 @@ void MumpsSolver::analyze_pattern(const Eigen::SparseMatrix<double>& a) {
 }
 
 bool MumpsSolver::factorize(const Eigen::SparseMatrix<double>& a) {
+  lp_timing::Scope timing(lp_timing::Kind::Numeric);
   std::lock_guard<std::recursive_mutex> _lk(g_mumps_api_mutex);
   empty_system_ = is_empty_square_system(a);
   if (empty_system_) return true;

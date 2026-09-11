@@ -73,7 +73,7 @@ NLPModel hs071() {
   return p;
 }
 
-void report(const char* solver, int run, const SolveResult& r, double ms,
+bool report(const char* solver, int run, const SolveResult& r, double ms,
             const IPMDetail* detail) {
   const double reference = 17.014017289155;
   std::printf(
@@ -88,22 +88,29 @@ void report(const char* solver, int run, const SolveResult& r, double ms,
       std::abs(r.stats.objective - reference), r.stats.primal_feas,
       r.stats.dual_feas, r.stats.complementarity,
       detail ? detail->newton_formulation.c_str() : "external");
+  // Windows remediation R3: enforce the same public accuracy gate as the log.
+  return r.stats.success && std::abs(r.stats.objective - reference) <= 1e-6 &&
+         r.stats.primal_feas <= 1e-6;
 }
 
 }  // namespace
 
 int main(int argc, char** argv) {
   const int repetitions = argc > 1 ? std::max(1, std::atoi(argv[1])) : 5;
+  // R3c: KKT tolerances do not directly bound absolute objective error.
+  const double tolerance = argc > 2 ? std::atof(argv[2]) : 1e-6;
+  if (!(tolerance > 0.0) || !std::isfinite(tolerance)) return 2;
+  std::printf("requested_kkt_tolerance=%.12g objective_acceptance=1e-6\n", tolerance);
   NLPModel model = hs071();
   model.solver_options.max_iterations = 200;
-  model.solver_options.tolerance = 1e-6;
-  model.solver_options.acceptable_tolerance = 1e-6;
+  model.solver_options.tolerance = tolerance;
+  model.solver_options.acceptable_tolerance = tolerance;
 
   IPMOptions options;
   options.max_iter = 200;
-  options.tol_primal = 1e-6;
-  options.tol_dual = 1e-6;
-  options.tol_complementarity = 1e-6;
+  options.tol_primal = tolerance;
+  options.tol_dual = tolerance;
+  options.tol_complementarity = tolerance;
   options.tol_accept = 0.0;
   options.allow_external_fallback = false;
 
@@ -115,25 +122,22 @@ int main(int argc, char** argv) {
       const auto solved = native.solve_nlp_detail(model);
       const double ms = std::chrono::duration<double, std::milli>(
           std::chrono::steady_clock::now() - t0).count();
-      report("native", run, solved.first, ms, &solved.second);
-      ok = ok && solved.first.stats.success;
+      ok = report("native", run, solved.first, ms, &solved.second) && ok;
     }
     IpoptAdapter ipopt;
     const auto t0 = std::chrono::steady_clock::now();
     const SolveResult solved = ipopt.solve_nlp(model);
     const double ms = std::chrono::duration<double, std::milli>(
         std::chrono::steady_clock::now() - t0).count();
-    report("ipopt", run, solved, ms, nullptr);
-    ok = ok && solved.stats.success;
+    ok = report("ipopt", run, solved, ms, nullptr) && ok;
     if ((run & 1) == 0) {
       NativeIPMAdapter native(options);
       const auto tn = std::chrono::steady_clock::now();
       const auto native_solved = native.solve_nlp_detail(model);
       const double native_ms = std::chrono::duration<double, std::milli>(
           std::chrono::steady_clock::now() - tn).count();
-      report("native", run, native_solved.first, native_ms,
-             &native_solved.second);
-      ok = ok && native_solved.first.stats.success;
+      ok = report("native", run, native_solved.first, native_ms,
+                  &native_solved.second) && ok;
     }
   }
   return ok ? 0 : 1;

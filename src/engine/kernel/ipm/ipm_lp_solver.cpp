@@ -1,3 +1,4 @@
+#include "../linear_algebra/lp_factor_timing.hpp"
 // High-performance Mehrotra Predictor-Corrector IPM for LP
 //
 // Solves: min c'x s.t. A x <= b, Aeq x = beq, lb <= x <= ub
@@ -283,6 +284,13 @@ SolveResult NativeIPMLPAdapter::solve_lp_with_presolve_snapshot(
                               {}) -> SolveResult {
     auto run_variant = [&](int rounds, IPMNewtonFormulation form,
                            const Eigen::VectorXd* override_start = nullptr) {
+      // Windows remediation R4: cancellation also gates robustness retries.
+      if (opt_.cancel_flag && opt_.cancel_flag->load(std::memory_order_relaxed)) {
+        SolveResult cancelled;
+        cancelled.stats.solver_name = name();
+        cancelled.stats.status = "Cancelled";
+        return cancelled;
+      }
       const double budget = has_deadline ? remaining_time() : 0.0;
       if (has_deadline && budget <= 0.0) {
         SolveResult timed_out;
@@ -675,11 +683,29 @@ SolveResult NativeIPMLPAdapter::solve_lp_impl(const LPModel& prob,
                                                const std::shared_ptr<const
                                                    LpPresolveMatrixWorkspace>&
                                                    matrix_workspace) const {
+  lp_timing::Run factor_timing(static_cast<int>(prob.A.rows() + prob.Aeq.rows()),
+                              static_cast<int>(prob.c.size()), ruiz_rounds);
   const bool has_warm_start = (x0.size() == prob.c.size());
   const bool ipm_verbose_env = (std::getenv("MIPSOLVERS_IPM_VERBOSE") != nullptr);
   SolveResult out;
   out.stats.solver_name = name();
   const auto t0 = std::chrono::steady_clock::now();
+
+  // R4: check between setup phases as well as between Newton iterations.
+  auto interrupted = [&]() {
+    if (opt_.cancel_flag && opt_.cancel_flag->load(std::memory_order_relaxed)) {
+      out.stats.status = "Cancelled";
+      return true;
+    }
+    if (time_limit_sec > 0.0 && std::isfinite(time_limit_sec) &&
+        std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count()
+            >= time_limit_sec) {
+      out.stats.status = "Time limit";
+      return true;
+    }
+    return false;
+  };
+  if (interrupted()) return out;
 
   const int n_orig = static_cast<int>(prob.c.size());
   if (n_orig == 0) {
@@ -1056,6 +1082,7 @@ SolveResult NativeIPMLPAdapter::solve_lp_impl(const LPModel& prob,
   bool auto_hybrid_augmented = false;
   int automatic_max_correctors = 3;
 
+  lp_timing::Scope graph_timing(lp_timing::Kind::Assembly);
   // === Banded storage: band[(row-col)*m + col] for row >= col, row-col <= bw ===
   const int bw = bandwidth;
   std::vector<double> band_storage;
@@ -1063,6 +1090,7 @@ SolveResult NativeIPMLPAdapter::solve_lp_impl(const LPModel& prob,
   std::vector<int> band_scatter_col_start;
 
   // === Sparse path — normal equations N = Ae·Θ·Ae' ===
+  if (interrupted()) return out;
   Eigen::SparseMatrix<double> N_sparse;
 #if MIPSOLVERS_HAVE_CHOLMOD
     // CHOLMOD is the preferred sparse Cholesky backend (supernodal BLAS-3).
@@ -1553,7 +1581,7 @@ SolveResult NativeIPMLPAdapter::solve_lp_impl(const LPModel& prob,
           sparse_diag_offsets[i] = static_cast<int>(pos - Ni);
         }
 #if !MIPSOLVERS_USE_ACCELERATE
-        if (!cholmod_ok) ldlt.analyzePattern(N_sparse);
+        if (!cholmod_ok) { lp_timing::Scope timing(lp_timing::Kind::Symbolic); ldlt.analyzePattern(N_sparse); }
 #endif
 #ifdef HACDCPF_HAVE_MKL_PARDISO
         if (use_normal_pardiso) normal_pardiso.analyze_pattern(N_sparse);
@@ -1640,7 +1668,9 @@ SolveResult NativeIPMLPAdapter::solve_lp_impl(const LPModel& prob,
   const bool aug_use_pardiso = false;
 #endif
 
+  graph_timing.finish();
   // === Initialization ===
+  if (interrupted()) return out;
   std::vector<double> xv(nn), yv(m);
   std::vector<double> gl(nn), gu(nn), zl(nn), zu(nn);
   double* x_d = xv.data();
@@ -1708,9 +1738,11 @@ SolveResult NativeIPMLPAdapter::solve_lp_impl(const LPModel& prob,
       std::fill(yv.begin(), yv.end(), 0.0);
     } else if (use_dense) {
       // Dense mode init: N = Ae_dense * Ae_dense' (Theta=I), solve for x and y.
+      lp_timing::Scope init_assembly(lp_timing::Kind::Assembly);
       N_dense.noalias() = Ae_dense * Ae_dense.transpose();
       N_dense.diagonal().array() += 1e-10;
-      ldlt_dense.compute(N_dense);
+      { lp_timing::Scope timing(lp_timing::Kind::Numeric); ldlt_dense.compute(N_dense); }
+      init_assembly.finish();
       if (ldlt_dense.info() == Eigen::Success) {
         Eigen::VectorXd tmp = ldlt_dense.solve(
             Eigen::Map<const Eigen::VectorXd>(b.data(), m));
@@ -1725,6 +1757,7 @@ SolveResult NativeIPMLPAdapter::solve_lp_impl(const LPModel& prob,
         std::fill(yv.begin(), yv.end(), 0.0);
       }
     } else if (use_banded) {
+      lp_timing::Scope init_assembly(lp_timing::Kind::Assembly);
       std::fill(band_storage.begin(), band_storage.end(), 0.0);
       for (int j = 0; j < n_orig; ++j)
         for (int si = band_scatter_col_start[j]; si < band_scatter_col_start[j + 1]; ++si)
@@ -1733,7 +1766,8 @@ SolveResult NativeIPMLPAdapter::solve_lp_impl(const LPModel& prob,
       for (int i = 0; i < m; ++i) band_storage[i] += 1e-10;
 
       std::vector<double> bw_init(band_storage);
-      if (banded_chol_factor(bw_init.data(), m, bw)) {
+      init_assembly.finish();
+      if ([&]() { lp_timing::Scope timing(lp_timing::Kind::Numeric); return banded_chol_factor(bw_init.data(), m, bw); }()) {
         std::memcpy(y_d, b.data(), sizeof(double) * m);
         banded_chol_solve(bw_init.data(), m, bw, y_d);
         aet_mul(y_d, x_d);
@@ -1816,7 +1850,7 @@ SolveResult NativeIPMLPAdapter::solve_lp_impl(const LPModel& prob,
       }
 #else
       {
-      ldlt.factorize(N_sparse);
+      { lp_timing::Scope timing(lp_timing::Kind::Numeric); ldlt.factorize(N_sparse); }
       if (ldlt.info() == Eigen::Success) {
         Eigen::Map<Eigen::VectorXd> bmap(b.data(), m);
         Eigen::VectorXd tmp = ldlt.solve(bmap);
@@ -1845,6 +1879,7 @@ SolveResult NativeIPMLPAdapter::solve_lp_impl(const LPModel& prob,
       // A sqrt(eps) stripe keeps the projection quasidefinite without
       // introducing the condition-number squaring that Auto avoided.
       using T = Eigen::Triplet<double>;
+      lp_timing::Scope init_assembly(lp_timing::Kind::Assembly);
       std::vector<T> init_j_trips;
       init_j_trips.reserve(static_cast<size_t>(A_mat.nonZeros() +
                                                Aeq_mat.nonZeros() + mi));
@@ -1861,6 +1896,7 @@ SolveResult NativeIPMLPAdapter::solve_lp_impl(const LPModel& prob,
       Eigen::SparseMatrix<double> init_jg(m, nn);
       init_jg.setFromTriplets(init_j_trips.begin(), init_j_trips.end());
       init_jg.makeCompressed();
+      init_assembly.finish();
 
       const double init_reg =
           std::sqrt(std::numeric_limits<double>::epsilon());
@@ -2068,6 +2104,7 @@ SolveResult NativeIPMLPAdapter::solve_lp_impl(const LPModel& prob,
   }
 
   // === IPM iteration ===
+  if (interrupted()) return out;
   std::vector<double> theta(nn), dx(nn), dy(m), dzl(nn), dzu(nn);
   std::vector<double> dx_aff(nn), dy_aff(m), dzl_aff(nn), dzu_aff(nn);
   std::vector<double> rhs(m), tmp_n(nn), Atdy(nn);
@@ -2450,6 +2487,7 @@ SolveResult NativeIPMLPAdapter::solve_lp_impl(const LPModel& prob,
 
   // Lambda: fill banded N from θ, factorize
   auto fill_and_factor_banded = [&]() -> bool {
+    lp_timing::Scope assembly_timing(lp_timing::Kind::Assembly);
     auto t_ff = tnow();
     double* bs = band_storage.data();
     const size_t bs_sz = band_storage.size();
@@ -2472,12 +2510,13 @@ SolveResult NativeIPMLPAdapter::solve_lp_impl(const LPModel& prob,
 
     // Copy to working buffer and factorize
     std::memcpy(band_work.data(), bs, sizeof(double) * bs_sz);
-    bool ok = banded_chol_factor(band_work.data(), m, bw);
+    bool ok = [&]() { lp_timing::Scope timing(lp_timing::Kind::Numeric); return banded_chol_factor(band_work.data(), m, bw); }();
     t_factor += std::chrono::duration<double, std::milli>(tnow() - t_ff2).count();
     return ok;
   };
 
   auto fill_and_factor_dense = [&]() -> bool {
+    lp_timing::Scope assembly_timing(lp_timing::Kind::Assembly);
     auto t_ff = tnow();
     // Ae_sqrt[:,k] = sqrt(theta[k]) * Ae_dense[:,k]
     for (int k = 0; k < nn; ++k)
@@ -2498,12 +2537,13 @@ SolveResult NativeIPMLPAdapter::solve_lp_impl(const LPModel& prob,
     N_dense.noalias() = Ae_sqrt * Ae_sqrt.transpose();
 #endif
     N_dense.diagonal().array() += reg;
-    ldlt_dense.compute(N_dense);
+    { lp_timing::Scope timing(lp_timing::Kind::Numeric); ldlt_dense.compute(N_dense); }
     t_factor += std::chrono::duration<double, std::milli>(tnow() - t_ff2).count();
     return ldlt_dense.info() == Eigen::Success;
   };
 
   auto fill_and_factor_sparse = [&]() -> bool {
+    lp_timing::Scope assembly_timing(lp_timing::Kind::Assembly);
     auto t_ff = tnow();
     double* Nv = N_sparse.valuePtr();
     std::memset(Nv, 0, sizeof(double) * sparse_n_nnz);
@@ -2542,7 +2582,7 @@ SolveResult NativeIPMLPAdapter::solve_lp_impl(const LPModel& prob,
     t_factor += std::chrono::duration<double, std::milli>(tnow() - t_ff2).count();
     return accel_numeric.status == SparseStatusOK;
 #else
-    ldlt.factorize(N_sparse);
+    { lp_timing::Scope timing(lp_timing::Kind::Numeric); ldlt.factorize(N_sparse); }
     t_factor += std::chrono::duration<double, std::milli>(tnow() - t_ff2).count();
     return ldlt.info() == Eigen::Success;
 #endif
@@ -3051,6 +3091,7 @@ SolveResult NativeIPMLPAdapter::solve_lp_impl(const LPModel& prob,
         // dual block) and factor the quasidefinite system (CHOLMOD simplicial
         // LDLᵀ, or Accelerate unpivoted LDLᵀ when aug_use_accel).
         auto set_aug_diag = [&](double rr) {
+          lp_timing::Scope timing(lp_timing::Kind::Assembly);
           for (int j = 0; j < nn; ++j)
             aug_kv[static_cast<size_t>(aug_diag[static_cast<size_t>(j)])] =
                 dvec[j] + rr;
@@ -3080,6 +3121,7 @@ SolveResult NativeIPMLPAdapter::solve_lp_impl(const LPModel& prob,
         set_aug_diag(reg);
         factor_ok = aug_numeric_factor();
         for (int retry = 0; retry < 4 && !factor_ok; ++retry) {
+          lp_timing::Retry retry_timing;
           const double dyn = reg * std::pow(100.0, retry + 1);
           set_aug_diag(dyn);
           factor_ok = aug_numeric_factor();
@@ -3091,6 +3133,7 @@ SolveResult NativeIPMLPAdapter::solve_lp_impl(const LPModel& prob,
         for (int j = 0; j < aug_primal_dim; ++j)
           wv[j] = dvec[aug_reduced_to_full[static_cast<size_t>(j)]];
         auto factor_augmented = [&](double rr) {
+          lp_timing::Scope timing(lp_timing::Kind::Assembly);
           bool ok = false;
           if (aug_condensed_col.empty()) {
             ok = factor_kkt_sparse(aug_cache, aug_w, aug_negAe, rr);
@@ -3131,6 +3174,7 @@ SolveResult NativeIPMLPAdapter::solve_lp_impl(const LPModel& prob,
         };
         factor_ok = factor_augmented(reg);
         for (int retry = 0; retry < 4 && !factor_ok; ++retry) {
+          lp_timing::Retry retry_timing;
           const double dyn_reg = reg * std::pow(100.0, retry + 1);
           factor_ok = factor_augmented(dyn_reg);
         }
@@ -3144,6 +3188,7 @@ SolveResult NativeIPMLPAdapter::solve_lp_impl(const LPModel& prob,
     if (!factor_ok && !use_augmented) {
       double dyn_reg = std::max(reg * 1e4, 1e-8);
       for (int retry = 0; retry < 4 && !factor_ok; ++retry) {
+          lp_timing::Retry retry_timing;
         if (use_banded) {
           // Restore the pristine matrix before perturbing: the failed
           // attempt left band_work partially factorized, so adding dyn_reg
@@ -3153,10 +3198,10 @@ SolveResult NativeIPMLPAdapter::solve_lp_impl(const LPModel& prob,
                       sizeof(double) * band_storage.size());
           double* bw_data = band_work.data();
           for (int i = 0; i < m; ++i) bw_data[i] += dyn_reg;
-          factor_ok = banded_chol_factor(bw_data, m, bw);
+          factor_ok = [&]() { lp_timing::Scope timing(lp_timing::Kind::Numeric); return banded_chol_factor(bw_data, m, bw); }();
         } else if (use_dense) {
           N_dense.diagonal().array() += dyn_reg;
-          ldlt_dense.compute(N_dense);
+          { lp_timing::Scope timing(lp_timing::Kind::Numeric); ldlt_dense.compute(N_dense); }
           factor_ok = (ldlt_dense.info() == Eigen::Success);
         } else {
           // Re-fill sparse normal equations with extra diagonal reg
@@ -3187,7 +3232,7 @@ SolveResult NativeIPMLPAdapter::solve_lp_impl(const LPModel& prob,
           }
 #else
           {
-          ldlt.factorize(N_sparse);
+          { lp_timing::Scope timing(lp_timing::Kind::Numeric); ldlt.factorize(N_sparse); }
           factor_ok = (ldlt.info() == Eigen::Success);
           }
 #endif
@@ -3521,7 +3566,7 @@ SolveResult NativeIPMLPAdapter::solve_lp_impl(const LPModel& prob,
            t_init_overhead, t_resid, t_setup, t_pred, t_corr, t_update);
     printf("    init_sub: pre_coldstart=%.3f coldstart_and_symbolic=%.3f\n",
            t_coldstart_begin_ms, t_init_overhead - t_coldstart_begin_ms);
-    printf("    setup_sub: fill=%.3f factor=%.3f\n", t_fill, t_factor);
+    printf("    setup_sub_normal_only: fill=%.3f factor=%.3f (all-backend totals: MIPSOLVERS_LP_FACTOR_TIMING=1)\n", t_fill, t_factor);
 #if MIPSOLVERS_HAVE_CHOLMOD
     if (cholmod_ok) {
       printf("    symbolic: normal flops=%.0f lnz=%.0f\n",

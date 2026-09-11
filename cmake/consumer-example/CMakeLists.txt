@@ -12,6 +12,7 @@ find_package(mipsolvers REQUIRED)
 
 add_executable(consumer_example main.cpp)
 target_link_libraries(consumer_example PRIVATE mipsolvers::mipsolvers)
+mipsolvers_deploy_runtime(consumer_example)
 
 # 可选：开启警告
 if(NOT MSVC)

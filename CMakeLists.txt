@@ -48,8 +48,10 @@ if(MIPSOLVERS_ENABLE_IPO)
   include(CheckIPOSupported)
   check_ipo_supported(RESULT _ipo_ok OUTPUT _ipo_out)
   if(_ipo_ok)
-    set(CMAKE_INTERPROCEDURAL_OPTIMIZATION_RELEASE ON)
-    set(CMAKE_INTERPROCEDURAL_OPTIMIZATION_RELWITHDEBINFO ON)
+    if(NOT MSVC)
+      set(CMAKE_INTERPROCEDURAL_OPTIMIZATION_RELEASE ON)
+      set(CMAKE_INTERPROCEDURAL_OPTIMIZATION_RELWITHDEBINFO ON)
+    endif()
   else()
     message(STATUS "mipsolvers: IPO/LTO requested but unavailable: ${_ipo_out}")
   endif()
@@ -148,6 +150,13 @@ add_library(mipsolvers STATIC
 )
 
 # ── Profile-guided optimization ─────────────────────────────────────────────
+if(MSVC AND MIPSOLVERS_ENABLE_IPO AND _ipo_ok)
+  # Windows remediation R5: optimize the core against unchanged vendor libs.
+  set_property(TARGET mipsolvers PROPERTY INTERPROCEDURAL_OPTIMIZATION_RELEASE ON)
+  set_property(TARGET mipsolvers PROPERTY INTERPROCEDURAL_OPTIMIZATION_RELWITHDEBINFO ON)
+  target_link_options(mipsolvers INTERFACE
+    "$<BUILD_INTERFACE:$<$<CONFIG:Release,RelWithDebInfo>:/LTCG>>")
+endif()
 # Instrument only the project core. The required link option is propagated to
 # executables through the static library, while large vendored dependencies
 # remain unchanged. PGO is opt-in because a mismatched workload can regress
@@ -159,7 +168,24 @@ if(NOT _mipsolvers_pgo_mode MATCHES "^(OFF|GENERATE|USE)$")
 endif()
 if(NOT _mipsolvers_pgo_mode STREQUAL "OFF")
   if(MSVC)
-    message(FATAL_ERROR "MIPSOLVERS PGO is not yet supported with MSVC")
+    # R5: each executable owns a profile; training and use share this directory.
+    if(NOT MIPSOLVERS_PGO_PROFILE)
+      set(MIPSOLVERS_PGO_PROFILE "${CMAKE_BINARY_DIR}/pgo-data" CACHE PATH
+          "MSVC per-executable profile directory" FORCE)
+    endif()
+    if(_mipsolvers_pgo_mode STREQUAL "USE" AND NOT IS_DIRECTORY "${MIPSOLVERS_PGO_PROFILE}")
+      message(FATAL_ERROR "PGO USE requires an existing MSVC profile directory")
+    endif()
+    file(MAKE_DIRECTORY "${MIPSOLVERS_PGO_PROFILE}")
+    set(_mipsolvers_pgo_flags "$<$<CONFIG:Release>:/GL>")
+    if(_mipsolvers_pgo_mode STREQUAL "GENERATE")
+      set(_mipsolvers_profile_option GENPROFILE)
+    else()
+      set(_mipsolvers_profile_option USEPROFILE)
+    endif()
+    target_link_options(mipsolvers INTERFACE
+      "$<BUILD_INTERFACE:$<$<CONFIG:Release>:/LTCG>>"
+      "$<BUILD_INTERFACE:$<$<CONFIG:Release>:/${_mipsolvers_profile_option}:PGD=${MIPSOLVERS_PGO_PROFILE}/$<TARGET_PROPERTY:NAME>.pgd>>")
   elseif(CMAKE_CXX_COMPILER_ID MATCHES "Clang")
     if(_mipsolvers_pgo_mode STREQUAL "GENERATE")
       set(_mipsolvers_pgo_flags -fprofile-instr-generate)
@@ -194,7 +220,9 @@ if(NOT _mipsolvers_pgo_mode STREQUAL "OFF")
       "MIPSOLVERS PGO requires Clang/AppleClang or GCC")
   endif()
   target_compile_options(mipsolvers PRIVATE ${_mipsolvers_pgo_flags})
-  target_link_options(mipsolvers INTERFACE ${_mipsolvers_pgo_flags})
+  if(NOT MSVC)
+    target_link_options(mipsolvers INTERFACE ${_mipsolvers_pgo_flags})
+  endif()
   message(STATUS "mipsolvers: PGO mode ${_mipsolvers_pgo_mode}")
 endif()
 unset(_mipsolvers_pgo_flags)
@@ -780,7 +808,8 @@ option(MIPSOLVERS_BUILD_BUNDLED_ARCHIVE
 if(MIPSOLVERS_BUILD_BUNDLED_ARCHIVE)
   set(_bundle_inputs "$<TARGET_FILE:mipsolvers>")
   foreach(_dep IN ITEMS mipsolvers_hfactor highs libscip ipopt_local dmumps
-                       fmt reflapack_vendored)
+                       fmt reflapack_vendored cholmod_vendored
+                       umfpack_vendored klu_vendored)
     if(TARGET ${_dep})
       # Only static-library targets have an archive file to bundle.  When a
       # dependency is provided as an INTERFACE target (e.g. dmumps wrapping a
@@ -804,6 +833,15 @@ if(MIPSOLVERS_BUILD_BUNDLED_ARCHIVE)
       DEPENDS mipsolvers
       COMMENT "Bundling single static archive: ${_bundle_output}"
       VERBATIM)
+  elseif(MSVC)
+    # MSVC does not read GNU MRI scripts. Preserve every input archive member.
+    # Contract: docs/archive/windows_remediation_2026-09-11.md R1.
+    add_custom_command(
+      OUTPUT "${_bundle_output}"
+      COMMAND "${CMAKE_AR}" /NOLOGO "/OUT:${_bundle_output}" ${_bundle_inputs}
+      DEPENDS ${_bundle_inputs}
+      COMMENT "Bundling MSVC static archive: ${_bundle_output}"
+      VERBATIM)
   else()
     # GNU ar MRI script: ADDLIB each input, then SAVE.
     set(_mri "${CMAKE_BINARY_DIR}/$<CONFIG>/mipsolvers_bundle.mri")
@@ -826,6 +864,13 @@ endif()
 # ── Compiler warnings ────────────────────────────────────────────────────────
 if(MSVC)
   target_compile_options(mipsolvers PRIVATE /W4)
+  if(MIPSOLVERS_ENABLE_NATIVE_ARCH)
+    # Explicit host-specific x64 experiment; Windows remediation R5.
+    if(NOT CMAKE_SIZEOF_VOID_P EQUAL 8 OR CMAKE_SYSTEM_PROCESSOR MATCHES "ARM|arm")
+      message(FATAL_ERROR "The MSVC native architecture option requires AVX2-capable x64")
+    endif()
+    target_compile_options(mipsolvers PRIVATE "$<$<CONFIG:Release,RelWithDebInfo>:/arch:AVX2>")
+  endif()
   if(MIPSOLVERS_ENABLE_WERROR)
     target_compile_options(mipsolvers PRIVATE /WX)
   endif()
@@ -1263,6 +1308,11 @@ if(_ms_eigen3_bundle_src)
     target_link_libraries(nlp_open_benchmark PRIVATE mipsolvers)
     target_include_directories(nlp_open_benchmark PRIVATE
       ${CMAKE_CURRENT_SOURCE_DIR}/include)
+    if(MIPSOLVERS_BUILD_TESTS)
+      add_test(NAME regression_nlp_hs071 COMMAND nlp_open_benchmark 1 1e-7)
+      set_tests_properties(regression_nlp_hs071 PROPERTIES
+        LABELS "integration" ENVIRONMENT "OMP_NUM_THREADS=1;MKL_NUM_THREADS=1")
+    endif()
   endif()
   message(STATUS "mipsolvers: bundling Eigen3 headers from ${_ms_eigen3_bundle_src}")
 endif()
@@ -1279,9 +1329,9 @@ endif()
 # the consumer config below reconstructs the link closure from relative paths.
 set(_ms_mkl_library_names "")
 if(WIN32 AND MIPSOLVERS_HAVE_MKL_PARDISO)
-  if(NOT MIPSOLVERS_MKL_THREADING STREQUAL "SEQUENTIAL")
+  if(NOT MIPSOLVERS_MKL_THREADING MATCHES "^(SEQUENTIAL|INTEL)$")
     message(FATAL_ERROR
-      "The relocatable Windows SDK requires MIPSOLVERS_MKL_THREADING=SEQUENTIAL")
+      "The relocatable Windows SDK requires explicit SEQUENTIAL or INTEL threading")
   endif()
   if(NOT MIPSOLVERS_MKL_ROOT OR
      NOT EXISTS "${MIPSOLVERS_MKL_ROOT}/manifest.cmake" OR
@@ -1297,14 +1347,31 @@ if(WIN32 AND MIPSOLVERS_HAVE_MKL_PARDISO)
   if(NOT MIPSOLVERS_LOCAL_MKL_MANIFEST_VERSION STREQUAL "1" OR
      NOT MIPSOLVERS_LOCAL_MKL_ARCHITECTURE STREQUAL "x64" OR
      NOT MIPSOLVERS_LOCAL_MKL_LINKAGE STREQUAL "static" OR
-     NOT MIPSOLVERS_LOCAL_MKL_THREADING MATCHES "^(sequential|both)$" OR
+     NOT MIPSOLVERS_LOCAL_MKL_THREADING MATCHES "^(sequential|intel|both)$" OR
      NOT CMAKE_SIZEOF_VOID_P EQUAL 8)
     message(FATAL_ERROR
       "Unsupported staged oneMKL manifest for the Windows x64 production SDK")
   endif()
 
-  foreach(_ms_mkl_expected IN ITEMS
-      mkl_intel_lp64.lib mkl_sequential.lib mkl_core.lib)
+  string(TOLOWER "${MIPSOLVERS_MKL_THREADING}" _ms_mkl_selected_threading)
+  if(NOT MIPSOLVERS_LOCAL_MKL_THREADING STREQUAL "both" AND
+     NOT MIPSOLVERS_LOCAL_MKL_THREADING STREQUAL _ms_mkl_selected_threading)
+    message(FATAL_ERROR "Staged oneMKL manifest does not contain the selected threading layer")
+  endif()
+  set(_ms_mkl_expected_names mkl_intel_lp64.lib mkl_sequential.lib mkl_core.lib)
+  if(MIPSOLVERS_MKL_THREADING STREQUAL "INTEL")
+    set(_ms_mkl_expected_names mkl_intel_lp64.lib mkl_intel_thread.lib mkl_core.lib libiomp5md.lib)
+    if(NOT MIPSOLVERS_MKL_RUNTIME_DLLS)
+      message(FATAL_ERROR "The Intel-threaded SDK requires its OpenMP runtime DLL")
+    endif()
+    foreach(_ms_runtime IN LISTS MIPSOLVERS_MKL_RUNTIME_DLLS)
+      if(NOT EXISTS "${_ms_runtime}")
+        message(FATAL_ERROR "Missing Intel OpenMP runtime: ${_ms_runtime}")
+      endif()
+      install(FILES "${_ms_runtime}" DESTINATION "${CMAKE_INSTALL_BINDIR}")
+    endforeach()
+  endif()
+  foreach(_ms_mkl_expected IN LISTS _ms_mkl_expected_names)
     set(_ms_mkl_source "")
     foreach(_ms_mkl_candidate IN LISTS MIPSOLVERS_MKL_LIBRARIES)
       if(IS_ABSOLUTE "${_ms_mkl_candidate}" AND EXISTS "${_ms_mkl_candidate}")

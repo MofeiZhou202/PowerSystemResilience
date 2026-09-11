@@ -4,6 +4,8 @@
 
 本章面向现场工程师与集成商，说明 MIPSolvers 的依赖模型、各平台构建步骤、离线自封包（sealed offline package）流程，以及安装后的消费与验证方法。
 
+**分支约定：`release/windows-self-contained` 用于 Windows 交付，`main` 用于 macOS。** 本章保留跨平台构建资料，但Windows release上的验收与性能结论只适用于其明确记录的Windows配置；分支间共享修改需分别集成和验证，不能自动同步平台默认值。
+
 **核心原则：仓库一旦拷贝到构建机，默认构建全程不需要网络。** configure 阶段不会下载任何依赖；缺失 vendored 源码树是致命的 checkout 错误，而不是降级行为。
 
 > 注意：不要在源码根目录直接 configure，请始终使用独立的构建目录（预设默认输出到 `build/<preset名>`）。
@@ -220,17 +222,34 @@ third_party/install/
 
 将 `third_party/oneapi-mkl/SHA256SUMS` 与已安装的 `mipsolvers-third-party` 清单随发布记录一并保存。**在密封机上使用 `cmake --preset windows-offline-release`，不要使用 vcpkg 预设，也不要依赖 `%MKLROOT%`**。该预设刻意要求已传输的预编译包——缺失或不兼容的依赖是 configure 错误，而不是隐式的树内重建或网络探测。
 
-验收包之前，用 `dumpbin /DEPENDENTS` 检查每个随包可执行文件与 DLL。期望的 oneMKL 形态是 **LP64、sequential、static**；若出现对 `mkl_intel_thread.dll`、`mkl_sequential.dll` 或其他意外 oneAPI DLL 的依赖，在修正链接模型或将运行时 DLL 显式纳入离线 artifact 集之前，应视该包为未密封。
+验收包之前，用 `dumpbin /DEPENDENTS` 检查每个随包可执行文件与 DLL。默认 oneMKL 形态是 **LP64、sequential、static**；显式 INTEL 配置使用静态线程层及动态 `libiomp5md.dll`，必须把该 DLL 纳入离线产物。任何未随包交付的非系统运行时依赖都意味着依赖闭包未完成。
 
 ### Intel 线程层（显式本地配置）
 
 ```powershell
-cmake -S . -B build/windows-threaded `
+cmake --preset windows-msvc-release `
+  -DMIPSOLVERS_MKL_ROOT=third_party/oneapi-mkl `
   -DMIPSOLVERS_MKL_THREADING=INTEL `
-  -DMIPSOLVERS_USE_OPENMP=OFF
+  -DMIPSOLVERS_USE_OPENMP=ON `
+  -DMIPSOLVERS_ENABLE_IPO=OFF `
+  -DMIPSOLVERS_ENABLE_NATIVE_ARCH=OFF `
+  -DMIPSOLVERS_PGO_MODE=OFF
 ```
 
-该配置链接 `mkl_intel_thread` 与 `libiomp5md`，运行时 DLL 记录在 `MIPSOLVERS_MKL_RUNTIME_DLLS` 中供消费者部署到可执行文件旁；关闭独立的 C++ OpenMP 核是为了避免同一进程加载 MSVC 与 Intel 两套 OpenMP 运行时。仓库 staged 的 oneMKL bundle 保持 sequential-only，线程化构建必须使用完整的本地 oneAPI 安装。跨线程数比较非凸求解结果时，使用 oneMKL 兼容的 CBWR，使并行归约不改变已接受的非线性轨迹。
+该配置链接 `mkl_intel_thread` 与 `libiomp5md`，运行时 DLL 记录在 `MIPSOLVERS_MKL_RUNTIME_DLLS` 中并部署到可执行文件旁。staging 时使用 `stage_onemkl.ps1 -Threading both` 可同时提供串行与线程层；显式 `MIPSOLVERS_MKL_ROOT` 控制本地库及运行时发现，缺失时配置失败，不回退到系统 oneAPI。
+
+上述开关与 2026-09-11 的重复实验一致：保留 C++ OpenMP 编译支持，但运行时设置 `OMP_NUM_THREADS=1`，由 `MKL_NUM_THREADS` 单独控制 oneMKL。关闭 C++ OpenMP 是另一个构建配置，不能直接套用本次数字。不要默认添加 CBWR 或 CPU affinity：本次均未设置，跨线程的数值轨迹也不保证逐位一致；需要可复现归约时应单独验证其准确性与性能。
+
+本机 i9-12900H 的 LP direct 推荐 INTEL/4：20组长尾合计中位数降18.50%，P95降17.72%，两档全集及NLP均通过准确性验收。Auto的全集总时间在4线程下增加10.44%，因此Auto/混合负载先保留2线程，不统一提高线程数。详细范围和原始证据见 [稳定性报告](../archive/windows_lp_stability_2026-09-11.md)。启动进程前设置：
+
+```powershell
+$env:OMP_NUM_THREADS='1'
+$env:MKL_NUM_THREADS='4'  # LP direct；Auto先用2
+$env:MKL_DYNAMIC='FALSE'
+$env:MIPSOLVERS_LP_FACTOR_TIMING='0'
+```
+
+以上是显式运行建议，不改变CMake默认线程层。LTCG/PGO/AVX2在本轮未单独验证，继续关闭；多任务并发的吞吐需另行测试。
 
 ## 2.7 SDK 产物布局与消费者链接
 
@@ -258,6 +277,42 @@ target_link_libraries(my_app PRIVATE mipsolvers::mipsolvers)
 ```
 
 安装包不会无条件搜索 Homebrew 路径。
+
+### 2.7.1 只分发编译版本
+
+当前 `mipsolvers` 是 C++20 静态库。近期建议发布可重定位的 **Windows x64 / MSVC v143 / Release / MD 二进制 SDK**，分发 `cmake --install` 生成的整个目录，而不是只拷贝一个 `.lib` 或构建目录中的 bundled archive。消费者编译自己的应用，不需要编译本项目；C++ 接口依赖的公开头文件与模板头仍须随包提供。
+
+在已通过验证的 x64 VS 开发者环境中：
+
+```powershell
+cmake --build build/windows-msvc-release --config Release --parallel 6
+cmake --install build/windows-msvc-release --config Release --prefix artifacts/mipsolvers-sdk-win-x64
+```
+
+交付目录应包含 `include/`、`lib/`、`lib/cmake/mipsolvers/`、`bin/` 中必需的运行时、第三方许可证/通知、最小消费者示例、版本与构建清单。核心实现的 `src/`、仓库 `.git/`、开发构建缓存、测试数据和内部调试符号不作为常规 SDK 内容；第三方源码交付义务单独按许可证落实，不能因使用二进制 SDK 就忽略。
+
+消费者最小配置：
+
+```cmake
+cmake_minimum_required(VERSION 3.20)
+project(my_app LANGUAGES CXX)
+set(CMAKE_CXX_STANDARD 20)
+set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreadedDLL")
+find_package(mipsolvers CONFIG REQUIRED)
+add_executable(my_app main.cpp)
+target_link_libraries(my_app PRIVATE mipsolvers::mipsolvers)
+mipsolvers_deploy_runtime(my_app)
+```
+
+配置时用 `-DCMAKE_PREFIX_PATH=<SDK解压目录>`，构建 Release。当前 C++ ABI 的支持范围应固定到经过验收的工具链/架构/运行时组合；Debug、MinGW、ARM64 和跨版本编译器兼容性不能由此自动推断。随产品提供匹配的 MSVC 运行时安装要求，Intel 线程层使用包内 `libiomp5md.dll`。
+
+正式发布前将 SDK 复制到另一个路径，在没有源码树、oneAPI 开发环境和开发机 PATH 的干净 Windows VM 上，仅使用 SDK 构建/运行消费者。除最小 LP 外，还需按交付功能覆盖 NLP、MILP、锥求解；核对最终 EXE/DLL 的 `dumpbin /DEPENDENTS`，并校验解压后的逐文件 SHA256。当前20项CTest和最小消费者验证不能替代这项完整发布验收。
+
+每份发行包固定版本、Git提交、编译器/Windows SDK版本、CMake选项、第三方版本、最低系统要求及数值验收结果。建议文件名包括版本和ABI，例如 `mipsolvers-<version>-windows-x64-msvc143-release-md.zip`，另附SHA256清单和变更记录。公开发行物放在Release附件或制品库；Git保留源码、配置与报告。PDB另存内部符号包以便根据用户崩溃信息定位问题。运行线程数由应用按负载设置，本轮LP direct推荐4、Auto保守选2，不在SDK中固定所有调用者的进程环境。
+
+**闭源交付必须先处理现有依赖许可。** 当前vendored `UMFPACK/Include/umfpack.h` 标注GPL-2.0+；`CHOLMOD/Include/cholmod.h` 列出Supernodal等GPL模块以及其他LGPL模块。不能假设把它们静态合并或改成DLL后就可无条件闭源分发。应核对实际链接模块及授权，选择满足对应源码/重链接等义务、取得合适商业授权，或形成替换/裁剪依赖的发行变体；后一种方案需重新执行数值与性能验收，不能沿用本轮SuiteSparse构建的数字。另须落实Ipopt、Eigen、oneMKL及其他实际依赖的通知、许可证和再分发条款，并明确本项目自身的使用授权。
+
+长期若要支持Python/C#/不同C++工具链，建议另设稳定的C ABI DLL：不透明句柄、固定宽度类型/数组、显式创建与销毁、错误码和版本查询；异常、STL/Eigen对象及跨CRT的内存释放不穿过DLL边界。再在该接口之上提供薄C++/Python封装。当前项目没有完成这层ABI交付，不能仅设置 `BUILD_SHARED_LIBS=ON` 就获得它；DLL本身也不等于算法不可被逆向。
 
 ## 2.8 运行时部署要点
 
@@ -327,7 +382,7 @@ ctest --test-dir build-win --build-config Release --output-on-failure --parallel
 | `MIPSOLVERS_STATIC_LIBGFORTRAN` | `OFF` | Linux 上静态 GNU Fortran 运行时 |
 | `MIPSOLVERS_IPOPT_LINEAR_SOLVER` | 平台相关 | `mumps`，Windows 上可为 `pardisomkl` |
 | `MIPSOLVERS_MKL_ROOT` | 空 | 权威本地静态 oneMKL bundle；设置后无系统回退 |
-| `MIPSOLVERS_MKL_THREADING` | Windows: `SEQUENTIAL` | 仅 Windows：`SEQUENTIAL` 或显式本地 oneAPI `INTEL` 线程 |
+| `MIPSOLVERS_MKL_THREADING` | Windows: `SEQUENTIAL` | 仅 Windows：`SEQUENTIAL` 或显式本地 bundle 的 `INTEL` 线程 |
 | `MIPSOLVERS_USE_PAPILO` | `ON` | 使用内嵌 PaPILO；原生 presolve 仍保留 |
 | `MIPSOLVERS_PAPILO_SOURCE_DIR` | 内嵌 | 覆盖为其他本地 PaPILO 源码树 |
 | `MIPSOLVERS_PAPILO_BOOST_DIR` | 内嵌 | 覆盖 PaPILO 的本地 Boost include 根 |

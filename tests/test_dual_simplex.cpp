@@ -520,7 +520,15 @@ TEST_CASE("Incremental standard-form bounds handle infinite transitions",
       {0, 0.0, true, -inf, -2.0},
       {0, 0.0, false, inf, 5.0},
   };
-  REQUIRE(update_standard_form_bounds_incremental(sf, lp, tighten));
+  {
+    StandardFormBoundTransaction transaction(sf);
+    CHECK_FALSE(transaction.apply(lp, tighten));
+    CHECK(sf.negative_col.size() == 1);
+    CHECK(sf.lb_shift[0] == 0.0);
+  }
+  REQUIRE_FALSE(update_standard_form_bounds_incremental(sf, lp, tighten));
+  update_standard_form_bounds(sf, lp, Eigen::VectorXd::Constant(1, -2.0),
+                              Eigen::VectorXd::Constant(1, 5.0));
   CHECK(sf.lb_shift[0] == Approx(-2.0));
   CHECK(sf.var_ub[0] == Approx(7.0));
   CHECK(sf.objective_const == Approx(-4.0));
@@ -536,7 +544,9 @@ TEST_CASE("Incremental standard-form bounds handle infinite transitions",
       {0, 0.0, true, -2.0, -inf},
       {0, 0.0, false, 5.0, inf},
   };
-  REQUIRE(update_standard_form_bounds_incremental(sf, lp, relax));
+  REQUIRE_FALSE(update_standard_form_bounds_incremental(sf, lp, relax));
+  update_standard_form_bounds(sf, lp, Eigen::VectorXd::Constant(1, -inf),
+                              Eigen::VectorXd::Constant(1, inf));
   CHECK(sf.lb_shift[0] == Approx(0.0));
   CHECK(std::isinf(sf.var_ub[0]));
   CHECK(sf.objective_const == Approx(0.0));
@@ -636,7 +646,7 @@ TEST_CASE("Standard-form bound transactions match full bound updates",
   const double inf = std::numeric_limits<double>::infinity();
   lp.vars = {
       {VarType::Continuous, 0.0, 10.0},
-      {VarType::Continuous, -inf, inf},
+      {VarType::Continuous, -6.0, inf},
       {VarType::Continuous, -5.0, 8.0},
       {VarType::Continuous, 1.0, inf},
   };
@@ -655,7 +665,7 @@ TEST_CASE("Standard-form bound transactions match full bound updates",
   const std::vector<BoundChangeInfo> changes{
       {0, 2.0, true, 0.0, 2.0},
       {0, -1.0, false, 10.0, 9.0},
-      {1, 0.0, true, -inf, -3.0},
+      {1, 3.0, true, -6.0, -3.0},
       {1, 0.0, false, inf, 7.0},
       {2, -4.0, false, 8.0, 4.0},
       {3, 1.0, true, 1.0, 2.0},
@@ -765,6 +775,49 @@ TEST_CASE("DualSimplex: 2-variable LP", "[dual_simplex]") {
   CHECK(res.result.stats.objective == Approx(-12.0).margin(1e-5));
   CHECK(res.result.x[0] == Approx(4.0).margin(1e-5));
   CHECK(res.result.x[1] == Approx(0.0).margin(1e-5));
+}
+
+// Analytical oracles: Windows remediation R2, x=p-q and x=u-q.
+TEST_CASE("DualSimplex: free variables preserve negative solutions and rays",
+          "[dual_simplex][free_variables]") {
+  const double inf = std::numeric_limits<double>::infinity();
+  LPModel lp;
+  lp.sense = Sense::Minimize;
+  lp.c = Eigen::VectorXd::Ones(1);
+  lp.A.resize(0, 1);
+  lp.b.resize(0);
+  lp.Aeq.resize(1, 1);
+  lp.Aeq.insert(0, 0) = 1.0;
+  lp.beq = Eigen::VectorXd::Constant(1, -3.0);
+  lp.vars = {{VarType::Continuous, -inf, inf}};
+  auto options = native_simplex_options();
+  auto sf = build_standard_form_lp(lp);
+  ruiz_scale_standard_form(sf);
+  auto result = solve_lp_from_sf(sf, options);
+  REQUIRE(result.result.stats.success);
+  CHECK(result.result.x[0] == Approx(-3.0));
+  CHECK(result.result.stats.objective == Approx(-3.0));
+  REQUIRE(result.result.box_dual_lb.size() == 1);
+  CHECK(result.result.box_dual_lb[0] == 0.0);
+  CHECK(result.result.box_dual_ub[0] == 0.0);
+  update_standard_form_cost(sf, Sense::Minimize, Eigen::VectorXd::Constant(1, -2.0));
+  result = solve_lp_from_sf(sf, options);
+  REQUIRE(result.result.stats.success);
+  CHECK(result.result.stats.objective == Approx(6.0));
+
+  lp.Aeq.resize(0, 1);
+  lp.beq.resize(0);
+  result = solve_lp_with_basis(lp, options);
+  REQUIRE(result.result.stats.has_unbounded_certificate);
+  REQUIRE(result.result.primal_ray.size() == 1);
+  CHECK(result.result.primal_ray[0] == Approx(-1.0));
+
+  lp.vars[0].ub = -2.0;
+  lp.c[0] = -1.0;
+  result = solve_lp_with_basis(lp, options);
+  REQUIRE(result.result.stats.success);
+  CHECK(result.result.x[0] == Approx(-2.0));
+  CHECK(result.result.stats.objective == Approx(2.0));
 }
 
 TEST_CASE("DualSimplex: publishes an audited primal ray for an unbounded LP",
