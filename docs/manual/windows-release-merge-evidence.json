@@ -1,0 +1,330 @@
+{
+  "date": "2026-09-11",
+  "merge_commit": "1d31f0ebcd1b90f2f1f5a0a579402203eef87998",
+  "parents": [
+    "2c400fcf6fb557e370cbca4b9965c713cb451def",
+    "9652ddb9fe82385a47c37d84e77d38aa42dfb107"
+  ],
+  "main_unchanged": "b42a054052c223e8dfdf3871c667bfc8fe36a09f",
+  "benchmark_sha256": "49298e6c335fde0b221758811a4f5831d3a637b5c5ad44e5283ddb4cc41daea1",
+  "configuration": {
+    "platform": "Windows 11 x64",
+    "compiler": "MSVC 19.44",
+    "build": "Release",
+    "mkl": "INTEL 2026.0.1 local",
+    "omp_threads": 1,
+    "mkl_dynamic": false,
+    "mkl_threads": [
+      2,
+      4
+    ],
+    "ipo": false,
+    "pgo": "OFF",
+    "native_arch": false,
+    "scuc": false,
+    "python": false
+  },
+  "netlib": {
+    "2": {
+      "accurate": 540,
+      "runs": 540,
+      "objective_tolerance": 1e-05,
+      "normalized_feasibility_tolerance": 1e-07,
+      "max_objective_rel_error": 1.2499555248275793e-06,
+      "max_normalized_primal_violation": 9.939788310798978e-08
+    },
+    "4": {
+      "accurate": 540,
+      "runs": 540,
+      "objective_tolerance": 1e-05,
+      "normalized_feasibility_tolerance": 1e-07,
+      "max_objective_rel_error": 1.2499555493200608e-06,
+      "max_normalized_primal_violation": 9.97766757030399e-08
+    }
+  },
+  "nlp": {
+    "accurate": 20,
+    "runs": 20,
+    "solver_tolerance": 1e-07,
+    "objective_acceptance": 1e-06
+  },
+  "stability": {
+    "2": {
+      "cases": {
+        "dfl001": {
+          "n": 20,
+          "median": 4493.29825,
+          "p95": 5030.4489,
+          "maximum": 5549.651,
+          "iqr_over_median": 0.03760529918084107
+        },
+        "greenbea": {
+          "n": 20,
+          "median": 5775.8135,
+          "p95": 9207.8643,
+          "maximum": 10227.8139,
+          "iqr_over_median": 0.5652012223040097
+        },
+        "maros-r7": {
+          "n": 20,
+          "median": 2421.9395,
+          "p95": 2715.5205,
+          "maximum": 2734.8068,
+          "iqr_over_median": 0.21869551241886911
+        }
+      },
+      "aggregate": {
+        "n": 20,
+        "median": 12310.3949,
+        "p95": 16395.6694,
+        "maximum": 17431.6314,
+        "iqr_over_median": 0.2764589542127524
+      },
+      "accurate": 60,
+      "runs": 60,
+      "peak_working_set_mib": {
+        "n": 20,
+        "median": 113.60546875,
+        "p95": 114.16015625,
+        "maximum": 114.2734375,
+        "iqr_over_median": 0.005432727022659285
+      },
+      "wall_ms": {
+        "n": 20,
+        "median": 12535.40160000557,
+        "p95": 16624.507900007302,
+        "maximum": 17643.5499000072,
+        "iqr_over_median": 0.27924791216904205
+      },
+      "iterations": {
+        "dfl001": [
+          44
+        ],
+        "greenbea": [
+          43,
+          44,
+          46,
+          47,
+          48,
+          51,
+          55,
+          58,
+          174,
+          199,
+          229,
+          277,
+          290,
+          331,
+          351,
+          359,
+          360,
+          368
+        ],
+        "maros-r7": [
+          21
+        ]
+      }
+    },
+    "4": {
+      "cases": {
+        "dfl001": {
+          "n": 20,
+          "median": 2531.93955,
+          "p95": 3758.9628,
+          "maximum": 5038.8197,
+          "iqr_over_median": 0.061476349228005815
+        },
+        "greenbea": {
+          "n": 20,
+          "median": 4656.99165,
+          "p95": 8184.2471,
+          "maximum": 8352.0594,
+          "iqr_over_median": 0.24855406386653078
+        },
+        "maros-r7": {
+          "n": 20,
+          "median": 1958.1852,
+          "p95": 2078.3047,
+          "maximum": 2176.6392,
+          "iqr_over_median": 0.14100499789294715
+        }
+      },
+      "aggregate": {
+        "n": 20,
+        "median": 9281.44285,
+        "p95": 12722.207699999999,
+        "maximum": 12913.9202,
+        "iqr_over_median": 0.21548479124665412
+      },
+      "accurate": 60,
+      "runs": 60,
+      "peak_working_set_mib": {
+        "n": 20,
+        "median": 117.33984375,
+        "p95": 117.8828125,
+        "maximum": 118.1015625,
+        "iqr_over_median": 0.0033456506541496055
+      },
+      "wall_ms": {
+        "n": 20,
+        "median": 9495.018499997968,
+        "p95": 12928.705999991507,
+        "maximum": 13146.41090000805,
+        "iqr_over_median": 0.2097034223788719
+      },
+      "iterations": {
+        "dfl001": [
+          44
+        ],
+        "greenbea": [
+          43,
+          44,
+          45,
+          46,
+          50,
+          51,
+          53,
+          55,
+          63,
+          77,
+          195,
+          213,
+          228,
+          279,
+          350,
+          355
+        ],
+        "maros-r7": [
+          21
+        ]
+      }
+    }
+  },
+  "decision": {
+    "recommended_threads": 4,
+    "four_thread_p95_gate_passed": true,
+    "four_vs_two_median_reduction": 0.24604832538718968
+  },
+  "ctest": {
+    "passed": 20,
+    "total": 20,
+    "wall_seconds": 240.85,
+    "hs071_registration_mkl_threads": 1,
+    "tests": [
+      {
+        "name": "milp_benchmark",
+        "passed": true,
+        "seconds": 12.16
+      },
+      {
+        "name": "native_kernel_comparison",
+        "passed": true,
+        "seconds": 12.69
+      },
+      {
+        "name": "test_engine_api",
+        "passed": true,
+        "seconds": 22.21
+      },
+      {
+        "name": "test_ipopt_parameter_stability",
+        "passed": true,
+        "seconds": 12.64
+      },
+      {
+        "name": "test_lp_solver",
+        "passed": true,
+        "seconds": 21.77
+      },
+      {
+        "name": "test_milp_solver",
+        "passed": true,
+        "seconds": 22.47
+      },
+      {
+        "name": "test_ipm_solver",
+        "passed": true,
+        "seconds": 22.45
+      },
+      {
+        "name": "test_conic_ipm",
+        "passed": true,
+        "seconds": 13.04
+      },
+      {
+        "name": "test_aml_conic",
+        "passed": true,
+        "seconds": 12.81
+      },
+      {
+        "name": "test_aml_model",
+        "passed": true,
+        "seconds": 12.78
+      },
+      {
+        "name": "test_dual_simplex",
+        "passed": true,
+        "seconds": 12.66
+      },
+      {
+        "name": "test_branch_and_cut",
+        "passed": true,
+        "seconds": 12.39
+      },
+      {
+        "name": "test_problem_validation",
+        "passed": true,
+        "seconds": 1.09
+      },
+      {
+        "name": "test_adapter_registry",
+        "passed": true,
+        "seconds": 12.53
+      },
+      {
+        "name": "test_presolve",
+        "passed": true,
+        "seconds": 0.81
+      },
+      {
+        "name": "test_lp_presolve",
+        "passed": true,
+        "seconds": 1.15
+      },
+      {
+        "name": "test_l2o_trace",
+        "passed": true,
+        "seconds": 1.82
+      },
+      {
+        "name": "test_numerical_stability",
+        "passed": true,
+        "seconds": 12.57
+      },
+      {
+        "name": "test_netlib_regression",
+        "passed": true,
+        "seconds": 13.29
+      },
+      {
+        "name": "regression_nlp_hs071",
+        "passed": true,
+        "seconds": 0.14
+      }
+    ]
+  },
+  "sdk": {
+    "relocated_consumer_passed": true,
+    "objective": 9.0,
+    "intel_runtime_deployed": true,
+    "msvc_archive_readable": true,
+    "clean_vm_tested": false
+  },
+  "limitations": [
+    "Simulation downstream failures from release parent not revalidated",
+    "Cross-batch absolute performance changes not uniquely attributed",
+    "No SCUC/Python coverage",
+    "Auto has no matching 20-block stability experiment"
+  ],
+  "raw_evidence": "reports/windows_release_merge_20260911/"
+}

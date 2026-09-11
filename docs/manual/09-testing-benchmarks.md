@@ -475,6 +475,8 @@ LP 计时默认关闭，手动诊断时设置 `MIPSOLVERS_LP_FACTOR_TIMING=1`。
 
 ### 9.7.1 本轮实测与运行建议
 
+本节是修复分支 `9652ddb9` 的历史测量。随后合入Windows release `1d31f0eb` 的复测见 [合并验收报告](../archive/windows_release_merge_2026-09-11.md)，两个版本的样本不可混算。
+
 完整数字、源码/二进制身份、预测偏差调查见 [INTEL/2、INTEL/4 稳定性报告](../archive/windows_lp_stability_2026-09-11.md)。两档每例20次，均60/60准确：
 
 | 案例 | 2线程中位数/P95 ms | 4线程中位数/P95 ms |
@@ -489,3 +491,11 @@ LP 计时默认关闭，手动诊断时设置 `MIPSOLVERS_LP_FACTOR_TIMING=1`。
 关闭计时后，两档NETLIB IPM/Auto各90×3均准确，合计1080/1080；HS071原生/Ipopt各档5次，合计20/20准确。全集IPM总时间降4.53%，Auto反增10.44%，因此Auto/混合负载先保留2线程；本次没有证明4线程对所有模块普遍有益。两档计时开关三对观测差异中位数+0.609%/+1.338%，但同配置也出现轨迹差异，尚不能从中隔离纯计时开销。
 
 最终全目标重链接后，在INTEL/4、OMP=1、计时关闭下串行运行完整CTest，**20/20通过**（14 unit、4 integration、2 benchmark），305.41秒。SCUC/Python未启用。源码与测试保留于本地工作区，完整证据目录见报告。
+
+## 9.8 Windows release 合并验收
+
+合并提交 `1d31f0eb` 将 `9652ddb9` 的修复合入Windows release父提交 `2c400fcf`，保留既有API与数值更新。macOS main不随本次修改。完整记录见 [合并验收报告](../archive/windows_release_merge_2026-09-11.md) 和 [机器可读证据](windows-release-merge-evidence.json)。
+
+Windows完整构建及 **CTest 20/20** 通过（240.85秒）；NETLIB两档全集 **1080/1080**、HS071 **20/20**、长尾重复 **120/120** 准确，重定位SDK消费者目标值 **9.000000**。20组长尾中，4比2线程区组合计中位数降24.60%、P95降22.41%，LP direct推荐4线程，Auto尚无对应20组稳定性验收，保守2线程建议不变。
+
+本批绝对耗时高于历史批次且波动明显，不能把线程间24.60%解释为合并相对旧版本的加速；原因尚未唯一定位。release父提交已知的Simulation下游失败没有在本轮重新验证，仍保留相应限制。SCUC/Python未启用，HS071的CTest注册项为1线程，其2/4线程准确性由独立NLP阶段覆盖。

@@ -240,7 +240,7 @@ cmake --preset windows-msvc-release `
 
 上述开关与 2026-09-11 的重复实验一致：保留 C++ OpenMP 编译支持，但运行时设置 `OMP_NUM_THREADS=1`，由 `MKL_NUM_THREADS` 单独控制 oneMKL。关闭 C++ OpenMP 是另一个构建配置，不能直接套用本次数字。不要默认添加 CBWR 或 CPU affinity：本次均未设置，跨线程的数值轨迹也不保证逐位一致；需要可复现归约时应单独验证其准确性与性能。
 
-本机 i9-12900H 的 LP direct 推荐 INTEL/4：20组长尾合计中位数降18.50%，P95降17.72%，两档全集及NLP均通过准确性验收。Auto的全集总时间在4线程下增加10.44%，因此Auto/混合负载先保留2线程，不统一提高线程数。详细范围和原始证据见 [稳定性报告](../archive/windows_lp_stability_2026-09-11.md)。启动进程前设置：
+本机 i9-12900H 的 LP direct 推荐 INTEL/4。Windows release合并 `1d31f0eb` 后，20组长尾合计中位数比同版本2线程降低24.60%，P95降低22.41%，两档全集及NLP均通过准确性验收；绝对耗时波动较大，不作为跨版本加速承诺。Auto尚未完成相同20组尾延迟/并发吞吐实验，先保留2线程。详细范围见 [合并验收报告](../archive/windows_release_merge_2026-09-11.md)；先前18.50%及Auto总时间增加10.44%的数字保存在 [修复分支历史报告](../archive/windows_lp_stability_2026-09-11.md)。启动进程前设置：
 
 ```powershell
 $env:OMP_NUM_THREADS='1'

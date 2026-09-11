@@ -33,6 +33,7 @@ theory-guided 规则，所有算法/数值改动必须以这些推导文档为�
 | [windows_offline_evaluation_2026-09-11.md](../archive/windows_offline_evaluation_2026-09-11.md) | Windows 离线复评：预注册协议、NETLIB/锥/NLP/MILP 实测、自动路径失败与 SDK 消费审计、增强建议及条件预测 |
 | [windows_remediation_2026-09-11.md](../archive/windows_remediation_2026-09-11.md) | Windows 修复理论与偏差记录：标准型、NLP 全局化、Auto 截止时间、SDK 闭包及 R6 分解计时/线程稳定性协议 |
 | [windows_lp_stability_2026-09-11.md](../archive/windows_lp_stability_2026-09-11.md) | LP 装配/符号/数值分解计时、INTEL/2与4的20组P95、全集/NLP验收及Windows运行建议范围 |
+| [windows_release_merge_2026-09-11.md](../archive/windows_release_merge_2026-09-11.md) | Windows release合并1d31f0eb：冲突处理、公共API保留、全集与20组线程复测、SDK重定位验收及历史下游限制 |
 | [lp_kernel_selector_2026-08-11.md](../archive/lp_kernel_selector_2026-08-11.md) | LP 内核选择器：成本模型与并发组合 portfolio 的决策记录 |
 | [native_ipm_windows_integration_2026-08-13.md](../archive/native_ipm_windows_integration_2026-08-13.md) | 原生 IPM 的 Windows 集成记录 |
 | [klu_numeric_refactor_2026-08-20.md](../archive/klu_numeric_refactor_2026-08-20.md) | 固定模式 LE/NLE 的 KLU 数值重分解契约、成本模型、回退事务与验收协议 |

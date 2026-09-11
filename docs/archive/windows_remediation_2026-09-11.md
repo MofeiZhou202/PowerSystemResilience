@@ -164,3 +164,9 @@ RATIONALE
 - Assumptions: 同一本地MSVC/MKL依赖闭包；release既有下游Simulation失败记录仍保留，当前任务不宣称修复未复测的下游案例。
 - References: R1–R6；手册9章Windows/main integration validation的KKT变换、边界/终止合同；KLU现有排序与固定模式refactor合同。
 - Validation: 重建全部Release目标；tools/windows_lp_stability.py的stability及gates阶段，独立目录reports/windows_release_merge_20260911；候选线程下完整CTest；新前缀cmake install、不同目录consumer-example配置/链接/执行并检查objective=9。对2/4推荐沿用R6固定P95和5%门槛，旧18.50%及31.54%不作为合并实测。失败先调查实现与合并保真，不能放宽门槛。
+
+### R7 实测验收
+
+合并提交1d31f0eb，全部Release目标构建通过；NETLIB两档各540/540准确、HS071各10/10准确、20组长尾合计120/120准确。4对2线程三例区组合计中位数降24.60%，各例P95门通过，LP direct仍推荐4线程；此比例不是相对父提交的速度提升。完整CTest20/20通过，240.85秒；移动后的SDK消费者目标值9.000000，INTEL运行时部署和MSVC归档读取通过。R7预测的零API丢失/零门槛放宽均满足，未新增算法干预。
+
+本批绝对耗时较先前数据增大且波动，固定迭代数/分解次数案例也受影响。对比构建缓存未发现MKL、BLAS、线程或优化选项变化；没有足够证据唯一归因于实现组合或机器状态，因此保留为性能归因限制，不声称已解释或消除。详见 `windows_release_merge_2026-09-11.md`。release父提交的Simulation下游失败记录继续保留；本轮不宣称覆盖未执行的下游测试。
