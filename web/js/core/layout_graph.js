@@ -157,6 +157,7 @@
       type: component.type,
       x: Number(component.x) || 0,
       y: Number(component.y) || 0,
+      rotation: Number(component.rotation) || 0,
       params: component.params || {},
       layoutFixed: component.layoutFixed === true,
     }));
@@ -175,6 +176,16 @@
     components.forEach(component => {
       const domain = componentDomain(component, index);
       const size = componentSize(component.type);
+      if (BUS_TYPES.has(component.type) && Number(options.busbarHalfMax) > 0) {
+        // Conservative rotated footprint: a later auto-span stays inside the
+        // ELK node. Same bound as canvas.js::layoutFootprint; see scale-first
+        // rationale in docs/planning/gui_one_line_redesign.md.
+        const half = Number(options.busbarHalfMax) + 18;
+        const angle = component.rotation * Math.PI / 180;
+        const cos = Math.abs(Math.cos(angle)), sin = Math.abs(Math.sin(angle));
+        size.width = 2 * (half * cos + 34 * sin) + 28;
+        size.height = 2 * (half * sin + 34 * cos) + 28;
+      }
       const fixed = isFixed(component);
       const busTerminalCount = index.busNeighbors.get(component.id)?.size || 0;
       const skeleton = BUS_TYPES.has(component.type) || COUPLERS.has(component.type) || busTerminalCount > 2;

@@ -4,7 +4,7 @@
 <meta charset="UTF-8"/>
 <meta name="viewport" content="width=device-width,initial-scale=1.0"/>
 <title>HySim-XJTU-HRPES</title>
-<link rel="stylesheet" href="css/style.css?v=20260911-buslen"/>
+<link rel="stylesheet" href="css/style.css?v=20260910-uc-threads"/>
 <script src="https://cdn.plot.ly/plotly-2.27.0.min.js"></script>
 </head>
 <body>
@@ -1171,10 +1171,15 @@
       <label class="sub-label" title="机组组合(MILP)求解器：Auto 自动优选；Native 原生分支定界；HiGHS / SCIP 为外部 MILP 求解器">机组组合求解器
         <select id="tspfUcSolver">
           <option value="auto" selected>Auto (优选)</option>
+          <option value="gurobi">Gurobi</option>
           <option value="native">Native B&amp;C</option>
           <option value="highs">HiGHS</option>
           <option value="scip">SCIP</option>
         </select>
+      </label>
+      <label class="sub-label" title="单个机组组合问题的求解器线程上限，与按日任务数独立；0 为后端默认。Auto 在指定线程数时使用 Gurobi，失败则回退 Native。">求解器线程数
+        <input id="tspfSolverThreads" type="number" value="0" min="0" max="256" step="1" aria-describedby="tspfSolverThreadsHint"/>
+        <span id="tspfSolverThreadsHint" class="sub-hint"></span>
       </label>
       <label class="sub-label sub-checkbox" title="启用 AC 网络约束：在机组组合中加入 DC 潮流节点功率平衡与线路热稳定限值；关闭则使用单母线(铜板)平衡">
         <input id="tspfNetworkConstraints" type="checkbox"/>
@@ -1274,7 +1279,7 @@
         <input id="tspfParallel" type="checkbox"/>
         <span>按日并行</span>
       </label>
-      <label class="sub-label" title="并行线程数；0 表示使用全部可用核心">线程数
+      <label class="sub-label" title="并行日任务的工作线程数；0 表示自动分配，不是单个 SCUC 求解器的线程数">按日并行线程数
         <input id="tspfThreads" type="number" value="0" min="0" max="256" step="1"/>
       </label>
       <button id="btnRunTimeSeriesPF" class="toolbar-btn run-btn" title="运行时序潮流">运行<br>时序潮流</button>
@@ -1302,7 +1307,7 @@
           <span>按日并行</span>
           <span id="annParallelHint" class="sub-hint"></span>
         </label>
-        <label class="sub-label" title="并行线程数；0 表示使用全部可用核心">线程数
+        <label class="sub-label" title="并行日任务的工作线程数；0 表示自动分配，不是单个 SCUC 求解器的线程数">按日并行线程数
           <input id="annThreads" type="number" value="0" min="0" max="256" step="1"/>
         </label>
         <label class="sub-label sub-checkbox" title="每日终端储能 SOC 等于初始 SOC，使各日相互独立（并行的前提）">
@@ -2606,7 +2611,7 @@
           <option value="2" selected>LOD2 母线</option>
         </select>
         <button id="btnOverviewFit" class="toolbar-btn" type="button" title="适应全网">适应</button>
-        <button id="btnOverviewLocal" class="toolbar-btn" type="button" title="打开所选母线的局部 SVG">局部 SVG</button>
+        <button id="btnOverviewLocal" class="toolbar-btn" type="button" title="打开所选母线的有界局部母线图">局部母线图</button>
         <button id="btnOverviewTable" class="toolbar-btn" type="button" title="打开全量拓扑表">表格</button>
       </div>
       <div id="networkOverviewStatus" class="network-overview-status" aria-live="polite"></div>
@@ -4192,10 +4197,14 @@
 <!-- ===== On-demand neighborhood sub-diagram (Phase 4) ===== -->
 <div id="subDiagramModal" class="modal" style="display:none">
   <div class="modal-backdrop" data-close-subdiagram></div>
-  <div class="modal-content sub-diagram-modal">
+  <div class="modal-content sub-diagram-modal" role="dialog" aria-modal="true" aria-labelledby="subDiagramTitle">
     <div class="sub-diagram-header">
-      <span id="subDiagramTitle" class="sub-diagram-title">局部 SVG</span>
+      <span id="subDiagramTitle" class="sub-diagram-title">局部母线图</span>
       <span class="sub-diagram-controls">
+        <button id="btnSubDiagramBack" class="toolbar-btn" type="button" disabled>返回上一母线</button>
+        <label class="sub-label">母线上限
+          <select id="subDiagramLimit"><option value="20">20</option><option value="40">40</option><option value="80">80</option></select>
+        </label>
         <label class="sub-label">跳数
           <select id="subDiagramHops">
             <option value="1">1 跳</option>
@@ -4205,11 +4214,22 @@
           </select>
         </label>
         <button id="btnSubDiagramRefresh" class="toolbar-btn" title="按当前跳数重绘">重绘</button>
-        <button id="btnSubDiagramClose" class="toolbar-btn" title="关闭" data-close-subdiagram>关闭 ×</button>
+        <button id="btnSubDiagramClose" class="toolbar-btn" title="返回原网络视图" data-close-subdiagram>返回网络 ×</button>
       </span>
     </div>
-    <div class="sub-diagram-body">
-      <svg id="subDiagramSvg" xmlns="http://www.w3.org/2000/svg"></svg>
+    <div class="sub-diagram-workspace">
+      <div class="sub-diagram-body" tabindex="0" aria-label="局部母线图，可滚动查看">
+        <svg id="subDiagramSvg" xmlns="http://www.w3.org/2000/svg"></svg>
+      </div>
+      <aside class="sub-diagram-inspector" aria-label="母线连接">
+        <strong id="subDiagramSelected"></strong>
+        <div id="subDiagramConnections"></div>
+        <div class="sub-diagram-pager">
+          <button id="btnSubDiagramPrev" class="toolbar-btn" type="button" aria-label="上一页连接">上一页</button>
+          <span id="subDiagramPage" aria-live="polite"></span>
+          <button id="btnSubDiagramNext" class="toolbar-btn" type="button" aria-label="下一页连接">下一页</button>
+        </div>
+      </aside>
     </div>
     <div id="subDiagramInfo" class="sub-diagram-info"></div>
   </div>
@@ -4220,22 +4240,23 @@
 
   <script src="js/components.js?v=20260712-cb-source-flow-v2"></script>
   <script src="js/search_registry.js?v=20260709-phase5"></script>
+  <script src="js/core/local_bus_diagram.js?v=20260910-scale-first"></script>
   <script src="js/core/network_overview.js?v=20260719-webgl-lod-v1"></script>
   <script src="js/core/iec_symbols.js?v=20260908-busbar-p1"></script>
-  <script src="js/canvas.js?v=20260911-buslen"></script>
+  <script src="js/canvas.js?v=20260910-scale-first"></script>
   <script src="js/core/one_line_store.js?v=20260910-store-p3"></script>
   <script src="js/core/analysis_contracts.js?v=20260714-market-v3"></script>
   <script src="js/core/task_manager.js?v=20260712-hysim-phase3-v1"></script>
   <script src="js/core/api_client.js?v=20260712-hysim-phase3-v1"></script>
   <script src="js/core/result_mapping.js?v=20260712-hysim-phase3-v1"></script>
   <script src="js/core/timeseries_window.js?v=20260712-hysim-phase4-v1"></script>
-  <script src="js/core/layout_graph.js?v=20260712-hysim-layout-v1"></script>
+  <script src="js/core/layout_graph.js?v=20260910-scale-first"></script>
   <script src="vendor/elk.bundled.js?v=0.9.3"></script>
   <script src="js/core/layout_engine.js?v=20260910-perf-hardening"></script>
   <script src="js/core/accessibility.js?v=20260712-hysim-phase5-v1"></script>
   <script src="js/core/runtime_diagnostics.js?v=20260712-hysim-phase6-v1"></script>
   <script src="vendor/sql-wasm.js?v=1.10.3"></script>
-  <script src="js/app.js?v=20260911-buslen"></script>
+  <script src="js/app.js?v=20260910-uc-threads"></script>
   <script src="js/core/market_navigation.js?v=20260907-market-guide"></script>
   <script src="js/core/market_activity.js?v=20260907-market-activity"></script>
   <script src="js/core/market_canvas.js?v=20260907-market-guide"></script>

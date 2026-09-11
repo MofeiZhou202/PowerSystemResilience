@@ -197,6 +197,8 @@ struct AnnualProductionSimResult {
   double max_energy_budget_violation_mwh{0.0};
   double fuel_budget_violation_mwh{0.0};
   std::string solver_name;
+  std::string uc_solver_name;
+  int uc_solver_threads_configured{-1}; // Coupled UC cap, -1 = unknown/not run
   bool parallel_daily_effective{false};
   int parallel_workers{1};
   std::string parallel_mode;

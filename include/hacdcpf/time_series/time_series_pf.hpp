@@ -76,6 +76,7 @@ struct UCSchedule {
   bool feasible{false};
   std::string solver_name;
   std::string solver_status;
+  int solver_threads_configured{-1}; // Configured cap, not observed usage; -1 = unknown/default
   double mip_gap{0.0};
   bool mip_gap_target_met{false};
   bool optimality_proven{false};
@@ -296,7 +297,7 @@ struct TimeSeriesPFOptions {
   // day loop.  Default off (the coupled solve).
   bool parallel_daily{false};
   int parallel_threads{0};            // 0 = hardware_concurrency()
-  int uc_solver_threads{0};            // 0 = backend default; Native B&C cap
+  int uc_solver_threads{0};            // 0 = backend default; 1..256 = Native/Gurobi thread cap
   bool keep_system_snapshots{false};
   bool verbose{false};
 };

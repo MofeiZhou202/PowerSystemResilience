@@ -404,6 +404,7 @@ hacdcpf_add_test(test_carbonflow_dynamic_storage test_carbonflow_dynamic_storage
 hacdcpf_add_test(test_carbonflow_tracing test_carbonflow_tracing.cpp)
 hacdcpf_add_test(test_carbonflow_case_validation test_carbonflow_case_validation.cpp)
 hacdcpf_add_test(test_nighttime_opf test_nighttime_opf.cpp)
+hacdcpf_add_test(test_uc_solver_threads test_uc_solver_threads.cpp)
 
 # Short-circuit analysis: Z-bus Thévenin cross-validation + IEC 60909 checks.
 #   1. 2-bus analytical: Z_Thev = Z_line
@@ -835,6 +836,12 @@ if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/run_gui_server.cpp")
     set_tests_properties(workspace_layout_e2e PROPERTIES
       LABELS "gui;e2e;browser;layout" TIMEOUT 120)
 
+    add_test(NAME annual_ui_reconcile_e2e
+      COMMAND "${HACDCPF_NODE_EXECUTABLE}"
+              "${CMAKE_SOURCE_DIR}/tests/e2e/annual_ui_reconcile_e2e.mjs"
+              --server "$<TARGET_FILE:run_gui_server>")
+    set_tests_properties(annual_ui_reconcile_e2e PROPERTIES LABELS "gui;e2e;browser;time_series" TIMEOUT 180)
+
     add_test(NAME gui_scale_features_e2e
       COMMAND "${HACDCPF_NODE_EXECUTABLE}"
               "${CMAKE_SOURCE_DIR}/tests/e2e/gui_scale_features_e2e.mjs"
@@ -864,6 +871,15 @@ if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/run_gui_server.cpp")
               --data-dir "${CMAKE_SOURCE_DIR}/data")
     set_tests_properties(network_overview_e2e PROPERTIES
       LABELS "gui;e2e;browser;webgl;scale" TIMEOUT 120)
+
+    add_test(NAME local_bus_diagram_test
+      COMMAND "${HACDCPF_NODE_EXECUTABLE}" "${CMAKE_SOURCE_DIR}/tests/e2e/local_bus_diagram_test.mjs")
+    set_tests_properties(local_bus_diagram_test PROPERTIES LABELS "gui;unit;layout;scale" TIMEOUT 30)
+    add_test(NAME local_bus_diagram_e2e
+      COMMAND "${HACDCPF_NODE_EXECUTABLE}" "${CMAKE_SOURCE_DIR}/tests/e2e/local_bus_diagram_e2e.mjs"
+              --server "$<TARGET_FILE:run_gui_server>" --data-dir "${CMAKE_SOURCE_DIR}/data"
+              --output-dir "${CMAKE_BINARY_DIR}/local-bus-diagram-e2e")
+    set_tests_properties(local_bus_diagram_e2e PROPERTIES LABELS "gui;e2e;browser;layout;scale" TIMEOUT 180)
 
     add_test(NAME parameter_contract_e2e
       COMMAND "${HACDCPF_NODE_EXECUTABLE}"

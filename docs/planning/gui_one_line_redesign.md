@@ -1,5 +1,50 @@
 # One-Line Diagram Editor Redesign (Busbar-Centric Authoring Canvas)
 
+## Scale-first implementation rationale
+
+This section supersedes the historical fixed-port diagnosis below. The current
+editor already draws adaptive busbars; its layout still reserves legacy widths.
+Thousands of buses remain in the existing WebGL overview. The first delivery
+is a bounded, read-only local busbar sheet, not a second model editor.
+
+- **Model:** breadth-first extraction over domain-qualified authored bus/link
+  identities, followed by disjoint bus rows and separate orthogonal edge lanes.
+  All authored connections (including open devices) are structural adjacency;
+  this view does not compute energization or collapse electrically distinct buses.
+- **Claim:** at most 80 bus rectangles are materialized in the local sheet and
+  no two bus rectangles overlap. Outgoing connections remain inspectable by
+  stable destination; revisiting a destination recenters the bounded sheet.
+- **Geometry:** row `i` occupies `[0,W] × [iH,(i+1)H)`, with positive padding
+  between bus/label footprints. Each rendered edge has a distinct lane outside
+  the bus column. Tap pitch is bounded below by allocating width from the
+  maximum displayed degree. Wires can cross; junctions exist only at bus taps.
+  Main-editor ELK nodes reserve `2 * BUS_HALF_MAX` plus label/handle clearance
+  (rotation-aware), so later auto-span cannot outgrow the layout reservation.
+- **Cost:** graph construction O(V+E+D) memory/time in JavaScript, where D is
+  attached device records; bounded BFS plus O(E) boundary classification;
+  local layout O(B+L), B≤80, L≤160. A maximum of 12 rendered links per bus
+  prevents a high-degree hub from generating an unbounded row; remaining links
+  stay available in the paged connection inspector. No all-pairs force solver.
+- **Prediction:** zero bus-rectangle overlaps; B≤80 and L≤160 even on a
+  5,000-bus hub or mesh; 5,000-bus pure graph/extraction/layout under 500 ms
+  locally. These are acceptance ceilings, not a production latency SLA.
+- **Assumptions:** valid, unique stable bus/link IDs; invalid/duplicate records
+  must report an error or explicit limitation. Diagram coordinates are CSS
+  pixels, not physical busbar lengths. Fixed authored overlaps are preserved
+  rather than silently moving user-locked objects.
+- **References:** BFS traversal (Cormen et al., *Introduction to Algorithms*,
+  breadth-first search); existing `app.js` neighborhood extraction,
+  `canvas.js::busHalfLen`, `layout_graph.js::componentSize`, and JSON field
+  mappings in `src/io/json_io.cpp`.
+- **Validation fixed before implementation:**
+  `node tests/e2e/local_bus_diagram_test.mjs`; browser
+  `local_bus_diagram_e2e.mjs` and existing `network_overview_e2e.mjs` with
+  `--server build/macos-release/run_gui_server --data-dir data`.
+  Verify a 5,000-bus synthetic network and case2869pegase, AC/DC equal IDs,
+  parallel links, open switches, transformer aliases, boundaries, selection,
+  navigation back, no full-model mutation, and desktop/mobile overflow.
+  Record measured outcomes in the living development status.
+
 > 规划文档 / Planning proposal. This describes a **controlled improvement**, not
 > current behavior. Status, acceptance criteria and risks are stated below.
 > Owning contract: [GUI ↔ backend contract](../../.github/skills/develop-gui-backend-contract/SKILL.md)

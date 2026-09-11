@@ -9298,6 +9298,25 @@ hacdcpf::UCSolverChoice parse_uc_solver_choice(const std::string& s) {
   return hacdcpf::UCSolverChoice::Auto;
 }
 
+// Solver workers are independent of the number of parallel day tasks.
+bool read_uc_solver_threads(const json& j, int& threads, httplib::Response& res) {
+  const auto value = j.value("uc_solver_threads", json(0));
+  const auto solver = parse_uc_solver_choice(j.value("uc_solver", std::string("auto")));
+  std::string error;
+  if (!value.is_number_integer() || value < 0 || value > 256)
+    error = "uc_solver_threads must be an integer in [0, 256]";
+  else if (value != 0 && (solver == hacdcpf::UCSolverChoice::HiGHS ||
+                         solver == hacdcpf::UCSolverChoice::SCIP))
+    error = "uc_solver_threads: current HiGHS/SCIP adapters do not support custom thread limits; use Auto, Native or Gurobi";
+  if (!error.empty()) {
+    res.status = 400;
+    res.set_content(json{{"error", error}}.dump(), "application/json");
+    return false;
+  }
+  threads = value.get<int>();
+  return true;
+}
+
 // Human-readable label for the enum (echoed back to the GUI for confirmation).
 const char* uc_solver_choice_label(hacdcpf::UCSolverChoice c) {
   switch (c) {
@@ -21303,6 +21322,8 @@ int main(int argc, char** argv) {
              (const httplib::Request& req, httplib::Response& res) {
       hacdcpf::util::AtomicFlagLease analysis_lease(g_session.busy);
       try {
+        int uc_threads = 0;
+        if (!read_uc_solver_threads(json::parse(req.body.empty() ? "{}" : req.body), uc_threads, res)) return;
         const auto request_started = std::chrono::steady_clock::now();
         hacdcpf::HybridPowerSystem sys_ts;
         hacdcpf::TimeSeriesData ts_data;
@@ -21372,6 +21393,7 @@ int main(int argc, char** argv) {
         opts.skip_uc = skip_uc;
         opts.run_opf = run_opf;
         opts.uc_solver = uc_solver;
+        opts.uc_solver_threads = uc_threads;
         opts.enable_network_constraints = enable_net;
         // DC network coupling is only meaningful when AC nodal constraints are on.
         opts.enable_dc_network_constraints = enable_dc_net && enable_net;
@@ -21451,6 +21473,9 @@ int main(int argc, char** argv) {
             {"demand_response", opts.enable_demand_response},
             {"demand_response_shiftable", opts.dr_shiftable}};
         out["uc_feasible"] = result.uc_schedule.feasible;
+        out["uc_solver_threads_requested"] = uc_threads;
+        out["uc_solver_threads_configured"] = result.uc_schedule.solver_threads_configured > 0
+            ? json(result.uc_schedule.solver_threads_configured) : json(nullptr);
         out["uc_solver_name"] = result.uc_schedule.solver_name;
         out["uc_solver_status"] = result.uc_schedule.solver_status;
         out["uc_mip_gap"] = result.uc_schedule.mip_gap;
@@ -24984,6 +25009,8 @@ int main(int argc, char** argv) {
       try {
         const auto request_started = std::chrono::steady_clock::now();
         const auto j = json::parse(req.body.empty() ? "{}" : req.body);
+        int uc_threads = 0;
+        if (!read_uc_solver_threads(j, uc_threads, res)) return;
         const double step_hr =
             (j.value("resolution", std::string("6h")) == "1h") ? 1.0 : 6.0;
         const bool use_session_ts =
@@ -25034,6 +25061,7 @@ int main(int argc, char** argv) {
         const bool enable_dc_net = j.value("enable_dc_network_constraints", false);
         const double reserve_frac = j.value("reserve_fraction", 0.0);
         opts.ts_pf_options.uc_solver = uc_solver;
+        opts.ts_pf_options.uc_solver_threads = uc_threads;
         opts.ts_pf_options.enable_network_constraints = enable_net;
         opts.ts_pf_options.enable_dc_network_constraints = enable_dc_net && enable_net;
         opts.ts_pf_options.reserve_requirement_fraction = std::max(0.0, reserve_frac);
@@ -25128,6 +25156,10 @@ int main(int argc, char** argv) {
         out["total_cost"] = result.total_cost;
         // Echo back the requested solver + active constraint set + objective.
         out["uc_solver_requested"] = uc_solver_choice_label(uc_solver);
+        out["uc_solver_threads_requested"] = uc_threads;
+        out["uc_solver_threads_configured"] = result.uc_solver_threads_configured > 0
+            ? json(result.uc_solver_threads_configured) : json(nullptr);
+        out["uc_solver_name"] = result.uc_solver_name;
         out["solver_name"] = result.solver_name;
         out["parallel_daily"] = opts.enable_parallel_daily;
         out["parallel_daily_effective"] = result.parallel_daily_effective;

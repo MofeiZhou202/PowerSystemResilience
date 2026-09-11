@@ -3388,7 +3388,9 @@ tr.topo-clickable:focus-visible {
 
 /* ===== On-demand neighborhood sub-diagram (Phase 4) ===== */
 .sub-diagram-modal {
-  width: min(780px, 94vw);
+  width: min(1120px, 96vw);
+  max-height: 92dvh;
+  min-height: 0;
   padding: 14px 16px;
   display: flex; flex-direction: column; gap: 10px;
 }
@@ -3397,13 +3399,41 @@ tr.topo-clickable:focus-visible {
   flex-wrap: wrap;
 }
 .sub-diagram-title { font-size: 14px; font-weight: 700; color: var(--accent); }
-.sub-diagram-controls { display: flex; align-items: center; gap: 8px; }
+.sub-diagram-controls { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
 .sub-diagram-controls .sub-label { flex-direction: row; align-items: center; gap: 4px; margin: 0; }
 .sub-diagram-body {
   border: 1px solid var(--border); border-radius: 8px;
-  background: var(--canvas-bg); overflow: hidden;
+  background: var(--canvas-bg); overflow: auto; min-width: 0; min-height: 0;
+  overscroll-behavior: contain;
 }
-#subDiagramSvg { width: 100%; height: 520px; display: block; }
+#subDiagramSvg { display: block; max-width: none; flex: none; }
+.sub-diagram-workspace { display: grid; grid-template-columns: minmax(0, 1fr) 260px; height: min(580px, 62dvh); min-height: 0; gap: 12px; }
+.sub-diagram-inspector { min-height: 0; overflow: auto; border-left: 1px solid var(--border); padding-left: 12px; overflow-wrap: anywhere; }
+.sub-diagram-device-summary { margin: 8px 0; font-size: 12px; color: var(--ink2); }
+.sub-diagram-connection { display: block; width: 100%; padding: 10px 8px; margin: 6px 0; text-align: left; color: var(--ink); background: var(--bg2); border: 1px solid var(--border); border-radius: 4px; cursor: pointer; overflow-wrap: anywhere; }
+.sub-diagram-connection:hover { border-color: var(--accent); }
+.sub-diagram-connection span { display: block; font-size: 12px; color: var(--ink2); margin-top: 3px; }
+.sub-diagram-pager { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin-top: 10px; }
+#subDiagramSvg text { fill: var(--ink); font-size: 13px; pointer-events: none; }
+#subDiagramSvg .subdiag-name, #subDiagramSvg .subdiag-boundary { fill: var(--ink2); font-size: 12px; }
+#subDiagramSvg .subdiag-bounds { fill: transparent; stroke: transparent; }
+#subDiagramSvg .subdiag-node.selected .subdiag-bounds { fill: none; stroke: var(--accent); stroke-dasharray: 4 3; }
+#subDiagramSvg .subdiag-busbar { stroke: var(--accent); stroke-width: 6; stroke-linecap: round; }
+#subDiagramSvg .dc .subdiag-busbar { stroke: var(--accent2); }
+#subDiagramSvg .subdiag-tap { fill: var(--ink); pointer-events: none; }
+#subDiagramSvg .subdiag-edge { fill: none; stroke: var(--ink2); stroke-width: 1; opacity: .45; }
+#subDiagramSvg .subdiag-edge.selected { stroke: var(--accent); stroke-width: 2; opacity: 1; }
+#subDiagramSvg .subdiag-edge.inactive { stroke-dasharray: 5 4; }
+#subDiagramSvg .subdiag-node.inactive .subdiag-busbar { stroke: var(--ink2); }
+#subDiagramSvg .subdiag-node:hover { stroke: none; }
+#subDiagramSvg .subdiag-node:focus .subdiag-bounds { stroke: var(--focus-ring); stroke-width: 2; }
+@media (max-width: 640px) {
+  .sub-diagram-modal { padding: 10px; gap: 8px; }
+  .sub-diagram-workspace { grid-template-columns: minmax(0, 1fr); grid-template-rows: minmax(140px, 1fr) minmax(100px, .65fr); height: 55dvh; }
+  .sub-diagram-inspector { border-left: 0; border-top: 1px solid var(--border); padding: 8px 0 0; }
+  .sub-diagram-info { max-height: 64px; overflow: auto; }
+  .sub-diagram-controls { gap: 5px; }
+}
 .sub-diagram-info { font-size: 12px; color: var(--ink2); display: flex; flex-wrap: wrap; gap: 10px; align-items: center; }
 .sub-diagram-info b { color: var(--ink); }
 .subdiag-legend { display: inline-flex; align-items: center; gap: 4px; }
@@ -5426,4 +5456,17 @@ body.market-generic-active #rightPanel { width: 65% !important; max-width: none;
   .market-navigation > label:first-child select { flex: 1; }
   .market-page-context h3 { font-size: 16px; }
   .market-page-context { gap: 8px; }
+}
+
+/* Keep the backend name and configured cap readable in narrow result panels. */
+.result-item.uc-thread-result {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 2fr);
+  align-items: start;
+  gap: 8px;
+}
+.uc-thread-result .result-value {
+  min-width: 0;
+  white-space: normal;
+  overflow-wrap: anywhere;
 }

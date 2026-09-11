@@ -6,6 +6,148 @@ This is the living handoff for verified build state and active engineering work.
 Update it in place; do not create dated copies. Source, registered tests, and
 the current Git worktrees remain authoritative.
 
+## SCUC solver threads and daily workers
+
+Live-preview follow-up: the only running preview was still PID 9258 on port
+61990, started at 20:02 before the rebuilt binary (22:42). Its static directory
+already contained the new controls, but unchanged asset URLs and an open page
+could retain old JavaScript. Bumped `app.js`/`style.css` URLs to
+`20260910-uc-threads` and started the rebuilt server separately on port 8080,
+leaving the earlier session intact. `/xjtu/?v=uc-threads` returns the new input
+and versioned assets; invalid `uc_solver_threads` on the annual route returns
+HTTP 400, confirming the new backend is live. The solver-thread input is in
+shared public modeling, not the annual daily-worker input.
+
+Fixed the production GUI's ambiguous thread control. A new shared solver-thread
+input (`tspfSolverThreads`) is editable for Auto/Native/Gurobi even with annual
+SCUC/SCED; the existing two controls are labeled daily-worker counts. Unsupported
+HiGHS/SCIP adapters disable custom solver counts explicitly and preserve the UI
+value for switching back. SCUC's annual inter-day coupling stays intact.
+
+Both production routes consume `uc_solver_threads` (integer 0–256) and reject
+invalid/unsupported overrides with HTTP 400. Native uses `BCOptions.num_threads`;
+Gurobi sets only `Threads`, leaving previous tolerances/time limits intact.
+Auto/Gurobi with a nonzero override skip HiGHS fallback and retain that limit
+when falling back to Native. Defaults retain the existing backend order.
+The result distinguishes requested count, configured cap (nullable), actual UC
+backend and day-worker execution; it does not claim measured active CPU workers.
+See the GUI runtime contract (including the field ledger) and the time-series
+manual's GUI-thread subsection for scope, rationale and numerical oracle.
+
+MIPSolvers required a narrow thread-only adapter setter. It is locally committed
+on `codex/uc-solver-threads` at `80ddb8b40540ef06c0cb5ce282dbc2f79e6114c5`
+(parent `5eac6be`); no remote push. `cmake/Dependencies.cmake` now pins this local
+revision because the previous pin lacks that interface. Its worktree is clean.
+Release's dirty-dependency guard remains enabled (`HACDCDSS_SKIP_MIPSOLVERS_DIRTY_CHECK=OFF`);
+initial attempts with dirty sources failed that guard and were resolved by the
+local dependency commit, not by disabling Release reproducibility checks.
+
+Verified on macOS arm64 with `macos-release`:
+
+- Rebuilt `run_gui_server` and `test_uc_solver_threads` successfully.
+- `test_uc_solver_threads '[uc_threads]' -s`: 3 cases / 29 assertions pass.
+  Native 1/2-thread and real Gurobi 2-thread solves match the predeclared objective
+  2200 within 1e-5; period MW balances within 1e-5. Annual coupled UC reports cap
+  2 independently of a requested daily-worker count of 7. No speedup claim.
+- Running the Auto/Gurobi case with an intentionally missing `GRB_LICENSE_FILE`
+  forces actual Native fallback: 8 assertions pass, retaining cap 2 and the same
+  objective. Logs: `/tmp/hysim-uc-threads-test.log` and
+  `/tmp/hysim-uc-threads-fallback.log`.
+- Registered `annual_ui_reconcile_e2e`: 33 checks pass, including SCUC/SCED input
+  editing, restored values, 390px mobile editing, independent day/solver counts,
+  invalid requests on both routes, and real IEEE14 AC/DC two-step UC via the GUI
+  with Native cap 2 and feasible scheduling. Result columns do not overlap.
+  Annual request serialization is intercepted; annual cap propagation is tested
+  with the short C++ fixture, not a fresh full-year performance run.
+- Focused CTest run covering these 3 C++ cases plus annual UI, scale GUI and local
+  busbar E2E: 6/6 pass, 32.93 s. After the final result-column CSS fix, annual UI
+  passes again in 2.16 s (33 checks). JS syntax and both Git whitespace checks pass.
+- Browser screenshots reviewed: `output/gui-uc-threads/annual-controls.png` and
+  `solver-result.png`. The result screenshot retains deliberate intercepted-run
+  error notifications from the request-contract tests; the subsequent real UC
+  run succeeds. CUA manual browser control remains unavailable (auth token).
+
+No full C++/MIPSolvers suite or yearly parallel-performance benchmark was run.
+HiGHS/SCIP custom solver-thread interfaces and per-step OPF threading remain
+outside this change. The GUI setting controls a limit, not guaranteed occupancy
+or linear speedup; parallel daily workers and solver workers can multiply.
+
+## Scale-first busbar GUI
+
+Implemented the first scale-first delivery in the working tree based on
+`b7ac722b`: existing WebGL overview → bounded read-only local busbar sheet.
+Default/max 20/80 buses, 160 rendered links, 12 taps per bus, 20 connection rows
+per page; explicit off-sheet/undrawn counts, domain-qualified navigation and
+history, keyboard isolation, fixed readable labels and mobile scrolling.
+Separate bus rows replace the concentric local node layout. Main SVG legacy/ELK
+layout reserves the configured adaptive span; rotated tap projection and live
+label/handle re-span are corrected. Contract and identity/field ledger:
+`docs/developer/gui_canvas_runtime.md` and its Chinese help translation.
+The planning document records the pre-implementation model and bounds.
+
+Verification on macOS arm64, Node v26.7.0, existing `macos-release` server:
+
+- `cmake --preset macos-release` completed and registered both new tests.
+  Latest `ctest --test-dir build/macos-release --output-on-failure -R
+  '^(local_bus_diagram_(test|e2e)|network_overview_e2e|gui_scale_features_e2e)$'`:
+  4/4 passed, 28.71 s, including the expanded IEEE118 browser regression.
+- Pure 5,000-bus hub: 80 local buses / 12 paths / **0 bus overlaps**,
+  graph + extraction + layout 22.355 ms; 5,000-bus mesh: 39 local buses /
+  59 paths / **0 bus overlaps**, 43.636 ms. Predeclared ceilings B≤80,
+  L≤160, no overlaps, <500 ms all pass; these are local fixtures, not an SLA.
+  An 80-bus complete graph reaches the 160-edge ceiling without overlap.
+- Browser synthetic 5,001 AC/DC buses: 20/80 limits, paged off-sheet navigation,
+  back, AC/DC ID 1 separation and JSON preservation pass. Desktop 1440×1000
+  and mobile 390×844 stay within the viewport with 13px identity labels.
+  Actual case2869pegase local view also passes geometry/model preservation.
+- IEEE14 AC/DC main editor: both legacy and ELK layouts have zero tested bus
+  overlaps; resize labels/handles align; all three links on the rotated test
+  bus remain on its axis. Delete inside the local sheet cannot edit the model,
+  Escape closes, and replacing the system clears the previous local view.
+- IEEE118 extension: MATPOWER `case118.m` (118 AC) and built-in `ieee118_acdc`
+  (118 AC + 6 DC) both have **0 tested bus overlaps** under legacy and ELK.
+  Local neighborhoods centered on highest-degree AC 49 pass 20/40/80 limits:
+  actual bus counts 20/40/59 and 20/40/68 at four hops, respectively, with zero
+  overlaps. Desktop 1440×1000 and mobile 390/320×844 preserve 13px labels and fit
+  the viewport. Selection, connection navigation, Back and full serialized JSON
+  preservation pass. This caught and fixed local selection panning the main SVG
+  viewport (`_canvas.viewBox`); ordinary global navigation retains its pan behavior.
+  Hybrid AC 49 has 13 connections: the 12-tap cap omits one drawn link while
+  retaining its inspector record. Main fit-to-network labels remain small;
+  these checks establish bus separation, not readability of the full-network fit.
+  Screenshot inspection confirms local readability and intentional independent
+  scrolling. Reproduce with `node tests/e2e/local_bus_diagram_e2e.mjs --server
+  build/macos-release/run_gui_server --data-dir data --output-dir
+  output/gui-busbar-ieee118`; screenshots and `verification.json` are in that
+  directory. Current in-app manual reinspection was unavailable because the
+  browser-control service returned an unavailable auth token; Playwright browser
+  execution and screenshot inspection completed.
+- Existing `network_overview_e2e.mjs`, `gui_scale_features_e2e.mjs` and
+  `busbar_length_e2e.mjs` pass (the latter 7/7 checks). The scale suite covers
+  large-network PF/OPF, table editing, imports and normal-editor return.
+  Updated its geometry selectors for busbars; repaired the overview test's
+  pre-existing incomplete Plotly mock by adding `purge`.
+- Manual in-app browser inspection loaded case2869pegase and navigated
+  AC 100 → AC 1203: separated bars, selection, five off-sheet connections and
+  three independent transformer records to AC 556 are visible. Screenshots:
+  `output/gui-busbar/` and `build/macos-release/local-bus-diagram-e2e/`.
+
+No C++ source or API schema changed for the busbar GUI. The GUI regressions above
+reused the existing server. Subsequently rebuilt `run_gui_server` successfully
+with `cmake --build build/macos-release --target run_gui_server -j4` at the user's
+request. The rebuilt executable passed a temporary localhost startup smoke:
+`/api/cases`, `/xjtu/` and `/xjtu/js/core/local_bus_diagram.js` returned HTTP 200;
+the temporary process was stopped afterward. Build emitted compiler warnings
+(including OpenXLSX deleted default operations and DynamicSystem class/struct
+declarations), but no build errors. No complete C++ suite was run.
+Configure warns that local MIPSolvers HEAD
+`5eac6be` differs from pin `a39812a`, and that its prebuilt dependency manifest
+does not match the current toolchain; configuration used vendored sources.
+No dependency pin was changed. Remaining scope: local device glyphs/editing,
+continuous zoom morphing, substation grouping, and full detailed sheets are
+not implemented by this increment. Wire crossings remain possible; main-editor
+manual/locked overlaps or cap increases after layout can require re-layout.
+
 ## Strict Hydro Label Convergence and Prospective Holdout (running)
 
 Theory §14 / intelligent simulation §12: four old training-only representative

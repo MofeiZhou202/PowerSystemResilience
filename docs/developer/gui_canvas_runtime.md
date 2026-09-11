@@ -1,5 +1,109 @@
 # Canvas Runtime and Result Playback
 
+## Time-series solver threads
+
+After this update, restart the server executable and reload the page: rebuilding
+does not replace an already-running process. The `app.js`/`style.css` asset URLs
+use version `20260910-uc-threads` to invalidate the previous frontend cache.
+
+The shared production toolbar distinguishes **求解器线程数** (`tspfSolverThreads`)
+from **按日并行线程数** (`tspfThreads` / `annThreads`). The solver input is
+editable for Auto, Native and Gurobi regardless of the annual daily mode; switching
+to HiGHS/SCIP disables it with an explicit unsupported-adapter hint, retains the
+entered value and submits 0 (backend default). Switching back restores the value.
+SCUC/SCED continue to disable independent annual days, not the solver input.
+
+| Value | API / C++ source | Contract |
+|---|---|---|
+| Solver cap | `uc_solver_threads` → `TimeSeriesPFOptions::uc_solver_threads`; annual `ts_pf_options` | Integer 0–256; 0 retains defaults; 1–256 applied to Native B&C or Gurobi |
+| Day workers | `parallel_threads` → existing day-pool options | Independent of the solver cap; annual decomposition requires DynamicOPF and its existing state-admissibility checks |
+| Configured cap | `uc_solver_threads_configured` | Positive configured limit, or null for backend default/unknown/no UC; never measured active threads |
+| Requested cap | `uc_solver_threads_requested` | Request echo, independent of actual backend/fallback |
+| Actual UC backend | `uc_solver_name` | Actual coupled-UC backend; distinct from annual-planning solver |
+
+Both `/api/session/run_ts_pf` and `/api/session/run_annual_sim` validate the cap
+before solving: fractional, negative, null, string and >256 values return HTTP
+400. Nonzero overrides for current HiGHS/SCIP adapters also return 400. Annual
+day drill-down forwards the shared solver cap too. The result panel distinguishes
+day-task execution from the UC solver's configured limit. DynamicOPF with no UC
+reports that UC was not run; its OPF threads are not controlled by this field.
+
+With a nonzero cap, Auto/Gurobi try Gurobi then Native, skipping the current
+HiGHS adapter because it cannot honor that override. With 0, the existing
+Gurobi→HiGHS→Native fallback order remains. Time-series independent-day Auto
+uses Native for an explicit cap; each day retains the requested solver cap.
+Default independent-day Native keeps its existing one-thread policy. Thus day
+workers × solver workers may exceed the hardware count; these are separate
+user-controlled concurrency limits, not an automatic speedup guarantee.
+
+The Gurobi thread-only setter lives in the sibling MIPSolvers adapter and preserves
+its existing time limits and tolerances. Regression targets: `test_uc_solver_threads`
+and `annual_ui_reconcile_e2e`. Numerical evidence and dependency revision are
+recorded in `docs/overview/development_status.md`.
+
+## Bounded local busbar sheets
+
+Large systems continue to enter the WebGL overview under the existing size
+policy; they are never expanded into thousands of busbar SVG elements by local
+navigation. Select an overview bus and choose **局部母线图**, or enter a bus
+in the global search and choose **邻域图**. The local sheet defaults to 20 buses,
+offers 40/80-bus limits and 1–4 hops, and preserves readable 13px identity labels
+inside its own scroll region. Mobile stacks the connection inspector below the
+sheet rather than scaling the whole drawing down.
+
+`web/js/core/local_bus_diagram.js` builds a read-only structural graph and
+extracts a bounded neighborhood. Each bus occupies a separate 160px row;
+rendered connections receive distinct taps and orthogonal lanes outside the bus
+column. At most 160 links and 12 taps per bus are drawn. Both off-sheet and
+undrawn internal links remain in the selected bus's connection inspector,
+paged at 20 rows. Counts explicitly disclose the rendering limits. Selecting a
+bus highlights its incident paths and synchronizes its stable selection with
+the main Canvas/WebGL/topology table. Clicking a connection or double-clicking
+a bus recenters the sheet; **返回上一母线** restores the previous center.
+Closing/Escape returns to the network; editor keyboard commands do not pass
+through the modal. A full model replacement clears the sheet and its history.
+
+| Contract | Authoritative source | GUI behavior |
+|---|---|---|
+| Bus identity | `ac.buses[].index` / `dc.buses[].index` | `{domain,index}`; duplicate IDs in one domain rejected; AC/DC equal IDs remain distinct |
+| Nominal voltage | `buses[].base_kv`, kV | Missing/non-positive values show “电压未提供”; no inferred 110/320 kV |
+| Ordinary branches | `ac/dc.branches[]`, `from_bus`, `to_bus`, stable `index` | Parallel records retain separate identities and connection rows |
+| Switching equipment | `ac.switches`, `ac.circuit_breakers`, `dc.dc_circuit_breakers`; `bus_from`, `bus_to`, `closed`, `in_service` | Open/offline links remain visible, dashed and labeled; not an energization result |
+| Transformers | `ac.transformers_2w`, `source_branch_idx`, `hv_bus/lv_bus` | Branch-backed metadata becomes an alias of the branch, not a duplicate link |
+| Converter links | VSC/LCC `bus_ac/bus_dc`; DC/DC `bus_in/bus_out` | Domain-qualified cross-domain endpoints; current nested and legacy top-level DC/DC collections recognized |
+| Multi-terminal equipment | 3W `hv_bus/mv_bus/lv_bus`; router `ports[].port_type/bus` | Port association spokes explicitly declared; no internal-conduction or electrical-equivalent claim |
+| Attached devices | Nested AC/DC component records with `bus` | Counts in inspector; no individual local device glyphs or top-level aggregate-device coverage claim |
+| Scope/boundaries | Full authored graph and extracted membership | No electrical merging, deletion, backend sync or result fabrication |
+
+Local selection/navigation leaves the authored JSON, including `_canvas.viewBox`,
+unchanged; `selectStableRef` forwards `preserveViewport: true` for local-sheet
+selection, synchronizing the selected component without panning the main Canvas
+or switching the underlying workspace tab. Ordinary search still pans to its
+target. The local sheet has no separate save format. Unknown link IDs/references are disclosed as
+limitations, duplicate stable links are rejected, and a nonexistent focus bus
+is an error. Crossings are possible: only bus tap dots indicate connections.
+This first delivery is a structural inspection sheet, not an editable
+substation schematic, automatic zoom morphing, or a full-network detailed sheet.
+
+The main editor now reserves the configured **maximum** busbar footprint before
+ELK layout and during legacy placement/collision checks. Its tap projection is
+rotation-aware, and live re-span keeps bar endpoints, labels and connect handles
+aligned. This reservation applies at automatic-layout time: user-authored
+overlaps/locked positions are preserved, and increasing the global busbar cap
+after layout may require another automatic layout. It is not a universal
+wire-crossing or arbitrary manual-layout guarantee.
+
+The mathematical bounds and predeclared performance ceiling are in
+[the scale-first rationale](../planning/gui_one_line_redesign.md#scale-first-implementation-rationale).
+Registered tests: `local_bus_diagram_test`, `local_bus_diagram_e2e`; existing
+`network_overview_e2e`, `gui_scale_features_e2e` and the busbar-length script
+cover adjacent behavior. The browser regression includes MATPOWER `case118.m`
+(118 AC buses) and built-in `ieee118_acdc` (118 AC + 6 DC buses), both main layout
+engines, 20/40/80 local limits, stable selection, full-JSON preservation, Back,
+and 390/320px mobile widths. Full-network fit can make main-editor labels too
+small to read; readable detail is provided by the local sheet. Current numerical
+evidence is in the development status.
+
 Southern market modules use a separate market topology inside the main viewport,
 implemented by `web/js/core/market_canvas.js`. They preserve the engineering
 Canvas model and use typed Southern stable IDs, synchronized scenario/day/slot

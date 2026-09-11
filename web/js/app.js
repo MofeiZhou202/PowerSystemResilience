@@ -1153,18 +1153,18 @@ const App = (() => {
     return true;
   }
 
-  function navigateToSearchResult(row) {
+  function navigateToSearchResult(row, options = {}) {
     if (!row) return;
     const headless = !!(typeof Canvas !== 'undefined' && Canvas.isHeadless && Canvas.isHeadless());
     const canPan = row.compId !== undefined && row.compId !== null && !headless &&
       typeof Canvas !== 'undefined' && Canvas.panToComponent;
     if (canPan) {
-      Canvas.panToComponent(row.compId);
+      Canvas.panToComponent(row.compId, options);
       setStatus(`已定位 ${row.title}`);
       log(`定位到 ${row.title}`, 'info');
       return;
     }
-    switchTab('topology');
+    if (!options.preserveViewport) switchTab('topology');
     showTopologySearchResult(row);
     const visible = highlightVisibleTopologyRow(row);
     const stableBus = resolveBusFromRow(row);
@@ -1186,8 +1186,8 @@ const App = (() => {
       candidate.source.bucket === String(ref.domain) &&
       candidate.ids.includes(index));
     if (!row) return false;
-    navigateToSearchResult(row);
-    if (window.innerWidth <= 640 && !options.openLocal) {
+    navigateToSearchResult(row, options);
+    if (window.innerWidth <= 640 && !options.openLocal && !options.preserveViewport) {
       document.body.classList.add('network-overview-table');
     }
     if (options.openLocal) openSubDiagramFor(String(ref.domain), index,
@@ -1219,7 +1219,7 @@ const App = (() => {
   // ========== On-demand neighborhood sub-diagram (Phase 4) ==========
   // A self-contained, read-only viewer: extracts a k-hop neighborhood of a bus
   // from the full system JSON (headless-aware) and draws it in a modal. The main
-  // canvas, headless state, and backend session are never touched, so this is
+  // viewport, electrical model, and backend session are preserved, so this is
   // safe for very large systems where the full single-line diagram is skipped.
   let _subDiagramFocus = null;  // { domain, index } of the last-drawn center bus
 
@@ -1237,173 +1237,182 @@ const App = (() => {
     return { domain: dcDomain ? 'dc' : 'ac', index: Number(bus) };
   }
 
-  const nodeKey = (domain, index) => `${domain}:${index}`;
+  let _subDiagramModel = null;
+  let _subDiagramSelected = null;
+  let _subDiagramPage = 0;
+  let _subDiagramHistory = [];
+  let _subDiagramReturnFocus = null;
+  const SUBDIAGRAM_KIND_LABELS = { line: '交流线路', dcline: '直流线路',
+    transformer: '变压器', transformer3w: '三绕组端口', switch: '开关',
+    breaker: '断路器', vsc: 'VSC', lcc: 'LCC', dcdc: 'DC/DC', router: '路由器端口' };
+  const SUBDIAGRAM_DEVICE_LABELS = { generators: '发电机', loads: '负荷', shunts: '并联补偿',
+    storage: '储能', dc_storage: '直流储能', external_grids: '外部电网',
+    pv_systems: '光伏', pv_arrays: '直流光伏', renewable_gens: '可再生电源',
+    static_generators: '分布式电源', motors: '电动机', flexible_loads: '柔性负荷',
+    asymmetric_loads: '不对称负荷', chargers: '充电桩', charging_stations: '充电站' };
 
-  // Build undirected adjacency over AC/DC buses (branches, transformers, VSC,
-  // DC/DC), plus a per-bus device summary for annotation.
-  function buildSystemGraph(sys) {
-    const adj = new Map();     // key -> Set(keys)
-    const edges = [];          // { a, b, kind }
-    const link = (aDomain, aIdx, bDomain, bIdx, kind) => {
-      if (![aIdx, bIdx].every(Number.isFinite)) return;
-      const a = nodeKey(aDomain, aIdx), b = nodeKey(bDomain, bIdx);
-      if (a === b) return;
-      if (!adj.has(a)) adj.set(a, new Set());
-      if (!adj.has(b)) adj.set(b, new Set());
-      adj.get(a).add(b); adj.get(b).add(a);
-      edges.push({ a, b, kind });
-    };
-    (sys.ac?.branches || []).forEach(br => link('ac', Number(br.from_bus), 'ac', Number(br.to_bus), 'line'));
-    (sys.ac?.transformers_2w || []).forEach(t => link('ac', Number(t.hv_bus), 'ac', Number(t.lv_bus), 'trafo'));
-    (sys.dc?.branches || []).forEach(br => link('dc', Number(br.from_bus), 'dc', Number(br.to_bus), 'dcline'));
-    (sys.vsc_converters || []).forEach(v => link('ac', Number(v.bus_ac), 'dc', Number(v.bus_dc), 'vsc'));
-    (sys.lcc_converters || []).forEach(v => link('ac', Number(v.bus_ac ?? v.ac_bus), 'dc', Number(v.bus_dc ?? v.dc_bus), 'lcc'));
-    (sys.dcdc_converters || []).forEach(d => {
-      const a = Number(d.bus_in ?? d.from_bus ?? d.port1_bus);
-      const b = Number(d.bus_out ?? d.to_bus ?? d.port2_bus);
-      link('dc', a, 'dc', b, 'dcdc');
-    });
-    // Per-bus device summary
-    const devices = new Map();  // key -> { gen, load, storage, pv, other }
-    const bump = (domain, idx, kind) => {
-      if (!Number.isFinite(Number(idx))) return;
-      const k = nodeKey(domain, Number(idx));
-      if (!devices.has(k)) devices.set(k, {});
-      devices.get(k)[kind] = (devices.get(k)[kind] || 0) + 1;
-    };
-    (sys.ac?.generators || []).forEach(g => bump('ac', g.bus, 'gen'));
-    (sys.ac?.loads || []).forEach(l => bump('ac', l.bus, 'load'));
-    (sys.ac?.storage || []).forEach(s => bump('ac', s.bus, 'storage'));
-    (sys.ac?.pv_systems || []).forEach(p => bump('ac', p.bus, 'pv'));
-    (sys.ac?.renewable_gens || []).forEach(r => bump('ac', r.bus, 'ren'));
-    (sys.ac?.external_grids || []).forEach(e => bump('ac', e.bus, 'grid'));
-    (sys.dc?.loads || []).forEach(l => bump('dc', l.bus, 'load'));
-    (sys.dc?.dc_storage || []).forEach(s => bump('dc', s.bus, 'storage'));
-    (sys.dc?.pv_arrays || []).forEach(p => bump('dc', p.bus, 'pv'));
-    return { adj, edges, devices };
-  }
-
-  const SUBDIAGRAM_MAX_NODES = 80;
-
-  // BFS the graph from a center bus out to `hops`, capped at SUBDIAGRAM_MAX_NODES.
-  function neighborhoodNodes(graph, centerKey, hops) {
-    const hopOf = new Map([[centerKey, 0]]);
-    let frontier = [centerKey];
-    let truncated = false;
-    for (let h = 1; h <= hops && frontier.length; h += 1) {
-      const next = [];
-      for (const key of frontier) {
-        for (const nb of (graph.adj.get(key) || [])) {
-          if (hopOf.has(nb)) continue;
-          if (hopOf.size >= SUBDIAGRAM_MAX_NODES) { truncated = true; break; }
-          hopOf.set(nb, h);
-          next.push(nb);
-        }
-        if (truncated) break;
-      }
-      frontier = next;
-      if (truncated) break;
-    }
-    return { hopOf, truncated };
-  }
-
-  function openSubDiagramFor(domain, index, hops) {
-    const sys = Canvas.buildSystemJson();
-    const graph = buildSystemGraph(sys);
-    const centerKey = nodeKey(domain, index);
-    if (!graph.adj.has(centerKey) && !graph.devices.has(centerKey)) {
-      // Isolated bus (no branches) — still show it alone.
-      graph.adj.set(centerKey, new Set());
-    }
-    const { hopOf, truncated } = neighborhoodNodes(graph, centerKey, hops);
-    const nodes = [...hopOf.keys()];
-    const nodeSet = new Set(nodes);
-    const edges = graph.edges.filter(e => nodeSet.has(e.a) && nodeSet.has(e.b));
-    _subDiagramFocus = { domain, index };
-    renderSubDiagram({ centerKey, hopOf, edges, devices: graph.devices, truncated, hops }, sys);
-    const modal = document.getElementById('subDiagramModal');
-    if (modal) modal.style.display = 'flex';
-    document.getElementById('subDiagramTitle').textContent =
-      `${domain.toUpperCase()} 母线 ${index} 邻域子图 · ${hops} 跳 · ${nodes.length} 节点${truncated ? '（已截断）' : ''}`;
-    log(`绘制 ${domain.toUpperCase()} 母线 ${index} 的 ${hops} 跳邻域子图（${nodes.length} 节点，${edges.length} 支路）`, 'info');
-  }
-
-  const SUBDIAGRAM_EDGE_COLORS = { line: '#61afef', trafo: '#e5c07b', dcline: '#56b6c2', vsc: '#c678dd', dcdc: '#98c379' };
-
-  function renderSubDiagram(model, sys) {
-    const svg = document.getElementById('subDiagramSvg');
-    if (!svg) return;
-    const W = 720, H = 520, cx = W / 2, cy = H / 2, R = Math.min(cx, cy) / (model.hops + 0.5);
-    // Group nodes by hop and lay them on concentric rings.
-    const byHop = new Map();
-    model.hopOf.forEach((h, key) => { if (!byHop.has(h)) byHop.set(h, []); byHop.get(h).push(key); });
-    const pos = new Map();
-    byHop.forEach((keys, h) => {
-      if (h === 0) { pos.set(keys[0], { x: cx, y: cy }); return; }
-      const n = keys.length, offset = (h % 2) * (Math.PI / n);
-      keys.forEach((key, i) => {
-        const a = (2 * Math.PI * i) / n + offset;
-        pos.set(key, { x: cx + h * R * Math.cos(a), y: cy + h * R * Math.sin(a) });
+  function openSubDiagramFor(domain, index, hops, options = {}) {
+    try {
+      const api = HySimCore.LocalBusDiagram;
+      const graph = api.buildGraph(Canvas.buildSystemJson());
+      const model = api.extract(graph, { domain, index }, {
+        hops, limit: Number(document.getElementById('subDiagramLimit')?.value) || 20,
       });
-    });
-    const parseKey = (key) => { const [d, i] = key.split(':'); return { domain: d, index: i }; };
-    let svgParts = [`<rect x="0" y="0" width="${W}" height="${H}" fill="transparent"/>`];
-    // Edges
-    model.edges.forEach(e => {
-      const p1 = pos.get(e.a), p2 = pos.get(e.b);
-      if (!p1 || !p2) return;
-      const color = SUBDIAGRAM_EDGE_COLORS[e.kind] || '#8a8a8a';
-      const dash = (e.kind === 'vsc' || e.kind === 'dcdc') ? ' stroke-dasharray="4 3"' : '';
-      svgParts.push(`<line x1="${p1.x.toFixed(1)}" y1="${p1.y.toFixed(1)}" x2="${p2.x.toFixed(1)}" y2="${p2.y.toFixed(1)}" stroke="${color}" stroke-width="1.6"${dash} opacity="0.85"/>`);
-    });
-    // Nodes
-    model.hopOf.forEach((h, key) => {
-      const p = pos.get(key); if (!p) return;
-      const { domain, index } = parseKey(key);
-      const isCenter = key === model.centerKey;
-      const isDc = domain === 'dc';
-      const r = isCenter ? 13 : 9;
-      const fill = isCenter ? '#ffcc00' : (isDc ? '#56b6c2' : '#61afef');
-      const dev = model.devices.get(key) || {};
-      const badges = [];
-      if (dev.gen || dev.ren || dev.pv) badges.push('G');
-      if (dev.load) badges.push('L');
-      if (dev.storage) badges.push('S');
-      if (dev.grid) badges.push('⚡');
-      svgParts.push(`<circle class="subdiag-node" data-domain="${domain}" data-index="${index}" cx="${p.x.toFixed(1)}" cy="${p.y.toFixed(1)}" r="${r}" fill="${fill}" stroke="${isCenter ? '#d19a66' : '#26324a'}" stroke-width="${isCenter ? 3 : 1.5}"/>`);
-      svgParts.push(`<text x="${p.x.toFixed(1)}" y="${(p.y + 3).toFixed(1)}" text-anchor="middle" font-size="9" font-weight="700" fill="#0b1522">${index}</text>`);
-      svgParts.push(`<text x="${p.x.toFixed(1)}" y="${(p.y - r - 3).toFixed(1)}" text-anchor="middle" font-size="8" fill="var(--ink2,#8a94a6)">${domain.toUpperCase()}${badges.length ? ' ' + badges.join('') : ''}</text>`);
-    });
-    svg.setAttribute('viewBox', `0 0 ${W} ${H}`);
-    svg.innerHTML = svgParts.join('');
+      const modal = document.getElementById('subDiagramModal');
+      const wasOpen = modal.style.display === 'flex';
+      if (!wasOpen) {
+        _subDiagramHistory = [];
+        _subDiagramReturnFocus = document.activeElement;
+      } else if (!options.back && _subDiagramFocus &&
+          (_subDiagramFocus.domain !== domain || _subDiagramFocus.index !== Number(index))) {
+        _subDiagramHistory.push({ ..._subDiagramFocus });
+        if (_subDiagramHistory.length > 32) _subDiagramHistory.shift();
+      }
+      _subDiagramFocus = { domain, index: Number(index) };
+      _subDiagramModel = model;
+      _subDiagramSelected = model.centerKey;
+      _subDiagramPage = 0;
+      modal.style.display = 'flex';
+      document.getElementById('subDiagramHops').value = String(model.hops);
+      document.getElementById('subDiagramTitle').textContent =
+        `${domain.toUpperCase()} ${index} · 局部母线图 · ${model.nodes.length}/${graph.nodes.size} 母线`;
+      document.getElementById('btnSubDiagramBack').disabled = !_subDiagramHistory.length;
+      renderSubDiagram(model);
+      const body = document.querySelector('.sub-diagram-body');
+      body.scrollTop = 0; body.scrollLeft = 0;
+      if (!wasOpen) document.getElementById('btnSubDiagramClose').focus();
+      NetworkOverview.selectRef(_subDiagramFocus);
+      log(`局部母线图：${domain.toUpperCase()} ${index}，${model.nodes.length} 母线，` +
+        `${model.boundary.length} 条视图外连接`, 'info');
+      return true;
+    } catch (error) {
+      setStatus(`局部母线图失败：${error.message || error}`, 'error');
+      log(`局部母线图失败：${error.message || error}`, 'error');
+      return false;
+    }
+  }
+
+  function selectSubDiagramBus(key) {
+    if (!_subDiagramModel?.hopOf.has(key)) return;
+    _subDiagramSelected = key;
+    _subDiagramPage = 0;
+    const node = _subDiagramModel.graph.nodes.get(key);
+    selectStableRef({ domain: node.domain, index: node.index }, { preserveViewport: true });
+    document.querySelectorAll('#subDiagramSvg .subdiag-node').forEach(el =>
+      el.classList.toggle('selected', el.dataset.key === key));
+    document.querySelectorAll('#subDiagramSvg .subdiag-edge').forEach(el =>
+      el.classList.toggle('selected', el.dataset.a === key || el.dataset.b === key));
+    renderSubDiagramConnections();
+  }
+
+  function renderSubDiagramConnections() {
+    const model = _subDiagramModel;
+    const node = model.graph.nodes.get(_subDiagramSelected);
+    const edges = model.graph.incident.get(node.key);
+    const pageSize = HySimCore.LocalBusDiagram.LIMITS.page;
+    const count = Math.max(1, Math.ceil(edges.length / pageSize));
+    _subDiagramPage = Math.max(0, Math.min(count - 1, _subDiagramPage));
+    const list = document.getElementById('subDiagramConnections');
+    list.replaceChildren();
+    document.getElementById('subDiagramSelected').textContent =
+      `${node.domain.toUpperCase()} ${node.index} · ${edges.length} 条连接`;
+    const name = document.createElement('p');
+    name.className = 'sub-diagram-device-summary';
+    const devices = Object.entries(node.devices).map(([kind, n]) =>
+      `${SUBDIAGRAM_DEVICE_LABELS[kind] || '其他设备'}: ${n}`).join(' · ');
+    name.textContent = [node.bus.name, devices].filter(Boolean).join(' · ') || '未附加设备';
+    list.appendChild(name);
+    const renderedKeys = new Set(model.rendered.map(edge => edge.key));
+    for (const edge of edges.slice(_subDiagramPage * pageSize, (_subDiagramPage + 1) * pageSize)) {
+      const target = model.graph.nodes.get(edge.a === node.key ? edge.b : edge.a);
+      const button = document.createElement('button');
+      button.type = 'button';
+      button.className = 'sub-diagram-connection';
+      button.dataset.domain = target.domain;
+      button.dataset.index = String(target.index);
+      button.dataset.edgeKey = edge.key;
+      const destination = document.createElement('strong');
+      destination.textContent = `前往 ${target.domain.toUpperCase()} ${target.index}`;
+      const detail = document.createElement('span');
+      detail.textContent = `${SUBDIAGRAM_KIND_LABELS[edge.kind] || edge.kind} #${edge.index}` +
+        `${edge.name ? ' · ' + edge.name : ''}` +
+        `${edge.open ? ' · 断开' : ''}${!edge.inService ? ' · 停运' : ''}` +
+        `${!model.hopOf.has(target.key) ? ' · 视图外' : !renderedKeys.has(edge.key) ? ' · 图中省略' : ''}`;
+      button.append(destination, detail);
+      button.onclick = () => openSubDiagramFor(target.domain, target.index, model.hops);
+      list.appendChild(button);
+    }
+    document.getElementById('subDiagramPage').textContent = `${_subDiagramPage + 1} / ${count}`;
+    document.getElementById('btnSubDiagramPrev').disabled = _subDiagramPage === 0;
+    document.getElementById('btnSubDiagramNext').disabled = _subDiagramPage + 1 === count;
+  }
+
+  function renderSubDiagram(model) {
+    const svg = document.getElementById('subDiagramSvg');
+    const geometry = HySimCore.LocalBusDiagram.layout(model);
+    const parts = ['<title>局部母线图：选择母线查看连接，双击以该母线为中心</title>'];
+    for (const path of geometry.paths) {
+      const e = path.edge;
+      parts.push(`<path class="subdiag-edge${e.open || !e.inService ? ' inactive' : ''}" ` +
+        `data-a="${e.a}" data-b="${e.b}" d="${path.d}"><title>` +
+        `${escapeHtml(SUBDIAGRAM_KIND_LABELS[e.kind] || e.kind)} #${e.index}` +
+        `${e.open ? ' · 断开' : ''}${!e.inService ? ' · 停运' : ''}</title></path>`);
+    }
+    for (const node of model.nodes) {
+      const p = geometry.positions.get(node.key);
+      const all = model.graph.incident.get(node.key);
+      const outside = all.filter(e => !model.hopOf.has(e.a === node.key ? e.b : e.a)).length;
+      const omitted = all.length - (model.degree.get(node.key) || 0) - outside;
+      const kv = Number(node.bus.base_kv);
+      const voltage = node.bus.base_kv != null && Number.isFinite(kv) && kv > 0 ? `${kv} kV` : '电压未提供';
+      const summary = `${outside} 条视图外连接${omitted ? ` · ${omitted} 条图中省略` : ''}`;
+      const name = String(node.bus.name || '');
+      const shortName = [...name].slice(0, 16).join('') + ([...name].length > 16 ? '…' : '');
+      parts.push(`<g class="subdiag-node ${node.domain}${node.bus.in_service === false ? ' inactive' : ''}" ` +
+        `data-key="${node.key}" data-domain="${node.domain}" data-index="${node.index}" ` +
+        `role="button" tabindex="0" aria-label="${node.domain.toUpperCase()} ${node.index}，${escapeHtml(name)}，${summary}">` +
+        `<title>${escapeHtml(name)} · ${voltage} · ${summary}</title>` +
+        `<rect class="subdiag-bounds" x="${p.x - 8}" y="${p.top}" width="${p.width + 16}" height="${p.height}" rx="5"/>` +
+        `<text x="${p.x}" y="${p.y - 32}">${node.domain.toUpperCase()} ${node.index} · ${voltage}</text>` +
+        `<text class="subdiag-name" x="${p.x}" y="${p.y - 15}">${escapeHtml(shortName)}</text>` +
+        `<line class="subdiag-busbar" x1="${p.x}" y1="${p.y}" x2="${p.x + p.width}" y2="${p.y}"/>` +
+        `<text class="subdiag-boundary" x="${p.x}" y="${p.y + 80}">${summary}</text></g>`);
+    }
+    for (const path of geometry.paths) {
+      parts.push(`<circle class="subdiag-tap" cx="${path.ax}" cy="${path.ay}" r="3"/>` +
+        `<circle class="subdiag-tap" cx="${path.bx}" cy="${path.by}" r="3"/>`);
+    }
+    svg.setAttribute('viewBox', `0 0 ${geometry.width} ${geometry.height}`);
+    svg.style.width = `${geometry.width}px`;
+    svg.style.height = `${geometry.height}px`;
+    svg.innerHTML = parts.join('');
     svg.onclick = event => {
       const node = event.target.closest?.('.subdiag-node');
-      if (!node) return;
-      selectStableRef({ domain: node.dataset.domain, index: Number(node.dataset.index) });
+      if (node) selectSubDiagramBus(node.dataset.key);
     };
     svg.ondblclick = event => {
       const node = event.target.closest?.('.subdiag-node');
-      if (!node) return;
-      openSubDiagramFor(node.dataset.domain, Number(node.dataset.index), model.hops);
+      if (node) openSubDiagramFor(node.dataset.domain, Number(node.dataset.index), model.hops);
     };
-    // Info summary
-    const info = document.getElementById('subDiagramInfo');
-    if (info) {
-      const counts = {};
-      model.edges.forEach(e => { counts[e.kind] = (counts[e.kind] || 0) + 1; });
-      const legend = [['line', '交流线路'], ['trafo', '变压器'], ['dcline', '直流线路'], ['vsc', 'VSC换流'], ['dcdc', 'DC/DC']]
-        .filter(([k]) => counts[k])
-        .map(([k, label]) => `<span class="subdiag-legend"><i style="background:${SUBDIAGRAM_EDGE_COLORS[k]}"></i>${label} ${counts[k]}</span>`)
-        .join('');
-      info.innerHTML = `中心母线 <b>${_subDiagramFocus.domain.toUpperCase()} ${_subDiagramFocus.index}</b> · ` +
-        `${model.hopOf.size} 节点 · ${model.edges.length} 支路 ${legend}` +
-        (model.truncated ? ` · <span class="subdiag-trunc">已截断至 ${SUBDIAGRAM_MAX_NODES} 节点</span>` : '');
-    }
+    svg.onkeydown = event => {
+      const node = event.target.closest?.('.subdiag-node');
+      if (node && (event.key === 'Enter' || event.key === ' ')) {
+        event.preventDefault(); selectSubDiagramBus(node.dataset.key);
+      }
+    };
+    document.getElementById('subDiagramInfo').textContent =
+      `只读结构图 · ${model.nodes.length}/${model.graph.nodes.size} 母线 · ` +
+      `${model.rendered.length}/${model.internal.length} 条内部连接 · ${model.boundary.length} 条视图外连接` +
+      `${model.truncated ? ' · 已达到母线数量上限' : ''}。连接可交叉，仅圆点表示接入。` +
+      '设备汇总见连接栏；不表示带电状态或潮流结果。' + model.graph.limitations.join('；');
+    selectSubDiagramBus(model.centerKey);
   }
 
   function closeSubDiagram() {
     const modal = document.getElementById('subDiagramModal');
     if (modal) modal.style.display = 'none';
+    document.body.classList.remove('network-overview-table');
+    if (_subDiagramReturnFocus?.isConnected) _subDiagramReturnFocus.focus();
   }
 
   // Draw the neighborhood of whatever the search box currently resolves to.
@@ -9687,7 +9696,27 @@ const App = (() => {
     return true;
   }
 
+  function readUCSolverThreads() {
+    const input = document.getElementById('tspfSolverThreads');
+    if (!input || input.disabled) return 0;
+    if (!input.value.trim() || !input.checkValidity()) {
+      input.reportValidity();
+      setStatus('求解器线程数必须是 0–256 的整数', 'error');
+      return null;
+    }
+    return Number(input.value);
+  }
+
+  function ucThreadSummary(data) {
+    const configured = data.uc_solver_threads_configured;
+    const backend = data.uc_solver_name || '';
+    if (!backend || backend === 'skipped') return '未执行机组组合';
+    return `${escapeHtml(backend)} · ${configured > 0 ? `配置上限 ${configured} 线程` : '后端默认（线程上限未报告）'}`;
+  }
+
   async function runTimeSeriesPF() {
+    const solverThreads = readUCSolverThreads();
+    if (solverThreads === null) return;
     setStatus('时序潮流计算中...', 'busy');
 
     if (!await syncToBackend(true)) {
@@ -9732,6 +9761,7 @@ const App = (() => {
       skip_uc: skipUC,
       run_opf: runOPF,
       uc_solver: ucSolver,
+      uc_solver_threads: solverThreads,
       enable_network_constraints: enableNet,
       enable_dc_network_constraints: enableDcNet,
       reserve_fraction: reserveFraction,
@@ -9770,6 +9800,8 @@ const App = (() => {
 
   // ── Annual parallel production simulation (split year into independent days) ──
   async function runAnnualSim() {
+    const solverThreads = readUCSolverThreads();
+    if (solverThreads === null) return;
     setStatus('年度并行生产模拟计算中...', 'busy');
 
     if (!await syncToBackend(true)) {
@@ -9828,6 +9860,7 @@ const App = (() => {
         daily_cyclic_soc: cyclicSoc,
         run_opf: dailyMode !== 'sced',
         uc_solver: ucSolver,
+        uc_solver_threads: solverThreads,
         enable_network_constraints: enableNet,
         enable_dc_network_constraints: enableDcNet,
         reserve_fraction: reserveFraction,
@@ -9899,6 +9932,8 @@ const App = (() => {
   // with the rich per-step time-series solver and show it in the (rich) 时序潮流
   // 结果 dashboard, keeping the annual dashboard in place for context.
   async function runAnnualDayDetail() {
+    const solverThreads = readUCSolverThreads();
+    if (solverThreads === null) return;
     const meta = _lastAnnualData;
     if (!meta) { log('请先运行年度仿真，再查看某日详情', 'warn'); return; }
     const stepHr = meta.step_duration_hr || 1;
@@ -9922,7 +9957,7 @@ const App = (() => {
       // cyclic-SOC the annual run used, so it matches that day of the annual run.
       daily_mode: meta._dailyMode || 'scuc',
       cyclic_soc: meta._cyclicSoc != null ? meta._cyclicSoc : true,
-    }, tspfRichOptions());
+    }, tspfRichOptions(), { uc_solver_threads: solverThreads });
 
     const data = await apiPost('/api/session/run_ts_pf', payload);
     if (data) {
@@ -10096,8 +10131,10 @@ const App = (() => {
           <span class="result-value ${feasClass}">${data.feasible ? '是' : '否'}</span></div>
         <div class="result-item"><span class="result-label">时间步数</span>
           <span class="result-value">${data.num_steps} (${data.step_duration_hr}h)</span></div>
-        <div class="result-item"><span class="result-label">并行</span>
+        <div class="result-item"><span class="result-label">日任务执行</span>
           <span class="result-value">${annParLabel}${annParDetail}</span></div>
+        <div class="result-item uc-thread-result"><span class="result-label">UC 求解器线程</span>
+          <span class="result-value">${ucThreadSummary(data)}</span></div>
         <div class="result-item"><span class="result-label">${data.objective_label || '年总运行成本 ($)'}</span>
           <span class="result-value">$${fmt(data.objective_value != null ? data.objective_value : data.total_cost)}</span></div>
         <div class="result-item"><span class="result-label">成本口径</span>
@@ -10318,8 +10355,10 @@ const App = (() => {
         <span class="result-value ${ucClass}">${ucStatus}${data.uc_solver_name ? ' (' + data.uc_solver_name + ')' : ''}</span></div>
       <div class="result-item"><span class="result-label">求解器</span>
         <span class="result-value">${solverTag || '—'}</span></div>
-      <div class="result-item"><span class="result-label">并行</span>
+      <div class="result-item"><span class="result-label">日任务执行</span>
         <span class="result-value">${parLabel}${parDetail}</span></div>
+      <div class="result-item uc-thread-result"><span class="result-label">UC 求解器线程</span>
+        <span class="result-value">${ucThreadSummary(data)}</span></div>
       <div class="result-item"><span class="result-label">${objLabel}</span>
         <span class="result-value">$${Number(objVal || 0).toFixed(0)}</span></div>
       <div class="result-item"><span class="result-label">约束集</span>
@@ -13621,6 +13660,12 @@ const App = (() => {
   }
 
   function onSystemLoaded() {
+    if (_subDiagramModel) {
+      closeSubDiagram();
+      _subDiagramModel = null; _subDiagramFocus = null; _subDiagramHistory = [];
+      document.getElementById('subDiagramSvg')?.replaceChildren();
+      document.getElementById('subDiagramConnections')?.replaceChildren();
+    }
     // A full (re)load makes the canvas match the backend session exactly, so the
     // canvas is NOT dirty — this preserves the "backend already has it" fast path
     // (no forced resync) for both freshly loaded and force-rendered systems.
@@ -19115,6 +19160,17 @@ const App = (() => {
       btn.innerHTML = show ? '收起<br>年度设置 ▾' : '展开<br>年度设置 ▸';
     });
     document.getElementById('btnRunAnnualSim')?.addEventListener('click', runAnnualSim);
+    const syncUCSolverThreads = () => {
+      const solver = document.getElementById('tspfUcSolver')?.value;
+      const input = document.getElementById('tspfSolverThreads');
+      const hint = document.getElementById('tspfSolverThreadsHint');
+      const supported = ['auto', 'native', 'gurobi'].includes(solver);
+      if (input) input.disabled = !supported;
+      if (hint) hint.textContent = supported
+        ? '（0=后端默认；执行UC时生效）' : '（当前适配器不支持自定义线程数）';
+    };
+    document.getElementById('tspfUcSolver')?.addEventListener('change', syncUCSolverThreads);
+    syncUCSolverThreads();
     // Parallel daily decomposition only applies to per-day DynamicOPF; disable
     // the control (with a hint) for the coupled SCUC/SCED modes so the constraint
     // is clear before running instead of surfacing only as a post-run downgrade.
@@ -19128,7 +19184,7 @@ const App = (() => {
       par.disabled = !isDopf;
       if (threads) threads.disabled = !(isDopf && par.checked);
       par.closest('.sub-label')?.classList.toggle('control-disabled', !isDopf);
-      if (hint) hint.textContent = isDopf ? '' : '（仅动态OPF）';
+      if (hint) hint.textContent = isDopf ? '' : '（跨日耦合；SCUC线程请在公共建模中设置）';
     };
     document.getElementById('annDailyMode')?.addEventListener('change', syncAnnualParallel);
     document.getElementById('annParallel')?.addEventListener('change', syncAnnualParallel);
@@ -24839,8 +24895,34 @@ const App = (() => {
         openSubDiagramFor(_subDiagramFocus.domain, _subDiagramFocus.index, hops);
       }
     });
+    document.getElementById('subDiagramLimit')?.addEventListener('change', () => {
+      if (_subDiagramFocus) openSubDiagramFor(_subDiagramFocus.domain, _subDiagramFocus.index,
+        Number(document.getElementById('subDiagramHops').value));
+    });
+    document.getElementById('btnSubDiagramBack')?.addEventListener('click', () => {
+      const previous = _subDiagramHistory.pop();
+      if (previous) openSubDiagramFor(previous.domain, previous.index,
+        Number(document.getElementById('subDiagramHops').value), { back: true });
+    });
+    document.getElementById('btnSubDiagramPrev')?.addEventListener('click', () => {
+      _subDiagramPage--; renderSubDiagramConnections();
+    });
+    document.getElementById('btnSubDiagramNext')?.addEventListener('click', () => {
+      _subDiagramPage++; renderSubDiagramConnections();
+    });
     document.querySelectorAll('[data-close-subdiagram]').forEach(el =>
       el.addEventListener('click', closeSubDiagram));
+    document.getElementById('subDiagramModal')?.addEventListener('keydown', event => {
+      // Keep editor shortcuts (Delete, R, undo) out of this read-only view.
+      event.stopPropagation();
+      if (event.key === 'Escape') { event.preventDefault(); closeSubDiagram(); return; }
+      if (event.key !== 'Tab') return;
+      const focusable = [...event.currentTarget.querySelectorAll(
+        'button:not(:disabled), select, [tabindex="0"]')].filter(el => el.getClientRects().length);
+      const first = focusable[0], last = focusable[focusable.length - 1];
+      if (event.shiftKey && document.activeElement === first) { event.preventDefault(); last?.focus(); }
+      else if (!event.shiftKey && document.activeElement === last) { event.preventDefault(); first?.focus(); }
+    });
     window.addEventListener('hysim:network-selection', event => {
       const ref = event.detail?.ref;
       if (ref) selectStableRef(ref, { openLocal: event.detail?.openLocal === true });

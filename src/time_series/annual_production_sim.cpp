@@ -1687,6 +1687,8 @@ AnnualProductionSimResult solve_annual_production_simulation(
   annual_uc_opts.skip_uc = false;
   annual_uc_opts.run_opf = false;
   UCSchedule coupled_uc = solve_unit_commitment(sys, ts_data, annual_uc_opts);
+  result.uc_solver_name = coupled_uc.solver_name;
+  result.uc_solver_threads_configured = coupled_uc.solver_threads_configured;
   result.generator_energy_mwh = coupled_uc.generator_energy_mwh;
   result.fuel_consumption_mwh = coupled_uc.fuel_consumption_mwh;
   result.max_energy_budget_violation_mwh = coupled_uc.max_energy_budget_violation_mwh;

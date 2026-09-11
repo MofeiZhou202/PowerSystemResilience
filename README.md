@@ -238,7 +238,7 @@ powershell -ExecutionPolicy Bypass -File tools/package_trial_windows.ps1
 | 三相与短路分析 | 已实现并持续回归 | 三相 NR 与 AC/DC 短路分析均有独立测试族。详细短路模块覆盖 IEC 60909 三序网、$K_G/K_T/K_S$、两/三绕组 Y/YN/Z/ZN/$\Delta$ 零序、线路零序电纳、方法 A/B/C、公式 (77)、$I_{bmo}$、附录 A、导体温度、相/地电流、稀疏批量、authored 身份恢复，以及理想导体收缩和实际电阻边 DCCB 分流；57 个直接短路用例/917 断言、IEC 13 母线综合例、50 组 OpenDSS 完整网络、35 组 GridLAB-D 5.3.0 平衡探针和 IEEE 13/34/123 外部 Thevenin 核已验证。GridLAB-D 为短路交叉验证强制门禁；详细 IEC 60909 计算域无开放审计项，EMT、控制器、保护与 IEC 61660 属于各自模型族。 |
 | 谐波分析 | 已实现并完成声明范围闭环 | 频域穿透、Newton 非线性、三相 abc/变压器零序与 AC/DC 耦合，频扫、IEEE 519 / GB/T 14549；14/14 跨域矩阵、24 个强制 GridLAB-D 切片、IEEE13/OpenDSS 164 点。 |
 | 暂态动力学 | 机电暂态相量 DAE 声明范围已闭环（持续扩展设备） | 平衡正序/显式三相相量网络、AC/DC 代数网络、潮流一致初始化、7 类求解器（含 MassMatrixDae 同时式 DAE）、DAE 诊断、小信号与 COI 频率观测；DC/DC Power/Voltage/Droop 动态端口与稳态方程同源，DER_A 7/10 状态链已按 PSD/WECC 逐式实现并使用系统 COI 频率。MassMatrixDae 对 IEEE 1547 及直接 `DynamicSystem` API 装配的定时限欠压/频率/正序 Zone-1 继电器执行回滚/二分定位、固定前向窗口事件聚类、`ACLoadScale`/`ACBranchTrip` 重置和事件后代数残差审计；直接继电器使用本地正序 PT、CT 与相角频率滤波，不以系统 COI 代替本地频率。该闭环不包含 EMT、行波、开关波形或形式化 chronology certification；PSD Test 42 轨迹对照仍受外部 SciML 环境阻断。rich-model/JSON/HTTP/GUI 尚不自动装配外部继电器，其他积分器、反时限、多区距离及步内未采样脉冲仍为声明边界。 |
-| 时序与年度生产模拟 | 核心已实现，年度/生命周期边界已深审计 | UC MILP → AC-OPF → PF 校验流水线；年度全耦合 UC、L0 能量/燃料代理预算、跨周 SOC、bottom-up feedback、物理生命周期 replay、抽样 PF correction、AC/DC/外部网碳分项均可执行。冻结 UC 已由 SciPy/HiGHS 和 256 序列穷举证明，6 步 AC 快照已与 OpenDSS/GridLAB-D 对照。制造/材料碳、网络损耗碳、燃料热率曲线和随机抽样 coverage 仍明确不属于当前范围；schedule-only 不能写成全年物理或生命周期外部认证。 |
+| 时序与年度生产模拟 | 核心已实现，年度/生命周期边界已深审计 | UC MILP → AC-OPF → PF 校验流水线；GUI 独立配置 Native/Gurobi UC 线程上限与日任务数（SCUC 可编辑，HiGHS/SCIP 自定义线程接口暂不支持）；年度全耦合 UC、L0 能量/燃料代理预算、跨周 SOC、bottom-up feedback、物理生命周期 replay、抽样 PF correction、AC/DC/外部网碳分项均可执行。冻结 UC 已由 SciPy/HiGHS 和 256 序列穷举证明，6 步 AC 快照已与 OpenDSS/GridLAB-D 对照。制造/材料碳、网络损耗碳、燃料热率曲线和随机抽样 coverage 仍明确不属于当前范围；schedule-only 不能写成全年物理或生命周期外部认证。 |
 | 电力市场 | 已实现（通用混合模型与南方规则研究执行入口） | 南方 GUI `/xjtu/#southern-market`；“运行模拟” `/xjtu/#market-operation` 按细则2.3/2.4组织15类边界，支持每日设备级覆盖、预测联合采样、逐日出清及ΔP统计。报价与物理边界分列，Canvas联动场景/日期/时段及原因复核。已验证小型流程及2000节点局部定位；水库非线性原始材料等仍有覆盖缺口，大规模批量出清性能未验证，不作正式市场等价或AC安全认证，见[执行契约](docs/modules/market/southern_execution_contract.md)。 |
 | 云南辅助服务 | 日前/日内调频、AGC计量及月度研究账本；黑启动仅规则提取 | `/xjtu/#market-ancillary`：固定UC/一次调频、安全移出/补入/调增、水电安全区间、独立储能/负荷排他、计量曲线、月分摊与更正历史。资质与动态安全、监管运营及实际支付需外部证据，见[契约](docs/modules/market/yunnan_ancillary_markets.md)。 |
 | 南方实时市场 | 第3章边界与滚动研究模拟 | `/xjtu/#market-realtime`：24×5分钟SCUC/SCED、独立8×15分钟LMP、实执行15分钟承接、2–4小时参考窗口；IEEE118混合资源实验。规则解释与外部运营限制见[契约](docs/modules/market/southern_real_time.md)。 |
@@ -612,6 +612,12 @@ GUI 第一阶段统一契约包括：`hysim_task_status_v1`（任务状态、耗
 第三阶段将共享前端基础设施从 `web/js/app.js` 拆分到 `web/js/core/`：`analysis_contracts.js` 维护分析端点和结果契约，`task_manager.js` 管理单活动任务、取消与后端收尾，`api_client.js` 统一请求 ID、错误和陈旧结果处理，`result_mapping.js` 维护 Dashboard 到 Canvas 的类型/索引映射。此后 `web/js/core/` 又扩展了 `timeseries_window.js`（长时序窗口化与保峰降采样）、`layout_graph.js` / `layout_engine.js`（布局语义投影与 ELK 异步布局客户端）、`accessibility.js`（键盘导航与可访问性审计）、`runtime_diagnostics.js`（前端运行时诊断）和 `network_overview.js`（WebGL2 全网 LOD 总览）。`app.js` 只保留 UI 状态回调和薄适配层，这些核心脚本必须在 `app.js` 之前加载。
 
 第四阶段针对中大型系统优化交互性能：普通规模仍使用 SVG 单线图编辑，并将连续鼠标移动合并到浏览器动画帧、对视口外元件执行可逆裁剪；超过规模阈值时不再显示空白“无画布”摘要，而由 WebGL2 点/线缓冲绘制 LOD0 域、LOD1 区域和 LOD2 母线全网总览，同时保持 SVG glyph 数为零。WebGL、局部 k 跳 SVG、虚拟拓扑表和结果导航统一使用 `{domain,index}` 母线引用。5,000 节点以上的无画布潮流请求自动采用 `response_detail=compact`：保留完整 `vm`/`va`/`vdc`/`branch_abs` 数值向量，省略逐元件 GIS 与 rich attribution 展示行，并通过 `model_scope` / `model_limitations` 声明边界；小系统仍返回完整逐元件结果。年度生产模拟按 7/30/90 天窗口浏览；选择全年时采用保留首尾及负荷极值的降采样，最多绘制 2000 点，同时保留完整原始序列供导出和后续分析使用。规模化 GUI E2E 对 WebGL 非空像素、选择同步、局部 SVG 和这些性能边界提供回归契约。
+
+局部视图现由 `web/js/core/local_bus_diagram.js` 提供20/40/80母线的只读母线图，
+独立母线行防止重叠，视图外连接和绘图预算内省略连接可在分页检查器中继续导航。
+标签保持可读字号，支持返回和AC/DC同号身份区分；主编辑器按可伸缩母线的最大范围预留布局空间。
+验证包括5000母线合成图、2869母线实际案例及手机视口；范围与限制见
+[Canvas运行契约](docs/developer/gui_canvas_runtime.md#bounded-local-busbar-sheets)。
 
 `/api/v1` 为大模型客户端提供后端分块：`sessions/{id}/topology` 支持 LOD、空间视口和分页，`sessions/{id}/subgraph` 按稳定母线引用提取有界邻域，`jobs/{id}/frames/{step}` 按时间/域/稳定索引/空间返回结果窗口，`jobs/{id}/violations` 返回最严重电压与负载率越限。静态 PF/OPF 使用第 0 帧，后续生产模拟沿同一帧协议扩展多时步。
 

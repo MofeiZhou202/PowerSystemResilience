@@ -1041,10 +1041,10 @@ const Canvas = (() => {
   }
 
   // ========== Rendering ==========
-  // ==================== P1: busbar mode (flag-gated, default off) ============
+  // ==================== Busbar geometry (default on) =======================
   // Resizable AC/DC busbars whose taps slide to each connected device's x, per
-  // docs/planning/gui_one_line_redesign.md. Off by default: the legacy fixed
-  // 80px, 4-port bus rendering and routing are untouched unless the flag is on.
+  // docs/planning/gui_one_line_redesign.md. Disabling the mode restores the
+  // legacy fixed 80px, 4-port bus rendering.
   // Reuse the existing BUS_TYPES / isBusType helpers (auto-layout section).
 
   // Auto-span half-length: cover every connected device's x-offset (min 40 =
@@ -1063,10 +1063,12 @@ const Canvas = (() => {
   })();
   function busHalfLen(comp) {
     let span = 40;
+    const rad = (comp.rotation || 0) * Math.PI / 180;
     for (const conn of connectionsOf(comp.id)) {
       const otherId = conn.from.compId === comp.id ? conn.to.compId : conn.from.compId;
       const other = getComponent(otherId);
-      if (other) span = Math.max(span, Math.abs(other.x - comp.x) + 20);
+      if (other) span = Math.max(span,
+        Math.abs((other.x - comp.x) * Math.cos(rad) + (other.y - comp.y) * Math.sin(rad)) + 20);
     }
     return Math.min(span, BUS_HALF_MAX);
   }
@@ -1074,7 +1076,13 @@ const Canvas = (() => {
   // Slide a bus endpoint to the other endpoint's x (clamped to the bar): the tap.
   function projectOntoBar(busComp, otherPt) {
     const half = busHalfLen(busComp);
-    return { x: Math.max(busComp.x - half, Math.min(busComp.x + half, otherPt.x)), y: busComp.y };
+    const rad = (busComp.rotation || 0) * Math.PI / 180;
+    const dx = Math.cos(rad), dy = Math.sin(rad);
+    // Orthogonal projection onto the rotated segment; geometry contract in
+    // docs/planning/gui_one_line_redesign.md § Scale-first.
+    const offset = Math.max(-half, Math.min(half,
+      (otherPt.x - busComp.x) * dx + (otherPt.y - busComp.y) * dy));
+    return { x: busComp.x + offset * dx, y: busComp.y + offset * dy };
   }
 
   function busbarSymbol(comp) {
@@ -1100,6 +1108,9 @@ const Canvas = (() => {
     if (lineEl) { lineEl.setAttribute('x1', -half); lineEl.setAttribute('x2', half); }
     const hitEl = busComp.el.querySelector('.comp-outline');
     if (hitEl) { hitEl.setAttribute('x', -half - 6); hitEl.setAttribute('width', 2 * half + 12); }
+    busComp.el.querySelectorAll('.comp-label, .comp-value').forEach(el => el.setAttribute('x', -half));
+    busComp.el.querySelectorAll('.busbar-connect-handle').forEach((el, i) =>
+      el.setAttribute('cx', [-half, 0, half][i]));
   }
 
   function respanBusesForConn(conn) {
@@ -2884,9 +2895,19 @@ const Canvas = (() => {
     const isBus = isBusType(comp.type);
     const isWide = comp.type === 'ac_branch' || comp.type === 'dc_branch' ||
                    comp.type === 'switch_comp' || comp.type === 'circuit_breaker';
-    const hw = isBus ? 58 : (isWide ? 62 : 52);
+    // Reserve the maximum adaptive span, not its transient current size: device
+    // placement can widen the bar later. Matches LayoutGraph's ELK reservation.
+    const hw = isBus && state.busbarMode ? BUS_HALF_MAX + 18 : isBus ? 58 : (isWide ? 62 : 52);
     const top = isBus ? 30 : 50;
     const bottom = isBus ? 34 : 62;
+    if (isBus && state.busbarMode) {
+      const angle = (comp.rotation || 0) * Math.PI / 180;
+      const cos = Math.abs(Math.cos(angle)), sin = Math.abs(Math.sin(angle));
+      const halfHeight = Math.max(top, bottom);
+      const x = hw * cos + halfHeight * sin + pad;
+      const y = hw * sin + halfHeight * cos + pad;
+      return { id: comp.id, x: comp.x - x, y: comp.y - y, w: 2 * x, h: 2 * y };
+    }
     return {
       id: comp.id,
       x: comp.x - hw - pad,
@@ -3510,10 +3531,11 @@ const Canvas = (() => {
     const meshExtra = Math.min(100, ringCount * 8);
     const baseLevelGap = dir === 'COMPACT' ? 180 : dir === 'BUSBAR' ? 220 : dir === 'RADIAL' ? 250 : 250;
     const baseNodeGap = dir === 'COMPACT' ? 155 : dir === 'BUSBAR' ? 270 : 220;
-    const levelGap = (options && options.levelGap) ||
-      (baseLevelGap + Math.min(90, densityExtra * 0.55) + Math.min(50, meshExtra * 0.35));
-    const nodeGap  = (options && options.nodeGap) ||
-      (baseNodeGap + densityExtra + meshExtra);
+    const barGap = state.busbarMode ? 2 * BUS_HALF_MAX + 100 : 0;
+    const levelGap = Math.max(dir === 'LR' ? barGap : 0, (options && options.levelGap) ||
+      (baseLevelGap + Math.min(90, densityExtra * 0.55) + Math.min(50, meshExtra * 0.35)));
+    const nodeGap = Math.max(dir !== 'LR' ? barGap : 0, (options && options.nodeGap) ||
+      (baseNodeGap + densityExtra + meshExtra));
     if (_layoutStats) {
       _layoutStats.maxLocalDevices = Number(maxLocalLoad.toFixed(1));
       _layoutStats.nodeGap = Math.round(nodeGap);
@@ -3807,6 +3829,7 @@ const Canvas = (() => {
     const contract = HySimCore.LayoutGraph.build(state.components, state.connections, {
       direction: options.direction || 'TB',
       incremental: options.incremental === true,
+      busbarHalfMax: state.busbarMode ? BUS_HALF_MAX : 0,
     });
     _layoutGraph = contract;
     const original = new Map(state.components.map(component => [component.id, {
@@ -8837,14 +8860,17 @@ const Canvas = (() => {
   }
 
   // ========== Pan-to-Component & Highlight ==========
-  function panToComponent(id) {
+  function panToComponent(id, { preserveViewport = false } = {}) {
     const comp = getComponent(id);
     if (!comp) return;
 
-    // Center viewBox on the component, keep current zoom scale
-    viewBox.x = comp.x - viewBox.w / 2;
-    viewBox.y = comp.y - viewBox.h / 2;
-    updateViewBox();
+    // Local-sheet selection must not move the underlying serialized viewport.
+    // Ordinary navigation centers on the component at the current zoom scale.
+    if (!preserveViewport) {
+      viewBox.x = comp.x - viewBox.w / 2;
+      viewBox.y = comp.y - viewBox.h / 2;
+      updateViewBox();
+    }
 
     // Select the component
     selectComponent(id);

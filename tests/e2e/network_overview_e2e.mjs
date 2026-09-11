@@ -69,7 +69,7 @@ async function main() {
   page.on('pageerror', error => errors.push(error.stack || error.message));
   await page.route('https://cdn.plot.ly/**', route => route.fulfill({
     contentType: 'text/javascript',
-    body: 'window.Plotly={newPlot:()=>Promise.resolve(),react:()=>Promise.resolve(),Plots:{resize:()=>{}}};',
+    body: 'window.Plotly={newPlot:()=>Promise.resolve(),react:()=>Promise.resolve(),purge:()=>{},Plots:{resize:()=>{}}};',
   }));
   await page.goto(`${baseUrl}/xjtu/`, { waitUntil: 'domcontentloaded' });
   await page.evaluate(() => App.loadMatpowerCase('case2869pegase.m'));

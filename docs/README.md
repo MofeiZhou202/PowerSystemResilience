@@ -2,6 +2,14 @@
 
 最后核实：2026-09-10
 
+[时序生产模拟线程设置](developer/gui_canvas_runtime.md#time-series-solver-threads)：
+SCUC 求解器线程与按日任务线程分开，Auto/Native/Gurobi 支持自定义求解器上限，
+接口校验及实际后端/配置上限回显已验证；依赖本地 MIPSolvers 新接口，版本见开发状态。
+
+[大系统局部母线图](developer/gui_canvas_runtime.md#bounded-local-busbar-sheets)：
+WebGL总览进入20/40/80母线的可滚动局部结构图，独立母线行、视图外连接、分页检查器、
+返回导航和域限定身份；主编辑器按母线最大长度预留布局空间。
+
 [市场求解性能与资源对照](modules/market/performance.md)：水量/储能/开停机分项对照、
 零成本开停机/小时储能方向等价投影、同初态恢复实验并行、完整周任务复测、实际输入参数对照与分段计时。
 新增装配模板与连续系数存储、原矩阵逐元素核对，以及原装配/缓存装配完整七日对照。

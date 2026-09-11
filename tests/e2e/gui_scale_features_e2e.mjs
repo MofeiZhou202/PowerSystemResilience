@@ -509,8 +509,8 @@ async function main() {
       const svg = document.getElementById('subDiagramSvg');
       const out = {
         visible: getComputedStyle(document.getElementById('subDiagramModal')).display,
-        nodes: svg.querySelectorAll('circle').length,
-        edges: svg.querySelectorAll('line').length,
+        nodes: svg.querySelectorAll('.subdiag-node').length,
+        edges: svg.querySelectorAll('.subdiag-edge').length,
         stillHeadless: Canvas.isHeadless(),
         glyphs: Canvas.state.components.length,
       };

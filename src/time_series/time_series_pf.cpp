@@ -2878,6 +2878,14 @@ UCBuildResult build_uc_milp(const HybridPowerSystem& sys,
 // ═══════════════════════════════════════════════════════════════════════
 namespace {
 thread_local int g_active_uc_solver_threads = 0;
+thread_local int g_configured_uc_solver_threads = -1; // -1 = backend default / unknown
+
+std::shared_ptr<engine::GurobiAdapter> make_uc_gurobi() {
+  auto adapter = std::make_shared<engine::GurobiAdapter>();
+  if (g_active_uc_solver_threads > 0)
+    adapter->set_milp_threads(g_active_uc_solver_threads);
+  return adapter;
+}
 
 struct ScopedUCSolverThreadOverride {
   explicit ScopedUCSolverThreadOverride(int threads)
@@ -2913,12 +2921,17 @@ engine::SolverAdapterPtr create_milp_adapter(UCSolverChoice choice) {
     } else if (hw >= 4) {
       opt.num_threads = std::min(hw, 8);
     }
+    g_configured_uc_solver_threads = opt.num_threads > 0 ? opt.num_threads : -1;
     return std::make_shared<NativeBranchAndCutAdapter>(opt);
   };
 
   if (choice == UCSolverChoice::Native) {
     return make_tuned_native();
   }
+  g_configured_uc_solver_threads = -1;
+  if (g_active_uc_solver_threads > 0 &&
+      (choice == UCSolverChoice::HiGHS || choice == UCSolverChoice::SCIP))
+    throw std::invalid_argument("uc_solver_threads: current HiGHS/SCIP adapters do not support custom thread limits");
   if (choice == UCSolverChoice::HiGHS) {
     return std::make_shared<HighsAdapter>();
   }
@@ -2931,7 +2944,7 @@ engine::SolverAdapterPtr create_milp_adapter(UCSolverChoice choice) {
     return make_tuned_native();
   }
   if (choice == UCSolverChoice::Gurobi) {
-    auto gurobi = std::make_shared<GurobiAdapter>();
+    auto gurobi = make_uc_gurobi();
     if (gurobi->available() && gurobi->supports(ProblemClass::MILP)) {
       return gurobi;
     }
@@ -2942,7 +2955,7 @@ engine::SolverAdapterPtr create_milp_adapter(UCSolverChoice choice) {
     return make_tuned_native();
   }
 
-  auto gurobi = std::make_shared<GurobiAdapter>();
+  auto gurobi = make_uc_gurobi();
   if (gurobi->available() && gurobi->supports(ProblemClass::MILP)) {
     return gurobi;
   }
@@ -2959,15 +2972,17 @@ engine::SolveResult solve_uc_milp_with_fallback(
   }
 
   std::string gurobi_failure = "unavailable or unlicensed";
-  GurobiAdapter gurobi;
-  if (gurobi.available() && gurobi.supports(ProblemClass::MILP)) {
-    auto solved = gurobi.solve_milp(model);
+  auto gurobi = make_uc_gurobi();
+  if (gurobi->available() && gurobi->supports(ProblemClass::MILP)) {
+    g_configured_uc_solver_threads = g_active_uc_solver_threads > 0 ? g_active_uc_solver_threads : -1;
+    auto solved = gurobi->solve_milp(model);
     if (solved.stats.success) return solved;
     gurobi_failure = solved.stats.status;
   }
 
   HighsAdapter highs;
-  if (highs.available() && highs.supports(ProblemClass::MILP)) {
+  if (g_active_uc_solver_threads == 0 && highs.available() && highs.supports(ProblemClass::MILP)) {
+    g_configured_uc_solver_threads = -1;
     auto solved = highs.solve_milp(model);
     if (solved.stats.success) {
       solved.stats.status += " (fallback after Gurobi: " +
@@ -3607,7 +3622,10 @@ HybridPowerSystem build_time_series_system_snapshot(
 UCSchedule solve_unit_commitment(const HybridPowerSystem& sys,
                                  const TimeSeriesData& ts_data,
                                  const TimeSeriesPFOptions& opts) {
+  if (opts.uc_solver_threads < 0 || opts.uc_solver_threads > 256)
+    throw std::invalid_argument("uc_solver_threads must be in [0, 256]");
   ScopedUCSolverThreadOverride thread_override(opts.uc_solver_threads);
+  g_configured_uc_solver_threads = -1;
   validate_time_series_data_for_solve(ts_data, true);
 
   auto net = build_dc_network(sys);
@@ -3697,6 +3715,7 @@ UCSchedule solve_unit_commitment(const HybridPowerSystem& sys,
   if (!result.stats.success || result.x.size() < expected_size) {
     UCSchedule sched;
     sched.feasible = false;
+    sched.solver_threads_configured = g_configured_uc_solver_threads;
     sched.solver_name = result.stats.solver_name;
     sched.solver_status = result.stats.status;
     sched.mip_gap = result.stats.mip_gap;
@@ -3704,9 +3723,11 @@ UCSchedule solve_unit_commitment(const HybridPowerSystem& sys,
     return sched;
   }
 
-  return extract_schedule(result.x, build,
+  auto schedule = extract_schedule(result.x, build,
                           result.stats.objective + build.obj_offset,
                           result.stats);
+  schedule.solver_threads_configured = g_configured_uc_solver_threads;
+  return schedule;
 }
 
 // ═══════════════════════════════════════════════════════════════════════
@@ -3783,7 +3804,13 @@ static TimeSeriesPFResult concat_ts_results(std::vector<TimeSeriesPFResult>& par
     cat_d(out.uc_schedule.dcdc_dispatch, u.dcdc_dispatch);
     out.uc_schedule.total_cost += u.total_cost;
     out.uc_schedule.feasible = out.uc_schedule.feasible && u.feasible;
-    if (first) { out.uc_schedule.solver_name = u.solver_name; first = false; }
+    if (first) {
+      out.uc_schedule.solver_name = u.solver_name;
+      out.uc_schedule.solver_threads_configured = u.solver_threads_configured;
+      first = false;
+    } else if (out.uc_schedule.solver_threads_configured != u.solver_threads_configured) {
+      out.uc_schedule.solver_threads_configured = -1;
+    }
     for (auto& x : p.opf_results) out.opf_results.push_back(std::move(x));
     for (auto& x : p.pf_results) out.pf_results.push_back(std::move(x));
     for (auto& x : p.pf_system_snapshots) out.pf_system_snapshots.push_back(std::move(x));
@@ -3820,9 +3847,10 @@ TimeSeriesPFResult solve_time_series_pf(const HybridPowerSystem& sys_in,
       TimeSeriesPFOptions day_opts = opts;
       day_opts.parallel_daily = false;              // each day is a plain solve
       day_opts.enforce_terminal_soc_cyclic = true;  // independence across days
-      day_opts.uc_solver = resolve_parallel_daily_uc_solver(opts.uc_solver);
-      day_opts.uc_solver_threads =
-          day_opts.uc_solver == UCSolverChoice::Native ? 1 : 0;
+      day_opts.uc_solver = opts.uc_solver_threads > 0 && opts.uc_solver == UCSolverChoice::Auto
+          ? UCSolverChoice::Native : resolve_parallel_daily_uc_solver(opts.uc_solver);
+      day_opts.uc_solver_threads = opts.uc_solver_threads > 0 ? opts.uc_solver_threads
+          : (day_opts.uc_solver == UCSolverChoice::Native ? 1 : 0);
       // Force the thread-safe native parity IPM for any per-step AC-OPF.
       day_opts.opf_options.ac_solver_backend = opf::ACOPFSolverBackend::ParityIPM;
       // Concurrent MILP is safe only when each daily solve owns its worker

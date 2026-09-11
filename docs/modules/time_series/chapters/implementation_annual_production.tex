@@ -248,3 +248,24 @@ OPF/PF 链均成功；并行路径同样要求每日 UC 和物理 replay 证书�
 跨周状态连续和 feedback 迭代均有源码路径与结果证书。报告不得用
 公共结构中 ``已声明的字段'' 代替实际执行证据。
 \end{gapnote}
+
+\subsection{GUI 求解器线程与日任务线程}
+公共建模区的求解器线程通过 \fld{uc\_solver\_threads} 传入
+\fld{ts\_pf\_options.uc\_solver\_threads}；年度整体 UC 在同一个可行域上执行
+并行分支定界，不删除跨日启停、爬坡或 SOC 约束。该值与日任务池的
+\fld{parallel\_threads} 独立。GUI 范围为整数 0--256，0 保留后端默认。
+Native B\&C 与 Gurobi 支持显式上限；当前 HiGHS/SCIP 适配器明确拒绝非零覆盖。
+Auto/Gurobi 的非零请求在 Gurobi 不可用时回退 Native，不进入不能消费该设置的 HiGHS。
+无覆盖时保留原有后端选择顺序。结果报告实际 UC 后端、请求数和配置上限，
+上限不是运行时活跃线程遥测；未执行 UC 或后端默认未解析时输出 null。
+
+理论依据：线程配置仅改变既有分支定界搜索的执行资源，不改变目标函数和可行域；
+参数装配开销为 $O(1)$，不提出加速比例结论。预先验证门槛：四时段两机组的
+merit-order 解析目标 $2(30\times10+40\times10+20\times20)=2200$，
+1/2 线程目标误差不超过 $10^{-5}$，逐时功率平衡误差不超过 $10^{-5}$ MW；
+无效线程参数拒绝，年度整体 UC 保留独立的日池参数。
+源码为 \path{src/time_series/time_series_pf.cpp} 与
+\path{src/time_series/annual_production_sim.cpp}，参数后端为兄弟仓库的
+Gurobi \fld{Threads} 接口及 Native B\&C \fld{num\_threads}。
+验证目标 \path{tests/test_uc_solver_threads.cpp} 和
+\path{tests/e2e/annual_ui_reconcile_e2e.mjs}；实测结果见开发状态。
