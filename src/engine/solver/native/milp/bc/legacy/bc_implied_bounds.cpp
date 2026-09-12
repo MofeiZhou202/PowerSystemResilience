@@ -394,16 +394,6 @@ void trace_highs_native_varbound_diff(
              missing_bad_cols, fmt::to_string(sample));
 }
 
-struct NativeImpliedColumnBounds {
-  std::vector<double> lower;
-  std::vector<double> upper;
-  std::vector<int> lower_source;
-  std::vector<int> upper_source;
-  std::uint64_t passes{0};
-  std::uint64_t lower_tightened{0};
-  std::uint64_t upper_tightened{0};
-};
-
 // The presolved LPModel represents +/-infinity with the 1e20 sentinel (native
 // MILPPresolve and PaPILO both use kInf=1e20), which std::isfinite treats as a
 // finite bound. Using such a sentinel as a real bound in activity sums causes
@@ -416,9 +406,9 @@ inline bool model_finite(double v) {
 
 NativeImpliedColumnBounds compute_implied_column_bounds_from_rows(
     const LPModel& lp,
-    int max_passes = 16,
-    int max_row_nnz = 512,
-    double tol = 1e-9) {
+    int max_passes,
+    int max_row_nnz,
+    double tol) {
   NativeImpliedColumnBounds out;
   const int n = static_cast<int>(lp.vars.size());
   out.lower.assign(static_cast<std::size_t>(n),
@@ -432,6 +422,20 @@ NativeImpliedColumnBounds compute_implied_column_bounds_from_rows(
   struct Entry {
     int col{-1};
     double coef{0.0};
+    // Per-term activity contributions captured at accumulation time.  The
+    // residual for an entry must subtract exactly the contribution that was
+    // accumulated into the row activity: try_tighten_* mutates the implied
+    // bounds (and their source rows) while this same row is still being
+    // processed, so recomputing the contribution at removal time can return a
+    // different value (in particular the raw model bound via the
+    // self-reference guard), which breaks the identity
+    // residual = activity - contribution and produces invalid implied bounds.
+    // Activity rule: Savelsbergh (1994), ORSA J. Computing 6(4), §2;
+    // Achterberg (2007), "Constraint Integer Programming", §3.2.
+    double lower_contrib{0.0};
+    double upper_contrib{0.0};
+    bool lower_inf{false};
+    bool upper_inf{false};
   };
 
   auto effective_lower = [&](int row, int col) {
@@ -453,22 +457,6 @@ NativeImpliedColumnBounds compute_implied_column_bounds_from_rows(
   auto upper_activity_bound = [&](int row, int col, double coef) {
     return coef < 0.0 ? effective_lower(row, col)
                       : effective_upper(row, col);
-  };
-  auto add_activity = [](double& activity, int& num_inf, double coef,
-                         double bound) {
-    if (model_finite(bound)) {
-      activity += coef * bound;
-    } else {
-      ++num_inf;
-    }
-  };
-  auto remove_activity = [](double& activity, int& num_inf, double coef,
-                            double bound) {
-    if (model_finite(bound)) {
-      activity -= coef * bound;
-    } else {
-      --num_inf;
-    }
   };
   auto try_tighten_lower = [&](int row, int col, double value) {
     if (!model_finite(value)) return false;
@@ -513,10 +501,23 @@ NativeImpliedColumnBounds compute_implied_column_bounds_from_rows(
           const auto& var = lp.vars[static_cast<std::size_t>(col)];
           if (std::abs(var.ub - var.lb) <= 1e-12) continue;
           entries.push_back(Entry{col, a});
-          add_activity(sum_lower, num_inf_lower, a,
-                       lower_activity_bound(source_row, col, a));
-          add_activity(sum_upper, num_inf_upper, a,
-                       upper_activity_bound(source_row, col, a));
+          auto& entry = entries.back();
+          const double lower_bound = lower_activity_bound(source_row, col, a);
+          if (model_finite(lower_bound)) {
+            entry.lower_contrib = a * lower_bound;
+            sum_lower += entry.lower_contrib;
+          } else {
+            entry.lower_inf = true;
+            ++num_inf_lower;
+          }
+          const double upper_bound = upper_activity_bound(source_row, col, a);
+          if (model_finite(upper_bound)) {
+            entry.upper_contrib = a * upper_bound;
+            sum_upper += entry.upper_contrib;
+          } else {
+            entry.upper_inf = true;
+            ++num_inf_upper;
+          }
         }
         if (entries.size() <= 1) return false;
 
@@ -526,8 +527,11 @@ NativeImpliedColumnBounds compute_implied_column_bounds_from_rows(
           if (std::isfinite(rhs)) {
             double residual = sum_lower;
             int residual_inf = num_inf_lower;
-            remove_activity(residual, residual_inf, entry.coef,
-                            lower_activity_bound(source_row, entry.col, entry.coef));
+            if (entry.lower_inf) {
+              --residual_inf;
+            } else {
+              residual -= entry.lower_contrib;
+            }
             if (residual_inf == 0 && std::isfinite(residual)) {
               const double bound = (rhs - residual) / entry.coef;
               if (entry.coef > 0.0) {
@@ -542,8 +546,11 @@ NativeImpliedColumnBounds compute_implied_column_bounds_from_rows(
           if (std::isfinite(lhs)) {
             double residual = sum_upper;
             int residual_inf = num_inf_upper;
-            remove_activity(residual, residual_inf, entry.coef,
-                            upper_activity_bound(source_row, entry.col, entry.coef));
+            if (entry.upper_inf) {
+              --residual_inf;
+            } else {
+              residual -= entry.upper_contrib;
+            }
             if (residual_inf == 0 && std::isfinite(residual)) {
               const double bound = (lhs - residual) / entry.coef;
               if (entry.coef > 0.0) {

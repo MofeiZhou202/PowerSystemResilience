@@ -88,6 +88,26 @@ void accumulate_variable_bound_source_stats(
 std::vector<NativeVariableBoundSourceEntry> collect_variable_bound_sources(
     const VariableBoundTable& table);
 
+/// Implied per-column bounds derived from row-activity propagation over the
+/// model rows (Savelsbergh 1994, §2; Achterberg 2007, §3.2).  lower/upper are
+/// the tightened bounds (-inf/+inf when untouched); lower_source/upper_source
+/// record the producing row index (-1 when untouched).
+struct NativeImpliedColumnBounds {
+  std::vector<double> lower;
+  std::vector<double> upper;
+  std::vector<int> lower_source;
+  std::vector<int> upper_source;
+  std::uint64_t passes{0};
+  std::uint64_t lower_tightened{0};
+  std::uint64_t upper_tightened{0};
+};
+
+NativeImpliedColumnBounds compute_implied_column_bounds_from_rows(
+    const LPModel& lp,
+    int max_passes = 16,
+    int max_row_nnz = 512,
+    double tol = 1e-9);
+
 void trace_highs_native_varbound_diff(
     const char* phase,
     const HiGHSPresolvedModelStats& highs_state,

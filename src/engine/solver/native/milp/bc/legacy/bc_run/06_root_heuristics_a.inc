@@ -1210,16 +1210,19 @@
 	      }
 	      return false;
 	    }
-	    if (!satisfies_with_bounds(base_lp, x, root.lb, root.ub,
-	                               kNodeFeasibilityTol)) {
-	      if (opt.verbose || trace_bc_timeline) {
-	        fmt::print(stderr,
-	                   "[B&C-INC-GATE] rejected source={} "
-	                   "reason=root_domain_bounds\n",
-	                   source != nullptr ? source : "incumbent");
-	      }
-	      return false;
-	    }
+	    // Incumbent validity is a property of the (reduced) model, not of the
+	    // current root search domain: the domain may already be closed by an
+	    // objective-cutoff prune -- tightened to the region strictly better than
+	    // the cutoff, possibly to inconsistency -- and a candidate sitting
+	    // exactly at the cutoff (e.g. the verified warm start that supplied it)
+	    // necessarily violates such a domain.  Discarding it loses the only
+	    // witness of the primal bound while its cutoff-conditioned artifacts
+	    // (conflicts, cliques, implied events) stay active, breaking the
+	    // monotone-cutoff invariant those artifacts rely on.
+	    // Achterberg (2007), "Constraint Integer Programming", §3.1: the
+	    // objective cutoff conditions propagation and pruning; a solution's
+	    // feasibility is judged against the problem, never against the current
+	    // propagation domain.
 	    return true;
 	  };
 	  auto current_incumbent_valid_for_proof = [&](const char* source) -> bool {
