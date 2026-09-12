@@ -423,10 +423,22 @@ static void recover_day(const J& job, J& day, int d, const std::string& pricing)
         job.at("base").at("generators").size()<=128 && job.at("base").at("storage").size()<=16 &&
         job.at("base").at("reservoirs").size()<=24 &&
         cores>=4 && per_solve_threads<=static_cast<int>(cores/2);
-      const size_t workers = parallel ? 2 : 1;
+      // Worker count: min(6, experiments, cores/2). RATIONALE: measured 2-worker
+      // efficiency 96.5% (performance.md, 恢复并发扩展与定价并发双解), so the 2-worker
+      // cap is the binding constraint; per-day waves of 6 match the 6 intervention
+      // factors. cores>=4 keeps the small-machine fallback at 2; the model-size caps
+      // above bound each concurrent MILP/JSON footprint (measured peak RSS 2.28 GiB
+      // at 2 workers, ~+0.3-0.5 GiB per additional worker) in place of a portable
+      // physical-memory probe. Each solve keeps per_solve_threads, so peak solver
+      // threads are workers*per_solve_threads <= cores.
+      const size_t workers = parallel ? std::min({static_cast<size_t>(6),experiments.size(),
+        static_cast<size_t>(cores/2)}) : 1;
       const auto recovery_start = std::chrono::steady_clock::now();
       day["recovery_execution"] = {{"workers",workers},{"experiments",experiments.size()},
         {"requested_solver_threads",requested_threads},{"resolved_solver_threads",parallel ? per_solve_threads : requested_threads},
+        {"worker_cap",6},{"logical_cpus",cores},
+        {"worker_admission",parallel ? "min(6, experiments, logical_cpus/2); size caps <=118 buses/<=128 generators/<=16 storage/<=24 reservoirs"
+                                     : "sequential: non-gurobi solver, single experiment, size cap or thread budget not met"},
         {"scope","independent paired interventions; chronological days remain sequential"}};
       const J baseline_totals = {{"deficit_mwh",day.at("deficit_mwh")},
         {"surplus_mwh",day.at("surplus_mwh")},{"overload_mwh",day.at("overload_mwh")}};
@@ -457,13 +469,17 @@ static void recover_day(const J& job, J& day, int d, const std::string& pricing)
         catch (const std::exception& e) { proof["error"] = e.what(); }
         return proof;
       };
+      // Waves of `workers` async experiments; results are collected in factor
+      // order within each wave and waves run sequentially, so the emitted
+      // counterfactual order is identical to the fully sequential loop.
       for(size_t first=0;first<experiments.size();first+=workers) {
-        if(workers==2 && first+1<experiments.size()) {
-          auto second = std::async(std::launch::async,evaluate,first+1);
-          auto first_result = evaluate(first);
-          day["counterfactuals"].push_back(std::move(first_result));
-          day["counterfactuals"].push_back(second.get());
-        } else day["counterfactuals"].push_back(evaluate(first));
+        const size_t wave=std::min(workers,experiments.size()-first);
+        if(wave==1){day["counterfactuals"].push_back(evaluate(first));continue;}
+        std::vector<std::future<J>> pending;
+        pending.reserve(wave-1);
+        for(size_t k=1;k<wave;++k)pending.push_back(std::async(std::launch::async,evaluate,first+k));
+        day["counterfactuals"].push_back(evaluate(first));
+        for(auto& f:pending)day["counterfactuals"].push_back(f.get());
       }
       day["recovery_execution"]["wall_sec"] = std::chrono::duration<double>(std::chrono::steady_clock::now()-recovery_start).count();
       const bool all_valid = std::all_of(day.at("counterfactuals").begin(), day.at("counterfactuals").end(),

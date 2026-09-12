@@ -4,7 +4,9 @@
 本节保留既有 macOS Release 平台模型的历史验证结果；本次规则文档对齐未重跑 C++ 测试。
 执行目标为 \srcpath{build/macos-release/tests/hacdcpf\_test\_market\_simulation}（目标名带
 \texttt{hacdcpf\_} 前缀，以区别于 MIPSolvers full-dev 的同名 \texttt{test\_market\_simulation}
-目标，见 \srcpath{tests/CMakeLists.txt:54-57}），记录为 22 cases、845 assertions。
+目标，见 \srcpath{tests/CMakeLists.txt:54-57}），记录已从 22 cases、845 assertions 更新为
+32 cases、1074 assertions（31 通过、1 个用例保留失败为 native 缺陷证据，
+见第~\ref{sec:logic-verification}~章）。
 这是市场模块内部回归证据，不是独立商业市场软件 oracle。
 尤其不能作为南方区域 2025 年 V1.0 的 98 点 SCUC、分省备用、水库或独立 LMP 模型的数值证据。
 

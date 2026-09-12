@@ -1015,3 +1015,66 @@ operation/forecast GUI/API 回归通过，包含无异常未触发、异常归�
 `output/market-performance/commitment-overlay/run_gui_server`。新会话载入保存的原始边界和
 同 seed 的完整周配置，启动时为 ready。原 8097/8101/8102 会话及结果均保留；
 旧进程不会因源码更新而自动获得新算法。启动记录与日志位于 `output/market-performance/service/`。
+
+## 恢复并发扩展与定价并发双解（2026-09-12）
+
+RATIONALE（实施前）：两项改动都不变数学模型、gap、时限值与审计门槛。
+P1：恢复实验共享同一干预前状态、互不依赖（paired recovery 已证），2 worker
+实测并行效率 96.5%，路数是约束而非效率；workers 取 min(6, 当日实验数, 逻辑核数/2)，
+cores>=4 使小机器回退 2，模型规模门禁（≤118 母线/128 机组/16 储能/24 水库）作为
+每路 MILP+JSON 内存代理（实测 2 worker 峰值 RSS 2.28 GiB，估计每加一路 +0.3--0.5 GiB）。
+每解线程数不变，峰值求解线程 workers×2 ≤ 核数。按 W=6、单实验时间不变的 LPT 预测
+恢复 wall 92.7→32.1 s，全周（always 配置）131.7→约 72 s，验收阈值 ≤75 s。
+P3：<100 万列 Gurobi 定价 LP 的双 fresh solve 共享同一不可变有序 LP，并发执行
+wall≈max 而非 sum；镜像 ≥100 万列 ordered-lp-barrier-8-v2 的并发对结构，
+check_price_duals 的对偶严格零差准入不变。时限语义改为两解同时开始、各自持有
+完整请求时限（退役的顺序版只给第二解剩余预算）；主解失败不再跳过复算，
+一致性门仍以 optimality_not_proven 失败，prices_valid 契约不变。
+预测 LMP 阶段 wall −50%（repeat_wall 4.16→约 2.1 s/周），主链 −4 s，验收阈值
+LMP 阶段三次中位数 −40%。假设：Gurobi 求解对相同线程数确定（不受负载影响），
+last_gurobi_solve_timing 线程局部；license 支持多环境（既有并发路径为证）。
+参考：`market_operation.cpp::recover_day`、`southern_market.cpp::solve`、
+执行契约 Deterministic Pricing。验收命令：同一保存 IEEE118 边界/seed 的完整周
+浏览器重放 before/after 各若干次串行运行 + `compare_market_replay.mjs` +
+`probe_market_lmp_duals` 两进程对偶逐 bit 比较 + test_southern_market 全套。
+
+改动内容：`recover_day` workers 规则与波次循环（波内按因素序收集，输出顺序与
+顺序循环逐元素相同），`recovery_execution` 新增 worker_cap/logical_cpus/
+worker_admission 准入记录；`solve()` 新增小列 Gurobi 并发双解分支，HiGHS/native
+保持原顺序路径（含剩余预算语义）；LMP 阶段 `runtime_sec` 对 Gurobi 改为并发对
+wall（与 v2 大列路径口径一致，顺序 HiGHS 仍为两解之和）。e2e 与对照脚本的
+workers 断言按新准入规则改写；对照脚本修复 dispatch_only 恢复无 lmp 阶段时的
+阶段存在性检查。
+
+实测（Apple M4 Max / 16 logical CPU / 128 GiB，Release -O3，commit 582420c 加本
+改动；期间 loadavg 约 3--5，有并行代理活动；全部运行串行）：
+
+| 指标 | before | after（3 次） | 变化 |
+|---|---:|---:|---:|
+| 全周浏览器 wall / s | 131.239--131.725（剖析期三次）/ 135.001（验收期 before-1） | 79.682 / 79.693 / 80.511 | 中位数 −39.4%；配对对照 −40.4% |
+| 主链累计 / s | 37.73 | 33.76 / 33.89 / 33.82 | −10.3% |
+| LMP 阶段累计 / s | 8.23 | 4.45 / 4.46 / 4.48 | **−45.8%（达 −40% 阈值）** |
+| 恢复 wall 累计 / s | 92.69 | 44.61 / 44.67 / 45.36 | −51.8% |
+| 恢复实验 CPU 合计 / s | 178.9 | 256.3 | 1.43× 膨胀 |
+
+数值核对：`compare_market_replay` 105 个阶段（21 主链 + 42 实验 × SCUC/SCED）
+最大相对目标差 **0**（逐 bit 相同）、最大原单位残差 1.28e-9、42 实验价格/有效性
+字段一致；每次重放内部断言所有 LMP 阶段 max_dual_difference==0、
+lp_algorithm=dual_simplex。`probe_market_lmp_duals` 两个新进程 × auto/
+dual_simplex/barrier 三请求方法：199246 行全对偶逐 bit 相等，SHA256
+`75321afd96c5f9f755e28314e098130f8345d6a8afbf90adeddfee877997096d`，目标
+3433253.5578213255、残差 8.23e-11，注入失败检查导出空价格。Release
+test_southern_market 80 用例 / 29923 断言通过（初版漏报 presolve_sec/search_sec
+契约字段导致 1 失败，已在并发报告补齐 null 字段后复测通过）。
+
+失配记录（P1 分量）：预测恢复 wall 32.1 s，实测 44.7 s（+39%，<50% 不触发完整
+重推导，但导致全周 ≤75 s 阈值未达：中位 79.693 s，超 6.3%）。直接证据：6 路 ×
+2 线程 = 12 个并发 Gurobi 线程下，逐实验 runtime 均匀膨胀 1.42--1.46 倍
+（178.9→256.3 s CPU），而每日 wall = 最慢实验 + 约 0.03 s（波次重叠仍近乎理想）。
+原成本模型假设单实验时间不随路数变化；实际约束是 12 线程共享内存带宽/缓存与
+大小核调度的争用，不是波次调度失效。修正后模型：recovery_wall(W) ≈
+max_t(exp_time) × inflation(W)，inflation(6)≈1.43；W=6 仍优于 W=2/3。
+P3 预测与实测相符（LMP −45.8% vs 预测 −50%；主链 −3.9 s vs 预测 −4.1 s）。
+全周 −39.4% 中位数提升为实测记录，不写成任意负载下的保证。
+证据目录：`output/market-performance/recovery-pricing-p1p3/`（after-1..3、before-1、
+probe 两进程结果、对照 comparison.json、二进制与源码哈希）。

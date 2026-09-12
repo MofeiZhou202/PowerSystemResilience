@@ -6,6 +6,112 @@ This is the living handoff for verified build state and active engineering work.
 Update it in place; do not create dated copies. Source, registered tests, and
 the current Git worktrees remain authoritative.
 
+## Southern A1–A7 hand-oracle anchors
+
+`tests/test_southern_market.cpp` gained six minimal per-interpretation oracle
+tests (`[southern_market][hand_oracle]`), each isolating one active constraint
+with paper-derived numbers asserted at 1e-6: A1 representative peak/valley
+points dispatch but day energy integrates only the 96 slots (480000 day bid
+cost invariant under representative load/duration edits, objective 492000 /
+522000 with authored weights); A3 two-segment incremental bids price the
+marginal block (840000/LMP 300 at 150 MW, 384000/LMP 200 at 80 MW) and the
+2.2.10 1%-of-flexible-range segment width is inclusive (2 MW admitted, 1.99 MW
+rejected); A4 downtime exactly at the 240/720-minute thresholds enters the new
+startup class (initial_state 224/225/704/705 -> hot/warm/warm/cold at the
+forced t=1 start, startup cost 10/20/20/30); A5 `penalized_shortfall` with a
+zero-capacity gateway parks the slack at its `adjusted_min_mwh` bound (480 MWh)
+priced at M4 (4.8e6) while `hard` fails SCUC; A6 a level corridor pinned at
+the 200 m ceiling forces per-slot `release = P*h/3600 + spill = 110 m3/s` with
+10 m3/s spill and a 245000 spill term; A7 the ordered negative-charge
+neighborhood [(1+d)Pch,(1-d)Pch] with d=0.05 makes a marginal charging storage
+price-setting (charge_price 250 -> ch=-39.975, LMP 250; 350 -> ch=-40.025,
+LMP 350) while `price_setting=0` fixes the charge and returns the margin to
+the generator (LMP 300). Suite baseline: `test_southern_market` 80 cases /
+29923 assertions, all green on macOS Release (was 74/29807).
+
+Companion note: the MIPSolvers HiGHS 1.15.1 upgrade removed
+`GurobiAdapter::set_milp_threads`; `src/time_series/time_series_pf.cpp`
+`make_uc_gurobi` now passes threads through `GurobiOptions.threads` (identical
+semantics: zero/positive override, backend default otherwise).
+
+## Market metamorphic / reduction test suite and a native SCUC false-optimality finding
+
+`tests/test_market_simulation.cpp` gained ten metamorphic and reduction tests
+(tags `[market][metamorphic]` / `[market][reduction]`) on a linearised
+`build_market_3bus_toy` fixture with analytic hand solutions (flat offers at
+20/35/55 $/MWh, L3 shift factors -2/7 and -4/7). Covered relations: offer
+homogeneity (all bids x2.5 => LMP x2.5, dispatch/commitment unchanged),
+own-price monotonicity of cleared energy, input-order permutation invariance
+(1e-12), proportional scale invariance (LMP unchanged, dispatch x2),
+congestion appearance/removal with flow-direction-aligned price separation
+(binding L3 => LMP {20,35,50}, relaxed => uniform 35), VOLL-capped load
+shedding monotone in demand, complementary slackness (price separation iff a
+branch binds), single-period reduction to hand merit-order dispatch
+({100,40,0}, energy cost 3400, G0 scarcity rent 1500), and bit-identical
+determinism. Suite baseline is now 32 cases / 1074 assertions (was 22/845),
+all green on macOS Release -- the native SCUC false-optimality case is fixed;
+see "Native SCUC false-optimality fix" below. Finding (historical):
+NativeBranchAndCut reported
+"Optimal (root gap closed)" at commitment_cost 9945 on a three-period
+copper-plate zero-fixed-cost toy while decommitting the 35 $/MWh unit in one
+period and serving it from the 55 $/MWh unit (period LMP 55); the same
+pipeline with the HiGHS UC backend reaches the analytic optimum 9145 with
+lambdas {20,35,35}, so the defect is isolated to the native SCUC bound/cut
+management, not to pricing or settlement.
+
+## Native SCUC false-optimality fix (2026-09-12)
+
+Root cause of the finding above, fixed in MIPSolvers (two coupled defects,
+both violations of branch-and-cut correctness invariants):
+
+1. **Invalid implied bounds (the unsound bound).** In
+   `compute_implied_column_bounds_from_rows`
+   (`src/engine/solver/native/milp/bc/legacy/bc_implied_bounds.cpp`), the
+   residual for a row entry was recomputed at removal time instead of
+   reusing the contribution accumulated into the row activity.  When a
+   two-sided row's rhs-side processing tightened the entry's own bound (and
+   stamped the entry's source row), the lhs-side removal hit the
+   self-reference guard and subtracted the *raw* model bound contribution
+   while the sum held the *tightened* one, breaking
+   `residual = activity - contribution` (the activity rule of Savelsbergh
+   1994, ORSA J. Comput. 6(4) §2; Achterberg 2007, "Constraint Integer
+   Programming", §3.2).  On the failing instance this claimed
+   `x133 >= 31.44` where the valid value is vacuous (-95.47; the LP optimum
+   sits at 28.57), escalating across passes into inverted intervals
+   ([175.63, -170.25]).  The corrupted implied bounds produced
+   variable-bound arcs that are refuted by the root LP optimum itself
+   (e.g. "u_g0_t1=1 => shed_b0_t1/2 >= 286.17" with ub 25), which poisoned
+   the objective-cutoff conflict/clique/event artifacts; propagation with
+   those artifacts is what later "proved" root bound = incumbent = 9945 and
+   printed the false "Optimal (root gap closed)".
+2. **Incumbent gated by the cutoff-closed search domain.** The verified
+   warm start (obj 9145, the analytic optimum, supplied as
+   `MIPModel::initial_solution`) was registered as the objective cutoff
+   (9144.99999) but then *rejected* as incumbent by
+   `validate_root_candidate_for_proof` because it was checked against the
+   live root domain, already closed by cutoff propagation ("strictly better
+   than the cutoff" region).  Incumbent validity is a model property, not a
+   search-domain property (Achterberg 2007, §3.1); losing the incumbent
+   while its cutoff-conditioned artifacts stayed active broke the
+   monotone-cutoff invariant they rely on, letting a worse feasibility-pump
+   incumbent (9945) in and enabling the circular bound lift above.  The gate
+   now validates candidates against the model only
+   (`bc_run/06_root_heuristics_a.inc`).
+
+Fix verified end to end: the captured 189-var/183-row SCUC MIP re-solves to
+9145 "Optimal (root gap closed)" (was 9945).  Regression guards:
+MIPSolvers `test_presolve` case `[presolve][implied-bounds][regression]`
+(minimal two-row LP identity check; fails with exactly 31.43822368000000012
+on the pre-fix code) and the e2e market case below.  Verification:
+`hacdcpf_test_market_simulation` 32/32 cases / 1074 assertions green
+(including all ten metamorphic/reduction cases, the copper-plate case now
+asserting native == oracle == 9145), `test_southern_market` 80/80 / 29923
+(baseline unchanged), `test_uc_solver_threads` 3/3 after migrating the
+deleted `set_milp_threads` checks to `GurobiOptions.threads` ctor
+validation, MIPSolvers ctest 17/18 (the one failure,
+`test_numerical_stability` NLP multiplier centrality, fails identically on
+the pre-fix tree and is unrelated to MILP).
+
 ## Market module documentation audit and manual upgrade
 
 Systematic doc-vs-code audit of `src/market/` against `docs/modules/market/`
@@ -91,7 +197,17 @@ Follow-up: new manual chapter `chapters/rule_implementation_gaps.tex`
 2.6.4–2.6.6) against the production code into consistent / interpretive
 (A1–A7) / deviating / not-implemented, with per-clause `file:line` evidence
 re-verified against `southern_market.cpp`/`southern_boundary.cpp`; the
-abstract now cross-references it. The chapter now also includes a compact
+abstract now cross-references it.
+
+Follow-up: new manual chapter `chapters/logic_verification.tex`
+(逻辑验证实验矩阵) documents the two logic-verification rounds without real
+market data: 10 metamorphic/reduction experiments on the generic engine
+(`[market][metamorphic]`/`[reduction]`, incl. the deliberately red Native
+SCUC false-optimality defect at `test_market_simulation.cpp:1920`) and 6
+southern A1–A7 hand oracles (`[southern_market][hand_oracle]`). Suite counts
+updated everywhere: `hacdcpf_test_market_simulation` 32/1074 (31 pass, 1
+retained failure as defect evidence), `test_southern_market` 80/29923 all
+green (both re-run in this doc sync). The chapter now also includes a compact
 theory-to-code-to-test traceability table covering balance/reserves/start-stop,
 storage recursion, SCED→LMP projection, and AC security feedback, and states
 explicitly that synthetic test passes are implementation evidence rather than
@@ -167,17 +283,31 @@ A third, unrelated pre-existing failure was also closed. The
 validation lost their messages because a `std::invalid_argument` thrown in
 `apply_gfl_params` / the grid-following inverter validator was not matched by the
 builder's `catch (const std::exception&)` and fell through to the `catch (...)`
-"cross-ABI" wrapper. Diagnosis (via `abi::__cxa_current_exception_type`) confirmed
-the in-flight type is exactly `std::invalid_argument`, but the `std::logic_error`
-family RTTI typeinfo is not matched under this build's Apple `libc++abi`
-(pointer-based comparison), while `std::runtime_error` matches. It is not a
-static-library duplicate typeinfo and not dependency interposition — a subtle
-runtime RTTI-ABI split. As a bounded workaround the two VSC DC-fault-control
-config validations (`src/dynamics/DynamicModelBuilder.cpp` and
-`src/dynamics/devices/BasicDynamicDevices.cpp`) now throw `std::runtime_error`,
-which propagates its message intact. This is a workaround, not a root fix: any
-code that catches `std::logic_error`/`std::invalid_argument` specifically remains
-affected by the underlying RTTI split.
+"cross-ABI" wrapper. Root cause (traced with `abi::__cxa_current_exception_type`
+and `dladdr`): the prebuilt **`libklusolvex.dylib`** — OpenDSS's KLUSolveX sparse
+solver from the `dss_python_backend` package, loaded transitively through
+`libdss_capi.dylib` — bundles its own C++ runtime and exports *weak* copies of
+the std exception typeinfos. `std::invalid_argument` has no strong export in
+`libc++abi` (only `std::exception`/`logic_error`/`runtime_error` do, via key
+functions), so dyld coalesces the process-wide `std::invalid_argument` typeinfo
+to libklusolvex's copy (`&typeid(std::invalid_argument)` resolves to
+`libklusolvex.dylib` while `&typeid(std::exception)` resolves to
+`/usr/lib/libc++abi.dylib`). Under Apple libc++abi's pointer-based (unique) RTTI
+matching the resulting inheritance chain does not reach libc++abi's
+`std::exception`, so `catch (const std::exception&)` misses a thrown
+`std::invalid_argument`; `logic_error`/`runtime_error` resolve to libc++abi's
+strong exports and are unaffected (hence the workaround type). The collision is
+emergent from the full multi-library link — an isolated program linking only
+libklusolvex does not reproduce it — so there is no single dylib to patch, and
+`strip`/`nmedit` cannot surgically hide the symbols without breaking the `klu_*`
+exports libdss_capi needs. The clean root fix is upstream: OpenDSS should build
+KLUSolveX with `-fvisibility=hidden` so it stops exporting std typeinfos (an
+upstream note for dss-extensions). As a bounded in-repo workaround the two VSC
+DC-fault-control config validations (`src/dynamics/DynamicModelBuilder.cpp` and
+`src/dynamics/devices/BasicDynamicDevices.cpp`) throw `std::runtime_error`, which
+propagates its message intact. This is a mitigation, not a root fix: any code
+that catches `std::logic_error`/`std::invalid_argument` specifically remains
+affected whenever the DSS runtime is loaded.
 
 Verified on macOS Release: full live manifest 34/34 (1,069,529 assertions),
 `test_transient_dynamics` 120/120, `test_dynamic_model_catalog` 8/8.
@@ -5305,3 +5435,29 @@ ctest --preset macos-release
 Use [README.md](../README.md) for the user-facing capability baseline,
 [AGENTS.md](../../AGENTS.md) for architecture and invariants, and
 [docs/README.md](README.md) for topic documentation.
+
+## Market recovery worker scaling and concurrent deterministic pricing (2026-09-12)
+
+P1/P3 of the market-operation profiling plan implemented, on top of commit
+`582420c` (working tree also carries another agent's unrelated edits). P1 widens
+`recover_day` admission from a fixed 2 workers to `min(6, experiments, logical_cpus/2)`
+(small 4-core machines still fall back to 2; size caps unchanged) and records
+`worker_cap`/`logical_cpus`/`worker_admission` in `recovery_execution`. P3 runs the
+sub-1e6-column Gurobi deterministic pricing pair concurrently (mirroring
+`ordered-lp-barrier-8-v2`); each fresh solve now holds the full requested time
+limit, and a failed primary no longer skips the repeat — the strict zero dual
+difference gate in `check_price_duals` is untouched. HiGHS/native pricing keeps
+the sequential remaining-budget path. Measured on the saved IEEE118 week
+(always/dispatch_only, 3 serial replays each side): browser wall 131.6 s median
+before -> 79.69 s median after (-39.4%); LMP stage -45.8% (meets the -40%
+threshold); recovery wall -51.8%. The P1 component missed its 32.1 s prediction
+(44.7 s actual): per-experiment runtime inflates 1.43x at 12 concurrent Gurobi
+threads, so the <=75 s week target was missed by 6.3%; the corrected cost model
+and all evidence are in docs/modules/market/performance.md (Recovery concurrency
+section) and output/market-performance/recovery-pricing-p1p3/. Results are
+bit-identical: 105-stage replay comparison shows max relative objective
+difference 0 and max residual 1.28e-9; probe_market_lmp_duals gives 199246-row
+full duals bitwise equal across two fresh processes. Regression:
+test_southern_market 80 cases / 29923 assertions pass; market_operation_e2e and
+market_forecast_e2e pass. Follow-up not done: P2 cross-day pipelining and P4 SCED
+reuse remain unimplemented by decision.

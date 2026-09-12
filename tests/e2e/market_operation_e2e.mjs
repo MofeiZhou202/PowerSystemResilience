@@ -367,7 +367,8 @@ try {
       const day = run.data.job.days[0];
       assert.equal(day.valid,true);
       const parallel = threads === 0 && os.cpus().length >= 4;
-      assert.equal(day.recovery_execution.workers,parallel ? 2 : 1);
+      const expectedWorkers = parallel ? Math.min(6, 3, Math.floor(os.cpus().length/2)) : 1;
+      assert.equal(day.recovery_execution.workers,expectedWorkers);
       assert.equal(day.recovery_execution.requested_solver_threads,threads);
       assert.equal(day.recovery_execution.resolved_solver_threads,parallel ? 2 : threads);
       assert.deepEqual(day.counterfactuals.map(c=>c.factor),['load_scale','solar_scale','generator_bid_scale']);

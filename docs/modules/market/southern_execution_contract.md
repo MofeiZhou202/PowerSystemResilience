@@ -68,10 +68,17 @@ v1 prices are not promised to match. Each solve has the requested soft optimizer
 budget; `runtime_sec` is pair wall including verification and queue wait, while
 repeat wall overlaps primary wall and must not be added to it.
 
-For smaller LPs and HiGHS, `ordered-lp-dual-simplex-v1` fixes pricing to a fresh single-thread dual
-simplex solve (seed 0). Gurobi resets environment parameter overrides to defaults,
-then uses Method=1, Threads=1, OptimalityTol=1e-8 and the configured time budget;
-HiGHS uses simplex_strategy=1, parallel=off, presolve=on and seed=0. Native market
+For smaller Gurobi LPs, `ordered-lp-dual-simplex-v1` fixes pricing to a fresh single-thread dual
+simplex solve (seed 0) and, since the concurrent-pricing change, runs the two fresh
+solves concurrently in independent environments, mirroring the v2 pair structure;
+each solve starts together and holds the full requested time budget (the retired
+sequential Gurobi variant gave the repeat only the remainder of the budget). A failed
+primary no longer skips the repeat; the consistency gate fails on
+`optimality_not_proven` either way. For HiGHS, v1 remains two sequential fresh
+solves with simplex_strategy=1, parallel=off, presolve=on and seed=0, the repeat
+holding the remaining stage budget. Gurobi resets environment parameter overrides to defaults,
+then uses Method=1, Threads=1, OptimalityTol=1e-8 and the configured time budget.
+Native market
 pricing continues to use HiGHS. Requested `gurobi_method`/threads govern SCUC/SCED
 dispatch only; the LMP pricing LP always uses the fixed size-based policy above
 (single thread in the v1 path), regardless of the requested dispatch algorithm.
@@ -93,14 +100,15 @@ vectors with exact equality (tolerance zero), original-unit primal residuals
 <=1e-6 and objective difference <=1e-6. Failure makes `prices_valid=false`, all
 exported LMP values null and the main result `lmp_failed`; settlement remains
 ineligible. A feasible schedule does not override this gate. Missing duals,
-timeouts and nonfinite values fail it. The sequential v1 repeat uses the remaining
-stage budget; the concurrent v2 pair uses the per-solve budgets described above.
+timeouts and nonfinite values fail it. Only the sequential HiGHS v1 repeat uses the
+remaining stage budget; the concurrent Gurobi v1 and v2 pairs give each solve the
+full requested per-solve budget described above.
 Solver time limits cannot strictly bound import/audit wall time.
 
 The operation/forecast summary retains the same `price_consistency` object.
 `repeat_wall_sec` and `repeat_solver_timing` separate the extra solve; primary
-`solver_timing` retains the first solve only. For sequential v1, `runtime_sec` sums
-both solver calls; concurrent v2 records pair wall. `solve_wall_sec` includes
+`solver_timing` retains the first solve only. For sequential HiGHS v1, `runtime_sec` sums
+both solver calls; the concurrent Gurobi v1/v2 pairs record pair wall. `solve_wall_sec` includes
 verification. Unexecuted checks have no valid
 price. Historical results without this object are displayed as unchecked.
 References: Gurobi Optimizer parameter reference, Method/Threads/Seed; HiGHS
@@ -194,9 +202,11 @@ carry 或运行状态。忙碌/旧 run_id/边界 revision 拒绝；未完成日�
 operation GET 返回 `recovery_policies:true`；GUI 对未声明该能力的旧服务隐藏新策略控件、
 禁用补算并省略新增配置字段，继续兼容旧的 explain 开关。
 `manual_wall_sec` 单独记录，不回写原逐日 `execution_timing`。
-每次恢复执行另返回 `recovery_execution`：workers（1或2）、experiments、
-请求/实际生效线程数、wall_sec 和范围说明。双 worker 并行仅在 Gurobi 后端、
+每次恢复执行另返回 `recovery_execution`：workers（1 至 6）、experiments、
+请求/实际生效线程数、wall_sec、worker_cap/logical_cpus/worker_admission 准入说明
+和范围说明。并行仅在 Gurobi 后端、
 不超过118母线/128机组/16储能/24水库、至少4核且每解线程不超过核数一半时启用；
+workers 取 min(6, 当日实验数, 逻辑核数/2)（4 核小机器回退 2）；
 日内实验独立并行，跨日推进永远串行。并行协议的推导与预算见 performance.md。
 界面可为所选历史日补算供需归因或含 LMP 完整链，并显示触发状态和恢复范围。
 
@@ -781,7 +791,7 @@ Native 路径见本文 Native 根割与整数修复两节。
 `execution.threads`默认0；非零仅接受Gurobi（最大128）。`time_limit_sec`与
 `mip_gap`沿用原范围；Gurobi参数作用于每个SCUC/SCED/LMP优化调用，LP也限时。
 时限不包含建模、许可证启动或全部恢复实验，仍不是整日硬预算。HiGHS路径中
-SCUC MILP与LMP定价LP（含重复核验的剩余预算）接收时限，SCED连续LP不设时限。
+SCUC MILP与LMP定价LP接收时限（Gurobi 并发双解各自持有完整请求时限，HiGHS 顺序复算使用剩余预算），SCED连续LP不设时限。
 运行模拟`config.solver_options={solver,time_limit_sec,mip_gap,threads}`可覆盖保存边界的
 执行设置；配置缺省时从保存边界继承，规范化结果与预测场景导出保留实际选择。
 GUI手工页和预测页分别编辑并重载这四项；日前边界页按schema编辑execution。

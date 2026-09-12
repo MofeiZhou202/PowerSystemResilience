@@ -4,7 +4,7 @@
 
 ## 受控源文件与章节地图
 
-`market_manual.tex` 是主文档（导言区、参数表环境与阅读指南），`chapters/` 包含十个章节源文件，由主文档 `\input` 引入：
+`market_manual.tex` 是主文档（导言区、参数表环境与阅读指南），`chapters/` 包含十一个章节源文件，由主文档 `\input` 引入：
   numerical_cross_validation.tex   数值交叉验证
   source_equivalent_contract.tex   源码等价合同
   southern_day_ahead_rules.tex     南方日前规则转写
@@ -15,6 +15,7 @@
   module_io.tex                    各模块输入输出（按公共入口组织）
   algorithm_selection.tex          算法选择与求解策略（后端分派、确定性定价、装配复用）
   yunnan_regulation.tex            云南调频市场模型（预安排出清、MILP耦合、计量分摊月结）
+  logic_verification.tex           逻辑验证实验矩阵（蜕变/退化、手算预言机、native缺陷证据）
 
 `market_manual.pdf` 与 LaTeX 中间文件是本地构建产物，不纳入版本控制
 （`.gitignore` 的 `docs/**/*.pdf`、`docs/**/*.aux` 规则覆盖；仅 `references/`
@@ -42,7 +43,7 @@
 开停机时间、储能能量、水位和下泄历史取前一天SCED第96点末态；每日SOC终值仍按申报
 生效。用户操作见[周月教程](../../guides/market_simulation_workflow.zh.md)。
 可下载的[PDF主手册](market_manual.pdf)及其`chapters/southern_execution.tex`已同步
-跨日状态公式、矩阵复用、定价一致性与本次性能验收；PDF共99页，在线/本地校验记录
+跨日状态公式、矩阵复用、定价一致性与本次性能验收；PDF共102页，在线/本地校验记录
 见[开发状态](../../overview/development_status.md)。
 
 [市场求解性能](performance.md)：IEEE118 水量、储能与机组组合的消融计时，
@@ -63,7 +64,7 @@ SCUC/SCED，主结果仍定价。Gurobi 内部 wall 拆分环境/导入/优化/�
 2000节点优化使用原LP独立下界和整数可行性核验，维持请求的MIP gap；候选储能和
 负荷轨迹不是与旧gap内解相同的承诺。默认水电版完整单日已由188 s无解改善到
 同协议旧版最大61.29/61.41 s；SCED→LMP复用后首次/重复各五次最大58.52/58.57 s，
-十次均低于一分钟，非任意模型的硬截止保证。74测试/29807断言、原矩阵及20份完整
+十次均低于一分钟，非任意模型的硬截止保证。80测试/29923断言、原矩阵及20份完整
 输出对照、七日小模型承接、3247054行跨进程对偶核验通过；限于本机Gurobi/合成诊断边界，
 最新8107入口和完整证据见性能记录。
 
@@ -88,10 +89,29 @@ GUI现分南方规则与通用AC/DC两套导航，默认进入南方“运行模
 预防式N-1割仅覆盖AC支路，均写入结果的 model_scope/model_limitations。
 external_grid 与 energy_router 无市场契约，显式退回 `unsupported_hybrid_market_assets`。
 定价求解原生单纯形超过5000变量直达HiGHS并有失败回退；gap未证最优写警告。
-测试基线 `hacdcpf_test_market_simulation` 22用例/845断言，另有独立oracle
+测试基线 `hacdcpf_test_market_simulation` 32用例/1074断言全部通过，另有独立oracle
 `market_sced_cross_validation`（`tools/market_validation/run_cross_validation.py`
 提供 `--negative-control` 负控制开关，人为改写一个 LMP 后预期校验失败并以退出码 0
 报告检出）；实时/博弈/混合出清的GUI回归见[开发状态](../../overview/development_status.md)。
+
+蜕变/退化等价测试（`tests/test_market_simulation.cpp`，tag `[market][metamorphic]`
+与 `[market][reduction]`，基于 `build_market_3bus_toy` 改造的线性报价三节点算例，
+所有关键数值有解析手算对照）：报价齐次性（×2.5 报价 ⇒ LMP×2.5、出清/组合逐点不变）、
+报价单调性、输入置换不变性（1e-12）、尺度不变性（负荷/容量/限额 ×2 ⇒ LMP 不变、
+出清 ×2）、拥塞出现/消失与价差方向（L3 绑定时 LMP={20,35,50}、flow={0,30,20}，
+放宽后全网统一 35）、VOLL 切负荷（超出 60MW 固定容量部分切负荷量=需求−60、
+LMP=VOLL=10000、随需求单调）、互补松弛（价差>0 当且仅当存在绑定支路）、
+单时段退化到 merit-order 经济调度（出清 {100,40,0}、能量成本 3400、
+G0 稀缺租金 1500）、确定性逐 bit 再现。**已修复的历史发现**：NativeBranchAndCut
+曾在三时段铜板、零固定成本算例上虚报最优——自报 "Optimal (root gap closed)"、
+commitment_cost=9945，却把第 2 时段 G1（35$/MWh）解租、改用更贵的 G2（55$/MWh）
+供电 40MW，该时段 LMP=55；同一流水线换 HiGHS UC 后达到解析最优 9145
+（G1 全时段在运、lambda={20,35,35}）。根因为 MIPSolvers 原生 B&C 的两处耦合缺陷
+（活动量残差恒等式破坏产生无效隐含界/VLB 工件 + 暖启动 incumbent 被截断关闭的
+搜索域门禁拒绝），已于 2026-09-12 修复并加回归守卫（详见
+[开发状态](../../overview/development_status.md) "Native SCUC false-optimality fix"
+与 `chapters/logic_verification.tex` 对应小节）；当前 native 与 HiGHS 在该用例
+同达解析最优 9145。
 
 [AEMO数据与可证伪验证](aemo_validation.md)：七日官方调度/报价，108项实验检查、
 两机256组合穷举与三后端对照，周/实时/调频/现金独立复核及12项结果变异。

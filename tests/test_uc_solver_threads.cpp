@@ -70,9 +70,10 @@ TEST_CASE("Auto and Gurobi keep explicit UC thread limits through fallback", "[u
     CHECK(result.solver_threads_configured == 2);
     CHECK(result.total_cost == Catch::Approx(2200).margin(1e-5));
   }
-  engine::GurobiAdapter adapter;
-  CHECK_THROWS_AS(adapter.set_milp_threads(-1), std::invalid_argument);
-  CHECK_THROWS_AS(adapter.set_milp_threads(1025), std::invalid_argument);
+  engine::GurobiOptions invalid_low; invalid_low.threads = -1;
+  engine::GurobiOptions invalid_high; invalid_high.threads = 1025;
+  CHECK_THROWS_AS(engine::GurobiAdapter(invalid_low), std::invalid_argument);
+  CHECK_THROWS_AS(engine::GurobiAdapter(invalid_high), std::invalid_argument);
 }
 
 TEST_CASE("Annual coupled SCUC forwards solver threads independently of daily workers", "[uc_threads]") {

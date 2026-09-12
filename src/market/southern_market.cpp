@@ -1715,6 +1715,55 @@ engine::SolveResult solve(Build& b, const J& input) {
     result.stats.runtime_sec=std::chrono::duration<double>(std::chrono::steady_clock::now()-began).count();
     return result;
   }
+  if(b.stage=="lmp" && input.at("execution").value("solver",std::string("highs"))=="gurobi") {
+    // Small (<1e6 columns) deterministic pricing pair. RATIONALE: the two fresh
+    // solves of the same ordered LP share only immutable input, so running them
+    // concurrently halves the stage wall while the strict zero-dual-difference
+    // admission (check_price_duals) is unchanged. Mirrors ordered-lp-barrier-8-v2
+    // above; solve_pricing_lp still pins single-thread dual simplex, Seed default.
+    // Time-limit semantics: both solves start together and each holds the full
+    // requested limit; the retired sequential variant gave the repeat only the
+    // remainder of the budget. A failed primary no longer skips the repeat; the
+    // consistency check fails on optimality_not_proven either way, so the
+    // exported prices_valid contract is unchanged. performance.md,
+    // 恢复并发扩展与定价并发双解. HiGHS/native stay on the sequential path below.
+    const auto began=std::chrono::steady_clock::now();
+    const auto independent=[&]{
+      const auto start=std::chrono::steady_clock::now();
+      engine::GurobiOptions options;
+      options.time_limit_sec=num(input.at("execution"),"time_limit_sec");
+      options.mip_gap=num(input.at("execution"),"mip_gap");
+      const auto environment_start=std::chrono::steady_clock::now();
+      engine::GurobiAdapter adapter(options);
+      const double environment_sec=std::chrono::duration<double>(std::chrono::steady_clock::now()-environment_start).count();
+      if(!adapter.available()) throw std::runtime_error("Gurobi unavailable: library or license initialization failed; no solver substitution performed");
+      auto result=adapter.solve_pricing_lp(b.model.linear_part);
+      const auto timing=engine::last_gurobi_solve_timing();
+      restore_duals(b,result);
+      const auto seconds=[](const std::optional<double>& v){return v?J(*v):J(nullptr);};
+      J report={{"scope","concurrent-independent-pricing-wall; each solve holds the full requested time limit"},
+        {"environment_sec",environment_sec},
+        {"model_import_sec",seconds(timing.model_import_sec)},{"optimize_sec",seconds(timing.optimize_sec)},
+        {"result_extract_sec",seconds(timing.result_extract_sec)},
+        {"primal_start_sec",0},{"presolve_sec",nullptr},{"search_sec",nullptr},
+        {"wall_sec",std::chrono::duration<double>(std::chrono::steady_clock::now()-start).count()}};
+      return std::pair{std::move(result),std::move(report)};
+    };
+    auto verification=std::async(std::launch::async,independent);
+    auto [result,timing]=independent();
+    auto [repeat,repeat_timing]=verification.get();
+    const auto objective=[&](const Eigen::VectorXd& x){return x.size()==b.model.linear_part.c.size()&&x.allFinite()?
+      b.model.linear_part.c.dot(x):std::numeric_limits<double>::infinity();};
+    b.price_consistency=detail::check_price_duals(result,repeat,b.le.size()+b.eq.size(),
+      primal_residual(b,result.x,input),primal_residual(b,repeat.x,input),
+      std::abs(objective(result.x)-objective(repeat.x)));
+    b.price_consistency["execution"]="concurrent_independent_solves";
+    b.price_consistency["repeat_wall_sec"]=repeat_timing["wall_sec"];
+    b.price_consistency["repeat_solver_timing"]=repeat_timing;
+    b.solver_timing=timing;
+    result.stats.runtime_sec=std::chrono::duration<double>(std::chrono::steady_clock::now()-began).count();
+    return result;
+  }
   const auto start = std::chrono::steady_clock::now();
   auto result = solve_once(b,input);
   if (b.stage != "lmp") return result;

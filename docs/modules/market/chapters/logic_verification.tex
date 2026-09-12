@@ -1,0 +1,96 @@
+% logic_verification.tex -- 逻辑验证实验矩阵
+\section{逻辑验证实验矩阵}\label{sec:logic-verification}
+
+\begin{theorynote}
+本章记录无真实市场数据条件下完成的两轮逻辑验证实验：通用引擎的蜕变/退化实验
+（\srcpath{tests/test\_market\_simulation.cpp}，tag \texttt{[market][metamorphic]}/
+\texttt{[market][reduction]}）与南方 A1--A7 手算预言机
+（\srcpath{tests/test\_southern\_market.cpp}，tag \texttt{[southern\_market][hand\_oracle]}）。
+所有数值断言均已实跑核实：通用套件 32 用例/1074 断言（31 通过、1 个用例保留失败为
+缺陷证据），南方套件 80 用例/29923 断言全部通过。
+\textbf{逻辑自洽不等于市场校准}：这些实验证明代码满足其声明的数学性质，
+不证明模型与任何真实市场结果一致。
+\end{theorynote}
+
+\subsection{方法论：无外部数据时的验证逻辑}
+没有真实报价与出清回放时，正确性证据只能来自模型自身的数学结构。本章实验覆盖
+七类手段：\textbf{不变量/恒等式}（齐次性、尺度不变、置换不变、逐位确定性）、
+\textbf{手算预言机}（解析最优值/价格预先独立算出再断言）、\textbf{蜕变测试}
+（对输入做语义保持变换，断言输出的已知关系）、\textbf{退化等价}（关掉网络/时段/
+固定成本后必须退化为教科书经济调度或铜板价）、\textbf{双路独立重算}（同一输入
+两个求解器路径对照）、\textbf{变异/负控制}（人为破坏数据必须被检出，见
+第~\ref{sec:market-xref}~节的 \texttt{-{}-negative-control}）。\textbf{参数有效性
+筛查}（对全参数空间做系统性合法/非法注入）尚未实现，列为后续工作。
+每类手段的局限同样明确：不变量通过不排除模型缺项，手算预言机只覆盖所构造的
+算例切片，双路对照只隔离实现差异而非模型正确性。
+
+\subsection{实验矩阵}
+通用引擎夹具 \fld{linear\_market\_toy}（\srcpath{tests/test\_market\_simulation.cpp:68-82}）：
+三母线线性化玩具系统，平坦报价 20/35/55 元/MWh，唯一可拥塞通道 L3（20 MVA，
+对 slack 的 shift factor 为 $-2/7$、$-4/7$），解析最优在夹具注释中预先推导；
+\fld{metamorphic\_options}（:106-112）关闭 AC 认证、备用置零、MIP gap 收紧到
+$10^{-9}$ 使解析最优可被证明。南方手算预言机基于 \fld{make\_southern\_market\_example}
+合成边界逐条构造。矩阵“测试位置”列：A 组为 \srcpath{tests/test\_market\_simulation.cpp}、
+B 组为 \srcpath{tests/test\_southern\_market.cpp} 的行号。
+\begin{center}\scriptsize
+\begin{longtable}{@{}L{2.7cm}L{3.4cm}L{3.9cm}L{2.5cm}L{1.9cm}@{}}
+\toprule 实验 & 逻辑断言 & 算例构造与关键数值 & 测试位置 & 状态\\\midrule
+\endhead
+A1 报价齐次性 & 全部报价分量乘 $k$：argmin 不变、全部对偶与目标乘 $k$ & 三时段，$k=2.5$；LMP 相对误差 $<10^{-6}$，出清逐点不变 & :1422 & 通过\\
+A2 自身报价单调性 & 报价升则自身中标能量不增（LP 比较静态） & 单时段铜板；G1 出清 $40\to40(+10)\to0(+25)$ MW & :1493 & 通过\\
+A3 置换不变性 & 机组/负荷输入顺序不影响出清 & 同输入随机重排；逐点偏差 $<10^{-12}$ & :1544 & 通过\\
+A4 尺度不变性 & 负荷/容量/限额同乘 2：LMP 不变、出清乘 2 & 三时段含拥塞 & :1618 & 通过\\
+A5 拥塞租金方向 & 绑定支路影子价顺流抬价 & L3 绑定：出清 $\{70,70,0\}$、LMP $\{20,35,50\}$、$\mu=52.5$、受端价差 $+30$；放宽 L3 恢复统一价 35 & :1684 & 通过\\
+A6 VOLL 定价 & 边际供给为切负荷时 LMP$=$VOLL 且切负荷随需求单调 & 硬容量 60 MW；需求 140/210/280 MW 时切负荷 80/150/220 MW，LMP$=10000$ & :1746 & 通过\\
+A7 互补松弛 & 价差 $>0$ 当且仅当存在绑定支路 & 同 A5 两个方向断言 & :1790 & 通过\\
+A8 单时段退化 & 无网无固定成本单时段 SCUC $\equiv$ merit-order 经济调度 & 140 MW：出清 $\{100,40,0\}$、成本 $3400$ & :1840 & 通过\\
+A9 无网退化 & 关网络约束 $\equiv$ 铜板统一价 & 三时段 $\lambda=\{20,35,35\}$；native 与 HiGHS 均达解析值 9145 & :1888 & 通过（缺陷已修复并加回归守卫，见下节）\\
+A10 逐位确定性 & 相同输入逐 bit 再现出清 & 同输入重复运行全字段比对 & :1968 & 通过\\
+B1 A1 代表点 & 代表点参与调度与定价但日电量只积 96 点 & 谷/峰代表点改写前后：\fld{day\_generation\_mwh}$=2400$、\fld{day\_energy\_bid\_cost}$=480000$ 不变；authored 权重仍进目标 & :1625 & 通过\\
+B2 A3 边际块定价 & 增量段报价由边际块定价；1\% 灵活区间含等于准入 & 两段 200/300：负荷 150$\to$LMP 300、80$\to$LMP 200；段宽恰 2 MW 准入、1.99 MW 校验拒绝 & :1651 & 通过\\
+B3 A4 三态门槛 & 停机时长等于门槛即进新状态 & 239/240 分钟热$\to$温、719/720 温$\to$冷；费用 10/20/30 & :1682 & 通过\\
+B4 A5 优先计划缺额 & penalized 缺额钉在保障电量上界并按 $M_4$ 计价 & 零关口容量：缺额 $=480$ MWh、罚项 $480\times10000$；hard 判 \fld{scuc\_failed} & :1712 & 通过\\
+B5 A6 水量闭合 & 泄洪项使 SI 水位平衡在上界闭合 & 来水 110 m$^3$/s：$release=Ph/3600+spill=110$、水位恒 200 m、溢流罚 $245000$ & :1732 & 通过\\
+B6 A7 储能定价资格 & $\pm5\%$ 负充电邻域切换边际身份 & 钉 SOC 轨迹强制 40 MW 充电：\fld{charge\_price} 250/350 $\to$ LMP 250/350；\fld{price\_setting}=0 固定充电则 LMP 回到 300 & :1763 & 通过\\
+\bottomrule
+\end{longtable}
+\end{center}
+
+\subsection{Native SCUC 虚报最优缺陷（已修复，2026-09-12）}
+\textbf{现象}（修复前）：A9 中默认 Native 后端（NativeBranchAndCut）在三时段铜板线性算例上
+自报 \texttt{"Optimal (root gap closed)"}、\fld{commitment\_cost}$=9945$，但第 2 时段
+错误解租 35 元机组、改用 55 元机组供电 40 MW，该时段价格 55 元/MWh；同一输入的
+HiGHS 路径达到解析最优 9145（G1 全时段在运），断言
+\fld{highs.commitment\_cost} $=9145<9945$ 成立
+（\srcpath{tests/test\_market\_simulation.cpp:1927-1966}）。
+
+\textbf{根因}（MIPSolvers 原生 B\&C 的两处耦合缺陷）：其一，
+\texttt{compute\_implied\_column\_bounds\_from\_rows} 的残差在移除项时重新计算贡献，
+而累加值中的是收紧后的贡献（行间自引用护栏返回原始界），破坏
+$\text{residual}=\text{activity}-\text{contribution}$ 恒等式（Savelsbergh 1994 §2；
+Achterberg 2007 §3.2 的活动量规则），产生被根 LP 最优解直接证伪的隐含界与
+variable-bound 弧，进而污染目标截断冲突/团/事件工件，使 incumbent 传播把根界非法
+抬到 incumbent（$9145\to9945$）；其二，验证过的暖启动 incumbent 被
+\texttt{validate\_root\_candidate\_for\_proof} 按"当前（已被截断关闭的）根搜索域"
+拒绝，而 incumbent 有效性是模型层面的性质（Achterberg 2007 §3.1），丢失 incumbent
+后截断回退（$9145\to9945$）使上述截断条件工件失效。修复位置：
+\texttt{bc\_implied\_bounds.cpp}（按累加快照移除贡献）与
+\texttt{bc\_run/06\_root\_heuristics\_a.inc}（incumbent 门禁改为只按模型校验）。
+
+\textbf{回归守卫}：MIPSolvers \texttt{test\_presolve} 用例
+\texttt{[presolve][implied-bounds][regression]}（最小两行 LP 恒等式校验，修复前精确复现
+$31.43822368000000012$）；本仓库 A9 三条 :1920 断言转绿且 native 与 oracle 同达 9145。
+
+\textbf{触发条件}（历史记录）：多时段 + 零固定成本 + 无网络约束
+三者的组合；单时段、有网、含固定成本的同类算例不受影响（A1--A8、A10 均通过）。
+
+\textbf{影响面}（历史记录）：缺陷限于 SCUC 组合决策；定价 LP 与结算对给定组合忠实。
+
+\subsection{与既有验证资产的关系}
+本章实验与已有通道互补，不重复展开：铜板独立方程 oracle 与
+\texttt{-{}-negative-control} 负控制（第~\ref{sec:market-xref}~节）提供跨语言独立
+重算与变异检出；AEMO 实证对照的 12 项结果变异记录见
+\srcpath{docs/modules/market/aemo\_validation.md}；南方确定性定价的双实例逐 bit
+对偶比对见第~\ref{sec:algorithm-selection}~章；规则一致性判定见
+第~\ref{sec:rule-gaps}~节。逻辑验证补上的是这些通道未覆盖的一层：对求解器与模型
+本身数学性质的系统断言，以及一个由蜕变实验暴露并保留的真实求解器缺陷。

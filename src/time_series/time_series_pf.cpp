@@ -2881,10 +2881,10 @@ thread_local int g_active_uc_solver_threads = 0;
 thread_local int g_configured_uc_solver_threads = -1; // -1 = backend default / unknown
 
 std::shared_ptr<engine::GurobiAdapter> make_uc_gurobi() {
-  auto adapter = std::make_shared<engine::GurobiAdapter>();
+  engine::GurobiOptions options;
   if (g_active_uc_solver_threads > 0)
-    adapter->set_milp_threads(g_active_uc_solver_threads);
-  return adapter;
+    options.threads = g_active_uc_solver_threads;
+  return std::make_shared<engine::GurobiAdapter>(options);
 }
 
 struct ScopedUCSolverThreadOverride {

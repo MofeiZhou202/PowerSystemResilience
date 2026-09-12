@@ -132,11 +132,12 @@ HiGHS）且内嵌 HiGHS 可用时，直达 HiGHS 并跳过原生 simplex；否�
 \subsection{验证通道总览}
 市场模块现有验证通道（用例/断言数为本次文档同步时在 macOS Release 构建上实跑核实）：
 \begin{itemize}
-  \item \srcpath{hacdcpf\_test\_market\_simulation}：Catch2 22 用例 / 845 断言，覆盖日前
+  \item \srcpath{hacdcpf\_test\_market\_simulation}：Catch2 32 用例 / 1074 断言
+        （31 通过、1 个用例保留失败为 native 缺陷证据，见第~\ref{sec:logic-verification}~章），覆盖日前
         流水线、定价对偶、结算、实时两结算与市场力度量
         （\srcpath{tests/test\_market\_simulation.cpp}；目标名前缀缘由见
         \srcpath{tests/CMakeLists.txt:54-57}）；
-  \item \srcpath{test\_southern\_market}：Catch2 74 用例 / 29807 断言，覆盖 98 点解析
+  \item \srcpath{test\_southern\_market}：Catch2 80 用例 / 29923 断言，覆盖 98 点解析
         费用/电价、输入拒绝、储能、水库、直流与 AC 安全反馈
         （\srcpath{tests/test\_southern\_market.cpp}）；
   \item \srcpath{test\_market\_forecast}：Catch2 8 用例 / 12503 断言
@@ -224,12 +225,14 @@ HiGHS）且内嵌 HiGHS 可用时，直达 HiGHS 并跳过原生 simplex；否�
 \input{chapters/module_io}
 \input{chapters/algorithm_selection}
 \input{chapters/yunnan_regulation}
+\input{chapters/logic_verification}
 
 \section{验证与边界局限}
 \subsection{验证与校核}
 验证通道总览见“平台实现阅读指南与约定”一节，此处仅列注册入口：
-Catch2 套件 \srcpath{hacdcpf\_test\_market\_simulation}（22 用例 / 845 断言）、
-\srcpath{test\_southern\_market}（74 用例 / 29807 断言）、
+Catch2 套件 \srcpath{hacdcpf\_test\_market\_simulation}（32 用例 / 1074 断言，
+31 通过 / 1 保留失败为缺陷证据，见第~\ref{sec:logic-verification}~章）、
+\srcpath{test\_southern\_market}（80 用例 / 29923 断言）、
 \srcpath{test\_market\_forecast}（8 用例 / 12503 断言）；
 ctest 注册的独立方程 oracle \srcpath{market\_sced\_cross\_validation}
 （\srcpath{tests/CMakeLists.txt:326-334}，含 \texttt{-{}-negative-control} 负控制）与

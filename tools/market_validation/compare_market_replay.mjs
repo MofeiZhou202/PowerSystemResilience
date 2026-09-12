@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import os from 'node:os';
 import { readFile, writeFile } from 'node:fs/promises';
 const [before,after]=process.argv.slice(2);
 assert.ok(before&&after,'Usage: node compare_market_replay.mjs BEFORE AFTER');
@@ -10,6 +11,8 @@ let maxResidual=0,maxObjectiveDifference=0,stages=0,experiments=0;
 const checkStages=(x,y)=>{
   for(const stage of ['scuc','sced','lmp']) {
     const u=x[stage],v=y[stage];
+    assert.equal(!!u,!!v,`${stage} presence differs`);
+    if(!u)continue;
     for(const key of ['requested_solver','requested_mip_gap','requested_time_limit_sec'])assert.equal(u[key],v[key]);
     for(const s of [u,v]){assert.ok(s.max_residual<=1e-6);maxResidual=Math.max(maxResidual,s.max_residual);}
     const diff=Math.abs(u.objective-v.objective)/Math.max(1,Math.abs(u.objective),Math.abs(v.objective));
@@ -23,7 +26,7 @@ for(let i=0;i<a.scenarios.length;++i) {
   assert.deepEqual(x.config,y.config);assert.equal(x.days.length,7);assert.equal(y.days.length,7);
   for(let d=0;d<7;++d) {
     const p=x.days[d],q=y.days[d];assert.equal(p.valid,true);assert.equal(q.valid,true);
-    assert.equal(q.recovery_execution.workers,2);
+    assert.equal(q.recovery_execution.workers,Math.min(6,q.recovery_execution.experiments,Math.floor(os.cpus().length/2)));
     assert.equal(q.stages.scuc.projected_commitment_units,48);
     assert.equal(q.stages.scuc.binary_variables,1920);
     if(d)assert.deepEqual(q.state_start,y.days[d-1].state_end);

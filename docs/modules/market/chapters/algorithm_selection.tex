@@ -131,10 +131,11 @@ $0\le gap\le\fld{mip\_gap}$（:1500-1508）；任一环节失败返回
 \end{sloppypar}
 
 \subsection{恢复/重跑的并行策略}
-运营恢复实验在固定当日初态下逐因素重算，双 worker 并行准入：Gurobi 后端、
+运营恢复实验在固定当日初态下逐因素重算，多 worker 并行准入：Gurobi 后端、
 实验数 $>1$、母线 $\le118$、机组 $\le128$、储能 $\le16$、水库 $\le24$、
-核数 $\ge4$ 且每解线程 $\le$ 核数一半；满足则 \fld{workers}=2 否则 1
-（\srcpath{src/market/market\_operation.cpp:415-426}）。时序日从不并行
+核数 $\ge4$ 且每解线程 $\le$ 核数一半；满足则
+\fld{workers}=$\min(6,\text{实验数},\lfloor\text{核数}/2\rfloor)$ 否则 1
+（4 核机器回退 2；\srcpath{src/market/market\_operation.cpp:415-440}）。时序日从不并行
 （独立潜在结果共享干预前状态； :415-417 注释）。
 
 \subsection{参数表（算法选择）}
@@ -158,7 +159,8 @@ $0\le gap\le\fld{mip\_gap}$（:1500-1508）；任一环节失败返回
 
 \subsection{验证与校核}
 \begin{itemize}
-  \item 通用引擎：\srcpath{hacdcpf\_test\_market\_simulation}（22 用例/845 断言）覆盖
+  \item 通用引擎：\srcpath{hacdcpf\_test\_market\_simulation}（32 用例/1074 断言，
+        31 通过/1 保留失败见第~\ref{sec:logic-verification}~章）覆盖
         SCUC 回退链标注、定价对偶与结算；铜板定价/结算恒等式由独立方程 oracle
         \fld{market\_sced\_cross\_validation} 复核（第~\ref{sec:market-xref}~节，
         含负控制）；
@@ -177,7 +179,7 @@ $0\le gap\le\fld{mip\_gap}$（:1500-1508）；任一环节失败返回
         （\texttt{[local\_solvers]}，本地算法共享 1\% gap 解析 oracle）、
         :993,:1030,:1063（\texttt{[gurobi]}，同模型出清、行对偶恒等、
         原始补全不固定最终组合）；
-  \item 套件整体 74 用例/29807 断言（本次文档同步实跑）。
+  \item 套件整体 80 用例/29923 断言（本次文档同步实跑）。
 \end{itemize}
 
 \subsection{边界与局限}

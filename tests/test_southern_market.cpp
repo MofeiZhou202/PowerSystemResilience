@@ -1622,6 +1622,203 @@ TEST_CASE("Southern hand oracle: two units conserve one reservoir water", "[sout
   REQUIRE(result.at("sced").at("reservoirs")[0].at("level_m")[95].get<double>() == Approx(4).margin(1e-6));
 }
 
+TEST_CASE("Southern A1 hand oracle: representative points dispatch but day energy integrates only 96 slots", "[southern_market][hand_oracle][boundary_rules]") {
+  // Load 100 MW on the 96 day slots, 200 MW at the authored peak (t=96) and
+  // 40 MW at the valley (t=97). Day energy = 100*0.25*96 = 2400 MWh and day bid
+  // cost = 2400*200 = 480000 regardless of the representatives; the optimized
+  // objective still prices them: 200*(2400+0.25*200+0.25*40) = 492000.
+  auto b = make_southern_market_example();
+  b["execution"]["ac_security"] = "schedule_only";
+  b["areas"][0]["load_mw"][96] = 200; b["areas"][0]["load_mw"][97] = 40;
+  b["buses"][0]["load_mw"][96] = 200; b["buses"][0]["load_mw"][97] = 40;
+  const auto result = run_southern_day_ahead_market(b); require_schedule(result);
+  const auto& power = result.at("sced").at("generators")[0].at("power_mw");
+  REQUIRE(power[96].get<double>() == Approx(200).margin(1e-6));
+  REQUIRE(power[97].get<double>() == Approx(40).margin(1e-6));
+  REQUIRE(result.at("sced").at("day_generation_mwh").get<double>() == Approx(2400).margin(1e-6));
+  REQUIRE(result.at("sced").at("day_energy_bid_cost").get<double>() == Approx(480000).margin(1e-6));
+  REQUIRE(result.at("sced").at("objective_terms").at("energy").get<double>() == Approx(492000).margin(1e-6));
+  // Authored representative duration/weight scales the objective (200*(2400+1*200+0.25*40)
+  // = 522000) but never leaks into the D-day energy accounts.
+  b["periods"][96]["duration_hr"] = 1.0; b["periods"][96]["weight_hr"] = 1.0;
+  const auto reweighted = run_southern_day_ahead_market(b); require_schedule(reweighted);
+  REQUIRE(reweighted.at("sced").at("generators")[0].at("power_mw")[96].get<double>() == Approx(200).margin(1e-6));
+  REQUIRE(reweighted.at("sced").at("day_generation_mwh").get<double>() == Approx(2400).margin(1e-6));
+  REQUIRE(reweighted.at("sced").at("day_energy_bid_cost").get<double>() == Approx(480000).margin(1e-6));
+  REQUIRE(reweighted.at("sced").at("objective_terms").at("energy").get<double>() == Approx(522000).margin(1e-6));
+}
+
+TEST_CASE("Southern A3 hand oracle: incremental bid segments price the marginal block and the 1 percent width is inclusive", "[southern_market][hand_oracle]") {
+  auto b = make_southern_market_example();
+  b["execution"]["ac_security"] = "schedule_only";
+  auto& g = b["generators"][0];
+  g["segments"] = {{{"quantity_mw", 100}, {"price_per_mwh", 200}}, {{"quantity_mw", 100}, {"price_per_mwh", 300}}};
+  // Demand 150 MW: segment 1 full (100 MW @200) plus 50 MW @300.
+  // Day bid cost = 96*0.25*(100*200+50*300) = 840000; in the pricing
+  // neighborhood [142.5,157.5] segment 1 stays at its 100 MW cap and segment 2
+  // is marginal -> LMP 300.
+  b["areas"][0]["load_mw"] = series(150); b["buses"][0]["load_mw"] = series(150);
+  const auto second = run_southern_day_ahead_market(b); require_schedule(second);
+  REQUIRE(second.at("sced").at("day_energy_bid_cost").get<double>() == Approx(840000).margin(1e-6));
+  REQUIRE(second.at("lmp").at("buses")[0].at("lmp_per_mwh")[0].get<double>() == Approx(300).margin(1e-6));
+  REQUIRE(second.at("lmp").at("buses")[0].at("lmp_per_mwh")[97].get<double>() == Approx(300).margin(1e-6));
+  // Demand 80 MW stays inside segment 1: cost 96*0.25*80*200 = 384000, LMP 200.
+  b["areas"][0]["load_mw"] = series(80); b["buses"][0]["load_mw"] = series(80);
+  const auto first = run_southern_day_ahead_market(b); require_schedule(first);
+  REQUIRE(first.at("sced").at("day_energy_bid_cost").get<double>() == Approx(384000).margin(1e-6));
+  REQUIRE(first.at("lmp").at("buses")[0].at("lmp_per_mwh")[0].get<double>() == Approx(200).margin(1e-6));
+  // 2.2.10: each segment must cover at least 1% of the 200 MW flexible range;
+  // exactly 2 MW is admitted, 1.99 MW is rejected.
+  g["segments"] = {{{"quantity_mw", 2}, {"price_per_mwh", 200}}, {{"quantity_mw", 198}, {"price_per_mwh", 300}}};
+  b["areas"][0]["load_mw"] = series(150); b["buses"][0]["load_mw"] = series(150);
+  const auto boundary = run_southern_day_ahead_market(b); require_schedule(boundary);
+  // 96*0.25*(2*200+148*300) = 1075200; the second block is marginal -> LMP 300.
+  REQUIRE(boundary.at("sced").at("day_energy_bid_cost").get<double>() == Approx(1075200).margin(1e-6));
+  REQUIRE(boundary.at("lmp").at("buses")[0].at("lmp_per_mwh")[0].get<double>() == Approx(300).margin(1e-6));
+  g["segments"] = {{{"quantity_mw", 1.99}, {"price_per_mwh", 200}}, {{"quantity_mw", 198.01}, {"price_per_mwh", 300}}};
+  REQUIRE_THROWS(validate_southern_market(b));
+}
+
+TEST_CASE("Southern A4 hand oracle: startup class enters the new state exactly at the downtime threshold", "[southern_market][hand_oracle]") {
+  // warm_after=240, cold_after=720. must_off[0]=1 with a single unit and strict
+  // balance forces the first start at t=1, where downtime = initial_state+15:
+  // 224+15=239 -> hot (10); 225+15=240 -> warm (20), equality enters the new
+  // state; 704+15=719 -> warm; 705+15=720 -> cold (30).
+  for (const int initial : {224, 225, 704, 705}) {
+    auto b = make_southern_market_example();
+    b["execution"]["ac_security"] = "schedule_only";
+    auto& g = b["generators"][0];
+    g["initial_on"] = 0; g["initial_power_mw"] = 0; g["initial_state_minutes"] = initial;
+    g["startup_cost"] = {10, 20, 30}; g["must_off"][0] = 1;
+    // No load at t=0 so the forced outage is feasible; from t=1 on the single
+    // unit must serve 100 MW, pinning the start to t=1.
+    b["areas"][0]["load_mw"][0] = 0; b["buses"][0]["load_mw"][0] = 0;
+    const auto result = run_southern_day_ahead_market(b);
+    INFO(initial);
+    require_schedule(result);
+    const auto& row = result.at("scuc").at("generators")[0];
+    const int downtime = initial+15;
+    const int expected = downtime < 240 ? 10 : downtime < 720 ? 20 : 30;
+    REQUIRE(row.at("start")[0].get<double>() == Approx(0).margin(1e-6));
+    REQUIRE(row.at("start")[1].get<double>() == Approx(1).margin(1e-6));
+    REQUIRE(row.at("online")[1].get<double>() == Approx(1).margin(1e-6));
+    REQUIRE(row.at("hot_start")[1].get<double>() == Approx(expected == 10 ? 1 : 0).margin(1e-6));
+    REQUIRE(row.at("warm_start")[1].get<double>() == Approx(expected == 20 ? 1 : 0).margin(1e-6));
+    REQUIRE(row.at("cold_start")[1].get<double>() == Approx(expected == 30 ? 1 : 0).margin(1e-6));
+    REQUIRE(result.at("scuc").at("objective_terms").at("startup").get<double>() == Approx(expected).margin(1e-6));
+  }
+}
+
+TEST_CASE("Southern A5 hand oracle: penalized priority shortfall sits at its guaranteed-energy bound and is priced at M4", "[southern_market][hand_oracle]") {
+  // Zero gateway capacity delivers no trade energy. hard keeps the 480 MWh
+  // guarantee as a hard floor -> infeasible; penalized_shortfall covers it with
+  // the slack at its upper bound (= adjusted_min_mwh) for 480*M4 = 480*10000.
+  // The mid-range shortfall oracle (800 guaranteed, 720 delivered, 80 short) is
+  // already anchored by "[southern_market] priority trade mapping".
+  auto j = two_bus();
+  auto trade = record("trades"); trade["gateway_kind"] = "ac_branch"; trade["gateway"] = 10;
+  trade["max_mw"] = series(0); trade["adjusted_min_mwh"] = 480; trade["original_min_mwh"] = 480; trade["max_mwh"] = 2000;
+  j["trades"].push_back(trade);
+  REQUIRE(run_southern_day_ahead_market(j).at("status") == "scuc_failed");
+  j["execution"]["priority_policy"] = "penalized_shortfall";
+  const auto result = run_southern_day_ahead_market(j); require_schedule(result);
+  REQUIRE(result.at("sced").at("trades")[0].at("power_mw")[0].get<double>() == Approx(0).margin(1e-6));
+  REQUIRE(result.at("sced").at("trades")[0].at("priority_shortfall_mwh").get<double>() == Approx(480).margin(1e-6));
+  REQUIRE(result.at("sced").at("objective_terms").at("priority_shortfall").get<double>() == Approx(480.0*10000).margin(1e-6));
+  REQUIRE(first_power(result) == Approx(0).margin(1e-6));
+  REQUIRE(first_power(result, 1) == Approx(100).margin(1e-6));
+}
+
+TEST_CASE("Southern A6 hand oracle: spill closes the SI water balance at the upper level bound", "[southern_market][hand_oracle]") {
+  // h=3600 m3/MWh turns 100 MW into 100 m3/s; S=90000 m2; inflow 110 m3/s.
+  // The dispatch corridor pins the level at the 200 m ceiling, so every point
+  // must spill 10 m3/s: release = P*h/3600 + spill = 110 and the level stays
+  // 200 m. Spill penalty = 98*0.25*1000*(3600/3600)*10 = 245000.
+  // Lag-slot history carry is already anchored by "Southern hydrology uses SI
+  // conservation" (cascade section: levels 100.5/101.5 from supplied history).
+  auto b = make_southern_market_example();
+  b["execution"]["ac_security"] = "schedule_only";
+  auto& g = b["generators"][0];
+  g["kind"] = "hydro"; g["must_on"] = std::vector<int>(98, 1);
+  g["pmin_mw"] = series(100); g["pmax_mw"] = series(100);
+  auto h = record("reservoirs"); h["generator"] = 1; h["upstream"] = -1;
+  h["lag_slots"] = 0; h["release_history_m3_s"] = json::array();
+  h["water_m3_mwh"] = 3600; h["area_m2"] = 90000;
+  h["initial_level_m"] = 200; h["physical_min_m"] = 0; h["physical_max_m"] = 200;
+  h["min_level_m"] = series(200); h["max_level_m"] = series(200);
+  h["inflow_m3_s"] = series(110); h["spill_max_m3_s"] = series(1000);
+  h["release_min_m3_s"] = series(0); h["release_max_m3_s"] = series(1000); h["release_ramp_m3_s"] = series(1000);
+  h["initial_release_m3_s"] = 110; h["min_mwh"] = 0; h["max_mwh"] = 2400;
+  b["reservoirs"].push_back(h);
+  const auto result = run_southern_day_ahead_market(b); require_schedule(result);
+  const auto& r = result.at("sced").at("reservoirs")[0];
+  for (const int t : {0, 47, 95, 97}) {
+    REQUIRE(r.at("spill_m3_s")[t].get<double>() == Approx(10).margin(1e-6));
+    REQUIRE(r.at("release_m3_s")[t].get<double>() == Approx(110).margin(1e-6));
+    REQUIRE(r.at("level_m")[t].get<double>() == Approx(200).margin(1e-6));
+  }
+  REQUIRE(result.at("sced").at("objective_terms").at("hydro_spill").get<double>() == Approx(245000).margin(1e-6));
+}
+
+TEST_CASE("Southern A7 hand oracle: the 5 percent charge neighborhood switches storage pricing eligibility", "[southern_market][hand_oracle]") {
+  // The 996 MWh terminal target forces charging 40 MW at every day slot; gen1
+  // (200 CNY/MWh, pmax 139.5, non-price-setting) then covers 139.5 MW and gen2
+  // (300 CNY/MWh) 0.5 MW. In the pricing LP gen2 is trapped by its own 5%
+  // neighborhood [0.475,0.525] while the charging storage keeps the wider
+  // ordered negative-charge neighborhood [(1+d)*(-40),(1-d)*(-40)] = [-42,-38]
+  // (charge_max 50 leaves both sides inside the retained physical charge row),
+  // so the storage becomes marginal: charge_price 250 -> ch=-39.975, LMP 250;
+  // charge_price 350 -> ch=-40.025, LMP 350. With price_setting=0 the charge is
+  // fixed at -40 and the margin returns to gen2: LMP 300.
+  auto base = make_southern_market_example();
+  base["execution"]["ac_security"] = "schedule_only";
+  base["generators"][0]["pmax_mw"] = series(139.5);
+  base["generators"][0]["price_setting"] = std::vector<int>(98, 0);
+  auto g2 = base["generators"][0]; g2["id"] = 2; g2["pmax_mw"] = series(200);
+  g2["segments"][0]["price_per_mwh"] = 300; g2["price_setting"] = std::vector<int>(98, 1);
+  g2["initial_power_mw"] = 0;
+  base["generators"].push_back(g2);
+  auto s = record("storage"); s["id"] = 5; s["bus"] = 1; s["available"] = std::vector<int>(98, 1);
+  s["discharge_min_mw"] = 0; s["discharge_max_mw"] = 0; s["charge_min_mw"] = 0; s["charge_max_mw"] = 50;
+  s["rated_mwh"] = 1000; s["roundtrip_efficiency"] = 1.0; s["initial_mwh"] = 36; s["terminal_mwh"] = 996;
+  // Pinning the SOC trajectory per slot (eta=1: +10 MWh per day slot) forces
+  // exactly 40 MW charging and 0.5 MW from gen2 at every slot; charge_max 50
+  // leaves the +/-5% pricing neighborhood free of the physical charge row.
+  std::vector<double> soc(98);
+  for (int t = 0; t < 98; ++t) soc[t] = 36+10*std::min(t+1, 96);
+  s["min_mwh"] = soc; s["max_mwh"] = soc; s["max_cycles"] = 1;
+  s["discharge_price"] = 0; s["charge_price"] = 250; s["price_setting"] = std::vector<int>(98, 1);
+  base["storage"].push_back(s);
+  const auto run = [&](double charge_price, int price_setting) {
+    auto b = base;
+    b["storage"][0]["charge_price"] = charge_price;
+    b["storage"][0]["price_setting"] = std::vector<int>(98, price_setting);
+    return run_southern_day_ahead_market(b);
+  };
+  const auto cheaper = run(250, 1);
+  const auto dearer = run(350, 1);
+  const auto excluded = run(250, 0);
+  for (const auto* result : {&cheaper, &dearer, &excluded}) {
+    require_schedule(*result);
+    REQUIRE(result->at("sced").at("generators")[0].at("power_mw")[0].get<double>() == Approx(139.5).margin(1e-6));
+    REQUIRE(result->at("sced").at("generators")[1].at("power_mw")[0].get<double>() == Approx(0.5).margin(1e-6));
+    REQUIRE(result->at("sced").at("storage")[0].at("charge_mw")[0].get<double>() == Approx(-40).margin(1e-6));
+    REQUIRE(result->at("sced").at("storage")[0].at("charge_mw")[95].get<double>() == Approx(-40).margin(1e-6));
+  }
+  REQUIRE(cheaper.at("lmp").at("storage")[0].at("charge_mw")[0].get<double>() == Approx(-39.975).margin(1e-6));
+  REQUIRE(cheaper.at("lmp").at("generators")[1].at("power_mw")[0].get<double>() == Approx(0.475).margin(1e-6));
+  REQUIRE(cheaper.at("lmp").at("buses")[0].at("lmp_per_mwh")[0].get<double>() == Approx(250).margin(1e-6));
+  REQUIRE(cheaper.at("lmp").at("buses")[0].at("lmp_per_mwh")[95].get<double>() == Approx(250).margin(1e-6));
+  REQUIRE(cheaper.at("lmp").at("storage")[0].at("energy_mwh")[0].is_null());
+  REQUIRE(dearer.at("lmp").at("storage")[0].at("charge_mw")[0].get<double>() == Approx(-40.025).margin(1e-6));
+  REQUIRE(dearer.at("lmp").at("generators")[1].at("power_mw")[0].get<double>() == Approx(0.525).margin(1e-6));
+  REQUIRE(dearer.at("lmp").at("buses")[0].at("lmp_per_mwh")[0].get<double>() == Approx(350).margin(1e-6));
+  REQUIRE(excluded.at("lmp").at("storage")[0].at("charge_mw")[0].get<double>() == Approx(-40).margin(1e-6));
+  REQUIRE(excluded.at("lmp").at("generators")[1].at("power_mw")[0].get<double>() == Approx(0.5).margin(1e-6));
+  REQUIRE(excluded.at("lmp").at("buses")[0].at("lmp_per_mwh")[0].get<double>() == Approx(300).margin(1e-6));
+  REQUIRE(excluded.at("lmp").at("buses")[0].at("lmp_per_mwh")[95].get<double>() == Approx(300).margin(1e-6));
+}
+
 TEST_CASE("Southern internal scenario sweep preserves weighted result semantics", "[southern_market][scenario]") {
   constexpr int scenarios = 20;
   std::mt19937 rng(20260905);

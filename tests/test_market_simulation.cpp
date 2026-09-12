@@ -50,6 +50,90 @@ double sum(const std::vector<double>& values) {
   return std::accumulate(values.begin(), values.end(), 0.0);
 }
 
+// ── Metamorphic / reduction experiment fixtures ─────────────────────────────
+//
+// linear_market_toy() derives from build_market_3bus_toy() with quadratic,
+// fixed and intertemporal cost terms stripped so every clearing has a
+// hand-computable merit order (each offer curve is flat at cost_c1):
+//   G0 @ bus0: 100 MW @ 20 $/MWh, G1 @ bus1: 80 MW @ 35 $/MWh,
+//   G2 @ bus2: 60 MW @ 55 $/MWh; loads 50 / 40 / 50 MW.
+//   Branch L3 (bus0 -> bus2, x = 0.15 pu, rate_a = 20 MVA) is the only
+//   congestible corridor; L1 (bus0-bus1) and L2 (bus1-bus2) are 100 MVA.
+// With the slack at bus0 the DC shift factors of L3 are -2/7 (bus1) and
+// -4/7 (bus2).  Congestion relief therefore costs 15/(2/7) = 52.5 $ per MW
+// via G1 and 35/(4/7) = 61.25 $ per MW via G2, so the congested optimum at
+// full load (140 MW) is analytic: shift 30 MW from G0 to G1, giving
+// dispatch {70, 70, 0}, branch flows {L1: 0, L2: 30, L3: 20} and LMPs
+// {20, 35, 50} (L3 shadow price mu = 52.5 $/MWh).
+hacdcpf::HybridPowerSystem linear_market_toy(bool with_fixed_costs) {
+  auto system = hacdcpf::io::build_market_3bus_toy();
+  const double flat_price[] = {20.0, 35.0, 55.0};
+  for (size_t g = 0; g < system.ac.generators.size(); ++g) {
+    auto& generator = system.ac.generators[g];
+    generator.cost_c2 = 0.0;
+    generator.cost_c1 = flat_price[g];
+    generator.cost_c0 = with_fixed_costs ? 10.0 : 0.0;
+    generator.startup_cost = with_fixed_costs ? 100.0 : 0.0;
+    generator.shutdown_cost = with_fixed_costs ? 5.0 : 0.0;
+    generator.pmin_mw = 0.0;
+    generator.min_up_time_hr = 0.0;
+    generator.min_dn_time_hr = 0.0;
+  }
+  for (auto& load : system.ac.loads) load.profile_id = 0;
+  return system;
+}
+
+hacdcpf::TimeSeriesData single_period_series() {
+  hacdcpf::TimeSeriesData time_series;
+  time_series.num_steps = 1;
+  time_series.step_duration_hr = 1.0;
+  return time_series;
+}
+
+// Three periods at 56 / 140 / 175 MW total load.  Period 0 is uncongested
+// (L3 flow 16 MW < 20), periods 1-2 bind L3.
+hacdcpf::TimeSeriesData toy_three_period_series() {
+  auto time_series = single_period_series();
+  time_series.num_steps = 3;
+  hacdcpf::TimeSeriesProfile load;
+  load.id = 0;
+  load.name = "toy_three_period_load";
+  load.values = {0.4, 1.0, 1.25};
+  time_series.profiles.push_back(std::move(load));
+  return time_series;
+}
+
+hacdcpf::market::MarketOptions metamorphic_options() {
+  auto options = market_options();
+  options.run_ac_validation = false;
+  options.upward_reserve_fraction = 0.0;
+  // The analytic optima below require the SCUC MIP to be proven tight; the
+  // default 1e-2 relative gap could legally stop short of the exact optimum.
+  options.scuc_mip_relative_gap = 1e-9;
+  return options;
+}
+
+size_t generator_position_by_index(const hacdcpf::HybridPowerSystem& system,
+                                   int index) {
+  for (size_t g = 0; g < system.ac.generators.size(); ++g) {
+    if (system.ac.generators[g].index == index) return g;
+  }
+  throw std::out_of_range("generator index not found");
+}
+
+size_t branch_position_by_index(const hacdcpf::HybridPowerSystem& system,
+                                int index) {
+  for (size_t l = 0; l < system.ac.branches.size(); ++l) {
+    if (system.ac.branches[l].index == index) return l;
+  }
+  throw std::out_of_range("branch index not found");
+}
+
+double lmp_spread(const std::vector<double>& lmp) {
+  const auto bounds = std::minmax_element(lmp.begin(), lmp.end());
+  return *bounds.second - *bounds.first;
+}
+
 }  // namespace
 
 TEST_CASE("Case9 24-hour native market closes SCUC-SCED-LMP-ACPF-settlement",
@@ -1333,4 +1417,593 @@ TEST_CASE("Case9 repeated participant game evaluates bounded local best response
   REQUIRE(no_learning_game.rounds.size() == 1);
   CHECK(no_learning_game.converged);
   CHECK(no_learning_game.status == "converged");
+}
+
+TEST_CASE("Market clearing is homogeneous of degree one in all offer prices",
+          "[market][metamorphic]") {
+  // Theory: multiplying every submitted offer component (energy segments,
+  // no-load, startup, shutdown) by k > 0 scales both the SCUC and the
+  // fixed-commitment SCED objectives by k.  The argmin (commitment and
+  // dispatch) is therefore unchanged, while every dual multiplier -- hence
+  // every LMP and the objective value -- scales by exactly k.
+  constexpr double k = 2.5;
+  const auto base_system = linear_market_toy(true);
+  auto scaled_system = base_system;
+  for (auto& generator : scaled_system.ac.generators) {
+    generator.cost_c2 *= k;
+    generator.cost_c1 *= k;
+    generator.cost_c0 *= k;
+    generator.startup_cost *= k;
+    generator.shutdown_cost *= k;
+  }
+  const auto time_series = toy_three_period_series();
+
+  const auto base = hacdcpf::market::run_day_ahead_market(
+      base_system, time_series, metamorphic_options());
+  const auto scaled = hacdcpf::market::run_day_ahead_market(
+      scaled_system, time_series, metamorphic_options());
+
+  INFO("base status=" << base.status);
+  INFO("scaled status=" << scaled.status);
+  for (const auto& warning : base.warnings) INFO(warning);
+  for (const auto& warning : scaled.warnings) INFO(warning);
+  REQUIRE(base.feasible);
+  REQUIRE(scaled.feasible);
+  REQUIRE(base.pricing.size() == 3);
+  REQUIRE(scaled.pricing.size() == 3);
+
+  // Analytic anchor for the base run (see fixture comment): period 1 binds
+  // L3 and prices buses at {20, 35, 50} $/MWh.
+  INFO("base period-1 LMPs=" << base.pricing[1].lmp_per_mwh[0] << ", "
+       << base.pricing[1].lmp_per_mwh[1] << ", "
+       << base.pricing[1].lmp_per_mwh[2]);
+  CHECK(base.pricing[1].lmp_per_mwh[0] == Catch::Approx(20.0).margin(1e-6));
+  CHECK(base.pricing[1].lmp_per_mwh[1] == Catch::Approx(35.0).margin(1e-6));
+  CHECK(base.pricing[1].lmp_per_mwh[2] == Catch::Approx(50.0).margin(1e-6));
+
+  CHECK(base.commitment.gen_commit == scaled.commitment.gen_commit);
+  CHECK(scaled.commitment_cost ==
+        Catch::Approx(k * base.commitment_cost).epsilon(1e-6).margin(1e-6));
+  INFO("base commitment_cost=" << base.commitment_cost
+       << " scaled=" << scaled.commitment_cost);
+
+  for (size_t t = 0; t < base.pricing.size(); ++t) {
+    for (size_t b = 0; b < base_system.ac.buses.size(); ++b) {
+      CHECK(scaled.pricing[t].lmp_per_mwh[b] ==
+            Catch::Approx(k * base.pricing[t].lmp_per_mwh[b])
+                .epsilon(1e-6)
+                .margin(1e-9));
+    }
+    for (size_t g = 0; g < base_system.ac.generators.size(); ++g) {
+      CHECK(scaled.pricing[t].generator_dispatch_mw[g] ==
+            Catch::Approx(base.pricing[t].generator_dispatch_mw[g])
+                .margin(1e-6));
+    }
+  }
+  REQUIRE(base.generator_settlement.size() ==
+          scaled.generator_settlement.size());
+  for (size_t g = 0; g < base.generator_settlement.size(); ++g) {
+    CHECK(scaled.generator_settlement[g].energy_revenue ==
+          Catch::Approx(k * base.generator_settlement[g].energy_revenue)
+              .epsilon(1e-6)
+              .margin(1e-9));
+  }
+}
+
+TEST_CASE("Cleared energy is monotone non-increasing in own offer price",
+          "[market][metamorphic]") {
+  // Theory: on a single-period copper plate the feasible dispatch polytope
+  // does not depend on offer prices, so raising one generator's marginal
+  // offer can only push it down the merit order; its cleared energy is
+  // weakly decreasing in its own price (LP comparative statics).
+  const auto base_system = linear_market_toy(false);
+  auto options = metamorphic_options();
+  options.enable_network_constraints = false;
+  const auto time_series = single_period_series();
+
+  const auto base = hacdcpf::market::run_day_ahead_market(
+      base_system, time_series, options);
+  REQUIRE(base.feasible);
+  REQUIRE(base.pricing.size() == 1);
+  const double base_energy = base.pricing.front().generator_dispatch_mw[1];
+  INFO("base G1 dispatch=" << base_energy
+       << " base LMP=" << base.pricing.front().lmp_per_mwh[0]);
+  CHECK(base_energy == Catch::Approx(40.0).margin(1e-6));
+
+  // +10 $/MWh keeps the merit order (20 < 45 < 55): dispatch must not move.
+  auto order_preserved_system = base_system;
+  order_preserved_system.ac.generators[1].cost_c1 = 45.0;
+  const auto order_preserved = hacdcpf::market::run_day_ahead_market(
+      order_preserved_system, time_series, options);
+  REQUIRE(order_preserved.feasible);
+  const double preserved_energy =
+      order_preserved.pricing.front().generator_dispatch_mw[1];
+  INFO("order-preserved G1 dispatch=" << preserved_energy
+       << " LMP=" << order_preserved.pricing.front().lmp_per_mwh[0]);
+  CHECK(preserved_energy <= base_energy + 1e-9);
+  CHECK(preserved_energy == Catch::Approx(base_energy).margin(1e-6));
+
+  // +25 $/MWh makes G1 the most expensive unit (20 < 55 < 60): its 40 MW
+  // must move to G2.
+  auto raised_system = base_system;
+  raised_system.ac.generators[1].cost_c1 = 60.0;
+  const auto raised = hacdcpf::market::run_day_ahead_market(
+      raised_system, time_series, options);
+  REQUIRE(raised.feasible);
+  const double raised_energy = raised.pricing.front().generator_dispatch_mw[1];
+  INFO("raised-offer G1 dispatch=" << raised_energy
+       << " G2 dispatch="
+       << raised.pricing.front().generator_dispatch_mw[2]
+       << " LMP=" << raised.pricing.front().lmp_per_mwh[0]);
+  CHECK(raised_energy <= base_energy + 1e-9);
+  CHECK(raised_energy < base_energy - 1.0);  // the perturbation actually bites
+  CHECK(raised.pricing.front().generator_dispatch_mw[2] ==
+        Catch::Approx(40.0).margin(1e-6));
+}
+
+TEST_CASE("Market clearing is invariant to generator and load input ordering",
+          "[market][metamorphic]") {
+  // Theory: the market optimum is a function of the authored components, not
+  // of their storage order.  With fixed costs pinning a unique commitment and
+  // strict merit gaps pinning unique primal/dual LP optima, permuting the
+  // generator/load/branch vectors (IDs and parameters unchanged) must
+  // reproduce the identical clearing mapped back through stable indices.
+  const auto base_system = linear_market_toy(true);
+  auto permuted_system = base_system;
+  std::swap(permuted_system.ac.generators[0], permuted_system.ac.generators[2]);
+  std::swap(permuted_system.ac.loads[0], permuted_system.ac.loads[2]);
+  std::swap(permuted_system.ac.branches[0], permuted_system.ac.branches[2]);
+  const auto time_series = toy_three_period_series();
+
+  const auto base = hacdcpf::market::run_day_ahead_market(
+      base_system, time_series, metamorphic_options());
+  const auto permuted = hacdcpf::market::run_day_ahead_market(
+      permuted_system, time_series, metamorphic_options());
+
+  INFO("base status=" << base.status);
+  INFO("permuted status=" << permuted.status);
+  for (const auto& warning : permuted.warnings) INFO(warning);
+  REQUIRE(base.feasible);
+  REQUIRE(permuted.feasible);
+  REQUIRE(base.pricing.size() == permuted.pricing.size());
+
+  CHECK(permuted.commitment_cost ==
+        Catch::Approx(base.commitment_cost).margin(1e-9));
+  INFO("base commitment_cost=" << base.commitment_cost
+       << " permuted=" << permuted.commitment_cost);
+
+  // Bus ordering is untouched, so LMP vectors are directly comparable.
+  for (size_t t = 0; t < base.pricing.size(); ++t) {
+    for (size_t b = 0; b < base_system.ac.buses.size(); ++b) {
+      CHECK(permuted.pricing[t].lmp_per_mwh[b] ==
+            Catch::Approx(base.pricing[t].lmp_per_mwh[b]).margin(1e-12));
+    }
+  }
+  // Generator-order quantities compare through the stable component index.
+  for (size_t g = 0; g < base_system.ac.generators.size(); ++g) {
+    const int index = base_system.ac.generators[g].index;
+    const size_t pg = generator_position_by_index(permuted_system, index);
+    for (size_t t = 0; t < base.pricing.size(); ++t) {
+      CHECK(permuted.pricing[t].generator_dispatch_mw[pg] ==
+            Catch::Approx(base.pricing[t].generator_dispatch_mw[g])
+                .margin(1e-12));
+      CHECK(permuted.commitment.gen_commit[pg][t] ==
+            base.commitment.gen_commit[g][t]);
+    }
+    const auto base_row = std::find_if(
+        base.generator_settlement.begin(), base.generator_settlement.end(),
+        [&](const auto& row) { return row.generator_index == index; });
+    const auto permuted_row = std::find_if(
+        permuted.generator_settlement.begin(),
+        permuted.generator_settlement.end(),
+        [&](const auto& row) { return row.generator_index == index; });
+    REQUIRE(base_row != base.generator_settlement.end());
+    REQUIRE(permuted_row != permuted.generator_settlement.end());
+    CHECK(permuted_row->energy_mwh ==
+          Catch::Approx(base_row->energy_mwh).margin(1e-9));
+    CHECK(permuted_row->energy_revenue ==
+          Catch::Approx(base_row->energy_revenue).margin(1e-9));
+  }
+  // Branch flows compare through the stable branch index.
+  for (size_t l = 0; l < base_system.ac.branches.size(); ++l) {
+    const int index = base_system.ac.branches[l].index;
+    const size_t pl = branch_position_by_index(permuted_system, index);
+    for (size_t t = 0; t < base.pricing.size(); ++t) {
+      CHECK(permuted.pricing[t].branch_flow_mw[pl] ==
+            Catch::Approx(base.pricing[t].branch_flow_mw[l]).margin(1e-12));
+    }
+  }
+}
+
+TEST_CASE("Market clearing is scale invariant under proportional demand and capacity scaling",
+          "[market][metamorphic]") {
+  // Theory: multiplying all loads, generator capacities and branch ratings by
+  // k while keeping $/MWh offer prices fixed maps every feasible dispatch P
+  // to kP over the same dual face: LMPs are unchanged and dispatch/branch
+  // flows scale by exactly k (DC power flow is linear in injections).
+  constexpr double k = 2.0;
+  const auto base_system = linear_market_toy(false);
+  auto scaled_system = base_system;
+  for (auto& load : scaled_system.ac.loads) {
+    load.p_mw *= k;
+    load.q_mvar *= k;
+  }
+  for (auto& generator : scaled_system.ac.generators) {
+    generator.pmax_mw *= k;
+    generator.pmin_mw *= k;
+  }
+  for (auto& branch : scaled_system.ac.branches) branch.rate_a_mva *= k;
+  const auto time_series = single_period_series();
+
+  const auto base = hacdcpf::market::run_day_ahead_market(
+      base_system, time_series, metamorphic_options());
+  const auto scaled = hacdcpf::market::run_day_ahead_market(
+      scaled_system, time_series, metamorphic_options());
+
+  INFO("base status=" << base.status);
+  INFO("scaled status=" << scaled.status);
+  for (const auto& warning : scaled.warnings) INFO(warning);
+  REQUIRE(base.feasible);
+  REQUIRE(scaled.feasible);
+  REQUIRE(base.pricing.size() == 1);
+  REQUIRE(scaled.pricing.size() == 1);
+  const auto& base_period = base.pricing.front();
+  const auto& scaled_period = scaled.pricing.front();
+  INFO("base dispatch=" << base_period.generator_dispatch_mw[0] << ", "
+       << base_period.generator_dispatch_mw[1] << ", "
+       << base_period.generator_dispatch_mw[2]);
+  INFO("scaled dispatch=" << scaled_period.generator_dispatch_mw[0] << ", "
+       << scaled_period.generator_dispatch_mw[1] << ", "
+       << scaled_period.generator_dispatch_mw[2]);
+  INFO("base LMPs=" << base_period.lmp_per_mwh[0] << ", "
+       << base_period.lmp_per_mwh[1] << ", " << base_period.lmp_per_mwh[2]);
+  INFO("scaled LMPs=" << scaled_period.lmp_per_mwh[0] << ", "
+       << scaled_period.lmp_per_mwh[1] << ", "
+       << scaled_period.lmp_per_mwh[2]);
+
+  for (size_t b = 0; b < base_system.ac.buses.size(); ++b) {
+    CHECK(scaled_period.lmp_per_mwh[b] ==
+          Catch::Approx(base_period.lmp_per_mwh[b]).margin(1e-6));
+  }
+  for (size_t g = 0; g < base_system.ac.generators.size(); ++g) {
+    CHECK(scaled_period.generator_dispatch_mw[g] ==
+          Catch::Approx(k * base_period.generator_dispatch_mw[g])
+              .epsilon(1e-9)
+              .margin(1e-6));
+  }
+  for (size_t l = 0; l < base_system.ac.branches.size(); ++l) {
+    CHECK(scaled_period.branch_flow_mw[l] ==
+          Catch::Approx(k * base_period.branch_flow_mw[l])
+              .epsilon(1e-9)
+              .margin(1e-6));
+  }
+  CHECK(sum(scaled_period.load_shedding_mw) < 1e-7);
+  CHECK(sum(base_period.load_shedding_mw) < 1e-7);
+}
+
+TEST_CASE("Binding branch limit creates congestion rent aligned with flow direction",
+          "[market][metamorphic]") {
+  // Theory (analytic, see fixture comment): at 140 MW the uncongested
+  // dispatch {100, 40, 0} would push 28.57 MW over L3 (limit 20 MW).  The
+  // cheapest relief shifts 30 MW from G0 to G1, giving dispatch {70, 70, 0},
+  // flows {L1: 0, L2: 30, L3: 20} and LMPs {20, 35, 50}: the L3 shadow price
+  // mu = 52.5 $/MWh adds 4mu/7 = 30 $/MWh at the receiving end bus2, so the
+  // price rises along the constrained flow direction.  Relaxing L3 restores
+  // the copper plate at the marginal offer 35 $/MWh everywhere.
+  auto congested_system = linear_market_toy(false);
+  const auto time_series = single_period_series();
+
+  const auto congested = hacdcpf::market::run_day_ahead_market(
+      congested_system, time_series, metamorphic_options());
+  INFO("congested status=" << congested.status);
+  for (const auto& warning : congested.warnings) INFO(warning);
+  REQUIRE(congested.feasible);
+  REQUIRE(congested.pricing.size() == 1);
+  const auto& period = congested.pricing.front();
+  INFO("congested dispatch=" << period.generator_dispatch_mw[0] << ", "
+       << period.generator_dispatch_mw[1] << ", "
+       << period.generator_dispatch_mw[2]);
+  INFO("congested LMPs=" << period.lmp_per_mwh[0] << ", "
+       << period.lmp_per_mwh[1] << ", " << period.lmp_per_mwh[2]);
+  INFO("congested flows=" << period.branch_flow_mw[0] << ", "
+       << period.branch_flow_mw[1] << ", " << period.branch_flow_mw[2]);
+  CHECK(period.generator_dispatch_mw[0] == Catch::Approx(70.0).margin(1e-6));
+  CHECK(period.generator_dispatch_mw[1] == Catch::Approx(70.0).margin(1e-6));
+  CHECK(period.generator_dispatch_mw[2] == Catch::Approx(0.0).margin(1e-6));
+  CHECK(period.lmp_per_mwh[0] == Catch::Approx(20.0).margin(1e-6));
+  CHECK(period.lmp_per_mwh[1] == Catch::Approx(35.0).margin(1e-6));
+  CHECK(period.lmp_per_mwh[2] == Catch::Approx(50.0).margin(1e-6));
+  // L3 (authored branch position 2, bus0 -> bus2) binds at its limit with
+  // positive from->to flow, and the LMP rises along that direction.
+  CHECK(period.branch_flow_mw[2] == Catch::Approx(20.0).margin(1e-6));
+  CHECK(period.lmp_per_mwh[2] > period.lmp_per_mwh[0] + 1.0);
+  CHECK(lmp_spread(period.lmp_per_mwh) == Catch::Approx(30.0).margin(1e-6));
+
+  auto relaxed_system = linear_market_toy(false);
+  relaxed_system.ac.branches[2].rate_a_mva = 1000.0;
+  const auto relaxed = hacdcpf::market::run_day_ahead_market(
+      relaxed_system, time_series, metamorphic_options());
+  INFO("relaxed status=" << relaxed.status);
+  REQUIRE(relaxed.feasible);
+  REQUIRE(relaxed.pricing.size() == 1);
+  const auto& relaxed_period = relaxed.pricing.front();
+  INFO("relaxed dispatch=" << relaxed_period.generator_dispatch_mw[0] << ", "
+       << relaxed_period.generator_dispatch_mw[1] << ", "
+       << relaxed_period.generator_dispatch_mw[2]);
+  INFO("relaxed LMPs=" << relaxed_period.lmp_per_mwh[0] << ", "
+       << relaxed_period.lmp_per_mwh[1] << ", "
+       << relaxed_period.lmp_per_mwh[2]);
+  CHECK(relaxed_period.generator_dispatch_mw[0] ==
+        Catch::Approx(100.0).margin(1e-6));
+  CHECK(relaxed_period.generator_dispatch_mw[1] ==
+        Catch::Approx(40.0).margin(1e-6));
+  CHECK(relaxed_period.generator_dispatch_mw[2] ==
+        Catch::Approx(0.0).margin(1e-6));
+  CHECK(lmp_spread(relaxed_period.lmp_per_mwh) < 1e-9);
+  CHECK(relaxed_period.lmp_per_mwh[0] == Catch::Approx(35.0).margin(1e-6));
+}
+
+TEST_CASE("Load shedding is priced at VOLL and grows monotonically with demand",
+          "[market][metamorphic]") {
+  // Theory: once every generator sits at its offer cap, the marginal source
+  // of supply is the shed variable itself, so the energy-balance dual (LMP)
+  // equals VOLL exactly, and shed volume equals demand minus firm capacity;
+  // raising demand further can only increase shedding weakly.
+  const auto base_system = [] {
+    auto system = linear_market_toy(false);
+    for (auto& generator : system.ac.generators) {
+      generator.pmax_mw = 20.0;  // 60 MW firm capacity vs 140 MW base demand
+    }
+    return system;
+  }();
+  auto options = metamorphic_options();
+  options.enable_network_constraints = false;
+  const auto time_series = single_period_series();
+  const double voll = options.value_of_lost_load_per_mwh;
+
+  double previous_shed = -1.0;
+  for (const double factor : {1.0, 1.5, 2.0}) {
+    auto system = base_system;
+    for (auto& load : system.ac.loads) load.p_mw *= factor;
+    const auto result = hacdcpf::market::run_day_ahead_market(
+        system, time_series, options);
+    INFO("factor=" << factor << " status=" << result.status);
+    for (const auto& warning : result.warnings) INFO(warning);
+    REQUIRE(result.feasible);
+    REQUIRE(result.pricing.size() == 1);
+    const auto& period = result.pricing.front();
+    const double shed = sum(period.load_shedding_mw);
+    const double expected_shed = 140.0 * factor - 60.0;
+    INFO("factor=" << factor << " shed=" << shed
+         << " expected=" << expected_shed
+         << " LMPs=" << period.lmp_per_mwh[0] << ", "
+         << period.lmp_per_mwh[1] << ", " << period.lmp_per_mwh[2]);
+    CHECK(shed == Catch::Approx(expected_shed).margin(1e-6));
+    for (const double lmp : period.lmp_per_mwh) {
+      CHECK(lmp == Catch::Approx(voll).margin(1e-3));
+    }
+    CHECK(shed >= previous_shed - 1e-9);
+    previous_shed = shed;
+  }
+}
+
+TEST_CASE("LMP price separation vanishes if and only if no branch limit binds",
+          "[market][metamorphic]") {
+  // Theory (complementary slackness): a branch shadow price is zero unless
+  // the flow constraint binds, so nodal price separation is possible only
+  // when at least one branch is at its limit; with no binding branch the
+  // network degenerates to a copper plate with one system-wide price.
+  const auto time_series = single_period_series();
+
+  const auto congested_system = linear_market_toy(false);
+  const auto congested = hacdcpf::market::run_day_ahead_market(
+      congested_system, time_series, metamorphic_options());
+  REQUIRE(congested.feasible);
+  const auto& tight = congested.pricing.front();
+  size_t binding = 0;
+  for (size_t l = 0; l < congested_system.ac.branches.size(); ++l) {
+    if (std::abs(tight.branch_flow_mw[l]) >=
+        congested_system.ac.branches[l].rate_a_mva - 1e-4) {
+      ++binding;
+      CHECK(l == 2);  // only L3 (20 MVA) may bind; L1/L2 carry 0 / 30 MW
+    }
+  }
+  INFO("congested binding branches=" << binding
+       << " spread=" << lmp_spread(tight.lmp_per_mwh));
+  // Only L3 may bind; L1 and L2 carry 0 / 30 MW against a 100 MVA rating.
+  CHECK(std::abs(tight.branch_flow_mw[0]) <= 100.0 - 1e-3);
+  CHECK(std::abs(tight.branch_flow_mw[1]) <= 100.0 - 1e-3);
+  CHECK(binding == 1);
+  CHECK(lmp_spread(tight.lmp_per_mwh) > 1.0);
+
+  auto relaxed_system = linear_market_toy(false);
+  relaxed_system.ac.branches[2].rate_a_mva = 1000.0;
+  const auto relaxed = hacdcpf::market::run_day_ahead_market(
+      relaxed_system, time_series, metamorphic_options());
+  REQUIRE(relaxed.feasible);
+  const auto& loose = relaxed.pricing.front();
+  bool any_binding = false;
+  for (size_t l = 0; l < 3; ++l) {
+    if (std::abs(loose.branch_flow_mw[l]) >=
+        relaxed_system.ac.branches[l].rate_a_mva - 1e-4) {
+      any_binding = true;
+    }
+  }
+  INFO("relaxed any binding=" << any_binding
+       << " spread=" << lmp_spread(loose.lmp_per_mwh)
+       << " flows=" << loose.branch_flow_mw[0] << ", "
+       << loose.branch_flow_mw[1] << ", " << loose.branch_flow_mw[2]);
+  CHECK_FALSE(any_binding);
+  CHECK(lmp_spread(loose.lmp_per_mwh) < 1e-9);
+}
+
+TEST_CASE("Single-period SCUC without intertemporal costs reduces to merit-order economic dispatch",
+          "[market][reduction]") {
+  // Theory: with one period, pmin = 0, no startup/shutdown/no-load costs and
+  // no network constraints, SCUC degenerates to the textbook economic
+  // dispatch: stack flat offers in merit order until demand is met.
+  // Hand solution for 140 MW: G0 (20 $/MWh) to its 100 MW cap, G1
+  // (35 $/MWh) marginal at 40 MW, G2 (55 $/MWh) idle; system lambda = 35;
+  // energy cost = 100*20 + 40*35 = 3400 $/h.
+  const auto system = linear_market_toy(false);
+  auto options = metamorphic_options();
+  options.enable_network_constraints = false;
+
+  const auto result = hacdcpf::market::run_day_ahead_market(
+      system, single_period_series(), options);
+
+  INFO("status=" << result.status);
+  for (const auto& warning : result.warnings) INFO(warning);
+  REQUIRE(result.feasible);
+  REQUIRE(result.pricing.size() == 1);
+  const auto& period = result.pricing.front();
+  INFO("dispatch=" << period.generator_dispatch_mw[0] << ", "
+       << period.generator_dispatch_mw[1] << ", "
+       << period.generator_dispatch_mw[2]);
+  INFO("LMPs=" << period.lmp_per_mwh[0] << ", " << period.lmp_per_mwh[1]
+       << ", " << period.lmp_per_mwh[2]);
+  INFO("commitment_cost=" << result.commitment_cost);
+  CHECK(period.generator_dispatch_mw[0] == Catch::Approx(100.0).margin(1e-6));
+  CHECK(period.generator_dispatch_mw[1] == Catch::Approx(40.0).margin(1e-6));
+  CHECK(period.generator_dispatch_mw[2] == Catch::Approx(0.0).margin(1e-6));
+  for (const double lmp : period.lmp_per_mwh) {
+    CHECK(lmp == Catch::Approx(35.0).margin(1e-6));
+  }
+  CHECK(result.commitment_cost == Catch::Approx(3400.0).margin(1e-6));
+  REQUIRE(result.generator_settlement.size() == 3);
+  // True cost follows the same merit arithmetic; the infra-marginal G0 earns
+  // (35 - 20) * 100 = 1500 $/h of scarcity rent at the uniform price.
+  CHECK(result.generator_settlement[0].true_cost ==
+        Catch::Approx(2000.0).margin(1e-6));
+  CHECK(result.generator_settlement[1].true_cost ==
+        Catch::Approx(1400.0).margin(1e-6));
+  CHECK(result.generator_settlement[2].true_cost ==
+        Catch::Approx(0.0).margin(1e-6));
+  CHECK(result.generator_settlement[0].energy_revenue ==
+        Catch::Approx(3500.0).margin(1e-6));
+  CHECK(result.generator_settlement[1].energy_revenue ==
+        Catch::Approx(1400.0).margin(1e-6));
+}
+
+TEST_CASE("Disabled network constraints reduce LMPs to a single copper-plate price",
+          "[market][reduction]") {
+  // Theory: without branch constraints the energy balance is the only nodal
+  // coupling, so every bus shares the system lambda of the marginal unit:
+  // 20 $/MWh in period 0 (56 MW, G0 marginal) and 35 $/MWh in periods 1-2
+  // (140 / 175 MW, G1 marginal) -- even though the same inputs produce
+  // congestion rents when the network is enabled.
+  const auto system = linear_market_toy(false);
+  auto options = metamorphic_options();
+  options.enable_network_constraints = false;
+
+  const auto result = hacdcpf::market::run_day_ahead_market(
+      system, toy_three_period_series(), options);
+
+  INFO("status=" << result.status);
+  for (const auto& warning : result.warnings) INFO(warning);
+  REQUIRE(result.feasible);
+  REQUIRE(result.pricing.size() == 3);
+  const double expected_lambda[] = {20.0, 35.0, 35.0};
+  for (size_t t = 0; t < 3; ++t) {
+    const auto& period = result.pricing[t];
+    INFO("period=" << t << " LMPs=" << period.lmp_per_mwh[0] << ", "
+         << period.lmp_per_mwh[1] << ", " << period.lmp_per_mwh[2]
+         << " spread=" << lmp_spread(period.lmp_per_mwh)
+         << " dispatch=" << period.generator_dispatch_mw[0] << ", "
+         << period.generator_dispatch_mw[1] << ", "
+         << period.generator_dispatch_mw[2]
+         << " commit=" << result.commitment.gen_commit[0][t]
+         << result.commitment.gen_commit[1][t]
+         << result.commitment.gen_commit[2][t]);
+    CHECK(lmp_spread(period.lmp_per_mwh) < 1e-9);
+    for (const double lmp : period.lmp_per_mwh) {
+      CHECK(lmp == Catch::Approx(expected_lambda[t]).margin(1e-6));
+    }
+    CHECK(sum(period.load_shedding_mw) < 1e-7);
+  }
+  // REGRESSION GUARD: the default Native UC solver (NativeBranchAndCut)
+  // previously reported "Optimal (root gap closed)" at commitment_cost = 9945,
+  // decommitting G1 in period 1 and serving its 40 MW from the more expensive
+  // G2 (period lambda 55).  Root cause (fixed in MIPSolvers): invalid implied
+  // bounds from a residual-accounting error in
+  // compute_implied_column_bounds_from_rows produced unsound objective-cutoff
+  // artifacts, and the verified warm start was rejected as incumbent against
+  // the cutoff-closed root search domain.  The native run must now attain the
+  // analytic optimum 9145 (period lambdas checked above), matching the HiGHS
+  // oracle below.
+
+  // HiGHS oracle: same pipeline, different UC solver.  Every analytic lambda
+  // is attained, proving the expected values are achievable on this input.
+  auto highs_options = options;
+  highs_options.uc_options.uc_solver = hacdcpf::UCSolverChoice::HiGHS;
+  const auto highs = hacdcpf::market::run_day_ahead_market(
+      system, toy_three_period_series(), highs_options);
+  INFO("native solver=" << result.commitment.solver_name
+       << " status=" << result.commitment.solver_status
+       << " commitment_cost=" << result.commitment_cost);
+  INFO("HiGHS solver=" << highs.commitment.solver_name
+       << " status=" << highs.commitment.solver_status
+       << " commitment_cost=" << highs.commitment_cost);
+  REQUIRE(highs.feasible);
+  REQUIRE(highs.pricing.size() == 3);
+  for (size_t t = 0; t < 3; ++t) {
+    const auto& period = highs.pricing[t];
+    INFO("HiGHS period=" << t << " LMPs=" << period.lmp_per_mwh[0] << ", "
+         << period.lmp_per_mwh[1] << ", " << period.lmp_per_mwh[2]
+         << " dispatch=" << period.generator_dispatch_mw[0] << ", "
+         << period.generator_dispatch_mw[1] << ", "
+         << period.generator_dispatch_mw[2]
+         << " commit=" << highs.commitment.gen_commit[0][t]
+         << highs.commitment.gen_commit[1][t]
+         << highs.commitment.gen_commit[2][t]);
+    CHECK(lmp_spread(period.lmp_per_mwh) < 1e-9);
+    for (const double lmp : period.lmp_per_mwh) {
+      CHECK(lmp == Catch::Approx(expected_lambda[t]).margin(1e-6));
+    }
+  }
+  // Both solvers must attain the same analytic optimum on this input.
+  CHECK(highs.commitment_cost == Catch::Approx(9145.0).margin(1e-6));
+  CHECK(result.commitment_cost == Catch::Approx(9145.0).margin(1e-6));
+}
+
+TEST_CASE("Identical market inputs reproduce bit-identical clearing results",
+          "[market][reduction]") {
+  // Theory: the engine is a deterministic pipeline (no randomness, no
+  // wall-clock-dependent decisions) over fixed solver configurations, so two
+  // runs on the same input must agree bit for bit.  This is the baseline
+  // determinism contract every other metamorphic relation relies on.
+  const auto system = linear_market_toy(true);
+  const auto time_series = toy_three_period_series();
+  const auto options = metamorphic_options();
+
+  const auto first = hacdcpf::market::run_day_ahead_market(
+      system, time_series, options);
+  const auto second = hacdcpf::market::run_day_ahead_market(
+      system, time_series, options);
+
+  INFO("first status=" << first.status);
+  INFO("second status=" << second.status);
+  REQUIRE(first.feasible);
+  REQUIRE(second.feasible);
+  REQUIRE(first.pricing.size() == second.pricing.size());
+  CHECK(first.status == second.status);
+  CHECK(first.commitment_cost == second.commitment_cost);
+  CHECK(first.commitment.gen_commit == second.commitment.gen_commit);
+  INFO("commitment_cost=" << first.commitment_cost);
+  for (size_t t = 0; t < first.pricing.size(); ++t) {
+    CHECK(first.pricing[t].lmp_per_mwh == second.pricing[t].lmp_per_mwh);
+    CHECK(first.pricing[t].generator_dispatch_mw ==
+          second.pricing[t].generator_dispatch_mw);
+    CHECK(first.pricing[t].branch_flow_mw ==
+          second.pricing[t].branch_flow_mw);
+    CHECK(first.pricing[t].objective == second.pricing[t].objective);
+  }
+  REQUIRE(first.generator_settlement.size() ==
+          second.generator_settlement.size());
+  for (size_t g = 0; g < first.generator_settlement.size(); ++g) {
+    CHECK(first.generator_settlement[g].energy_revenue ==
+          second.generator_settlement[g].energy_revenue);
+    CHECK(first.generator_settlement[g].true_cost ==
+          second.generator_settlement[g].true_cost);
+  }
 }

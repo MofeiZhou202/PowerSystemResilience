@@ -383,7 +383,8 @@ AC 安全迭代（\srcpath{include/hacdcpf/market/southern\_market.hpp:44}；实
 \textbf{输出字段}：任务含 \fld{config}（归一化后含 \fld{solver\_options}）、\fld{base}
 与逐日结果；每日结果含 \fld{state\_start}/\fld{state\_end}（相邻日核对用）、
 \fld{cause\_analysis}、\fld{counterfactuals} 与 \fld{recovery\_execution}
-（\fld{workers}、\fld{experiments}、线程决议与 \fld{wall\_sec}，
+（\fld{workers}、\fld{experiments}、\fld{worker\_cap}/\fld{logical\_cpus}/\fld{worker\_admission}
+准入记录、线程决议与 \fld{wall\_sec}，
 \srcpath{src/market/market\_operation.cpp:265,428-429,468}）；跨日承接由
 \fld{carry\_from} 生成（\srcpath{src/market/market\_operation.cpp:119}），仅当日结果有效才
 推进（见第~\ref{sec:southern-execution}~节）。
@@ -391,7 +392,8 @@ AC 安全迭代（\srcpath{include/hacdcpf/market/southern\_market.hpp:44}；实
 \textbf{边界与局限}：恢复实验只对当日实际偏离参考的因素各做一次单因素重算
 （:404-413）；并行准入为 Gurobi 后端、实验数 $>1$、母线 $\le118$、机组 $\le128$、
 储能 $\le16$、水库 $\le24$、核数 $\ge4$ 且每解线程 $\le$ 核数一半，满足时
-\fld{workers}=2 否则 1（:415-426）；时序日从不并行。滚动模式拒绝跨日非空启停轨迹
+\fld{workers}=$\min(6,\text{实验数},\lfloor\text{核数}/2\rfloor)$ 否则 1（:415-440）；
+时序日从不并行。滚动模式拒绝跨日非空启停轨迹
 （:303-305）。
 
 \subsection{云南辅助服务}
