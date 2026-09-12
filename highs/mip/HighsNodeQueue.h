@@ -166,8 +166,8 @@ class HighsNodeQueue {
              std::vector<HighsInt>&& branchings, double lower_bound,
              double estimate, HighsInt depth,
              std::vector<HacdcpfLocalCut>&& localCuts = {})
-        : domchgstack(domchgstack),
-          branchings(branchings),
+        : domchgstack(std::move(domchgstack)),
+          branchings(std::move(branchings)),
           hacdcpfLocalCuts(std::move(localCuts)),
           lower_bound(lower_bound),
           estimate(estimate),

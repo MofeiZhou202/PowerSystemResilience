@@ -8,6 +8,7 @@
 #ifndef HIGHS_CUTPOOL_H_
 #define HIGHS_CUTPOOL_H_
 
+#include <atomic>
 #include <cstdint>
 #include <memory>
 #include <set>
@@ -30,10 +31,11 @@ struct HighsCutSet {
   };
 
   std::vector<HighsInt> cutindices;
+  std::vector<HighsInt> cutpools;
   std::vector<HighsInt> ARstart_;
   std::vector<HighsInt> ARindex_;
   std::vector<double> ARvalue_;
-  std::vector<double> lower_;
+  std::vector<double> lower_;  // Currently only ever contains -kHighsInf
   std::vector<double> upper_;
   std::vector<unsigned char> hacdcpf_integral_;
   std::vector<unsigned char> hacdcpf_propagate_;
@@ -59,6 +61,7 @@ struct HighsCutSet {
 
   void clear() {
     cutindices.clear();
+    cutpools.clear();
     lower_.clear();
     upper_.clear();
     hacdcpf_integral_.clear();
@@ -141,6 +144,10 @@ class HighsCutPool {
   HighsDynamicRowMatrix matrix_;
   std::vector<double> rhs_;
   std::vector<int16_t> ages_;
+  std::deque<std::atomic<int16_t>> numLps_;
+  std::deque<std::atomic<uint8_t>>
+      ageResetWhileLocked_;      // Was the cut propagated?
+  std::vector<bool> hasSynced_;  // Has the cut been globally synced?
   std::vector<double> rownormalization_;
   std::vector<double> maxabscoef_;
   std::vector<uint8_t> rowintegral;
@@ -161,17 +168,18 @@ class HighsCutPool {
   std::vector<std::pair<HighsInt, double>> sortBuffer;
   bool hacdcpfRootLedgerScope = false;
 
-  bool isDuplicate(size_t hash, double norm, const HighsInt* Rindex,
-                   const double* Rvalue, HighsInt Rlen, double rhs);
-
  public:
-  HighsCutPool(HighsInt ncols, HighsInt agelim, HighsInt softlimit)
+  HighsInt index_;
+
+  HighsCutPool(HighsInt ncols, HighsInt agelim, HighsInt softlimit,
+               HighsInt index)
       : matrix_(ncols),
         agelim_(agelim),
         softlimit_(softlimit),
         numLpCuts(0),
         numPropNzs(0),
-        numPropRows(0) {
+        numPropRows(0),
+        index_(index) {
     ageDistribution.resize(agelim_ + 1);
     minScoreFactor = 0.9;
     bestObservedScore = 0.0;
@@ -181,8 +189,15 @@ class HighsCutPool {
 
   const std::vector<double>& getRhs() const { return rhs_; }
 
-  void resetAge(HighsInt cut) {
+  bool isDuplicate(size_t hash, double norm, const HighsInt* Rindex,
+                   const double* Rvalue, HighsInt Rlen, double rhs);
+
+  void resetAge(HighsInt cut, bool thread_safe = false) {
     if (ages_[cut] > 0) {
+      if (thread_safe) {
+        ageResetWhileLocked_[cut].store(1, std::memory_order_relaxed);
+        return;
+      }
       if (matrix_.columnsLinked(cut)) {
         propRows.erase(std::make_pair(ages_[cut], cut));
         propRows.emplace(0, cut);
@@ -190,14 +205,18 @@ class HighsCutPool {
       ageDistribution[ages_[cut]] -= 1;
       ageDistribution[0] += 1;
       ages_[cut] = 0;
+      ageResetWhileLocked_[cut].store(0, std::memory_order_relaxed);
     }
   }
 
   double getParallelism(HighsInt row1, HighsInt row2) const;
 
+  double getParallelism(HighsInt row1, HighsInt row2,
+                        const HighsCutPool& pool2) const;
+
   void performAging();
 
-  void lpCutRemoved(HighsInt cut);
+  void lpCutRemoved(HighsInt cut, bool thread_safe = false);
 
   void addPropagationDomain(HighsDomain::CutpoolPropagation* domain) {
     propagationDomains.push_back(domain);
@@ -217,14 +236,21 @@ class HighsCutPool {
     ageDistribution.resize(agelim_ + 1);
   }
 
+  void increaseNumLps(HighsInt cut, HighsInt n) {
+    assert(numLps_[cut] >= 1);
+    numLps_[cut].fetch_add(n, std::memory_order_relaxed);
+  };
+
   void setHacdcpfRootLedgerScope(bool active) {
     hacdcpfRootLedgerScope = active;
   }
 
   bool getHacdcpfRootLedgerScope() const { return hacdcpfRootLedgerScope; }
 
-  void separate(const std::vector<double>& sol, HighsDomain& domprop,
+  void separate(const std::vector<double>& sol, const HighsDomain& domprop,
                 HighsCutSet& cutset, double feastol,
+                const std::deque<HighsCutPool>& cutpools,
+                bool thread_safe = false,
                 const HighsMipSolver* mipsolver = nullptr);
 
   void separateLpCutsAfterRestart(HighsCutSet& cutset,
@@ -260,6 +286,8 @@ class HighsCutPool {
     cutinds = matrix_.getARindex() + start;
     cutvals = matrix_.getARvalue() + start;
   }
+
+  void syncCutPool(const HighsMipSolver& mipsolver, HighsCutPool& syncpool);
 };
 
 #endif

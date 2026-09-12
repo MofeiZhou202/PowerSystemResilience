@@ -118,8 +118,8 @@ const char* highsBasisStatusName(HighsBasisStatus status) {
 
 std::uint64_t highsLpBasisSemanticRowHash(
     const HighsLpRelaxation& lpRelaxation, HighsInt row) {
-  const double lower = lpRelaxation.slackLower(row);
-  const double upper = lpRelaxation.slackUpper(row);
+  const double lower = lpRelaxation.slackLower(row, lpRelaxation.getMipSolver().mipdata_->getDomain());
+  const double upper = lpRelaxation.slackUpper(row, lpRelaxation.getMipSolver().mipdata_->getDomain());
   HighsInt len = 0;
   const HighsInt* rowinds = nullptr;
   const double* rowvals = nullptr;
@@ -295,8 +295,8 @@ void highsTraceLpBasisState(HighsLpRelaxation& lpRelaxation,
       const double value = solution.row_value[row];
       sample << i << ":" << basicVar << ":row" << row << ":status"
              << highsBasisStatusName(status) << ":val" << value << ":lb"
-             << lpRelaxation.slackLower(row) << ":ub"
-             << lpRelaxation.slackUpper(row) << ":frac"
+             << lpRelaxation.slackLower(row, lpRelaxation.getMipSolver().mipdata_->getDomain()) << ":ub"
+             << lpRelaxation.slackUpper(row, lpRelaxation.getMipSolver().mipdata_->getDomain()) << ":frac"
              << std::abs(value - std::round(value)) << ":rh" << std::hex
              << highsLpBasisSemanticRowHash(lpRelaxation, row) << std::dec;
     }
@@ -409,8 +409,8 @@ std::string highsTableauBasisTraceInfo(
     if (emitted > 0) out << ";";
     const HighsInt row = rowWeight.first;
     out << "row" << row << ":w" << rowWeight.second << ":lb"
-        << lpRelaxation.slackLower(row) << ":ub"
-        << lpRelaxation.slackUpper(row) << ":sig["
+        << lpRelaxation.slackLower(row, lpRelaxation.getMipSolver().mipdata_->getDomain()) << ":ub"
+        << lpRelaxation.slackUpper(row, lpRelaxation.getMipSolver().mipdata_->getDomain()) << ":sig["
         << highsTableauRowSignature(lpRelaxation, row, maxTerms) << "]";
     ++emitted;
   }
@@ -620,7 +620,7 @@ void HighsTableauSeparator::separateLpSolution(HighsLpRelaxation& lpRelaxation,
       break;
 
     assert(lpAggregator.isEmpty());
-    for (std::pair<HighsInt, double> rowWeight : fracvar.row_ep)
+    for (const auto& rowWeight : fracvar.row_ep)
       lpAggregator.addRow(rowWeight.first, rowWeight.second);
 
     lpAggregator.getCurrentAggregation(baseRowInds, baseRowVals, false);
@@ -659,7 +659,7 @@ void HighsTableauSeparator::separateLpSolution(HighsLpRelaxation& lpRelaxation,
                        "tableau",
                        basisTraceInfo.empty() ? nullptr
                                               : basisTraceInfo.c_str());
-    if (mip.mipdata_->domain.infeasible()) break;
+    if (transLp.getGlobaldom().infeasible()) break;
 
     lpAggregator.getCurrentAggregation(baseRowInds, baseRowVals, true);
     rhs = 0;
@@ -671,7 +671,7 @@ void HighsTableauSeparator::separateLpSolution(HighsLpRelaxation& lpRelaxation,
                        negatedBasisTraceInfo.empty()
                            ? nullptr
                            : negatedBasisTraceInfo.c_str());
-    if (mip.mipdata_->domain.infeasible()) break;
+    if (transLp.getGlobaldom().infeasible()) break;
 
     lpAggregator.clear();
     if (bestScore == -1.0 && cutpool.getNumCuts() != numCuts)
