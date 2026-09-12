@@ -1,6 +1,10 @@
-# HiGHS 1.14.0 source list (reconstructed from build artifacts)
+# HiGHS 1.15.1 source list (reconstructed from build artifacts)
 
 set(highs_sources
+  ${CMAKE_CURRENT_LIST_DIR}/HighsExternalApi.cpp
+  ${CMAKE_CURRENT_LIST_DIR}/HighsExternalDeps.cpp
+  ${CMAKE_CURRENT_LIST_DIR}/extern/HighsExtrasApi.cpp
+  ${CMAKE_CURRENT_LIST_DIR}/extern/HighsExtrasExternalDeps.cpp
   ${CMAKE_CURRENT_LIST_DIR}/interfaces/highs_c_api.cpp
   ${CMAKE_CURRENT_LIST_DIR}/io/Filereader.cpp
   ${CMAKE_CURRENT_LIST_DIR}/io/FilereaderLp.cpp
@@ -24,6 +28,7 @@ set(highs_sources
   ${CMAKE_CURRENT_LIST_DIR}/lp_data/HighsModelUtils.cpp
   ${CMAKE_CURRENT_LIST_DIR}/lp_data/HighsOptions.cpp
   ${CMAKE_CURRENT_LIST_DIR}/lp_data/HighsRanging.cpp
+  ${CMAKE_CURRENT_LIST_DIR}/lp_data/HighsRunData.cpp
   ${CMAKE_CURRENT_LIST_DIR}/lp_data/HighsSolution.cpp
   ${CMAKE_CURRENT_LIST_DIR}/lp_data/HighsSolutionDebug.cpp
   ${CMAKE_CURRENT_LIST_DIR}/lp_data/HighsSolve.cpp
@@ -40,9 +45,9 @@ set(highs_sources
   ${CMAKE_CURRENT_LIST_DIR}/mip/HighsImplications.cpp
   ${CMAKE_CURRENT_LIST_DIR}/mip/HighsLpAggregator.cpp
   ${CMAKE_CURRENT_LIST_DIR}/mip/HighsLpRelaxation.cpp
-  ${CMAKE_CURRENT_LIST_DIR}/mip/HighsMipAnalysis.cpp
   ${CMAKE_CURRENT_LIST_DIR}/mip/HighsMipSolver.cpp
   ${CMAKE_CURRENT_LIST_DIR}/mip/HighsMipSolverData.cpp
+  ${CMAKE_CURRENT_LIST_DIR}/mip/HighsMipWorker.cpp
   ${CMAKE_CURRENT_LIST_DIR}/mip/HighsModkSeparator.cpp
   ${CMAKE_CURRENT_LIST_DIR}/mip/HighsNodeQueue.cpp
   ${CMAKE_CURRENT_LIST_DIR}/mip/HighsObjectiveFunction.cpp
@@ -63,6 +68,7 @@ set(highs_sources
   ${CMAKE_CURRENT_LIST_DIR}/pdlp/HiPdlpWrapper.cpp
   ${CMAKE_CURRENT_LIST_DIR}/presolve/HPresolve.cpp
   ${CMAKE_CURRENT_LIST_DIR}/presolve/HPresolveAnalysis.cpp
+  ${CMAKE_CURRENT_LIST_DIR}/presolve/HPresolveTest.cpp
   ${CMAKE_CURRENT_LIST_DIR}/presolve/HighsPostsolveStack.cpp
   ${CMAKE_CURRENT_LIST_DIR}/presolve/HighsSymmetry.cpp
   ${CMAKE_CURRENT_LIST_DIR}/presolve/ICrash.cpp
@@ -95,6 +101,7 @@ set(highs_sources
   ${CMAKE_CURRENT_LIST_DIR}/simplex/HighsSimplexAnalysis.cpp
   ${CMAKE_CURRENT_LIST_DIR}/test_kkt/DevKkt.cpp
   ${CMAKE_CURRENT_LIST_DIR}/test_kkt/KktCh2.cpp
+  ${CMAKE_CURRENT_LIST_DIR}/util/HighsDynamicLibrary.cpp
   ${CMAKE_CURRENT_LIST_DIR}/util/HFactor.cpp
   ${CMAKE_CURRENT_LIST_DIR}/util/HFactorDebug.cpp
   ${CMAKE_CURRENT_LIST_DIR}/util/HFactorExtend.cpp
@@ -199,3 +206,41 @@ set(highs_headers)
 set(cupdlp_headers)
 set(ipx_headers)
 set(basiclu_headers)
+set(hipo_sources
+  ${CMAKE_CURRENT_LIST_DIR}/ipm/hipo/ipm/IpmData.cpp
+  ${CMAKE_CURRENT_LIST_DIR}/ipm/hipo/ipm/FactorHiGHSSolver.cpp
+  ${CMAKE_CURRENT_LIST_DIR}/ipm/hipo/ipm/Control.cpp
+  ${CMAKE_CURRENT_LIST_DIR}/ipm/hipo/ipm/Iterate.cpp
+  ${CMAKE_CURRENT_LIST_DIR}/ipm/hipo/ipm/KktMatrix.cpp
+  ${CMAKE_CURRENT_LIST_DIR}/ipm/hipo/ipm/Model.cpp
+  ${CMAKE_CURRENT_LIST_DIR}/ipm/hipo/ipm/PreProcess.cpp
+  ${CMAKE_CURRENT_LIST_DIR}/ipm/hipo/ipm/Refine.cpp
+  ${CMAKE_CURRENT_LIST_DIR}/ipm/hipo/ipm/Solver.cpp
+)
+
+set(factor_highs_sources
+  ${CMAKE_CURRENT_LIST_DIR}/ipm/hipo/factorhighs/Analyse.cpp
+  ${CMAKE_CURRENT_LIST_DIR}/ipm/hipo/factorhighs/CallAndTimeBlas.cpp
+  ${CMAKE_CURRENT_LIST_DIR}/ipm/hipo/factorhighs/CliqueStack.cpp
+  ${CMAKE_CURRENT_LIST_DIR}/ipm/hipo/factorhighs/DataCollector.cpp
+  ${CMAKE_CURRENT_LIST_DIR}/ipm/hipo/factorhighs/DenseFactHybrid.cpp
+  ${CMAKE_CURRENT_LIST_DIR}/ipm/hipo/factorhighs/DenseFactKernel.cpp
+  ${CMAKE_CURRENT_LIST_DIR}/ipm/hipo/factorhighs/DgemmParallel.cpp
+  ${CMAKE_CURRENT_LIST_DIR}/ipm/hipo/factorhighs/FactorHiGHS.cpp
+  ${CMAKE_CURRENT_LIST_DIR}/ipm/hipo/factorhighs/Factorise.cpp
+  ${CMAKE_CURRENT_LIST_DIR}/ipm/hipo/factorhighs/FormatHandler.cpp
+  ${CMAKE_CURRENT_LIST_DIR}/ipm/hipo/factorhighs/HybridHybridFormatHandler.cpp
+  ${CMAKE_CURRENT_LIST_DIR}/ipm/hipo/factorhighs/HybridSolveHandler.cpp
+  ${CMAKE_CURRENT_LIST_DIR}/ipm/hipo/factorhighs/KrylovMethodsIpm.cpp
+  ${CMAKE_CURRENT_LIST_DIR}/ipm/hipo/factorhighs/Numeric.cpp
+  ${CMAKE_CURRENT_LIST_DIR}/ipm/hipo/factorhighs/SolveHandler.cpp
+  ${CMAKE_CURRENT_LIST_DIR}/ipm/hipo/factorhighs/Swaps.cpp
+  ${CMAKE_CURRENT_LIST_DIR}/ipm/hipo/factorhighs/Symbolic.cpp
+)
+
+set(hipo_util_sources
+  ${CMAKE_CURRENT_LIST_DIR}/ipm/hipo/auxiliary/Auxiliary.cpp
+  ${CMAKE_CURRENT_LIST_DIR}/ipm/hipo/auxiliary/KrylovMethods.cpp
+  ${CMAKE_CURRENT_LIST_DIR}/ipm/hipo/auxiliary/Logger.cpp
+  ${CMAKE_CURRENT_LIST_DIR}/ipm/hipo/auxiliary/VectorOperations.cpp
+)

@@ -642,8 +642,8 @@ void HighsPathSeparator::separateLpSolution(HighsLpRelaxation& lpRelaxation,
                 inds.resize(numInds);
 
                 if (transLp.untransform(cutVals, inds, rhs)) {
-                  const bool mixAccepted =
-                      cutGen.finalizeAndAddCut(inds, cutVals, rhs);
+                  const bool mixAccepted = cutGen.finalizeAndAddCut(
+                      transLp.getGlobaldom(), inds, cutVals, rhs);
                   success |= mixAccepted;
                   if (mixAccepted) ++ledger.mixSuccess;
                 }
