@@ -20,7 +20,8 @@
 正文第 28--63 页（PDF 文件第 31--66 页）。第~\ref{sec:southern-rule}~节按条款
 转写 SCUC，并说明 SCED 与独立 LMP 模型；附录~\ref{sec:southern-facsimile}~直接
 嵌入该范围原页，保留全部公式、定义和原文歧义。
-\textbf{规则模型不等于当前生产实现，现有代码尚未与该细则完全一致。}
+\textbf{规则模型不等于当前生产实现，现有代码尚未与该细则完全一致——
+逐条差异、解释性执行与未实现条款见第~\ref{sec:rule-gaps}~节。}
 本手册同时依据 HySim-XJTU-HRPES 平台电力市场仿真模块
 （\srcpath{src/market/}、\srcpath{include/hacdcpf/market/market\_simulation.hpp}）整理，
 覆盖日前市场全链路（报价$\to$SCUC$\to$固定组合 SCED/LMP$\to$LODF N-1 割$\to$AC 认证$\to$结算）、
@@ -42,6 +43,7 @@
 
 \input{chapters/southern_day_ahead_rules}
 \input{chapters/southern_execution}
+\input{chapters/rule_implementation_gaps}
 
 \section{平台实现阅读指南与约定（非南方规则模型）}
 \subsection{数据来源}
@@ -88,6 +90,83 @@ DC 支路损耗不进入商业出清、在非线性认证中校核；VSC 固定/
 \texttt{"unsupported\_hybrid\_market\_assets"} 并直接返回（\srcpath{src/market/market\_simulation.cpp:run\_day\_ahead\_market}）。
 \fld{scuc\_mip\_relative\_gap}=$10^{-2}$ 意味着 SCUC 为近似解，除非 \fld{scuc\_optimality\_proven}
 置真；AC 应急校核为 opt-in，失败在 \texttt{SecurityResult} 中保持显式（不静默修复）。
+
+\subsection{求解器家族与选择逻辑}
+\textbf{本节为摘要；完整算法选择、回退链与确定性保障见第~\ref{sec:algorithm-selection}~章。}
+平台日前链路与南方执行入口各有一套后端分派，均按模型规模与求解器可用性决定，
+分派结果写入 performance 字段或一致性台账，不静默降级。
+
+\textbf{平台日前（\srcpath{src/market/market\_simulation.cpp}）}。SCUC 由
+\srcpath{solve\_market\_commitment}（\srcpath{src/market/market\_simulation.cpp:1939}）装配后按
+\fld{options.uc\_options.uc\_solver}（默认 \texttt{UCSolverChoice::Auto}，
+\srcpath{include/hacdcpf/time\_series/time\_series\_pf.hpp:150}）选择 MIP 后端，
+含按二元变量规模启用的结构化 HiGHS 分支路径
+（\srcpath{src/market/market\_simulation.cpp:2109-2113}）。固定组合定价 LP（SCED/LMP）统一走
+\srcpath{solve\_market\_pricing\_lp}（\srcpath{src/market/market\_simulation.cpp:907-940}）：
+变量数超过 \fld{pricing\_native\_max\_variables}（默认 $5000$，
+\srcpath{include/hacdcpf/market/market\_simulation.hpp:427}；置 $0$ 表示全部定价 LP 直达
+HiGHS）且内嵌 HiGHS 可用时，直达 HiGHS 并跳过原生 simplex；否则先解原生 simplex，
+失败时以 HiGHS 回退并写入 warning。基态定价调用点与两类 warning 见
+\srcpath{src/market/market\_simulation.cpp:4939-4961}；N-1 校正定价复用同一函数
+（\srcpath{src/market/market\_simulation.cpp:5106-5108}）。对偶 LMP 提取见
+\srcpath{src/market/market\_simulation.cpp:extract\_pricing}。
+
+\textbf{南方执行入口（\srcpath{src/market/southern\_market.cpp}）}。Gurobi 方法选择集中在
+\srcpath{gurobi\_method}（\srcpath{src/market/southern\_market.cpp:1346-1353}）：\texttt{lmp}
+阶段列数 $\ge10^{6}$ 时固定 barrier，否则固定对偶单纯形；其他阶段按
+\texttt{execution.gurobi\_method} 显式指定，\texttt{auto} 时仅 compact 且列数 $\ge10^{6}$
+用 barrier，否则交求解器默认。非大规模定价 LP 固定单线程
+（\srcpath{src/market/southern\_market.cpp:1527}），整数修复的投影 LP 同样固定
+单线程对偶单纯形（\srcpath{src/market/southern\_market.cpp:1415}）。列数 $\ge10^{6}$ 且
+求解器为 Gurobi 的定价走大模型路径（\srcpath{src/market/southern\_market.cpp:1681}）：
+进程内互斥保证每进程至多一对大定价（\srcpath{src/market/southern\_market.cpp:1684-1686}），
+两份独立 Gurobi 实例并发求解同一有序 LP（\srcpath{src/market/southern\_market.cpp:1701-1703}），
+固定 8 线程 barrier（策略 \texttt{"ordered-lp-barrier-8-v2"}，
+\srcpath{src/market/southern\_market.cpp:1709-1711}），随后由
+\srcpath{src/market/southern\_price\_consistency.hpp:check\_price\_duals} 对两份完整原单位
+行对偶逐 bit 比对（最大绝对差不为 $0$ 即 \texttt{dual\_mismatch}，另审计最优性、原始残差与
+目标值）。非大模型 \texttt{lmp} 阶段也在剩余时限内顺序重解一次做同一比对
+（\srcpath{src/market/southern\_market.cpp:1720-1745}）。价格一致性不通过时价格为空、不得
+结算（见第~\ref{sec:southern-execution}~节）。
+
+\subsection{验证通道总览}
+市场模块现有验证通道（用例/断言数为本次文档同步时在 macOS Release 构建上实跑核实）：
+\begin{itemize}
+  \item \srcpath{hacdcpf\_test\_market\_simulation}：Catch2 22 用例 / 845 断言，覆盖日前
+        流水线、定价对偶、结算、实时两结算与市场力度量
+        （\srcpath{tests/test\_market\_simulation.cpp}；目标名前缀缘由见
+        \srcpath{tests/CMakeLists.txt:54-57}）；
+  \item \srcpath{test\_southern\_market}：Catch2 74 用例 / 29807 断言，覆盖 98 点解析
+        费用/电价、输入拒绝、储能、水库、直流与 AC 安全反馈
+        （\srcpath{tests/test\_southern\_market.cpp}）；
+  \item \srcpath{test\_market\_forecast}：Catch2 8 用例 / 12503 断言
+        （\srcpath{tests/test\_market\_forecast.cpp}）；
+  \item \srcpath{market\_sced\_cross\_validation}：ctest 注册的独立方程 oracle
+        （\srcpath{tests/CMakeLists.txt:326-334}），正向
+        \texttt{ctest -R '\^{}market\_sced\_cross\_validation\$'}；负控制经
+        \srcpath{tools/market\_validation/run\_cross\_validation.py} 的
+        \texttt{-{}-negative-control} 开关复现（见第~\ref{sec:market-xref}~节）；
+  \item 浏览器 E2E（Playwright，\srcpath{tests/e2e/}）：\fld{market\_gui\_e2e}、
+        \fld{market\_workflow\_e2e}、\fld{market\_activity\_e2e}、
+        \fld{southern\_market\_e2e}、\fld{market\_operation\_e2e}、
+        \fld{market\_forecast\_e2e}、\fld{market\_canvas\_layout\_e2e}、
+        \fld{market\_study\_e2e} 及 6 个 IEEE118 变体
+        （\fld{market\_ieee118\_e2e}、\fld{market\_ieee118\_row\_presolve\_e2e}、
+        \fld{market\_ieee118\_native\_e2e}、\fld{market\_ieee118\_mixed\_e2e}、
+        \fld{market\_ieee118\_resources\_e2e}、\fld{market\_ieee118\_generic\_e2e}）；
+  \item \srcpath{run\_southern\_market\_benchmark}：2000 节点授权 Gurobi 基准，仅 UNIX，
+        由 \fld{HACDCPF\_ENABLE\_MARKET\_SCALE\_TESTS}（默认 OFF）门控，注册名
+        \fld{southern\_market\_2000\_benchmark}（\srcpath{tests/CMakeLists.txt:59-71}）；
+  \item Python 单元测试：\texttt{market\_bid\_empirical\_unit} 与
+        \texttt{market\_independent\_audit\_unit} 经 ctest 注册
+        （\srcpath{tests/CMakeLists.txt:756-765}，脚本
+        \srcpath{tests/test\_market\_bid\_empirical.py}、
+        \srcpath{tests/test\_market\_independent\_audit.py}）；
+        \srcpath{tests/test\_market\_intelligence.py} 未注册 ctest，按
+        \srcpath{docs/modules/market/intelligent\_simulation.md} 以
+        \texttt{python3 -m unittest discover -s tests -p test\_market\_intelligence.py}
+        驱动 \srcpath{tools/market\_intelligence/} 的价格 oracle 与代理模型流水线。
+\end{itemize}
 
 \section{平台功能定位与架构（实现对照）}
 \subsection{公共入口族}
@@ -141,10 +220,24 @@ DC 支路损耗不进入商业出清、在非线性认证中校核；VSC 固定/
 实时侧辅助服务参数位于
 \texttt{Ancillary\allowbreak Service\allowbreak Options}。
 
+\input{chapters/market_boundary}
+\input{chapters/module_io}
+\input{chapters/algorithm_selection}
+\input{chapters/yunnan_regulation}
+
 \section{验证与边界局限}
 \subsection{验证与校核}
-注册测试：\srcpath{test\_market\_simulation}（目标 \texttt{hacdcpf\_test\_market\_simulation}），
-覆盖日前流水线、定价对偶、结算与市场力度量。
+验证通道总览见“平台实现阅读指南与约定”一节，此处仅列注册入口：
+Catch2 套件 \srcpath{hacdcpf\_test\_market\_simulation}（22 用例 / 845 断言）、
+\srcpath{test\_southern\_market}（74 用例 / 29807 断言）、
+\srcpath{test\_market\_forecast}（8 用例 / 12503 断言）；
+ctest 注册的独立方程 oracle \srcpath{market\_sced\_cross\_validation}
+（\srcpath{tests/CMakeLists.txt:326-334}，含 \texttt{-{}-negative-control} 负控制）与
+Python 单元 \texttt{market\_bid\_empirical\_unit}、\texttt{market\_independent\_audit\_unit}
+（\srcpath{tests/CMakeLists.txt:756-765}）；浏览器 E2E（\srcpath{tests/e2e/} 下
+\texttt{market\_*} 与 \texttt{southern\_market\_e2e}，共 14 个注册项）；授权 Gurobi 规模基准
+\texttt{southern\_market\_2000\_benchmark}（\texttt{HACDCPF\_ENABLE\_MARKET\_SCALE\_TESTS}
+门控，\srcpath{tests/CMakeLists.txt:59-71}）。
 
 \subsection{边界与局限（如实标注）}
 \begin{itemize}

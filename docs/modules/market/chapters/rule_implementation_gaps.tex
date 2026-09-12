@@ -1,0 +1,150 @@
+% rule_implementation_gaps.tex -- 规则—实现差异清单
+\section{规则—实现差异清单}\label{sec:rule-gaps}
+
+\begin{theorynote}
+本章把“规则模型不等于当前生产实现”具体化：对规则转写章（第~\ref{sec:southern-rule}~节）
+的每个条款，按四类状态判定生产代码现状——\textbf{一致}（代码按规则实现）、
+\textbf{解释性执行}（原文歧义/多解，代码采用显式选择的 A1--A7 解释）、
+\textbf{不一致/偏离}（实现与规则文字明确不同）、\textbf{未实现}（规则有而代码无对应分支）。
+判定对象是\textbf{南方执行入口}（\fld{run\_southern\_day\_ahead\_market}）；
+\textbf{通用 AC/DC 引擎}（\fld{run\_day\_ahead\_market}）与规则的差异单列摘要。
+每条给出：规则怎么要求、代码实际怎么做、差异对结果的影响。
+规则原文理解以转写章与附录原页为准；索引骨架取自已校核的
+\srcpath{docs/modules/market/southern\_execution\_contract.md} 公式—源码—测试索引与
+\srcpath{docs/modules/market/southern\_rules\_comparison.md}，每条代码出处均已重新打开核实。
+\end{theorynote}
+
+\subsection{理论—代码对应关系与证据口径}
+本章的“实现”列不是对变量名称的猜测，而是按以下可复核链路建立：规则方程先在
+\srcpath{docs/modules/market/chapters/southern\_day\_ahead\_rules.tex} 中编号，再定位到
+装配该方程的生产函数，最后用注册测试检查残差、边界或结果字段。下表给出可直接复核的
+代表性闭环；行号随源码变更可能移动，函数名和测试名称是稳定锚点。
+\begin{center}\scriptsize
+\begin{longtable}{@{}L{3.2cm}L{5.0cm}L{5.8cm}@{}}
+\toprule 理论对象 & 代码锚点（装配/结果） & 自动化证据（测试断言）\\\midrule
+\endhead
+功率平衡、备用与三态启停 & \fld{southern::build\_scuc\_model}、\fld{build\_sced\_model}；键名
+\fld{2.6.3.1/balance}、\fld{2.6.3.3/reserve}、\fld{start\_hot/cold}\nobreakspace{}
+(\srcpath{src/market/southern\_market.cpp}) &
+\texttt{Southern SCUC ...} 系列用例；残差断言
+\texttt{max\_residual <= 1e-6}，并检查启停次数与备用不足失败状态\\
+储能能量递推与效率 & \fld{build\_storage\_constraints}；\fld{energy\_mwh}、充放电互斥与起末 SOC
+字段（\srcpath{src/market/southern\_market.cpp}） &
+\texttt{Southern assembly templates preserve rolling objectives residuals and water SOC carry}；
+逐时能量递推和 carry 字段均有断言\\
+SCED 到 LMP 的固定组合投影 & \fld{solve\_sced} $\to$ \fld{derive\_lmp\_model}；
+\fld{assembly\_template.derived\_from=sced} 与对偶一致性字段 &
+\texttt{Southern pricing derives the original ordered LP from SCED}；
+\fld{matrix\_comparison=exact\_match}、\fld{max\_dual\_difference=0}\\
+AC 安全校核迭代 & \fld{audit\_security} 与 \fld{security\_iterations}；失败写入
+\fld{feasible=false}/\fld{ac\_validation\_failed} &
+\texttt{Southern AC validation ...} 用例检查割添加、迭代上限和失败状态；该测试验证实现的
+局部灵敏度流程，不等价于规则要求的全局非凸安全域\\
+\bottomrule
+\end{longtable}
+\end{center}
+表中“通过”只表示该实现分支在合成边界上满足相应断言。它不把测试通过提升为正式规则
+认证，也不把未输出的对偶分量（例如线路乘子 $\tau$）推断成已实现字段；因此后文仍将
+聚合费用、乘子分解和外部结算列为差异或未实现项。
+
+\subsection{南方执行入口：SCUC 条款逐项判定}
+\begin{center}\scriptsize
+\begin{longtable}{@{}L{1.7cm}L{2.2cm}L{4.6cm}L{6.6cm}@{}}
+\toprule 条款 & 状态 & 实现（源码出处） & 差异说明与影响\\\midrule
+\endhead
+2.6.3 目标 & 一致（含解释） & 运行费分段、最小出力费（开机计入）、三态启动费、过网费、M1--M4 松弛、储能报价（southern\_market.cpp:583-585,:641-643,:964-986,:997,:1033,:1006-1008） & 原式无停机费/备用报价/失负荷费：停机变量费用为 0（:585），不另列；$C^{pmin}$ 仅 UC 阶段计费、SCED/LMP 阶段费用系数为 0（:583-585），与 $J_{SCED}=J_{UC}-C^U-C^{pmin}$ 一致\\
+2.6.3.1 & 一致 & 分母线平衡行 \fld{2.6.3.1/balance}（:978），非市场计划与交易成分注入 & 无差异；统调/母线校正见边界章\\
+2.6.3.2 & 一致 & 正备用行含网络受限量（:788） & 无差异\\
+2.6.3.3 & 一致 & 负备用行含负荷侧备用（:791；schema \fld{load\_side\_down\_reserve\_mw}） & 无差异；通用引擎无此族（见通用摘要）\\
+2.6.3.4 & 一致 & 一次调频 min 容量行与分省/直调系统行（:623-624,:794,:798） & 无差异\\
+2.6.3.5 & 不一致（子类缺失） & 通用必开 \fld{must\_on}/\fld{must\_off}（schema :86；冲突校验 boundary :384-385） & 规则 $I_s$ 含热电联产（按供热流量折算上下限）与调试机组（按调试计划取界）：代码无相应字段与装配分支，须由用户在 \fld{pmin/pmax\_mw} 中预先折算；不折算则该两类机组语义丢失\\
+2.6.3.6 & 解释性执行（A3） & $p=T_{traj}+\fld{technical\_min\_mw}\cdot s+\sum_k seg_k$，$seg_k\le q_k\cdot s$（:714-721） & 原文求和外自由下标与段界语义未澄清；代码按 2.2.10 采用增量段宽并绑定稳定状态，每段 $\ge1\%$ 灵活区间（boundary :371-380）。影响：报价输入口径不同，直接搬绝对区间式申报会被校验拒绝\\
+2.6.3.7 & 一致 & 段价直接进入目标（:641-643；quantity 模式置 0） & 段价非降由边界校验保证（boundary :373）\\
+2.6.3.8 & 一致 & 出力上下限与启停轨迹四式（:712,:732；轨迹 :700-711） & 无差异\\
+2.6.3.9/10 & 一致 & 群功率区间与群日电量（:805,:809；日电量仅 96 点） & 无差异\\
+2.6.3.11 & 一致 & 含启停轨迹项的爬坡（:761；:753-760） & 爬坡时长取相邻点实际分钟差（:663-664），代表点间不虚构等长 15 分钟（A1 解释）\\
+2.6.3.12 & 一致 & 最小开停事件窗口含初始状态剩余义务（:683-696） & 无差异；跨越优化起点的历史由 \fld{initial\_state\_minutes} 显式给定\\
+2.6.3.13 & 一致（含解释 A4） & 状态转移/互斥、最大启停次数（:650-674,:773-774） & 原文单启动费式与三态说明并存（A4）：代码实现三态 $start_k$ 与 \fld{offline\_minutes} 门槛（:588-592,:665-674），是对 A4 的显式解释而非原文唯一解\\
+2.6.3.14/15 & 一致 & 线路/断面 B$\theta$/分布因子式与 $M_1$ 双松弛（:964-986） & 无差异；断面独立于支路约束，不以 N-1 替代\\
+2.6.3.16 & 一致（含解释） & 负充电、方向互斥、小时内不可既充又放（:890-894,:904）、能量递推/起末值/效率加权循环（:905-916） & 效率取往返效率平方根（:840），与原文“暂取”一致；小时内约束在 compact 投影下以小时方向二元实现（:841-848，证明见 performance.md）\\
+2.6.3.17 & 一致 & 中枢平衡/上下界/爬坡/相邻调节方向（:936-947） & 恒定损耗率；线损与送端符号由边界数据明确\\
+2.6.3.18/19 & 解释性执行（A6） & SI 水量式与水位双限、日电量（:1022-1064） & 原式无显式时间换算（A6）；代码显式取 $h$（m$^3$/MWh）、$S$（m$^2$）、3600 秒换算与上游时滞历史，恒定库面/耗水率为建模约定（水位库容/水头曲线/振动区未建模）\\
+2.6.3.20 & 一致 & 报量报价（$\alpha$ 下限+预测上限）与报量不报价（偏差=预测）（:644,:765-769） & $M_2$ 弃电罚 \fld{penalties}[1]（:644）\\
+2.6.3.21 & 解释性执行（A5） & 日电量下限/上限与关口映射（:995-1014） & 原文目标有 $M_4SL_k^-$ 而约束未写松弛（A5）：代码以 \fld{priority\_policy} 显式二选——\texttt{hard} 无松弛硬下限，\texttt{penalized\_shortfall} 引入 \fld{priority\_shortfall\_mwh} 与 $M_4$（:1006-1008）；两种口径结果不同，不得混称原式\\
+目标 $P_{gwf}$ 项 & 不一致（聚合） & 每成分每阶段单一过网费 \fld{scuc/sced/lmp\_fee}（schema :191-192；:997,:1258） & 规则为网损费+送出侧省内输配电费+输电费分享空间之和；代码只接受聚合值。影响：费用结构不单列，若三分量随成分/阶段不同变化，需在输入侧预先加总，结果中无法还原分量\\
+时域 $T=98$ & 解释性执行（A1） & 96 个 0.25 h 日点 + 2 个 authored 代表点（boundary :333-348）；日电量只计 96 点（:1750） & 代表点时长/权重取 authored 值，空隙不积分未观测能量与水量；承接只取第 96 点（索引 95）末态（operation :119-147）\\
+\bottomrule
+\end{longtable}
+\end{center}
+
+\subsection{南方执行入口：SCED/LMP 与节点电价（2.6.4--2.6.6）}
+\begin{center}\scriptsize
+\begin{longtable}{@{}L{1.7cm}L{2.2cm}L{4.6cm}L{6.6cm}@{}}
+\toprule 条款 & 状态 & 实现（源码出处） & 差异说明与影响\\\midrule
+\endhead
+2.6.2 步骤 2 & 解释性执行 & 消费外部调频预出清容量：SCUC 后 $P^{min}+R^{reg,down}$、$P^{max}-R^{reg,up}$ 进 SCED，非稳定机组获分配即抛错（:605-608,:725-728） & 调频市场本身由另一细则规定，本入口不出清该市场（云南研究调频见第~\ref{sec:yunnan-regulation}~章）；预出清结果错误会原样传入能量出清\\
+2.6.4 SCED & 一致 & 固定组合 SCED：$u/start/stop$ 冻结、目标去 $C^U$ 与 $C^{pmin}$（:583-585,:1194-1230） & 无差异\\
+2.6.5 定价资格与 $\delta$ & 解释性执行（A7 关联） & \fld{price\_setting}=0 固定于 SCED 出力，否则 $[(1-\delta)p,(1+\delta)p]$ 邻域（:595-601）；$\delta$=\fld{price\_delta} 默认 $0.05$（boundary :486） & 规则未给 $\delta$ 数值：$0.05$ 是显式选择的默认，不是规则参数。影响：$\delta$ 直接决定定价 LP 可行域宽度，取值不同节点价可不同；储能/新能源/优先计划是否保留进定价由 \fld{lmp\_storage\_policy}/\fld{lmp\_renewable\_priority} 选择（:762,:841,:1004），对应 A7 未重列条款的两种读法\\
+2.6.5 $M'_1$--$M'_4$ & 一致 & \fld{pricing\_penalties}[4] 独立定价罚因子（schema :213；派生装配 :1198-1230） & 无差异；不默认等于出清 $M_j$\\
+2.6.6 节点电价 & 不一致（形式） & 节点价直接取母线平衡行原乘子除以权重：$LMP_{b,t}=(\lambda^{bal}_{b,t}+\lambda^{up}-\lambda^{down})/w_t$，其中备用行消元被代数还原（:1953-1958） & 规则给出分解式 $LMP=\lambda-\sum(\tau^{max}-\tau^{min})G$：在 LP 对偶意义下平衡行乘子即完整节点价（含线路/断面拥塞），但代码\textbf{不单列输出} $\tau$ 线路/断面分量，无法按规则形式核对分解；报告口径为节点价本身\\
+2.6.2 步骤 4（AC 校核） & 不一致（口径收窄） & 局部潮流灵敏度加割重求 SCUC/SCED，\fld{security\_iterations} 上限（默认 4，boundary :486），耗尽或潮流失败即拒绝认证（:2440-2450；execution 章 :68-72） & 规则要求“加约束重复第一至第四步直到满足”：代码是局部切面的有界迭代，不是非凸安全域的全局 oracle——可能欠约束（灵敏度近似）或提前失败；失败显式而非静默通过。影响方向不定，按失败显式处理\\
+\bottomrule
+\end{longtable}
+\end{center}
+
+\subsection{通用 AC/DC 引擎与规则的主要差异（摘要）}
+通用入口 \fld{run\_day\_ahead\_market} 不是规则模型的实现，逐项对照已校核记录于
+\srcpath{docs/modules/market/southern\_rules\_comparison.md}（UC/DATA/OFFER/PRICE 表）。
+主要差异：
+\begin{itemize}
+  \item 目标含空载费、停机费、备用报价与 VOLL，无跨省费和 M1--M4 全套项，报价系数非负截断——
+        这些项不得写入规则原目标（comparison :70 行族）；
+  \item 母线净需求平衡，无省区交易成分/关口映射；全系统毛负荷比例上备用，无分省正负备用、
+        一次调频、机组群、断面、水库与水电日电量约束族（comparison :71-94）；
+  \item 时域为 \fld{num\_steps} 统一步长，98 点/峰谷代表点口径不适用；
+  \item 无独立规则 LMP 模型：\fld{extract\_pricing} 直接返回 AC/DC 母线平衡对偶
+        （\srcpath{src/market/market\_simulation.cpp:extract\_pricing}），无定价资格/$\delta$/M′；
+  \item AC 校核只认证不重清：失败置 \fld{feasible}=false、\fld{status=ac\_validation\_failed}
+        （\srcpath{src/market/market\_simulation.cpp:5259-5269}），不执行规则第 4 步的重算链路；
+  \item 储能为 DC 侧优化准入、充电非负、逐时段互斥，无小时内联合方向与效率加权循环的规则口径。
+\end{itemize}
+
+\subsection{未实现条款（规则有、代码无对应分支）}
+\begin{itemize}
+  \item \textbf{2.6.3.5 热电联产与调试机组子类型}：无供热流量折算与调试计划字段，
+        需输入侧预先折算为 \fld{pmin/pmax\_mw}（目录限制见
+        \srcpath{src/market/southern\_boundary.cpp:270,:272}）；
+  \item \textbf{目标 $P_{gwf}$ 的费用分量}：网损费、送出侧省内输配电费、输电费分享空间
+        不单列（见前表“不一致（聚合）”行）；
+  \item \textbf{2.6.6 分解式的乘子分量输出}：节点价有、$\tau$ 分量无输出；
+  \item \textbf{正式结算}：第 2.6 节范围不含结算条款；平台两侧均为研究口径——南方
+        \fld{analyze\_southern\_market\_result} 明示为条件电量×诊断价台账（“no contracts,
+        real-time deviation, auxiliary-service or cost allocation”，
+        \srcpath{src/market/southern\_market.cpp:2141}），通用 \fld{settle\_market}
+        （\srcpath{src/market/market\_simulation.cpp:settle\_market}）为平台自有 uplift 体系，
+        均不构成规则结算凭证；
+  \item \textbf{市场外程序}：D-2 审批披露、检修审批、调频/跨省备用市场出清、市场力监管与
+        争议处理均为外部流程（目录限制，boundary :266-285）。
+\end{itemize}
+
+\subsection{验证与校核}
+判定依据的索引骨架：\srcpath{docs/modules/market/southern\_execution\_contract.md}
+“公式—源码—测试索引”（2.6.3.1--2.6.3.21 行族映射，已校核）；每个“一致”判定对应
+\srcpath{tests/test\_southern\_market.cpp} 的解析/回归用例（74 用例/29807 断言整体，
+本次文档同步实跑），关键行族的独立数值检查（比例校正、备用不足、三态门槛、
+群日电量 1200 MWh、50 MW 拥塞与 200/300 元电价、0.81 效率、水位 99.9/90.4 m、
+新能源 20 MW 偏差、优先计划 80 MWh 缺口等）以合同索引所列为准。
+A1--A7 的逐项解释记录于第~\ref{sec:southern-execution}~节与
+\srcpath{docs/modules/market/southern\_rules\_comparison.md} 歧义表。
+
+\subsection{边界与局限}
+\begin{itemize}
+  \item 判定基于规则转写章与嵌入原页；发布机构未澄清前，A1--A7 的任何解释选择都
+        不构成“与正式规则完全一致”的证据，亦无发布机构规则等价认证；
+  \item “一致”指代码装配了对应行族并通过合成解析/回归用例，不是省级真实数据回放或
+        市场认证；合成算例的报价/边界均标注 synthetic；
+  \item 差异影响凡不能由代码或已校核实验量化的，本章只给方向性说明并标注口径；
+        后续代码变更可能改变判定，以当次源码为准；
+  \item 规则第 2.6 节之外的条款（实时、结算、披露、监管）不在本清单判定范围内，
+        云南调频衔接的差异口径见第~\ref{sec:yunnan-regulation}~章。
+\end{itemize}

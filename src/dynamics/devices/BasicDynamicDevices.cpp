@@ -5425,16 +5425,23 @@ void Exciter::addJacobian(double t,
 }
 
 void Exciter::handleEvent(const DynamicEvent& event, DynamicState& x, NetworkState&) {
+  if (event.type == DynamicEventType::Custom && event.component_type == "Exciter") {
+    // A voltage-reference step targets the exciter itself, so match on the
+    // "Exciter" component type rather than the host generator. computeDerivatives
+    // switches from the captured equilibrium reference to params_.v_ref_pu while
+    // captured_ is false, applying the step at t_event.
+    if (!protection_target_matches(event, "Exciter", params_.component_index, 0)) return;
+    const auto it = event.params.find("v_ref_pu");
+    params_.v_ref_pu = it == event.params.end() ? event.value : it->second;
+    captured_ = false;
+    return;
+  }
   const bool matching = protection_target_matches(event, "Generator",
                                                   params_.component_index, 0);
   if (!matching) return;
   if (event.type == DynamicEventType::GeneratorTrip) {
     params_.in_service = false;
     if (!range_.empty() && range_.offset < x.x.size()) x.x[range_.offset] = 0.0;
-  } else if (event.type == DynamicEventType::Custom && event.component_type == "Exciter") {
-    const auto it = event.params.find("v_ref_pu");
-    params_.v_ref_pu = it == event.params.end() ? event.value : it->second;
-    captured_ = false;  // re-capture the operating point on the next trim
   }
 }
 
@@ -6474,7 +6481,11 @@ GridFollowingInverter::GridFollowingInverter(GridFollowingInverterParams params)
         control.active_power_derate_start_pu <=
             control.undervoltage_block_pu ||
         control.undervoltage_block_delay_s < 0.0) {
-      throw std::invalid_argument(
+      // std::runtime_error (not std::invalid_argument): the std::logic_error
+      // family RTTI is not matched by catch(const std::exception&) in this
+      // build's libc++abi, so the builder's catch(...) wrapper would otherwise
+      // discard this validation message.
+      throw std::runtime_error(
           "DC-link fault control requires finite 0 <= block < derate-start "
           "thresholds and a nonnegative block delay");
     }

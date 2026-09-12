@@ -268,7 +268,12 @@ void apply_gfl_params(const std::map<std::string, double>& p,
                params.dc_fault_control.enabled ? 1.0 : 0.0);
   if (!std::isfinite(dc_fault_enabled) ||
       (dc_fault_enabled != 0.0 && dc_fault_enabled != 1.0)) {
-    throw std::invalid_argument("dc_fault_control_enabled must be exactly 0 or 1");
+    // Use std::runtime_error rather than std::invalid_argument: in this build the
+    // std::logic_error-family RTTI typeinfo is not matched by catch(const
+    // std::exception&) (Apple libc++abi pointer-based matching), so a
+    // logic_error would be swallowed by the builder's catch(...) wrapper and its
+    // message lost. runtime_error propagates with its message intact.
+    throw std::runtime_error("dc_fault_control_enabled must be exactly 0 or 1");
   }
   params.dc_fault_control.enabled = dc_fault_enabled == 1.0;
   params.dc_fault_control.active_power_derate_start_pu = param_or(

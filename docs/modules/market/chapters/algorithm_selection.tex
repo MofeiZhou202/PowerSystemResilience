@@ -1,0 +1,200 @@
+% algorithm_selection.tex -- 算法选择与求解策略
+\section{算法选择与求解策略}\label{sec:algorithm-selection}
+
+\begin{theorynote}
+本章把导言区“求解器家族与选择逻辑”小节展开为完整的算法选择说明：
+每个后端分派、回退链与确定性保障均以代码为准并注明出处。导言区小节保留为摘要。
+核心原则：分派结果写入 performance 字段或一致性台账，近似与回退必须显式，
+不静默降级；确定性保证只对同一有序 LP、同一后端版本与同一平台成立。
+\end{theorynote}
+
+\subsection{功能定位}
+市场模块有两套求解栈：通用 AC/DC 引擎（\srcpath{src/market/market\_simulation.cpp}，
+SCUC 为 MILP、定价为 LP）与南方流水线（\srcpath{src/market/southern\_market.cpp}，
+SCUC/SCED/LMP 三阶段）。算法选择回答三个问题：MILP 用哪个后端、定价 LP 用哪条
+确定性路径、装配与求解结果在什么准入条件下可以复用。选择逻辑全部可按规模与
+可用性复现，失败沿显式回退链传播并在结果中留痕。
+
+\subsection{通用引擎：SCUC 后端分派与回退}
+\textbf{后端分派}（\fld{create\_market\_milp\_adapter}，
+\srcpath{src/market/market\_simulation.cpp:803-856}）：\fld{uc\_solver} 取
+\texttt{Native}/\texttt{HiGHS}/\texttt{SCIP}/\texttt{Gurobi}/\texttt{Auto}
+（默认 \texttt{Auto}，\srcpath{include/hacdcpf/time\_series/time\_series\_pf.hpp:150}）。
+\texttt{Native} 直达原生分支定界；\texttt{HiGHS} 走内嵌 HiGHS（满足条件时启用结构化
+分支）；\texttt{SCIP}/\texttt{Gurobi} 不可用时分别回退原生与 HiGHS；
+\texttt{Auto} 优先 Gurobi（\fld{market\_gurobi\_available} 静态探测，
+:793-801），否则 HiGHS，再否则原生。结构化 HiGHS 分支的启用条件为
+HiGHS 路径、\fld{structured\_scuc\_branching} 且二元变量数 $\ge$
+\fld{structured\_scuc\_min\_binary\_variables}（\fld{market\_uses\_structured\_highs}，
+:782-791）。
+
+\textbf{回退链}（\fld{solve\_market\_milp\_with\_fallback}，:858-905）：显式非
+Auto/非 Gurobi 选择直接求解不回退；Auto 或 Gurobi 选择依次
+Gurobi $\to$ HiGHS $\to$ 原生，每次回退把上游失败状态追加进
+\fld{stats.status}（如 \texttt{"(fallback after Gurobi: ...)"}），不静默替换。
+
+\textbf{分支定界选项}（\fld{market\_scuc\_bc\_options}，:760-780）：Gomory 割、
+根节点 15 轮 $\times$ 每轮 20 割、伪费用分支、混合节点选择、
+\fld{max\_lp\_iter}=30000；这些是 MIPSolvers \texttt{engine::BCOptions} 的取值，
+时限/间隙/节点上限分别透传 \fld{scuc\_time\_limit\_sec}、
+\fld{scuc\_mip\_relative\_gap}、\fld{scuc\_max\_nodes}。
+
+\textbf{最优性口径}：\fld{scuc\_mip\_relative\_gap} 默认 $10^{-2}$（hpp:430）。
+达到 gap 目标但未证零间隙时置 \fld{scuc\_mip\_gap\_target\_met} 并写 warning；
+未达目标时写明“返回可行现任解但未达 gap 目标”（:4907-4916）；
+只有 \fld{scuc\_optimality\_proven} 才是零间隙证明。
+
+\textbf{何时选哪个}：默认 \texttt{Auto}——有 Gurobi license 时用 Gurobi，否则
+HiGHS；需要完全无外部依赖的可复现 B\&C 时选 \texttt{Native}；\texttt{SCIP} 为
+可选后端实验。定价对偶的正确性不依赖 SCUC 后端（定价阶段固定组合）。
+
+\subsection{通用引擎：定价 LP 分派}
+固定组合定价 LP（SCED/LMP）统一走 \fld{solve\_market\_pricing\_lp}
+（\srcpath{src/market/market\_simulation.cpp:907-940}）：变量数超过
+\fld{pricing\_native\_max\_variables}（默认 $5000$，
+\srcpath{include/hacdcpf/market/market\_simulation.hpp:427}；$0$=全部直达 HiGHS）
+且内嵌 HiGHS 可用时直达 HiGHS、跳过原生 simplex；否则先原生 simplex，失败时以
+HiGHS 回退。两类事件都写 warning 并记入
+\fld{performance.pricing\_solver\_fallback\_used}/%
+\fld{pricing\_large\_model\_direct\_highs\_used}（:4939-4961）；
+N-1 校正定价复用同一函数（:5106-5108）。
+
+\subsection{南方流水线：确定性定价}
+\textbf{方法选择的固定策略}（\fld{gurobi\_method}，
+\srcpath{src/market/southern\_market.cpp:1346-1353}）：\texttt{lmp} 阶段列数
+$\ge10^{6}$ 固定 barrier，否则固定对偶单纯形——定价不响应用户的算法偏好；
+其他阶段按 \fld{execution.gurobi\_method} 指定，\texttt{auto} 时仅 compact 且
+列数 $\ge10^{6}$ 用 barrier，否则求解器默认。非大规模定价 LP 固定单线程
+（:1527）；整数修复的投影 LP 同样固定单线程对偶单纯形（:1415）。
+
+\textbf{双实例一致性}：非大模型 \texttt{lmp} 阶段在剩余时限内顺序重解一次
+（:1720-1745）；列数 $\ge10^{6}$ 且 Gurobi 时走大模型路径（:1681）：进程内互斥
+保证每进程至多一对大定价（:1684-1686），两份独立 Gurobi 实例并发求解同一有序 LP
+（:1701-1703），固定 8 线程 barrier（策略 \fld{"ordered-lp-barrier-8-v2"}，
+:1709-1711）。两条路径都由
+\srcpath{src/market/southern\_price\_consistency.hpp:9-30} 的
+\fld{check\_price\_duals} 对两份完整原单位行对偶逐 bit 比对（最大绝对差不为 0 即
+\fld{dual\_mismatch}，另审计最优性、原始残差与目标值）；不一致则价格为空、不得结算。
+
+\textbf{为什么固定策略}：自动并发算法曾在同一 LP 上产生第 5 日最大
+6.64876 元/MWh 的价格差（非舍入误差，保留为历史失败证据，
+\srcpath{docs/modules/market/performance.md:920}；现行策略沿革见 :431）。
+固定单线程对偶单纯形消除退化最优面上的胜者竞争；保存的探针证据显示同一装配 LP
+在 auto/dual\_simplex/barrier 三种请求下 199246 个行对偶逐 bit 一致、目标
+14034457.13961928、最大残差 $1.16\times10^{-10}$
+（\srcpath{docs/modules/market/performance.md:423-429}，本地增量实验口径）。
+
+\subsection{装配策略与解复用}
+\textbf{装配路径} \fld{assembly\_mode}（枚举
+\srcpath{src/market/southern\_boundary.cpp:232}）：\texttt{cached} 复用符合条件的
+阶段存储/稀疏结构（全部数值重新计算）；\texttt{reference} 走原装配；
+\texttt{verify} 额外用独立原装配逐元素比对矩阵、目标、边界、表达式与索引，
+一致时记 \fld{matrix\_comparison}=\fld{"exact\_match"}
+（\srcpath{src/market/southern\_market.cpp:1138,:1184-1189,:1336-1341}；
+比对实现 \fld{compare\_assembly}，:1098）。模式不改变数学 formulation。
+
+\textbf{同日派生}：\fld{derive\_sced}（:1149-1192）在严格准入下由 SCUC 矩阵派生
+SCED——仅当无最小出力费用/启动费/调频预出清、SCUC 与 SCED 过网费相同、非
+reference/RT/云南/行预求解时准入（:1153-1159）；\fld{derive\_lmp}（:1194-1345）在
+SCED 基础上冻结 $u$/$start$/$stop$、按原定价分支做有序行列选择并换用
+\fld{pricing\_penalties}（:1198-1230），$A_{price}=RA_{sced}C$ 的行/列选择见
+:1294-1313；不满足准入一律走原装配。
+
+\textbf{解与下界复用}：SCUC 的已接受下界证书在 SCED 阶段可复用，门槛为同一 LP 且
+变量盒仅收紧（\fld{same\_lp\_with\_tighter\_box}，
+\srcpath{src/market/southern\_bound\_certificate.hpp:9-22}）、SCED 二元变量为 SCUC 子集、
+前解原始残差达标（:2389-2402）；复用时证书标注 \fld{reused\_from}=\fld{"scuc"}、
+\fld{bound\_subset}=true（:2396-2401）。未过门槛正常重解。
+
+\textbf{行预求解与根割}：\fld{row\_presolve}=\texttt{enabled} 仅 compact 可用
+（\srcpath{src/market/southern\_boundary.cpp:307-308}），裁剪边界可证明冗余的不等式，
+原约束保留复核、定价 LP 保留全部行。Native 求解的根割策略
+\fld{native\_root\_cuts}：\texttt{default} 不改变引擎默认；\texttt{enhanced}（实验）
+设 \fld{root\_cut\_rounds}=20、\fld{cuts\_per\_round}=100、强制分离审计、
+超 10 万预解行的根模型拒绝（\srcpath{src/market/southern\_market.cpp:1611,:1617-1628}），
+诊断写入 \fld{native\_diagnostics}（:1631-1645）；这些选项属 MIPSolvers
+\texttt{engine::BCOptions}。
+
+\begin{sloppypar}
+\textbf{认证整数修复}（\fld{certified\_integer\_repair}，:1432-1519）：
+\fld{large\_mip\_strategy}=\texttt{certified\_repair} 或 \texttt{auto} 且列数
+$\ge10^{6}$ 时，对 SCUC（非 RT/云南、纯二元、compact、正 gap；准入
+:1530-1533，schema 侧强制 compact Gurobi+正 gap，
+\srcpath{src/market/southern\_boundary.cpp:300-302}）执行：30\% 时限解 LP 松弛
+（:1440）$\to$ 二元取整固定并做储能/负荷候选投影（储能预算
+$\min(2\text{s},5\%)$，:1452；负荷按母线与日能量上限单调缩减，:1457-1476）
+$\to$ 40\% 时限 barrier（不交叉）解修复 LP（:1487-1494），并发的 Lagrangian 盒
+支撑下界证书对原模型求值（\fld{box\_dual\_lower\_bound} 全程向外取整，
+\srcpath{src/market/southern\_bound\_certificate.hpp:27-62}）。接受条件为修复残差达标且
+$0\le gap\le\fld{mip\_gap}$（:1500-1508）；任一环节失败返回
+\texttt{std::nullopt} 回退正常求解，失败只是启发式未中，不伪造证书。
+\end{sloppypar}
+
+\subsection{恢复/重跑的并行策略}
+运营恢复实验在固定当日初态下逐因素重算，双 worker 并行准入：Gurobi 后端、
+实验数 $>1$、母线 $\le118$、机组 $\le128$、储能 $\le16$、水库 $\le24$、
+核数 $\ge4$ 且每解线程 $\le$ 核数一半；满足则 \fld{workers}=2 否则 1
+（\srcpath{src/market/market\_operation.cpp:415-426}）。时序日从不并行
+（独立潜在结果共享干预前状态； :415-417 注释）。
+
+\subsection{参数表（算法选择）}
+\begin{paramtable}
+\fld{uc\_options.uc\_solver} & — & — & Auto/\allowbreak Native/\allowbreak HiGHS/\allowbreak SCIP/\allowbreak Gurobi & Auto & 通用 SCUC 后端（time\_series\_pf.hpp:150）\\
+\fld{scuc\_mip\_relative\_gap} & — & — & $0\sim1$ & $0.01$ & 通用 SCUC gap（hpp:430）\\
+\fld{scuc\_time\_limit\_sec} / \fld{scuc\_max\_nodes} & — & s/节点 & $>0$ & $120$/$50000$ & 透传 BC 选项（hpp:431-432,:763-765）\\
+\fld{pricing\_native\_max\_variables} & — & 变量 & $\ge0$ & $5000$ & 定价 LP 直达 HiGHS 门槛；$0$=全直达（hpp:427）\\
+\fld{structured\_scuc\_branching} / \fld{structured\_scuc\_min\_binary\_variables} & — & — & 布尔/变量 & true/$1000$ & 结构化 HiGHS 分支门槛（hpp:428-429,:782-791）\\
+\fld{solver} & — & — & highs/\allowbreak gurobi/\allowbreak native & highs & 南方便携后端（southern\_boundary.cpp:224,:293）\\
+\fld{gurobi\_method} & — & — & auto/\allowbreak \fld{solver\_default}/\allowbreak barrier/\allowbreak \fld{dual\_simplex} & auto & 调度阶段方法；定价固定策略（:227,:1346-1353）\\
+\fld{large\_mip\_strategy} & — & — & auto/\allowbreak reference/\allowbreak \fld{certified\_repair} & auto & 大整数模型策略（:228,:299-302）\\
+\fld{assembly\_mode} & — & — & cached/\allowbreak reference/\allowbreak verify & cached & 装配路径（:232,:1138）\\
+\fld{row\_presolve} & — & — & none/\allowbreak enabled & none & 冗余行裁剪，须 compact（:231,:307-308）\\
+\fld{native\_root\_cuts} & — & — & default/\allowbreak enhanced & default & 根割策略，enhanced 为实验（:233-234,:1617-1628）\\
+\fld{formulation} & — & — & compact/\allowbreak reference & compact & 等价建模形式（:226,:295）\\
+\fld{mip\_start} & — & — & auto/\allowbreak enabled/\allowbreak none & auto & 可行初解，显式 enabled 须 Gurobi（:230,:309-310）\\
+\fld{mip\_gap} / \fld{time\_limit\_sec} & — & —/s & $0\sim0.1$/$0.1\sim3600$ & $0.01$/$120$ & 南方执行块（:216,:215,:486）\\
+\fld{threads} & — & 线程 & $0\sim128$ & $0$ & 非零须 Gurobi；定价内部固定（:225,:313-314,:1527）\\
+\end{paramtable}
+
+\subsection{验证与校核}
+\begin{itemize}
+  \item 通用引擎：\srcpath{hacdcpf\_test\_market\_simulation}（22 用例/845 断言）覆盖
+        SCUC 回退链标注、定价对偶与结算；铜板定价/结算恒等式由独立方程 oracle
+        \fld{market\_sced\_cross\_validation} 复核（第~\ref{sec:market-xref}~节，
+        含负控制）；
+  \item 南方装配与复用：\srcpath{tests/test\_southern\_market.cpp:203,:237}
+        （\texttt{[assembly\_cache]}，边界变更后系数精确一致、滚动目标/残差/水量
+        SOC 承接）、:155（\texttt{[lmp\_reuse\_gurobi]}，SCED 派生原有序 LP）、
+        :160（\texttt{[bound\_certificate]}，SCED 下界复用要求精确 LP 包含）；
+  \item 确定性定价：\srcpath{tests/test\_southern\_market.cpp:43,:179}
+        （\texttt{[price\_consistency]}，不一致/未证对偶拒绝、与请求算法无关的重复
+        定价）；探针工件见 \srcpath{docs/modules/market/performance.md:423-429}；
+  \item 下界与修复：\srcpath{tests/test\_southern\_market.cpp:22}
+        （\texttt{[bound\_certificate]}，任意乘子弱对偶）、:62
+        （\texttt{[certified\_repair]}，审计原模型并拒绝不支持证书）；
+  \item 求解器选项与本地算法：\srcpath{tests/test\_southern\_market.cpp:947}
+        （\texttt{[solver\_options]}，旧输入归一化与不可用选择拒绝）、:850
+        （\texttt{[local\_solvers]}，本地算法共享 1\% gap 解析 oracle）、
+        :993,:1030,:1063（\texttt{[gurobi]}，同模型出清、行对偶恒等、
+        原始补全不固定最终组合）；
+  \item 套件整体 74 用例/29807 断言（本次文档同步实跑）。
+\end{itemize}
+
+\subsection{边界与局限}
+\begin{itemize}
+  \item Gurobi 路径需要有效 license；不可用/未授权时显式回退并在状态串标注，
+        不静默替换后端（:879-885; southern 侧 license 不可用直接报错）。
+  \item 2000 节点规模基准由 \fld{HACDCPF\_ENABLE\_MARKET\_SCALE\_TESTS}（默认 OFF）
+        门控、仅 UNIX（\srcpath{tests/CMakeLists.txt:59-71}）；大规模性能数字均为
+        本机单次实测，不是硬截止保证（见 performance.md）。
+  \item 确定性定价保证的范围：同一有序 LP、同一后端版本、同一平台、同一参数下的
+        代表解一致性；不证明数学对偶唯一，跨版本/跨平台不承诺逐 bit 一致
+        （第~\ref{sec:southern-execution}~节同口径）。
+  \item time-limit/gap 结果是近似解：达到 gap 目标不等于零间隙证明，
+        \fld{scuc\_optimality\_proven} 之外不得写成最优（:4907-4916）；
+        认证整数修复失败只是启发式未中，不构成不可行证据。
+  \item \fld{native\_root\_cuts}=\texttt{enhanced} 是有界分离实验，不保证实际加割或
+        加速（\srcpath{docs/modules/market/southern\_execution\_contract.md} 的
+        Native Root Cut Experiments）；装配复用与派生只改变计算路径，不改变
+        formulation，verify 模式是全比对证据而非第二模型。
+\end{itemize}

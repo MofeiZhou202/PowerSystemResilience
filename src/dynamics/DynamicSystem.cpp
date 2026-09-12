@@ -236,6 +236,7 @@ bool numerical_masked_dynamic_jacobian(DynamicSystem& sys,
   return evaluate_masked_dynamic_residual(sys, t, state, restored, error);
 }
 
+
 bool is_machine_controller(const DynamicDevice& device) {
   const std::string type = device.type();
   return type == "Governor" || type == "Exciter" || type == "PSS";
@@ -260,7 +261,15 @@ struct ConsistentInitializationResult {
   std::string message;
 };
 
-ConsistentInitializationResult solve_consistent_dynamic_initial_state(
+// Reduced consistent-initialization Newton: solves mask f(x, y(x)) = 0 over the
+// differential state x with the algebraic network y(x) eliminated by an exact
+// per-evaluation network solve. Because solveNetwork enforces g = 0 exactly this
+// converges the sensitive electromechanical residuals to machine precision, but
+// the eliminated map y(x) is multi-valued for IBR-heavy systems, so it must be
+// warm-started on the physical branch (its solveNetwork continuation seed is the
+// current sys.y). Used as the second, tightening phase after the coupled solve
+// has selected the branch.
+ConsistentInitializationResult solve_reduced_dynamic_initial_state(
     DynamicSystem& sys,
     double t,
     const Eigen::VectorXd& initial_state,
@@ -274,12 +283,24 @@ ConsistentInitializationResult solve_consistent_dynamic_initial_state(
   } tolerance_restore{sys.options.algebraic_network_tol,
                       sys.options.algebraic_network_tol};
   // The reduced residual f(x,y(x)) cannot be certified more tightly than the
-  // algebraic solve used to evaluate y(x). Keep its evaluation noise at least
-  // one decade below the requested dynamic gate during initialization only.
-  // Higham, Accuracy and Stability of Numerical Algorithms, 2nd ed., Sec. 1.4.
+  // algebraic solve used to evaluate y(x). A forward-difference reduced Jacobian
+  // taken through an algebraic solve of accuracy eta has error O(sqrt(eta)) at
+  // the optimal step h ~ sqrt(eta) (Higham, Accuracy and Stability of Numerical
+  // Algorithms, 2nd ed., Sec. 1.4), so certifying the reduced residual to
+  // `tolerance` needs eta ~ tolerance^2. A stiff/high-gain machine hand-off to
+  // this Newton (e.g. the PSS/E STAB1 OMIB GENROU with Xd'=Xd''=0.30, Xd=Xq=2.2
+  // and a K=130 exciter) otherwise locks at the sqrt(0.1*tolerance) ~ 1e-4
+  // Jacobian-noise floor. But the algebraic solve cannot be driven below the
+  // floor its own conditioning admits, and the caller's algebraic tolerance is
+  // by construction reachable for this network, so bound the request to a few
+  // decades under it -- tight enough for the reduced Jacobian, still reachable
+  // on stiff AC/DC networks (e.g. a DCDC-coupled DC bus that floors near 2e-11).
+  const double gate = std::max(0.0, tolerance);
+  const double caller_network_tol = tolerance_restore.saved;
   const double initialization_network_tol =
-      std::max(100.0 * std::numeric_limits<double>::epsilon(),
-               0.1 * std::max(0.0, tolerance));
+      std::max({100.0 * std::numeric_limits<double>::epsilon(),
+                gate * gate,
+                caller_network_tol * 1e-4});
   sys.options.algebraic_network_tol =
       std::min(sys.options.algebraic_network_tol, initialization_network_tol);
   std::string error;
@@ -387,6 +408,178 @@ ConsistentInitializationResult solve_consistent_dynamic_initial_state(
   }
   if (result.message.empty()) {
     result.message = "DAE consistent-initialization Newton did not converge";
+  }
+  return result;
+}
+
+ConsistentInitializationResult solve_coupled_dynamic_initial_state(
+    DynamicSystem& sys,
+    double t,
+    const Eigen::VectorXd& initial_state,
+    double tolerance,
+    int max_iterations) {
+  ConsistentInitializationResult result;
+  // Coupled consistent DAE initialization. The semi-explicit model is
+  //   dx/dt = f(x, y),   0 = g(x, y),
+  // with g the AC/DC network-balance residual, so a consistent initial point is
+  // the joint equilibrium  [ mask f(x, y) ; g(x, y) ] = 0.  Grid-following IBRs
+  // inject (near-)constant power, so the reduced algebraic map y(x) from a free
+  // network solve is multi-valued: a Newton that eliminates y can lock onto a
+  // spurious high-voltage load-flow branch (Kundur, Power System Stability and
+  // Control, Sec. 13.3).  Carrying the network voltage y as an explicit unknown
+  // seeded at the power-flow point and enforcing g = 0 keeps the iterate on the
+  // physical branch and returns the true consistent initial values (Hairer &
+  // Wanner, Solving ODEs II, Ch. VII.1).  Levenberg--Marquardt absorbs the rank
+  // deficiency left by masked slow-state rows.
+  const int n_x = static_cast<int>(initial_state.size());
+  const int n_ac = sys.network.acPhaseNodeCount();
+  const int n_dc = sys.network.dcBusCount();
+  const int n_v = 2 * n_ac + n_dc;
+  const int n = n_x + n_v;
+  if (n == 0) {
+    result.converged = true;
+    return result;
+  }
+  // Network-voltage seed = the power-flow operating point the caller left in
+  // sys.y before this solve.
+  const NetworkState voltage_seed = sys.y;
+  const Eigen::VectorXd zero_derivative = Eigen::VectorXd::Zero(std::max(0, n_x));
+
+  auto unpack = [&](const Eigen::VectorXd& u, Eigen::VectorXd& x, NetworkState& y) {
+    x = u.head(n_x);
+    y = voltage_seed;
+    for (int i = 0; i < n_ac; ++i) {
+      y.Vac_abc[i] = std::complex<double>(u[n_x + i], u[n_x + n_ac + i]);
+    }
+    for (int i = 0; i < n_dc; ++i) {
+      y.Vdc[i] = u[n_x + 2 * n_ac + i];
+    }
+  };
+  std::string error;
+  auto residual_at = [&](const Eigen::VectorXd& u, Eigen::VectorXd& R) -> bool {
+    Eigen::VectorXd x;
+    NetworkState y;
+    unpack(u, x, y);
+    Eigen::VectorXd r_f;
+    Eigen::VectorXd r_g;
+    if (!sys.evaluateDaeResidual(t, x, y, zero_derivative, r_f, r_g, error)) {
+      return false;
+    }
+    // r_f = 0 - f(x, y) = -f; mask slow rows so only enforced states appear.
+    mask_slow_residuals(sys.devices, r_f);
+    R.resize(n_x + static_cast<int>(r_g.size()));
+    if (n_x > 0) R.head(n_x) = r_f;
+    R.tail(r_g.size()) = r_g;
+    return R.allFinite();
+  };
+
+  Eigen::VectorXd u(n);
+  if (n_x > 0) u.head(n_x) = initial_state;
+  for (int i = 0; i < n_ac; ++i) {
+    u[n_x + i] = voltage_seed.Vac_abc[i].real();
+    u[n_x + n_ac + i] = voltage_seed.Vac_abc[i].imag();
+  }
+  for (int i = 0; i < n_dc; ++i) {
+    u[n_x + 2 * n_ac + i] = voltage_seed.Vdc[i];
+  }
+
+  auto apply = [&](const Eigen::VectorXd& u_final) {
+    Eigen::VectorXd x;
+    NetworkState y;
+    unpack(u_final, x, y);
+    sys.x.x = x;
+    sys.y = y;
+  };
+
+  Eigen::VectorXd R;
+  if (!residual_at(u, R)) {
+    result.message = error;
+    result.residual_norm = std::numeric_limits<double>::infinity();
+    return result;
+  }
+  double norm = inf_norm(R);
+  result.residual_norm = norm;
+  if (norm <= tolerance) {
+    result.converged = true;
+    apply(u);
+    return result;
+  }
+
+  const double eps0 = NumericalConstants::kSqrtMachineEpsilon;
+  double lambda = 1e-6;
+  const double min_alpha = std::max(1e-9, sys.options.newton_damping_min);
+  const int max_iters = std::max(1, max_iterations);
+  Eigen::MatrixXd jac(R.size(), n);
+
+  auto try_step = [&](const Eigen::VectorXd& delta_in) -> bool {
+    Eigen::VectorXd delta = delta_in;
+    if (!delta.allFinite()) return false;
+    const double delta_inf = inf_norm(delta);
+    if (delta_inf > 5.0) delta *= 5.0 / delta_inf;
+    double alpha = 1.0;
+    while (alpha >= min_alpha) {
+      const Eigen::VectorXd trial = u + alpha * delta;
+      Eigen::VectorXd trial_R;
+      if (residual_at(trial, trial_R)) {
+        const double trial_norm = inf_norm(trial_R);
+        if (trial_norm <= (1.0 - 1e-4 * alpha) * std::max(norm, tolerance)) {
+          u = trial;
+          R = trial_R;
+          norm = trial_norm;
+          return true;
+        }
+      }
+      alpha *= 0.5;
+    }
+    return false;
+  };
+
+  for (int iter = 0; iter < max_iters; ++iter) {
+    for (int col = 0; col < n; ++col) {
+      Eigen::VectorXd u2 = u;
+      const double h = eps0 * std::max(1.0, std::abs(u[col]));
+      u2[col] += h;
+      Eigen::VectorXd Rp;
+      if (!residual_at(u2, Rp)) {
+        result.message = error;
+        apply(u);
+        return result;
+      }
+      jac.col(col) = (Rp - R) / h;
+    }
+
+    const Eigen::MatrixXd jt = jac.transpose();
+    const Eigen::MatrixXd jtj = jt * jac;
+    const Eigen::VectorXd rhs = -jt * R;
+    const double diag_scale = std::max(1.0, jtj.diagonal().cwiseAbs().maxCoeff());
+    bool accepted = false;
+    for (int damp_try = 0; damp_try < 10 && !accepted; ++damp_try) {
+      Eigen::MatrixXd a = jtj;
+      a.diagonal().array() += lambda * diag_scale;
+      Eigen::VectorXd delta;
+      accepted = sparse_solve_dense_system(a, rhs, delta) && try_step(delta);
+      if (accepted) {
+        lambda = std::max(1e-12, lambda * 0.1);
+      } else {
+        lambda *= 10.0;
+      }
+    }
+    result.iterations = iter + 1;
+    result.residual_norm = norm;
+    if (norm <= tolerance) {
+      result.converged = true;
+      apply(u);
+      return result;
+    }
+    if (!accepted) {
+      result.message = "Coupled DAE consistent-initialization line search failed";
+      break;
+    }
+  }
+
+  apply(u);
+  if (result.message.empty()) {
+    result.message = "Coupled DAE consistent-initialization did not converge";
   }
   return result;
 }
@@ -669,6 +862,17 @@ void DynamicSystem::initializeStatesFromPowerFlow() {
   bool trimmed = false;
   double fast_norm = std::numeric_limits<double>::infinity();
 
+  // Power-flow-seeded operating point. Once grid-following IBRs inject constant
+  // power, the {trim; solveNetwork} fixed-point map can become expansive
+  // (spectral radius > 1) and walk the algebraic state toward a spurious
+  // high-voltage equilibrium. If the cheap trim does not converge, the
+  // consistent-initialization Newton (and its warm-started network solves) must
+  // restart from this seed rather than a divergent trim iterate -- the same
+  // restart-from-seed contract solveNetwork() uses for its Newton fallback
+  // (Kelley, Solving Nonlinear Equations with Newton's Method, Ch. 2).
+  const Eigen::VectorXd power_flow_seed_state = x.x;
+  const NetworkState power_flow_seed_network = y;
+
   for (int iter = 0; iter < std::max(1, options.max_dynamic_trim_iters); ++iter) {
     if (!solveNetwork(options.t_start_s, error)) {
       initialization.warnings.push_back("Dynamic equilibrium trim skipped: " + error);
@@ -712,12 +916,61 @@ void DynamicSystem::initializeStatesFromPowerFlow() {
 
   if (!trimmed && std::isfinite(fast_norm) &&
       options.use_consistent_dynamic_initialization) {
-    const ConsistentInitializationResult consistent =
-        solve_consistent_dynamic_initial_state(*this,
-                                               options.t_start_s,
-                                               x.x,
-                                               options.dynamic_trim_tol,
-                                               options.max_dynamic_trim_iters);
+    // The reduced consistent-initialization Newton eliminates the network
+    // voltage y through a free algebraic solve. That map y(x) is single-valued
+    // for machine-dominated systems but becomes multi-valued once grid-following
+    // inverters inject (near-)constant power, where the free solve can lock onto
+    // a spurious high-voltage load-flow branch (Kundur, Power System Stability
+    // and Control, Sec. 13.3). Only for systems containing such devices is the
+    // network voltage carried as an explicit unknown in the coupled (x, y)
+    // Newton, seeded at the power-flow point, to select the physical branch;
+    // machine-dominated systems keep the exact-g reduced Newton unchanged.
+    const bool has_grid_following_ibr = std::any_of(
+        devices.begin(), devices.end(),
+        [](const std::unique_ptr<DynamicDevice>& device) {
+          return device->type() == "VSCGridFollowing" ||
+                 device->modelName() == "REGC_REEC_GFL_Subset";
+        });
+
+    ConsistentInitializationResult consistent;
+    if (has_grid_following_ibr) {
+      // Restart from the power-flow seed (states, network voltage and
+      // device-internal anchors) so a divergent trim iterate cannot bias the
+      // coupled Newton, then select the physical algebraic branch.
+      y = power_flow_seed_network;
+      x.x = power_flow_seed_state;
+      for (auto& device : devices) {
+        device->initializeFromPowerFlow(initial_power_flow, x, y);
+      }
+      consistent = solve_coupled_dynamic_initial_state(*this,
+                                                       options.t_start_s,
+                                                       x.x,
+                                                       options.dynamic_trim_tol,
+                                                       options.max_dynamic_trim_iters);
+      // Tighten the sensitive electromechanical residuals with the exact-g
+      // reduced Newton on the branch the coupled pass selected (its
+      // per-evaluation solveNetwork continues from the coupled voltage in sys.y).
+      if (!consistent.converged &&
+          consistent.residual_norm > options.dynamic_trim_tol) {
+        const ConsistentInitializationResult tightened =
+            solve_reduced_dynamic_initial_state(*this,
+                                                options.t_start_s,
+                                                x.x,
+                                                options.dynamic_trim_tol,
+                                                options.max_dynamic_trim_iters);
+        if (tightened.residual_norm <= consistent.residual_norm) {
+          consistent = tightened;
+        }
+      }
+    } else {
+      // Machine-dominated systems: the exact-g reduced Newton from the trimmed
+      // state converges the electromechanical residuals to machine precision.
+      consistent = solve_reduced_dynamic_initial_state(*this,
+                                                       options.t_start_s,
+                                                       x.x,
+                                                       options.dynamic_trim_tol,
+                                                       options.max_dynamic_trim_iters);
+    }
     initialization.dynamic_trim_iterations += consistent.iterations;
     fast_norm = consistent.residual_norm;
     trimmed = consistent.converged || fast_norm <= options.dynamic_trim_tol;

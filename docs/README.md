@@ -1,6 +1,10 @@
 # HySim-XJTU-HRPES 文档中心
 
-最后核实：2026-09-10
+最后核实：2026-09-12
+
+[电力市场模块文档校核与手册升级](modules/market/README.md)：全部md契约与LaTeX手册
+经六路文档—代码双向校核；修正过时表述、接口字段缺口与公式转写问题；手册对标
+潮流/最优潮流规范新增求解器家族与验证通道总览，交叉验证oracle新增可复现负控制开关。
 
 [时序生产模拟线程设置](developer/gui_canvas_runtime.md#time-series-solver-threads)：
 SCUC 求解器线程与按日任务线程分开，Auto/Native/Gurobi 支持自定义求解器上限，
@@ -35,7 +39,7 @@ GUI“帮助”目录，可搜索“跨日继承”“SOC”“性能”；在�
 计算阶段分开，明确七工作区、输入版本、执行依赖、图形分析和验收路径。
 文档为目标设计；现有GUI/API行为仍以模块执行契约为准。
 
-[智能仿真标签与价格代理](modules/market/intelligent_simulation.md)：完整周Oracle、LMP标签、两轮独立周验证、压力场景代理及分组基线负结果。
+[智能仿真标签与价格代理](modules/market/intelligent_simulation.md)：完整周Oracle、LMP标签、v1/v2两轮压力试验及后续水电专项辨识轮验证、压力场景代理及分组基线负结果。
 
 [水电电量分配与新能源消纳](theory/hydro_renewable_allocation.md)：固定各站周电量、优化7日分配；§12–13记录已完成的72次等日电量日内形状/火电条件交叉评价及4次精度复算。主模型MAE 64.50、网络对照57.98 MWh，未达25 MWh门槛；本地请求P95约20–25 ms。单训练配对揭示1%gap标签不稳定，需严格Oracle收敛验证及新的可行/高收益留出周；不声明生产精度。§14新增已授权执行的多配对严格标签检查与全新留出周协议，数值结果待完成。
 

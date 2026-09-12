@@ -205,9 +205,14 @@ optimize_sec / result_extract_sec（含模型释放）；primal_start_sec 是独
 其他后端为 null，presolve_sec/search_sec 未单独测量为 null。
 这些是内部完成后计时，不是实时进度；optimize 仍含延迟更新、预处理、根节点和搜索。
 推导、预注册预测与数值证据见 performance.md 的“原因分析触发与恢复定价隔离”。
-条件 LMP 不保证唯一：同一 IEEE118 定价矩阵由现有 auto / dual_simplex 返回不同
-最优对偶，最大价差6.64876 CNY/MWh，目标/残差均通过原门槛。规范化价格选取未实现；
-不能由 SCED/物理承接一致推导价格逐 bit 一致，详见性能契约的失败门槛与复现证据。
+条件 LMP 不保证唯一：定价策略固定前的历史反例（保留为失败证据）中，同一 IEEE118
+定价矩阵由 auto / dual_simplex 返回不同最优对偶，最大价差6.64876 CNY/MWh，
+目标/残差均通过原门槛。现行代码对 LMP 阶段固定按规模定价策略
+（`southern_market.cpp::gurobi_method`，列数<1e6 恒 Method=1 的对偶单纯形），
+auto 与 dual_simplex 是同一次确定性求解，请求方法不影响 LMP；
+`tools/market_validation/probe_market_lmp_duals.cpp` 断言三种请求方法的
+全部行对偶严格相等。数学对偶唯一性仍未证明，不能由 SCED/物理承接一致推导
+价格逐 bit 一致，详见性能契约的失败门槛与复现证据。
 
 ## Yunnan Ancillary Coupling
 
@@ -372,7 +377,9 @@ accounts，电量MWh、收入CNY；储能净收入可为负，DR为削减补偿�
 固定验证门槛：每个日窗输出96运行点和2预测点；全部场景初态相同；停运功率误差
 小于1e-6 MW，来水覆盖误差小于1e-8 m3/s；独立账本测试小于1e-4 CNY，生产门槛如上。
 
-Release `test_southern_market` 当前45用例/25804断言通过；新增 `[study]` 2/1874，
+Release `test_southern_market` 截至主仓库 HEAD `8b93145bf4f5`（见本节末构建记录）时
+45用例/25804断言通过（历史快照；现行基线为 74 用例/29807 断言，见
+[开发状态](../../overview/development_status.md)）；新增 `[study]` 2/1874，
 同范围ASan/UBSan通过（关闭泄漏检测）。解析case检查24小时100MW电量付款及零线路租金，
 并主动破坏出力验证balance_failed；demo检查故障区间与完整来水倍数，避免相互混用。
 注册 `market_study_e2e` 使用实际Plotly、IEEE118混合案例、故障×来水×报价组合，
@@ -582,7 +589,7 @@ Assumptions: 原始机组技术能力保留，报价/启停参数、时序及新
 
 References: 本文执行解释、正式规则 2.4 / 2.6；上述需求响应约束为此研究的明确扩展。
 Validation: `build/macos-release/tests/test_southern_market`；
-`/usr/bin/time -l build/macos-release/tests/run_southern_benchmark output/southern-market/large`；
+`/usr/bin/time -l build/macos-release/tests/run_southern_market_benchmark output/southern-market/large`；
 结构计数精确匹配，解析能量/费用误差 <=1e-6，完整阶段最大残差 <=1e-6；
 时限/无 incumbent 必须在报告中显示失败。GUI 大边界保存重载、分页和桌面/手机截图，
 以及 ASan/UBSan 对应单元回归。超出预测 50% 时先复查实现、分配器/稀疏填充和输入假设。
@@ -665,7 +672,7 @@ SCED/LMP 删除前两项承诺成本；LMP 使用独立 M1'–M4' 和费率。�
 
 ### 预测场景运行 RATIONALE
 
-Model/algorithm: 7 日共同因子预测误差，保存基准 96 点日曲线和逐日确定性覆盖。
+Model/algorithm: 8 日联合采样、7 日出清的共同因子预测误差，保存基准 96 点日曲线和逐日确定性覆盖。
 因素按 load/wind/solar/inflow/generator_bid/load_bid/line_limit 排序；日预测中心
 为基准倍数，概率模式使用 Gaussian copula：z0=L*epsilon0，
 zd=rho*z(d-1)+sqrt(1-rho^2)*L*epsilon_d，L*L'=R。Eigen 特征分解验证相关矩阵
@@ -682,9 +689,10 @@ DeltaP_ij=max(0,Pij-Fmax,Fmin-Pij)，停运线路有效限额为零。阈值 1e-
 原因复核固定当日初态，恢复为当日预测中心；另输出约束族有效性信息、设备缺额/
 线路限额证据和跨完整场景输入输出 Pearson 相关（零方差返回 null，非因果）。
 
-Cost model: S 场景、D=7、K 因素，计算 O(S*D*(1+K)*C_day)，串行调用现有出清器；
-采样 O(K^3+S*D*K^2)。每完成场景重新汇总历史，累计统计 O(S^2*D*T*(B+L))，
-内存 O(S*D*T*(B+L))；当前实现不承诺大网大量场景的性能。
+Cost model: S 场景、采样维度 D=8（联合采样 8 日边界，只出清统计前 7 日）、K 因素，
+出清计算 O(S*7*(1+K)*C_day)，串行调用现有出清器；
+采样 O(K^3+S*D*K^2)。每完成场景重新汇总历史，累计统计 O(S^2*7*T*(B+L))，
+内存 O(S*7*T*(B+L))；当前实现不承诺大网大量场景的性能。
 Prediction: 固定倍率退化为确定性结果；2 个解析路径负荷倍率 1 与 3，容量 200 MW，
 周异常样本比例 1/2，周缺额均值 8400 MWh，逐点平均缺额 50 MW；一条失败路径
 不补零，异常概率范围扩展为 [1/3,2/3]。均匀采样 4096 场景的均值误差 <0.02，
@@ -702,7 +710,9 @@ Release 与 ASan/UBSan；注册 GUI E2E（分布编辑→生成周边界→逐�
 
 运行模拟默认打开“预测场景”，手工周/月页仍可切换。先加载已保存南方边界，再设置
 七日加末日预安排预测中心、分布/区间、场景数和相关性，点击“生成一周市场边界”。生成不自动
-出清；场景下拉与八日表可检查实际倍数。点击“逐日出清全部场景”后每次请求计算
+出清；场景下拉与八日表可检查实际倍数。后端强制预测 operation 为 total_days==7 且
+horizon=="week"，否则抛出 "forecast horizon must be one week"；day/month horizon
+的预测配置被拒绝。点击“逐日出清全部场景”后每次请求计算
 一个场景的一天（包括恢复重算），完成该周后进入下一个场景，日初状态不跨场景。
 “采用手工周边界为底稿”保留每日停运、区间与倍数；预测倍数乘在该底稿上。
 “恢复每日基准模板”清空每日覆盖。新预测配置需重新生成才生效。
@@ -712,13 +722,15 @@ Release 与 ASan/UBSan；注册 GUI E2E（分布编辑→生成周边界→逐�
 | 基准预测 | 南方已保存边界 `base`、`config.operation.days` | 基准 96 点日曲线；八日底稿倍数及区间、停运计划，末日仅预测 |
 | 因素顺序 | `factor_order` / `marginals[].factor` | 负荷、风、光、来水、发电/储能报价、可控负荷补偿、线路限额 |
 | 分布 | `marginals[].distribution` | fixed / uniform / triangular / clipped_normal；区间模式仅 fixed / interval |
-| 参数 | `center[8]/lower/upper/sigma` | 倍数 0–10；center 是固定值/三角众数/限幅正态位置和恢复参照，uniform 的均值仍为上下界中点 |
+| 参数 | `center[8]/lower/upper/sigma` | 倍数 0–10；center 是固定值/三角众数/限幅正态位置和恢复参照，uniform 的均值仍为上下界中点；另校验每日底稿 authored 倍数 × upper ≤ 10，超限拒绝生成 |
 | 联合相关 | `correlation[7][7]`、`temporal_rho` | 潜在高斯相关矩阵，对称、对角 1、PSD；日相关 -0.95…0.95，初日平稳高斯。区间模式强制单位矩阵及 rho=0 |
 | 规模/复现 | `sample_count/seed/sampler` | 1–512 场景，uint32 seed；结果保存实际场景，不依赖未来随机库完全一致 |
 | 单独报价 | operation `generator_bid_scale/load_bid_scale` | 前者作用机组与储能，后者只作用可控负荷补偿；与既有全市场 `bid_scale` 相乘 |
 | ΔPᵢ | `scenarios[].days[].nodes[].delta_p_mw` | deficit-surplus，MW；异常幅值统计 deficit+surplus，残差另列 |
 | ΔPᵢⱼ | `lines[].delta_pij_mw` | 等于物理有功越限 `overload_mw`；界面限额乘投运状态 |
 | 周异常概率 | `statistics.week_delta_p_peak_mw/week_delta_pij_peak_mw` | 每条完整周路径一次试验，报告 valid/total/unknown、有效样本比例、Wilson95 与未知路径概率界 |
+| 场景计数 | `statistics.mode/total_scenarios/complete_scenarios/failed_scenarios` | 另含 complete_scenarios_with_limit/unproven；失败/未运行场景保留为未知，不计入有效分母 |
+| 周能量汇总 | `statistics.week_deficit_mwh/week_surplus_mwh/week_overload_mwh` | summary 结构 mean/p05/p50/p95/max，无 Wilson/概率界；overload 为跨线路越限积分，不是缺供电量 |
 | 时段统计 | `statistics.periods[672]` | 同一日期/时段跨已验证样本的均值、P05/P50/P95、异常比例及未知界；未执行点为 null |
 | 设备统计 | `statistics.nodes/lines` | stable ID，完整场景的周峰值、周异常比例及积分；节点正负不能抵消 |
 | 相关性 | `statistics.correlations` | 完整场景七日输入平均倍数 vs 周缺额/线路越限积分 Pearson r；少于 3 点或零方差为 null |
@@ -1021,10 +1033,10 @@ RATIONALE（每日覆盖，非求解器改写）:
 
 | 值 | API / 源码 | GUI / 单位与验证 |
 |---|---|---|
-| 周/月日期 | `config.horizon/start_date`，`make_market_operation` | 7 天或自然月；月起点必须为 1 日；闰年 2 月为 29 天 |
-| 每日覆盖 | `config.days[d]` | 六个倍数 0–10、`first_slot/last_slot` 0–95（界面显示 1–96），停运机组/线路 stable ID 数组；拒绝重复/未知 ID |
+| 日/周/月日期 | `config.horizon/start_date`，`make_market_operation` | 单日、7 天或自然月；月起点必须为 1 日；闰年 2 月为 29 天 |
+| 每日覆盖 | `config.days[d]` | 八个倍数 0–10、`first_slot/last_slot` 0–95（界面显示 1–96），停运机组/线路 stable ID 数组；拒绝重复/未知 ID |
 | 预测倍数 | `load_scale/wind_scale/solar_scale/inflow_scale` | 同比覆盖指定区间负荷 P/Q、风光预测、本地来水 |
-| 报价和线路 | `bid_scale/line_limit_scale` | 报价倍数作用于全天机组分段、储能充放和负荷补偿；限额倍数作用于区间有功上下限及额定 MVA |
+| 报价和线路 | `bid_scale/line_limit_scale` | 报价倍数作用于全天机组分段、储能充放和负荷补偿；限额倍数作用于区间有功上下限及额定 MVA；独立报价倍数 `generator_bid_scale`（机组与储能）/`load_bid_scale`（可控负荷补偿）与全市场 `bid_scale` 相乘 |
 | 物理缺額/富余 | `days[d].nodes[].deficit_mw/surplus_mw` | MW，独立于 `node_imbalance_mw` 数值残差；严格模式默认无松弛 |
 | 线路越限 | `days[d].lines[].power_mw/min_mw/max_mw/overload_mw` | MW，原线路 ID 与端点，超过有功上下限的量；不是 AC 视在功率判据 |
 | 周期积分 | `deficit_mwh/surplus_mwh/overload_mwh` | 前 96 点乘 0.25 h；最后一项是跨线路越限积分和，不是缺供电量 |
@@ -1037,6 +1049,9 @@ RATIONALE（每日覆盖，非求解器改写）:
 ```json
 {"action":"start","revision":1,"config":{"horizon":"week","start_date":"2028-02-01","penalty_per_mwh":100000,"explain":true,"days":[]}}
 ```
+
+该示例省略 `explain_trigger`，按代码默认取 `always`（而非文档主推的 anomaly）；
+省略 `recovery_pricing` 时默认为 `dispatch_only`。
 
 `POST /api/session/market_operation` 的 `start` 创建并校验任务，`step` 接受
 `{action:"step",run_id,day}` 计算一个日窗及配对恢复，`cancel` 接受

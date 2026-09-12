@@ -1,0 +1,205 @@
+% market_boundary.tex -- 市场边界与边界模拟
+\section{市场边界与边界模拟}\label{sec:market-boundary}
+
+\begin{theorynote}
+本章展开市场边界的定义、校验与边界模拟（情景生成与对比实验）。
+JSON 字段、单位、取值范围与 GUI 编辑控件的唯一来源是
+\srcpath{src/market/southern\_boundary.cpp:southern\_market\_schema}；
+条款目录（\fld{southern\_market\_boundary\_catalog}，
+\srcpath{src/market/southern\_boundary.cpp:248-286}）区分 2.3/2.4 运行边界与 2.5 交易申报，
+目录覆盖不等于物理模型完全等价。与第~\ref{sec:market-module-io}~章重复处数值一致。
+\end{theorynote}
+
+\subsection{功能定位}
+南方区域边界是带版本的独立快照：公开引用一律为稳定 ID，绝不使用
+\texttt{HybridPowerSystem} 向量位置；保存前必须通过
+\fld{validate\_southern\_market}（\srcpath{src/market/southern\_boundary.cpp:288-455}）的
+全字段校验，校验同时返回归一化后的有效边界（execution 默认值补齐、母线负荷按比例校正）。
+边界模拟在其上提供两类研究扩展：预测情景的联合采样（\srcpath{src/market/market\_forecast.cpp}）
+与逐日运营的倍率/停运/恢复实验（\srcpath{src/market/market\_operation.cpp}）。
+
+\subsection{边界表全集}
+顶层共 15 张边界表（另有元字段 \fld{schema\_version}/\fld{name}/\fld{source}/\fld{base\_mva}
+与 \fld{execution} 执行块）。每行记录均为 \fld{id}+\fld{name}+\fld{source} 三元组，
+\fld{id} 全表唯一、\fld{source} 必填非空（\srcpath{src/market/southern\_boundary.cpp:316-322}）。
+字段集与校验界全部摘自 schema（\srcpath{src/market/southern\_boundary.cpp:80-245}）：
+\begin{center}\scriptsize
+\begin{longtable}{@{}L{2.8cm}L{5.6cm}L{6.9cm}@{}}
+\toprule 边界表 & 关键字段（单位） & 校验规则（出处）\\\midrule
+\endhead
+\fld{periods} & \fld{kind}、\fld{start\_minute}（min）、\fld{duration\_hr}/\fld{weight\_hr}（h） & 定长 98：前 96 点 \fld{day}、$15t$ 起点、0.25 h；末 2 点属 D+1、恰一峰一谷；区间不重叠（:333-348）\\
+\fld{areas} & \fld{load\_mw}、\fld{reserve\_up/down\_mw}、\fld{network\_reserve\_reduction\_mw}、\fld{load\_side\_down\_reserve\_mw}、\fld{primary\_mw}（MW） & 1$\sim$100 区；统调非零而母线和为零拒绝（:355）\\
+\fld{primary\_groups} & \fld{generators}、\fld{requirement\_mw}（MW） & 成员引用机组、无重复（:404-406）\\
+\fld{buses} & \fld{area}、\fld{load\_mw}（MW）、\fld{q\_load\_mvar}（Mvar）、\fld{base\_kv}（kV）、\fld{vmin/vmax\_pu} & \fld{area} 引用完整、上下界有序（:349）；负荷按比例校正（:350-358）\\
+\fld{generators} & \fld{bus}、\fld{kind}、\fld{pmin/pmax\_mw}、\fld{technical\_min\_mw}、爬坡 MW/min、\fld{min\_up/down\_minutes}、\fld{startup\_cost}[3]、\fld{startup\_curves\_mw}[3]、\fld{shutdown\_curve\_mw}、\fld{segments}[1$\sim$10]、\fld{forecast\_mw}、\fld{renewable\_alpha}、\fld{primary\_fraction}、\fld{regulation\_up/down\_mw}、\fld{must\_on/off}、\fld{available} & 段价非降、每段 $\ge1\%$ 灵活区间且段宽覆盖 \fld{pmax}（:371-380,:386）；温/冷门槛递增（:368）；停机初值为零（:369）；\fld{must\_on}+\fld{must\_off}$\le1$ 且不超 \fld{available}（:384-385）；技术最小 $\le$ \fld{pmin}（:387）；新能源字段互斥（:388-394）\\
+\fld{controllable\_loads}（研究扩展） & \fld{bus}、\fld{max\_reduction\_mw}（MW）、\fld{compensation\_per\_mwh}（元/MWh）、\fld{max\_day\_reduction\_mwh}（MWh） & 独立 ID 空间、引用母线、source 必填（:360-365）；非必填表（:235）\\
+\fld{branches} & \fld{from/to\_bus}、\fld{r/x/b\_pu}、\fld{tap}、\fld{shift\_deg}、\fld{min/max\_mw}、\fld{rate\_mva}（MVA） & 端点引用、无自环、限值有序（:396-398）\\
+\fld{sections} & \fld{members}（支路+方向权重）、\fld{min/max\_mw}（MW） & 成员引用支路、无重复（:400-402）\\
+\fld{external\_schedules} & \fld{bus}、\fld{kind}（hydro/renewable/biomass/nuclear/captive/\allowbreak pumped\_storage/external）、\fld{power\_mw} & 引用母线（:359）\\
+\fld{groups} & \fld{generators}、\fld{min/max\_online}、\fld{min/max\_mw}、\fld{min/max\_mwh} & 成员引用、三类上下界有序（:404-407）\\
+\fld{storage} & \fld{bus}、充放功率界（MW）、\fld{rated\_mwh}、\fld{roundtrip\_efficiency}、\fld{initial/terminal\_mwh}、\fld{min/max\_mwh}、\fld{max\_cycles}、充放电报价 & 能量上限 $\le$ 额定；初值/终值在界内（:409-414）\\
+\fld{dc\_hubs} & 多端直流中枢 & 记录表（schema :175）\\
+\fld{dc\_links} & 四端点（母线/中枢互斥）、\fld{min/max\_mw}、\fld{loss\_fraction}、\fld{ramp\_up/down\_mw} & 每端恰一母线或中枢（:416-422）\\
+\fld{trades} & \fld{gateway\_kind}/\fld{gateway}/\fld{direction}、\fld{min/max\_mw}、\fld{original/adjusted\_min\_mwh}、\fld{max\_mwh}、三档过网费 & 关口引用；直流端口仅正向；保障电量调整须填原因（:424-428）\\
+\fld{reservoirs} & \fld{generator(s)}、\fld{upstream}、\fld{lag\_slots}、\fld{water\_m3\_mwh}（m$^3$/MWh）、\fld{area\_m2}、水位界（m）、\fld{inflow/spill/release\_*\_m3\_s}、\fld{min/max\_mwh} & 成员须 hydro/pumped\_hydro 且独占一库（:436-438）；调度水位在物理界内（:443-446）；上游引用、链无环、历史长度 $\ge$ 时滞（:442,:448-453）\\
+\bottomrule
+\end{longtable}
+\end{center}
+
+\subsection{边界语义要点}
+\textbf{98 点索引空间}：$kT=98$（\srcpath{src/market/southern\_boundary.cpp:14}）；
+前 96 点为运行日 15 分钟物理点，末 2 点为 D+1 峰/谷代表点，
+\fld{duration\_hr} 为物理持续时长、\fld{weight\_hr} 为目标费用权重，
+代表点空隙不积分未观测水量与电量（见第~\ref{sec:southern-execution}~节）。
+
+\textbf{母线负荷比例校正}：校验返回的有效边界把统调预测按原始母线预测比例分摊
+$D^{eff}_{b,t}=D^{raw}_{b,t}D_{a,t}/\sum_{k\in a}D^{raw}_{k,t}$
+（\srcpath{src/market/southern\_boundary.cpp:350-358}）；统调非零而母线和为零时拒绝保存。
+
+\textbf{水电/水库（SI 单位）}：下泄 $Q^{release}=spill+\sum_g P_g\,h_h/3600$、水位递推
+$Z_t-Z_{t-1}=\frac{3600\Delta t}{S}(I_t+Q^{up}_{t-lag}-Q^{release}_t)$
+（\srcpath{src/market/southern\_market.cpp:1025-1055}；$h_h$ 为 m$^3$/MWh、$S$ 为 m$^2$、
+流量 m$^3$/s，上游迟滞历史显式消费）。恒定库面/耗水率与固定时滞是建模约定，
+水位库容曲线、水头曲线、振动区未完整表示（目录限制，
+\srcpath{src/market/southern\_boundary.cpp:277}）。
+
+\textbf{储能}：充电功率为负变量 $ch\in[-\fld{charge\_max\_mw}\cdot avail,0]$、
+放电非负，方向互斥 $dis\_on+ch\_on\le1$，能量递推
+$E_t-E_{t-1}=\eta\,ch\Delta t+dis\,\Delta t/\eta$（$\eta=\sqrt{\fld{roundtrip\_efficiency}}$）、
+末值目标与循环上限（\srcpath{src/market/southern\_market.cpp:838-916}）。
+
+\textbf{三态启动}：非紧凑机组引入 \fld{offline\_minutes} 与热/温/冷三类启动二元
+$start_k$（费用分别取 \fld{startup\_cost}[k]），$\sum_k start_k=start$；
+停机时长按整数分钟递推使三态门槛互斥（含等号归属）
+（\srcpath{src/market/southern\_market.cpp:584-592,:665-674}）。
+
+\textbf{算例生成与 \fld{thermal\_limit}}：\fld{southern\_market\_from\_system} 的
+\fld{thermal\_limit} 取 $-1$（全部保留）或 $0\sim544$ 的保留台数（ACTIVSg2000 水电扩展
+算例 544 台火电；按 \fld{pmax} 降序、同值按 ID 稳定排序保留，
+\srcpath{src/market/southern\_boundary.cpp:495-497,:544-552}），GUI 默认 120
+（\srcpath{tests/run\_gui\_server.cpp:22289}）；缩减是合成机队变更而非等价聚合。
+
+\textbf{execution 执行块}：\fld{interpretation} 固定
+\srcpath{"explicit-time-incremental-bids-si-water-v1"}（A1--A7 解释版本）、
+\fld{priority\_policy}（A5：hard/\allowbreak penalized\_shortfall）、
+\fld{lmp\_storage\_policy} 与 \fld{lmp\_renewable\_priority}（A7）、
+\fld{penalties}[4]（M1--M4）与 \fld{pricing\_penalties}[4]（M1'--M4'）、
+\fld{price\_delta}、\fld{time\_limit\_sec}、\fld{mip\_gap}、\fld{ac\_security}、
+\fld{security\_iterations}（schema :207-218）及增补求解字段（:222-234）。
+备用平衡消元与原乘子恢复式 $\lambda^{orig}=\lambda^{transf}+d^{up}-d^{down}$、
+节点电价 $LMP=\lambda^{orig}/w_t$ 见第~\ref{sec:southern-execution}~节，本章不重复。
+
+\subsection{预测情景采样模型}
+实现为 \fld{make\_market\_forecast}（\srcpath{src/market/market\_forecast.cpp:80-158}）。
+共同因子日误差叠加在基准 96 点日曲线上：7 元有序因素
+\fld{load\_scale}、\fld{wind\_scale}、\fld{solar\_scale}、\fld{inflow\_scale}、
+\fld{generator\_bid\_scale}、\fld{load\_bid\_scale}、\fld{line\_limit\_scale}
+（\srcpath{src/market/market\_forecast.cpp:16}，注意无合并 \fld{bid\_scale}）。
+概率模式用 Gaussian copula（Nelsen 2006，:121）：相关矩阵经 Eigen 特征分解校验
+对称、单位对角、半正定（:112-120），取 $L=\Phi_V\Lambda_+^{1/2}$，逐日
+\begin{equation}
+ z_0=L\epsilon_0,\qquad z_d=\rho\,z_{d-1}+\sqrt{1-\rho^2}\,L\epsilon_d,
+\end{equation}
+再经 $u=\Phi(z_k)$ 逆变换到边际：均匀 $lo+(hi-lo)u$、三角分段平方根、
+限幅正态 $\mathrm{clamp}(center+\sigma z,lo,hi)$（端点有概率质量，非截断正态）
+（:139,:144-148）；固定值直接取中心。区间模式不用 copula，按 $8\times7$ 维分层
+洗牌覆盖（:125-126,:144），不输出概率。采样值与 authored 倍率相乘写入场景
+（:149-150），并预校验 $authored\times hi\le10$（:108）。
+联合采样 8 日边界、只出清统计 7 日（第 8 日仅为第 7 日峰谷预安排，
+:127-131 及 \fld{limitations}）；默认 8 场景、边际均匀 $[0.9,1.1]$、
+\fld{line\_limit\_scale} 默认 fixed、seed 20250905、$\rho=0.5$
+（\fld{market\_forecast\_defaults}，:64-78）。
+
+\subsection{运营日倍率、峰谷代表点与承接}
+\textbf{日倍率与停运}：每个日覆盖含八个倍率
+（\fld{load\_scale}、\fld{wind\_scale}、\fld{solar\_scale}、\fld{inflow\_scale}、
+\fld{bid\_scale}、\fld{line\_limit\_scale}、\fld{generator\_bid\_scale}、
+\fld{load\_bid\_scale}，\srcpath{src/market/market\_operation.cpp:17}），
+逐一校验 $0\sim10$（:322），作用于负荷/预测/报价段/线路限值/来水
+（:57-71）；机组/线路停运按稳定 ID 去重校验（:326-330）；
+\fld{boundary\_overrides} 为带原因的逐字段覆盖。故障/来水对比试验即这些
+干预的逐日组合，属确定性研究诊断，不是概率仿真。
+
+\textbf{峰谷代表点选取}：对 D+1 预测日的统调负荷求 argmin/argmax（同值取首个），
+平坦曲线取谷=0、峰=95；代表点 \fld{start\_minute}=$1440+15t$，时长/权重沿用基准边界
+同类代表点，不虚构空隙能量（\fld{daily\_window}，
+\srcpath{src/market/market\_operation.cpp:85-118}）；全部 98 点时序字段按稳定 ID
+从预测日同步（:104-113）。
+
+\textbf{跨日承接}：\fld{carry\_from}（\srcpath{src/market/market\_operation.cpp:119-147}）
+从 SCED 第 96 点（索引 95）末态生成下一日初值：机组状态、出力（裁至
+$[0,P^{max}_{95}]$）与连续状态分钟数——设日末连续同状态点数为 $k$，则
+$\tau=15k+\mathbf 1[k=96\land\text{日初状态相同}]\cdot\tau_{prev}$（:127-131）；
+储能能量裁至 $[0,E^{rated}]$（:134）；水库水位、非负下泄与 96 点下泄历史（:135-138）；
+直流联络线非负功率与调节方向（:139-141）。只有当日结果有效才更新承接与完成日数，
+失败日任务置 \fld{failed} 且不推进（:530-532）。
+
+\textbf{恢复与原因分析}：解释触发 \fld{explain\_trigger}（anomaly/always/manual，
+异常阈值 $10^{-6}$ MW，:512-518）；原因分析六状态
+\fld{unavailable}/\fld{not\_requested}/\fld{not\_triggered}/\fld{no\_interventions}/%
+\fld{completed}/\fld{partial\_failure}（:515,:470-471）；恢复实验只对当日实际偏离
+参考的因素各做一次单因素重算，双 worker 并行准入见
+第~\ref{sec:algorithm-selection}~章。
+
+\subsection{参数表（边界模拟）}
+\begin{paramtable}
+\fld{mode} & — & — & probabilistic/\allowbreak interval & probabi\allowbreak listic & 采样模式（market\_forecast.cpp:81-82）\\
+\fld{sample\_count} & $S$ & 场景 & $1\sim512$ & $8$ & 场景数（:67,:84）\\
+\fld{seed} & — & — & $0\sim2^{32}{-}1$ & $20250905$ & mt19937\_64 种子（:85）\\
+\fld{temporal\_rho} & $\rho$ & — & $-0.95\sim0.95$ & $0.5$ & 相邻日 AR(1) 相关（:86）\\
+\fld{marginals[].lower/upper} & — & — & $0\sim10$、$lo\le hi$ & $0.9$/$1.1$ & 边际支撑（:103）\\
+\fld{marginals[].sigma} & $\sigma$ & — & $0\sim10$ & $0.05$ & 限幅正态尺度（:104）\\
+\fld{marginals[].center} & — & — & $[lo,hi]$、7 或 8 日 & 全 1 & 日预测中心；7 日自动补第 8 日（:105-107）\\
+\fld{marginals[].distribution} & — & — & fixed/uniform/\allowbreak triangular/\allowbreak \fld{clipped\_normal}/interval & uniform & 分布按模式准入（:101）；\fld{line\_limit\_scale} 默认 fixed（:72）\\
+\fld{correlation} & $R$ & — & $7\times7$ PSD & 单位阵 & 对称单位对角半正定（:112-118）\\
+\fld{days[].} 八个日倍率 & — & — & $0\sim10$ & $1.0$ & 逐日干预（market\_operation.cpp:17,:322）\\
+\fld{days[].first\_slot}/\fld{last\_slot} & — & 点 & $0\sim95$ & $0$/$95$ & 日出清窗口（:323-325）\\
+\fld{days[].generator\_outages}/\fld{branch\_outages} & — & — & 稳定 ID & 空 & 日停运（:326-330）\\
+\fld{horizon} & — & — & day/\allowbreak week/\allowbreak month & — & 运营跨度（:293-298）\\
+\fld{penalty\_per\_mwh} & — & 元/MWh & $1\sim10^{7}$ & — & 缺额罚因子（:299）\\
+\fld{terminal\_forecast\_source} & — & — & authored/\allowbreak \fld{baseline\_template} & 自动 & 末日预测来源（:313-314）\\
+\end{paramtable}
+
+\subsection{验证与校核}
+\begin{itemize}
+  \item 边界与目录：\srcpath{tests/test\_southern\_market.cpp:1141}
+        （\texttt{[operation][boundary\_rules]}，目录与准入 schema 及负荷校正）、
+        :1206（非市场计划进入出清与预测边界，含 \fld{boundary\_overrides} 经
+        \fld{make\_market\_forecast} 的传播 :1218-1222）；
+  \item 峰谷与承接：\srcpath{tests/test\_southern\_market.cpp:1101}
+        （\texttt{[operation][lookahead]}，次日极值驱动全部时序与实际爬坡承接）、
+        :1177（代表点按稳定 ID 同步全部类型化时序）、
+        :1294（运营日历与解析缺额灵敏度）、:1327（完整闰月滚动）、
+        :237（\texttt{[assembly\_cache]}，滚动目标/残差与水量 SOC 承接）；
+  \item 恢复策略：\srcpath{tests/test\_southern\_market.cpp:1225}
+        （\texttt{[recovery\_policy]}，触发与历史 dispatch\_only 解释保持已实现状态）、
+        :1471（线路越限与节点缺额区分）；
+\begin{sloppypar}
+  \item 采样：\srcpath{tests/test\_southern\_market.cpp:1625,:1654}
+        （\texttt{[scenario]} 与 \texttt{[scenario][statistics]}，场景语义与统计输出）；
+        采样 RATIONALE 的预测（4096 均匀场景均值误差 $<0.02$、单位对角/对称/PSD 校验、
+        同 seed 复现、区间输出概率为 null）见
+        \srcpath{docs/modules/market/southern\_execution\_contract.md} 预测场景 RATIONALE
+        （已校核底稿）；
+\end{sloppypar}
+  \item 浏览器 E2E：\fld{market\_forecast\_e2e} 与 \fld{market\_operation\_e2e}
+        （\srcpath{tests/CMakeLists.txt:963-972}）。
+\end{itemize}
+
+\subsection{边界与局限}
+\begin{itemize}
+  \item 条款目录覆盖不等于物理模型完全等价；报价属交易申报，可控负荷补偿、
+        概率/区间扰动与节点缺额罚变量为研究扩展（目录自述，
+        \srcpath{src/market/southern\_boundary.cpp:281-285}）；
+  \item 日窗为 96 点加 D+1 两代表点，不接收完整 D+1 的 96 点，缺测预测不自动填补
+        （\srcpath{src/market/southern\_boundary.cpp:273}）；周/月为顺序滚动而非全周期
+        联合优化，滚动入口拒绝非空跨日启停轨迹
+        （\srcpath{src/market/market\_operation.cpp:303-305}）；
+  \item 概率语义仅限所设输入分布下的 Monte Carlo 估计；区间采样不提供概率或严格
+        最坏界；失败/未运行场景保留为未知（\fld{limitations}，
+        \srcpath{src/market/market\_forecast.cpp:129-131}）；同 seed 复现要求相同生成器与
+        标准随机库版本；
+  \item 缩减机队（\fld{thermal\_limit}）是合成变更，不代表等价聚合；
+        水库恒定库面/耗水率、固定时滞为建模约定；
+  \item 恢复实验是固定当日初态的确定性单因素反事实，不是统计因果结论。
+\end{itemize}

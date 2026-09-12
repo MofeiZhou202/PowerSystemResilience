@@ -2,7 +2,9 @@
 \section{数值结果、恒等式校核与验证边界}\label{sec:market-numerical}
 
 本节保留既有 macOS Release 平台模型的历史验证结果；本次规则文档对齐未重跑 C++ 测试。
-原执行目标为 \srcpath{build/macos-release/tests/test\_market\_simulation}，记录为 22 cases、845 assertions。
+执行目标为 \srcpath{build/macos-release/tests/hacdcpf\_test\_market\_simulation}（目标名带
+\texttt{hacdcpf\_} 前缀，以区别于 MIPSolvers full-dev 的同名 \texttt{test\_market\_simulation}
+目标，见 \srcpath{tests/CMakeLists.txt:54-57}），记录为 22 cases、845 assertions。
 这是市场模块内部回归证据，不是独立商业市场软件 oracle。
 尤其不能作为南方区域 2025 年 V1.0 的 98 点 SCUC、分省备用、水库或独立 LMP 模型的数值证据。
 
@@ -27,7 +29,7 @@ SCUC warm start/结构提示/分支优先级 & true/true/true & 必须存在\\
 
 \subsection{交叉校核层级}
 测试同时检查向量长度、备用平衡、LMP 有限性、结算记录和性能剖面；这些是源码结果
-与契约的同实现一致性校核。第~\ref{sec:market-xref}~节的独立方程 oracle 现已在铜板银定价
+与契约的同实现一致性校核。第~\ref{sec:market-xref}~节的独立方程 oracle 现已在铜板定价
 范围内提供独立重算的 LMP 与结算恒等式校核；含网阻塞 LMP、MATPOWER 市场 oracle 与跨引擎
 全网 LMP 比较仍未覆盖，故除铜板切片外不能把 24/24 写成市场经济最优性证明。
 
@@ -51,11 +53,23 @@ ctest --test-dir build/macos-release \
 两个算例的解析期望为：负荷 60 MW 时仅廉价机组边际，$\mathrm{LMP}=20$、出力 $(60,0)$、用户
 支付与资源收益均为 $1200$；负荷 140 MW 时廉价机组满发、调峰机组边际，$\mathrm{LMP}=40$、出力
 $(100,40)$、用户支付与资源收益均为 $5600$；两例阻塞租金与现金流残差均为 $0$。准入阈值为 $10^{-6}$；
-既有记录中九类检查最大误差为 $0$，负控制（人为改写一个 LMP）如期触发失败。该 oracle 校核铜板经济
+既有记录中九类检查最大误差为 $0$。负控制可复现：\srcpath{run\_cross\_validation.py} 的
+\texttt{-{}-negative-control} 开关把第一个算例首条母线 LMP 人为改写 $+1.0$ 元/MWh 后再校验，
+预期 oracle 检出并整体判 FAIL，此时脚本以退出码 0 报告“负控制如期失败”；若被改写的 LMP 反而
+通过校验，脚本以退出码 1 报错（说明检查对 LMP 错误不敏感）。复现命令为
+\begin{verbatim}
+python3 tools/market_validation/run_cross_validation.py \
+  --executable build/macos-release/tests/market_sced_xref \
+  --out /tmp/market_xref_neg.json --markdown /tmp/market_xref_neg.md \
+  --negative-control
+\end{verbatim}
+该 oracle 校核铜板经济
 调度的边际定价与结算恒等式；有网络阻塞的 LMP、损耗、备用协优和 N-1 仍由市场 Catch2 套件验证，
 本节不以铜板一致性冒充含网市场的外部准确度。
 
 \subsection{失败与准入}
 SCUC 达到相对 gap 但未证明最优时，结果必须保留 \fld{scuc\_optimality\_proven=false}；
-AC 认证失败不改变商业出清，只把 \texttt{SecurityResult} 标为失败；未支持资产通过
+AC 认证失败不重做商业出清，但 \fld{result.feasible} 置 \texttt{false} 且 \fld{status} 标记为
+\fld{"ac\_validation\_failed"}（\srcpath{src/market/market\_simulation.cpp:5259-5269}），
+同时 \texttt{SecurityResult} 标为失败；未支持资产通过
 \fld{unsupported\_assets} 显式退回。任何报告若省略这三个字段，均不满足本手册准入。

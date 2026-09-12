@@ -2,14 +2,47 @@
 
 本目录是 `src/market/` 的唯一模块文档目录。
 
-[智能仿真标签与价格代理](intelligent_simulation.md)：离线完整周Oracle、LMP分位数/尖峰标签、两轮独立周验证与模型产物；IEEE118合成压力试验保留分组基线负结果，尚未准入边界优化。
+## 受控源文件与章节地图
+
+`market_manual.tex` 是主文档（导言区、参数表环境与阅读指南），`chapters/` 包含十个章节源文件，由主文档 `\input` 引入：
+  numerical_cross_validation.tex   数值交叉验证
+  source_equivalent_contract.tex   源码等价合同
+  southern_day_ahead_rules.tex     南方日前规则转写
+  southern_execution.tex           南方执行
+  rule_implementation_gaps.tex     规则—实现差异清单（四态判定、A1–A7、未实现条款）
+  theory_market_economics.tex      市场经济学理论层
+  market_boundary.tex              市场边界与边界模拟（schema全集、采样与运营实验）
+  module_io.tex                    各模块输入输出（按公共入口组织）
+  algorithm_selection.tex          算法选择与求解策略（后端分派、确定性定价、装配复用）
+  yunnan_regulation.tex            云南调频市场模型（预安排出清、MILP耦合、计量分摊月结）
+
+`market_manual.pdf` 与 LaTeX 中间文件是本地构建产物，不纳入版本控制
+（`.gitignore` 的 `docs/**/*.pdf`、`docs/**/*.aux` 规则覆盖；仅 `references/`
+下三份官方规则原件 PDF 为例外，属外部规范源附件）。
+
+本目录各 Markdown 文档定位：
+  southern_execution_contract.md   主执行合同（跨日状态、出清流水线、验收证据）
+  performance.md                   性能证据
+  intelligent_simulation.md        智能仿真（离线 Oracle、标签与代理模型实验记录）
+  system_design.md                 目标设计与迁移契约（七工作区）
+  yunnan_ancillary_markets.md      云南辅助服务（调频/黑启动规则提取与衔接）
+  southern_real_time.md            实时市场
+  southern_rules_comparison.md     规则对照
+  aemo_validation.md               AEMO 验证
+  empirical_bidding_analysis.md    实证报价对照实验
+  bidding_behavior_review.md       报价行为文献与实现审查
+
+每节结构约定（与 OPF/PF 手册一致）：功能定位 → 数学模型/算法（公式注明
+源码出处 文件:行号）→ 参数表 → 验证与校核 → 边界与局限。
+
+[智能仿真标签与价格代理](intelligent_simulation.md)：离线完整周Oracle、LMP分位数/尖峰标签、v1/v2两轮压力试验及后续水电专项辨识轮验证与模型产物；IEEE118合成压力试验保留分组基线负结果，尚未准入边界优化。
 
 本地与在线帮助使用同一份`docs/` Markdown，在线“帮助”可搜索“跨日继承”“SOC”或
 “性能”。[跨日状态契约](southern_execution_contract.md)明确机组连续
 开停机时间、储能能量、水位和下泄历史取前一天SCED第96点末态；每日SOC终值仍按申报
 生效。用户操作见[周月教程](../../guides/market_simulation_workflow.zh.md)。
 可下载的[PDF主手册](market_manual.pdf)及其`chapters/southern_execution.tex`已同步
-跨日状态公式、矩阵复用、定价一致性与本次性能验收；PDF共62页，在线/本地校验记录
+跨日状态公式、矩阵复用、定价一致性与本次性能验收；PDF共99页，在线/本地校验记录
 见[开发状态](../../overview/development_status.md)。
 
 [市场求解性能](performance.md)：IEEE118 水量、储能与机组组合的消融计时，
@@ -56,7 +89,9 @@ GUI现分南方规则与通用AC/DC两套导航，默认进入南方“运行模
 external_grid 与 energy_router 无市场契约，显式退回 `unsupported_hybrid_market_assets`。
 定价求解原生单纯形超过5000变量直达HiGHS并有失败回退；gap未证最优写警告。
 测试基线 `hacdcpf_test_market_simulation` 22用例/845断言，另有独立oracle
-`market_sced_cross_validation`；实时/博弈/混合出清的GUI回归见[开发状态](../../overview/development_status.md)。
+`market_sced_cross_validation`（`tools/market_validation/run_cross_validation.py`
+提供 `--negative-control` 负控制开关，人为改写一个 LMP 后预期校验失败并以退出码 0
+报告检出）；实时/博弈/混合出清的GUI回归见[开发状态](../../overview/development_status.md)。
 
 [AEMO数据与可证伪验证](aemo_validation.md)：七日官方调度/报价，108项实验检查、
 两机256组合穷举与三后端对照，周/实时/调频/现金独立复核及12项结果变异。
@@ -96,7 +131,7 @@ IEEE118多资源案例可按日/周/月独立组合线路/机组停运、天然�
 16种指标覆盖SCED功率基点、一次调频备用、规则上/下备用贡献、线路有功负载率、新能源消纳、
 水位、储能和负荷响应；全设备分页/筛选/CSV及Canvas时段定位同步。
 备用贡献不是逐机备用中标量，线路负载率不是交流MVA负载率；详见[周计划口径](southern_execution_contract.md#weekly-plan-results)。
-新版运行入口为 `http://127.0.0.1:8095/xjtu/#market-operation`，已保留完整7天结果。
+新版运行入口为 `http://127.0.0.1:8088/xjtu/#market-operation`，已保留完整7天结果。
 左侧Canvas采用ELK分层布线，默认显示两跳局部邻域（最多24节点），可切换80节点扩展邻域。
 线路数值进入悬停/设备明细；节点数值可切换，平行支路独立布线。选中设备和切换时段保留视角，
 支持主动重新居中；显示范围不会删减出清模型。布局及联动验证见[Canvas布局](southern_execution_contract.md#market-canvas-layout)。

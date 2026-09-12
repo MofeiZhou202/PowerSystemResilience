@@ -59,7 +59,7 @@ RATIONALE：3.1、3.5.2–3.5.7明确15分钟滚动、2小时SCUC/SCED24×5min�
 
 SCED固定SCUC离散状态，应用外部调频预留并重新优化连续出力。定价固定前序SCED离散选择和非定价出力；定价资源`(1−delta)P_sced<=P_lmp<=(1+delta)P_sced`与物理上下界取交集。储能定价是否保留能量约束、新能源/优先计划是否保留，由`execution.lmp_storage_policy/lmp_renewable_priority`明确选择；不得把一种解释写成官方勘误。定价程序可能因15分钟状态投影失败，返回`prices_valid=false`与`pricing_error`，仍保留有效5分钟排程。
 
-网络`A f = injections`、`f=diag(baseMVA/x) A^T theta + phase_shift`，与每时刻拓扑对应的PTDF等价，逐岛参考角；保留线路/断面双向松弛。`DeltaP=deficit-surplus`，同时报告总松弛`deficit+surplus`；`DeltaPij`为线路正/反越限松弛，并独立重算物理越限。角度模型避免显式稠密PTDF矩阵。
+网络`A f = injections`、`f=diag(baseMVA/(x·tap)) A^T theta + phase_shift`，与每时刻拓扑对应的PTDF等价，逐岛参考角；保留线路/断面双向松弛。`DeltaP=deficit-surplus`，同时报告总松弛`deficit+surplus`；`DeltaPij`为线路正/反越限松弛，并独立重算物理越限。角度模型避免显式稠密PTDF矩阵。
 
 水位`z_t=z_(t-1)+300/A*(inflow+upstream_delayed_release-release)`；`release=spill+Σp*water_m3_mwh/3600`。储能`E_t=E_(t-1)-dt*(pdis/eta+pch*eta)`且pch≤0；小时内互斥按真实小时分组（5分钟12点、15分钟4点），跨滚动保留已执行小时模式。窗口末SOC显式声明，不能每2h无说明地套日末目标。机组群/水库窗口MWh、负荷最大削减MWh及储能剩余循环容量必须标注时域。
 
@@ -89,7 +89,7 @@ SCED固定SCUC离散状态，应用外部调频预留并重新优化连续出力
 
 Release手算覆盖双时间网格、小时缺价、首点爬坡、事故备用严格/惩罚、固定抽蓄、逐点水电电量、停机水电备用资格、拓扑断开、线路越限、预测四级递补、封存报价拒绝、共享水库状态与小时储能历史。IEEE118端到端脚本`tests/e2e/southern_realtime_e2e.mjs`独立重算梯级水量、储能能量及前三点承接，含线路停运、Canvas/曲线联动、移动端、版本冲突及非法报价。
 
-验证命令：Release `build/macos-release/tests/test_southern_market`；Sanitizer `ASAN_OPTIONS=detect_leaks=0 build/macos-asan-ubsan/tests/test_southern_market '[realtime]'`；浏览器 `node tests/e2e/southern_realtime_e2e.mjs`。最终Release59测试/27962断言、实时ASan/UBSan6测试/81断言通过；日前及辅助页面E2E回归通过。构建为macOS arm64 Release O3/C++20。Release与Sanitizer报告是HEAD `8b93145`当时工作树（含未提交修改）的记录；E2E摘要已在HEAD `5041bcdb`重跑更新。当时正常CMake重配受原依赖锁定差异阻止，使用已配置构建目标，未改依赖锁。
+验证命令：Release `build/macos-release/tests/test_southern_market`；Sanitizer `ASAN_OPTIONS=detect_leaks=0 build/macos-asan-ubsan/tests/test_southern_market '[realtime]'`；浏览器 `node tests/e2e/southern_realtime_e2e.mjs`。截至HEAD `8b93145`的Release59测试/27962断言、实时ASan/UBSan6测试/81断言通过；日前及辅助页面E2E回归通过。构建为macOS arm64 Release O3/C++20。Release与Sanitizer报告是HEAD `8b93145`当时工作树（含未提交修改）的记录；E2E摘要已在HEAD `5041bcdb`重跑更新。当时正常CMake重配受原依赖锁定差异阻止，使用已配置构建目标，未改依赖锁。
 
 | 事前预测 | 实测 |
 |---|---|

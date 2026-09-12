@@ -20,12 +20,40 @@ applied event records, warnings, and optional modal/CSV data.
 For `MassMatrixDae`, a run is rejected before time stepping unless requested
 power-flow initialization converged and the finite fast-state residual satisfies
 `dynamic_trim_tol`. During the global consistent-initialization Newton solve,
-the algebraic network tolerance is temporarily tightened to the smaller of the
-user value and one tenth of `dynamic_trim_tol`, then restored for time stepping.
-This prevents a nominally looser algebraic solve from setting the floor of a
-stricter differential-state certificate. The default Anderson-Picard network
-budget is ten iterations with early exit; the Newton fallback restarts from the
-pre-Picard voltage seed.
+the algebraic network tolerance is temporarily tightened, then restored for time
+stepping. A forward-difference reduced Jacobian taken through an algebraic solve
+of accuracy `η` carries an `O(√η)` error at its optimal step, so certifying the
+fast-state residual to `dynamic_trim_tol` requires the algebraic solve to reach
+`≈ dynamic_trim_tol²` — not merely one decade below it. The looser decade leaves a
+`√(0.1·dynamic_trim_tol) ≈ 1e-4` Jacobian-noise floor that stalls a stiff,
+high-gain machine hand-off to this Newton (observed on the PSS/E STAB1 OMIB
+GENROU with `Xd′ = Xd″ = 0.30`, `Xd = Xq = 2.2` and a `K = 130` exciter, whose
+q-axis emf and field residuals locked at `≈ 3.8e-4`). Because an algebraic solve
+cannot be driven below the floor its own conditioning admits, and the caller's
+network tolerance is by construction reachable, the request is bounded a few
+decades under that tolerance — tight enough for the reduced Jacobian, still
+achievable on stiff AC/DC networks whose DC bus floors near `1e-11`. The default
+Anderson-Picard network budget is ten iterations with early exit; the Newton
+fallback restarts from the pre-Picard voltage seed.
+
+The consistent-initialization strategy is branch-aware. The reduced Newton
+eliminates the network voltage `y` through a per-evaluation `solveNetwork`, which
+enforces the algebraic balance `g(x, y) = 0` exactly and converges the sensitive
+electromechanical residuals to machine precision. That eliminated map `y(x)` is
+single-valued for machine-dominated systems, so those systems use the reduced
+Newton from the trimmed operating point unchanged. Once grid-following inverters
+(`VSCGridFollowing` VSCs or standalone grid-following inverters, model
+`REGC_REEC_GFL_Subset`) inject near-constant power, `y(x)` becomes multi-valued
+and the free network solve can lock onto a spurious high-voltage load-flow branch
+(Kundur, *Power System Stability and Control*, Sec. 13.3). For systems that
+contain such devices, initialization restarts from the power-flow seed and
+carries the network voltage as an explicit unknown in a coupled `(x, y)` Newton
+that solves `[mask f(x, y); g(x, y)] = 0` with a Levenberg–Marquardt step; this
+selects the physical branch near the power-flow operating point. The reduced
+Newton then tightens the electromechanical residuals on that branch. IEEE118
+AC/DC (six VSCs) initializes to a consistent operating point at `max|V| ≈ 1.165`
+pu and passes the AC voltage health check, where the reduced Newton alone drifted
+to a spurious `≈ 1.9` pu equilibrium that tripped the health check.
 
 The mixed AC/DC initialization uses the same DC/DC port-power equation as
 steady-state power flow. Power-controlled DC/DC devices retain a first-order

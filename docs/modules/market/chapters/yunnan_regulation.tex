@@ -1,0 +1,269 @@
+% yunnan_regulation.tex -- 云南调频市场模型
+\section{云南调频市场模型}\label{sec:yunnan-regulation}
+
+\begin{theorynote}
+本章是云南 2025 调频辅助服务市场研究执行模型的数学描述，以代码实现为准；
+规则原件为 \srcpath{docs/modules/market/references/yunnan\_frequency\_regulation\_rules\_2025.pdf}
+（云监能市场〔2025〕114 号），逐项提取与已校核实况见
+\srcpath{docs/modules/market/yunnan\_ancillary\_markets.md}。
+本章不构成完整云南调频规则等价认证（口径见边界与局限一节）。
+输入输出字段全集见第~\ref{sec:market-module-io}~章云南小节，本章聚焦数学结构。
+\end{theorynote}
+
+\subsection{功能定位与出清链路}
+索引约定：AGC 单元 $a$、单元内机组 $g$、交易小时 $h=0\sim23$、能量时点 $t=0\sim97$
+（前 96 点为运行日 15 分钟点，末 2 点为次日代表点，不承担小时调频合同）。
+公开入口 \fld{run\_yunnan\_ancillary\_market} 与 \fld{run\_yunnan\_ancillary\_intraday}
+接线于 \srcpath{src/market/southern\_market.cpp:2587-2588}，统一走
+\fld{run\_southern\_market\_impl}：能量 SCUC 先解出组合 $u_{gt}$、稳定状态 $s_{gt}$ 与
+一次调频 $f_{gt}$；随后运行小时预安排 \fld{yunnan::prearrange} 与安全调整
+\fld{yunnan::adjust\_awards}（\srcpath{src/market/southern\_market.cpp:2429-2436}），
+把三者连同调频中标量固定，重建带调频约束的 SCED（调频约束只在非 UC 阶段激活，
+\srcpath{src/market/southern\_market.cpp:513}），再按需接独立 LMP 与 AC 安全迭代。
+日内阶段复用日前完整组合解（\fld{reused\_day\_ahead}=true，
+\srcpath{src/market/southern\_market.cpp:2363-2372}），重算日内 SCED/LMP。
+与既有外部二次预安排同时输入被拒绝（\srcpath{src/market/yunnan\_ancillary.hpp:47-48}）。
+
+\subsection{小时级预安排出清模型}
+实现为 \fld{yunnan::prearrange}（\srcpath{src/market/yunnan\_ancillary.hpp:125-233}）。
+
+\textbf{小时需求}。先按时点汇总控制区负荷与新能源预测，再取小时最大
+（\srcpath{src/market/yunnan\_ancillary.hpp:147-155}）：
+\begin{equation}
+ C_h=C_{\min}+R_1\max_{t\in 4h..4h+3}L_t+R_2\max_{t\in 4h..4h+3}D_t,
+\end{equation}
+其中 $L_t=\sum_a \fld{load\_mw}_{a,t}$，$D_t$ 为 wind/solar/renewable 机组
+\fld{forecast\_mw} 之和；不能把各资源各自的最大值相加。
+
+\textbf{性能排序指标}。对每台 AGC 单元，$k_a$ 为最近 8 个中标时段性能指数的算术均值
+（要求 $k_a>0$，\srcpath{src/market/yunnan\_ancillary.hpp:58-60}），
+$k_{\max}=\max_a k_a$（:132-136）。
+
+\textbf{候选容量必要上界}。成员 $g$ 在时点 $t$ 的可调宽度先裁到运行区间并扣一次调频
+（:166-170）：无声明安全区（火电）时
+$w_{gt}=P^{\max}_{gt}-P^{\min}_{gt}-f_{gt}$；水电按安全区取最大连通宽度
+$w_{gt}=\max_k\big(\min(P^{\max}_{gt},h_{gk})-\max(P^{\min}_{gt},l_{gk})-f_{gt}\big)$。
+候选容量取 5 分钟爬坡与半宽度的较小者，单元内求和后对小时四点取最小
+（:172-173,:197）：
+\begin{equation}
+ \overline Q_{a,h}=\min_{t\in 4h..4h+3}\sum_{g\in a}
+ \max\!\Big(0,\min\big(w_{gt}/2,\;5\min(r^{up}_g,r^{down}_g,r^{std}_g)\big)\Big),
+\end{equation}
+其中 $r^{std}_g$ 为申报 AGC 标准速率。该上界只是排序筛选的必要条件，
+水量/网络/时序耦合由后续 SCED 残差审计兜底。独立资源（储能/直控负荷）另要求
+任一刻可用、持续响应 $\ge1$ 小时且同小时跨省备用为零
+（\srcpath{src/market/yunnan\_ancillary.hpp:176-195}）。
+
+\textbf{申报处理与排序}。报价越出 $[3,8]$ 时回退到 \fld{default\_price\_per\_mw}
+（未设则用下限 3，:200-201）。有效授予申报为
+\begin{equation}
+ \widetilde Q_{a,h}=\min\big(\fld{capacity\_mw}_{a,h},\lfloor \tfrac12 C_h\rfloor,
+ \lfloor \overline Q_{a,h}\rfloor\big)
+\end{equation}
+（单主体 50\% 需求上限与必要容量界，:202；未满足资格/互斥条件取 0，:202-208）。
+排序价为
+\begin{equation}
+ q^{rank}_{a,h}=\fld{bid}_{a,h}\cdot k_{\max}/k_a
+\end{equation}
+（:209），按排序价升序、同价按 $k_a$ 降序、再同按稳定 ID 升序（可复现性约定，
+:216-220）。
+
+\textbf{整块中标与价格}。按序整块接纳直至累计中标满足 $C_h$
+（原文未明示边际按比例截断，:221-223）；正式边际价为最后中标排序价的 15 元封顶
+\begin{equation}
+ Q_h=\min\!\big(15,\;q^{rank}_{last(h)}\big),
+\end{equation}
+短缺小时参考价为 null 且 \fld{capacity\_sufficient}=false（:224-228,:231）。
+日前结果只称参考价；日内统一正式出清价 \fld{clearing\_price\_per\_mw}
+（\srcpath{src/market/yunnan\_rules\_workflow.hpp:151-155}）。
+
+\subsection{综合性能指标与计量分档}
+实现为 \fld{yunnan::performance\_metrics} 与 \fld{yunnan::meter}
+（\srcpath{src/market/yunnan\_rules\_workflow.hpp:190-260}）。速率与误差均为额定容量
+标幺口径，不混用 MW/min。排序综合指标
+\begin{equation}
+ k_1=\frac{v_{meas}}{v_{std}},\quad
+ k_2=1-\frac{delay}{delay_{std}},\quad
+ k_3=1-\frac{error}{error_{allowed}},\quad
+ k=\frac{k_1+k_2+k_3}{3}
+\end{equation}
+（:194,:196；附录 1 的多机加权标准速率在本实现按事件给定的单一电网标准速率输入）。
+结算性能系数
+\begin{equation}
+ m_1=\min\!\Big(4,\frac{v_{meas}}{0.015}\Big),\quad
+ m_2=1-\frac{delay}{60},\quad
+ m_3=1-\frac{error}{0.01},\quad
+ m=\min\!\Big(2,\frac{m_1+m_2+m_3}{3}\Big)
+\end{equation}
+（:195-196）；$m<0$ 拒绝并提示需外部统计规则处置，
+不擅自截断为 0（:245）。AGC 里程只累计 AUTOR 事件
+$D_{ah}=\sum_{cmd}|\Delta P|$（:246）；自身原因不可用时段取区间并集
+（\fld{union\_seconds}，:199-204），计费分档为
+\begin{equation}
+ R_{ah}=\begin{cases}D_{ah}\,Q_h\,m_{ah},&\text{非测试且不可用}\le300\text{ s},\\0,&\text{否则},\end{cases}
+\end{equation}
+即 300 秒不扣、301 秒全扣该小时（:248-249；门槛用例见
+\srcpath{tests/test\_southern\_market.cpp:373-375}）。
+
+\subsection{与能量 MILP 的耦合约束}
+SCUC 冻结 $u,s,f$ 后，SCED 在保留全部能量平衡、线路、爬坡与水库约束的同时新增
+（均见 \srcpath{src/market/southern\_market.cpp}，\fld{ancillary} 分支）：
+
+\textbf{二次备用变量}。每台机组新增 $r^+_{gt},r^-_{gt}\ge0$，仅 $t<96$ 非零：
+\begin{align}
+ r^+_{gt}&\le 5\min(r^{std}_g,r^{up}_g)\,s_{gt},&
+ r^-_{gt}&\le 5\min(r^{std}_g,r^{down}_g)\,s_{gt}
+\end{align}
+（:628-633；$r^{std}$ 取成员声明标准速率，非成员为 0），并满足输出包络
+\begin{align}
+ p_{gt}+f_{gt}+r^+_{gt}&\le P^{\max}_{gt}u_{gt},&
+ p_{gt}-r^-_{gt}&\ge \max(P^{min}_{gt},P^{tech}_{g})\,s_{gt}
+\end{align}
+（:634-635,:733-735；下界含技术最小出力）。二次备用同时计入区域备用消元
+（:637）。
+
+\textbf{水电允许区间析取}。对声明安全区的水电，引入 $z_{gtk}\in\{0,1\}$：
+\begin{equation}
+ \sum_k z_{gtk}=s_{gt},\qquad
+ \sum_k l_{gk}z_{gtk}\le p_{gt}-r^-_{gt}-T_{gt},\qquad
+ p_{gt}+f_{gt}+r^+_{gt}-T_{gt}\le\sum_k h_{gk}z_{gtk}
+\end{equation}
+（$T_{gt}$ 为启停轨迹项，:736-752），保证基点到调频端点落在同一连通允许区间；
+LMP 阶段固定区间选择。这是工程代数化，不表示真实振动幅值、过区时间或水头依赖。
+
+\textbf{厂级双向求和}。对每个 AGC 单元与小时内各时点
+（:777-783）：
+\begin{equation}
+ \sum_{g\in a}r^+_{gt}=Q^{award}_{a,h(t)},\qquad
+ \sum_{g\in a}r^-_{gt}=Q^{award}_{a,h(t)},
+\end{equation}
+其中奖额按保守小时包络取该小时中标量与实时指令的最大值
+（\fld{yunnan::required\_capacity}，\srcpath{src/market/yunnan\_rules\_workflow.hpp:182-187}；
+$t\ge96$ 恒为 0，次日代表点不保留二次奖额）。
+
+\textbf{独立储能}。中标时点强制 $dis=ch=dis\_on=ch\_on=0$（:853,:868），
+且令 $\eta=\sqrt{\fld{roundtrip\_efficiency}}$、$r$ 为小时调频容量，能量窗口
+\begin{equation}
+ E^{\min}_t+\frac{r}{\eta}\le E_t\le E^{\max}_t-r\,\eta
+\end{equation}
+对小时内各点及起始能量同时成立（:872-875）；首小时初值 SOC 落在窗外时直接抛
+\fld{invalid\_argument} 拒绝，不自动缩减奖额（:876-877）。日内另要求该小时实际日前
+充放电计划为零（\srcpath{src/market/yunnan\_ancillary.hpp:186-190}）。
+
+\textbf{独立负荷}。以声明削减基点 $b$ 固定运行，要求
+$r\le b$ 且 $b+r\le \fld{available}_t\fld{max\_reduction\_mw}_t$，对称裕度不足同样抛错
+（:822-826）；日削减能量上限扣除各时点上调预留能量
+$\sum_t award_t\Delta t$（:817,:832）。
+
+\textbf{输出排他标记}。独立资源输出 98 点 \fld{agc\_reserved\_mw} 与
+\fld{energy\_market\_eligible}（中标时段为 false），能量账本按该标记跳过补偿，
+防止优化目标与结果账本重复支付（:1889-1892,:2150）。
+
+\subsection{计量、分摊、入账与月结}
+实现于 \srcpath{src/market/yunnan\_rules\_workflow.hpp:208-391}。
+
+\textbf{计量}（\fld{meter}，:208-260）。结算前置：日内出清、
+\fld{settlement\_eligible}、能量计划可行、非诊断松弛、实时容量充足（:209-213）。
+测量事件不得重叠、不得重复 \fld{event\_id}、不得跨越实时容量变更（:234-239）；
+被调用而缺测量行只标 \fld{complete}=false 并列入 \fld{missing\_measurements}，
+缺行表示未知，绝不以零交付伪造（:253-258）。
+
+\textbf{分摊}（\fld{allocate}，:264-292）。点对网跨省主体的补偿与分摊/返还权重减半
+（因子 $0.5$，:273,:283-287）；非连续现货按上网电量分摊
+$J_g=R\cdot E_g/\sum E$，连续现货按 \fld{generation\_share} 拆分发电/用户两池
+（:277-279）；正费用池遇零分母拒绝而非自动转嫁（:280）；分摊与返还的平衡残差
+强制 $\le10^{-6}$ 元（:290-291）。日结参与主体的补偿金额只从计量结果汇总，
+输入行严格字段校验拒绝外部直接填写 \fld{compensation\_cny}（:309-313）。
+
+\textbf{入账与更正}（\fld{post\_statement}，:330-367）。先交付后入账；更正必须指名
+最新原凭证、保留旧版，并满足发现后 1 个日历月与交付日起 6 个日历月两个窗口
+（:347-348）；同一出清禁止重复记账（:339），AGC 事件跨交付日重放拒绝（:363-364）。
+
+\textbf{月结}（\fld{settle\_month}，:371-391）。先按月内每个运行日的最新有效凭证
+汇总 $\sum D\cdot Q\cdot m$，再用整月电量执行分摊一次（不累计逐日分摊）；
+月结强制 \fld{generation\_share}$=F=0.5$（:385）；缺任一运行日返回
+\fld{complete}=false 与 \fld{missing\_days}（:380-381）。
+
+\subsection{工作流时序与封存}
+时间均按运行日 00:00 相对分钟。报价窗口为 D-1 的 $[-900,-720]$ 分钟
+（\srcpath{src/market/yunnan\_rules\_workflow.hpp:49}）；逐小时出清时刻
+\fld{clearing\_minutes} 校验界 $[-660,1410]$，且须 $\le 60h-30$（正式出清距运行小时
+至少 30 分钟，:38-39）。\fld{seal\_bids} 按（分钟，提交 ID）排序取最后一条满足精度
+（0.1 元步长、1 MW 步长）与 50\% 容量上限的有效申报，精度或容量非法的申报不替换
+既有有效申报（:103-119）。日内仅可替换 \fld{clearing\_minutes}、
+\fld{allow\_uplift}、安全复核、暂停与实时指令：封存后的主体配置与申报记录必须与日前
+快照一致，否则拒绝（\srcpath{src/market/southern\_market.cpp:2298-2305}）。
+安全调整按价降序/$k$ 升序移出、从初始中标为零的序列外主体补入、受
+\fld{allow\_uplift} 门控的调增，全部写入 \fld{adjustment\_log}
+（\srcpath{src/market/yunnan\_rules\_workflow.hpp:123-150}）；暂停时段结算价取前一
+交易日同小时价（:155），其校验界为 $[0,15]$（:60-63，已知缝隙见边界与局限）。
+
+\subsection{参数表}
+默认值出自 \fld{yunnan::defaults}/\fld{complete\_defaults}
+（\srcpath{src/market/yunnan\_ancillary.hpp:91-121}、
+\srcpath{src/market/yunnan\_rules\_workflow.hpp:16-33}），校验界出处逐行标注：
+\begin{paramtable}
+\fld{cmin\_mw} & $C_{\min}$ & MW & $0\sim10^{6}$ & $450$ & \fld{research}=false 时锁定 450（yunnan\_ancillary.hpp:41-42,:93）\\
+\fld{load\_ratio} & $R_1$ & — & $0\sim1$ & $0.005$ & 负荷比例；规则动态调整、无唯一官方默认（:43,:93）\\
+\fld{renewable\_ratio} & $R_2$ & — & $0\sim1$ & $0.003$ & 新能源比例（:43,:93）\\
+\fld{k\_history} & $k$ & — & 8 点、均值 $>0$ & 水电 1.5/火电 1 & 最近 8 次中标性能（:58-60,:106）\\
+\fld{price\_per\_mw} & bid & 元/MW & 24 点、0.1 步长 & 水电 4/火电 5 & 里程报价，$[3,8]$ 外回退缺省（:61,:106,:200-201）\\
+\fld{default\_price\_per\_mw} & — & 元/MW & $3\sim8$、0.1 步长 & null & 缺省报价校验界（:64）\\
+\fld{capacity\_mw} & — & MW & 24 点、1 MW 步长 & $10$ & 申报容量，单主体 $\le \tfrac12 C_h$（:62,:107,:202）\\
+\fld{standard\_ramp\_mw\_min} & $r^{std}$ & MW/min & $\ge0$ & 水电 $0.2$/\allowbreak 火电 $0.015$ & 申报 AGC 标准速率；模板默认值为额定功率 $P^{max}$ 的倍数（:75,:118）\\
+\fld{safe\_intervals\_mw} & $[l,h]$ & MW & $\le16$ 段 & 模板两段 & 水电强制、递增不交；火电必须为空（:76-84）\\
+\fld{sustained\_hours} & — & h & $\ge0$ & $0$ & 独立资源持续响应准入 $\ge1$（yunnan\_ancillary.hpp:180）\\
+\fld{clearing\_minutes} & — & min & $[-660,1410]$、$\le60h{-}30$ & 全 $-660$ & 逐小时出清时刻（\srcpath{src/market/yunnan\_rules\_workflow.hpp:17,:38-39}）\\
+\fld{bid\_submissions.minute} & — & min & $[-900,-720]$ & — & D-1 报价窗口（:49）\\
+\fld{suspensions.previous\_trading\_day\_price\_per\_mw} & — & 元/MW & $[0,15]$ & — & 暂停时段历史价校验界（已知缝隙，:60-63）\\
+\fld{generation\_share} & $F$ & — & $0\sim1$ & — & 分摊比例；非研究日结与月结强制 $F=0.5$（:304,:385）\\
+\fld{allow\_uplift} & — & — & 布尔 & true & 安全调增开关（:17,:40,:147）\\
+\end{paramtable}
+
+\subsection{验证与校核}
+\begin{itemize}
+  \item Catch2：\srcpath{tests/test\_southern\_market.cpp} 的 8 个 \texttt{[ancillary]} 用例
+        直接校核本章模型——封存申报与安全排序独立 oracle（:332）、日内复用组合与计量门控
+        （:359，含 180 元手算、300/301 秒分档 :370-375）、暂停价/实时容量/账户守恒（:395）、
+        月结更正替换与整月分母（:418）、缺省报价回退/小时下限/15 元封顶（:452）、
+        独立储能/负荷的能量排他/持续/稀缺反例（:482）、小时排序与固定一次调频手算 oracle
+        （:518）、水电安全区约束与厂级聚合（:557）。套件整体当前为 74 用例/29807 断言
+        （本次文档同步实跑）。
+  \item 手算基准（与 \srcpath{docs/modules/market/yunnan\_ancillary\_markets.md} 一致）：
+        需求 20 MW、A 移出后 B/C 各中标 10 MW、排序价 5/6、日内价 6 元/MW；里程 10/20 MW、
+        $m=1$ 时补偿 180 元，发电/用户各分摊 90 元，现金残差 $<10^{-6}$；非连续现货月度
+        100+300 元补偿、90/10 MWh 月电量分摊 360/40 元。
+  \item 浏览器 E2E：\srcpath{tests/e2e/yunnan\_ancillary\_e2e.mjs}，ctest 注册
+        \fld{yunnan\_ancillary\_e2e}（\srcpath{tests/CMakeLists.txt:951-956}）。
+  \item 保存工件（本次核实存在与键结构）：\srcpath{output/market-ancillary/live-rules-audit.json}
+        （\fld{fixed\_state\_residual}、\fld{plant\_reserve\_residual\_mw}、
+        \fld{safe\_band\_excess\_mw}、\fld{storage\_energy\_market\_overlap\_mw}、
+        \fld{compensation\_cny}、\fld{cash\_residual\_cny} 等独立复核项）、\allowbreak
+        \srcpath{output/market-ancillary/ieee118-rule-statement.json}
+        （\fld{metering}/\allowbreak\fld{allocation}/\allowbreak\fld{complete}）、\allowbreak
+        \srcpath{output/market-ancillary/ieee118-independent-day-cap-failure.json}
+        （保守日能量反例证据）；数值台账以
+        \srcpath{docs/modules/market/yunnan\_ancillary\_markets.md} 已校核记录为准。
+\end{itemize}
+
+\subsection{边界与局限}
+\begin{itemize}
+  \item 本章为研究执行解释：已实现的排序、具名安全移出/补入/调增、日内固定状态、
+        独立资源排他、计量计费与月度重分摊只覆盖可计算研究规则；
+        \textbf{不构成完整云南调频规则等价认证}
+        （与 \srcpath{docs/modules/market/yunnan\_ancillary\_markets.md} 口径一致）。
+  \item 黑启动市场：仅完成规则提取，代码中无黑启动出清实现
+        （\srcpath{src/market/} 与 \srcpath{include/hacdcpf/market/} 无 \fld{black\_start}
+        实现），不提供任何伪装成可执行的黑启动交易入口。
+  \item 暂停时段历史价校验界为 $[0,15]$：必填可防缺失但防不住显式填 0 占位，
+        0 价会进入结算，属已知缝隙，后续收紧下界
+        （\srcpath{src/market/yunnan\_rules\_workflow.hpp:63} 与
+        \srcpath{docs/modules/market/yunnan\_ancillary\_markets.md} 第 16 条注）。
+  \item 允许区间析取是工程代数化：不认证真实振动幅值、过区时间、水头依赖区间或
+        秒级 AGC 水力响应；跨时点允许换区，不作区间转换轨迹的动态安全认证。
+  \item 候选容量上界只是排序必要条件：SCED 不可行时保留失败状态供下一轮复核，
+        不从 MILP 不可行状态虚构唯一责任机组（\fld{coupled\_safety\_failed} 口径）。
+  \item AGC 资格/试验、最近 8 次中标历史的时间有效性、原始信号统计规范、
+        两个细则个人考核函数、法律月结支付均为外部输入；线性排程可行不代表
+        交流或动态安全。结算必须使用署名 AGC 指令/响应记录，调度计划不推断里程。
+\end{itemize}

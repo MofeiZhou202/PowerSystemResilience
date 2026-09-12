@@ -137,16 +137,33 @@ $(injection-curtailment)\,LMP\,\Delta t$。客户总付款为能量、备用和 
  A_g&=R_g^{perf}-C_g^{nonperf}-C_g^{imbalance},\\
  R_g^{2set}&=R_g^{DA,energy}+R_g^{DA,reserve}+U_g+R_g^{dev}+A_g.
 \end{align}
-备用交付量是指令乘 performance factor；机组惩罚偏差为
-$\max(0,|P^{RT}-P^{instruction}|-\rho\max(|P^{instruction}|,1))$。
+备用交付量是指令乘 performance factor；机组惩罚偏差仅在备用激活指令
+$P^{reserve}_g>10^{-12}$ 的机组上计算，此时
+\begin{equation}
+ I_g=\max\!\big(0,\;|P^{RT}-P^{instruction}|-\rho\max(|P^{instruction}|,1)\big),
+\end{equation}
+无备用激活指令的机组偏差恒取 $0$（\srcpath{src/market/market\_simulation.cpp:5611-5619}），
+其中 $P^{instruction}$ 为调度指令出力。
 依据均为 \srcpath{src/market/market\_simulation.cpp:run\_real\_time\_market}。
 
-HHI 使用百分数份额而非 $[0,1]$ 份额：
+HHI 使用百分数份额而非 $[0,1]$ 份额，且出力与收入两侧的分子分母均经 $\max(0,\cdot)$
+截断（\srcpath{src/market/market\_simulation.cpp:4461-4480}）：
 \begin{equation}
- HHI_{output}=\sum_p(100E_p/\sum_qE_q)^2,
+ HHI_{output}=\sum_p\Big(100\,\frac{\max(0,E_p)}{\sum_q\max(0,E_q)}\Big)^{\!2},
 \end{equation}
-无总量时份额为零；收入 HHI 同理但负收入先截为零，见
+总量不超过 $10^{-12}$ 时份额为零；出力非负时该截断为空操作，收入 HHI 同理（负收入先截为零），见
 \srcpath{src/market/market\_simulation.cpp:aggregate\_participant\_settlement}。
+
+\subsection{验证与校核}
+
+本章装配契约的回归证据为 Catch2 套件 \srcpath{hacdcpf\_test\_market\_simulation}
+（22 用例 / 845 断言，\srcpath{tests/test\_market\_simulation.cpp}），覆盖日前流水线、
+定价对偶提取、结算赋值、实时两结算偏差（含
+\texttt{Case9 real-time fixed-commitment market closes two-settlement deviations} 与
+\texttt{Hybrid real-time market settles DC load forecast deviations}）及 HHI 市场力度量；
+铜板切片的 LMP 与结算恒等式另由独立方程 oracle 复核（第~\ref{sec:market-xref}~节）。
+本章未逐式展开的分支（DC storage 日循环、warm start 修复、重复博弈等）以其 Catch2 用例为准，
+不在本章给出独立数值证据。
 
 \subsection{覆盖边界}
 

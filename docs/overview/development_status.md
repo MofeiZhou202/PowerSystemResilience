@@ -1,10 +1,186 @@
 # Development Status
 
-Updated: 2026-09-10
+Updated: 2026-09-12
 
 This is the living handoff for verified build state and active engineering work.
 Update it in place; do not create dated copies. Source, registered tests, and
 the current Git worktrees remain authoritative.
+
+## Market module documentation audit and manual upgrade
+
+Systematic doc-vs-code audit of `src/market/` against `docs/modules/market/`
+(six parallel review passes over the md contracts, the LaTeX manual chapters,
+the Yunnan ancillary workflow, and the performance/validation evidence).
+Overall match was high; no "implemented-worse-than-documented" or
+fallback-presented-as-exact cases were found. Fixed the confirmed mismatches:
+
+- `southern_execution_contract.md`: benchmark binary name
+  (`run_southern_market_benchmark`), the stale "current auto/dual_simplex
+  divergent duals" claim rewritten as pre-fixed-strategy historical evidence,
+  forecast RATIONALE updated to 8-day joint sampling / 7-day clearing
+  (`market_forecast.cpp:129-137`), statistics table gained the scenario-count
+  and weekly-energy summary fields, forecast week-only horizon rejection
+  documented, `horizon="day"` and the eight daily multiplier fields registered,
+  `explain_trigger`/`recovery_pricing` defaults noted, dated snapshot wording.
+- `performance.md`: CTest gating of `southern_market_2000_benchmark`
+  (`HACDCPF_ENABLE_MARKET_SCALE_TESTS`, UNIX, licensed Gurobi) declared;
+  outer-vs-inner wall-clock provenance note (outer values are retained in
+  `output/market-operation/local-2000-reduced/comparison.json`); recovery
+  parallelism requires more than one experiment.
+- `README.md`: port 8095→8088, round-count wording, new controlled-sources and
+  chapter-map section mirroring the OPF manual README conventions.
+- `southern_real_time.md`: tap factor restored in the network equation;
+  snapshot wording tied to HEAD.
+- `yunnan_ancillary_markets.md`: implementation location corrected (rule logic
+  lives in the two private headers), mandatory AGC roster for every boundary
+  hydro unit documented, the explicit-zero historical-price gap recorded as a
+  known limitation (validation lower bound unchanged), intraday replaceable
+  field list widened to match `southern_market.cpp:2302-2305`, default
+  reservoir/unit AGC grouping documented.
+- LaTeX manual aligned with the PF/OPF manual conventions: typo (铜板银),
+  test target renamed to `hacdcpf_test_market_simulation`, real-time penalty
+  deviation formula gained the reserve-instruction gate
+  (`market_simulation.cpp:5611-5619`), HHI zero-clipping noted, AC-validation
+  failure consequences stated precisely (`feasible=false`,
+  `ac_validation_failed`), per-chapter verification subsections added, and the
+  preamble gained solver-family/dispatch and verification-channel overview
+  sections (all line references re-verified).
+- `tools/market_validation/run_cross_validation.py` gained `--negative-control`
+  (corrupts one LMP, expects the oracle to FAIL; exit 0 only when detected),
+  making the negative-control claim in `numerical_cross_validation.tex`
+  reproducible. Verified: forward oracle passes (max_error=0.0),
+  negative control detected (max_error=1.0), registered ctest
+  `market_sced_cross_validation` passes; `hacdcpf_test_market_simulation`
+  22/845, `test_southern_market` 74/29807, `test_market_forecast` 8/12503 all
+  green; `market_manual.tex` compiles with xelatex twice, no errors, no
+  overfull boxes.
+
+Follow-up: new manual chapter `chapters/module_io.tex` (各模块输入输出),
+organized per public entry point — generic hybrid engine (day-ahead,
+real-time, repeated game, offer submission), southern pipeline (day-ahead,
+real-time rolling, forecast, operation/recovery), and Yunnan ancillary
+(clearing/intraday, settlement/monthly). Each entry documents its input
+parameter table, output field table, units, and index spaces with verified
+`file:line` citations (including the forecast 7-marginal vs operation
+8-multiplier distinction and the 96+2 / 72×5min / 24×4 time grids). Manual
+now compiles to 80 pages; `docs/modules/market/README.md` chapter map and
+page count updated.
+
+Follow-up: new manual chapter `chapters/yunnan_regulation.tex` (云南调频市场模型)
+adds the mathematical-model chapter for the Yunnan frequency-regulation market:
+hourly prearrangement clearing (demand, capability bounds, ranking price,
+whole-block award), performance indices, the MILP coupling constraints
+(secondary reserves, hydro safe-band disjunction, independent storage/load
+exclusion), metering/allocation/journal/month-close, workflow timing, a
+parameter table, and verification anchors — every formula carries a verified
+`file:line` citation to `src/market/yunnan_ancillary.hpp`,
+`yunnan_rules_workflow.hpp` and `southern_market.cpp`.
+
+Follow-up: two more manual chapters — `chapters/market_boundary.tex`
+(市场边界与边界模拟: the full 15-table southern boundary schema with units and
+validation rules, 98-point semantics, forecast copula/AR(1) sampling, and
+operation multipliers/peak-valley/carry/recovery) and
+`chapters/algorithm_selection.tex` (算法选择与求解策略: SCUC backend dispatch
+and fallback chain, pricing-LP routing, deterministic southern pricing with
+bit-exact dual comparison, assembly/derive/reuse admission, certified integer
+repair, and recovery parallelism). The preamble solver-family subsection is
+now a summary cross-referencing the new chapter.
+
+Follow-up: new manual chapter `chapters/rule_implementation_gaps.tex`
+(规则—实现差异清单) systematically classifies every rule clause (2.6.3.1–21,
+2.6.4–2.6.6) against the production code into consistent / interpretive
+(A1–A7) / deviating / not-implemented, with per-clause `file:line` evidence
+re-verified against `southern_market.cpp`/`southern_boundary.cpp`; the
+abstract now cross-references it. The chapter now also includes a compact
+theory-to-code-to-test traceability table covering balance/reserves/start-stop,
+storage recursion, SCED→LMP projection, and AC security feedback, and states
+explicitly that synthetic test passes are implementation evidence rather than
+formal rule certification. `market_manual.tex` was rebuilt twice with XeLaTeX
+after this addition (100 pages, no errors).
+
+## Branch-aware dynamic initialization for IBR systems
+
+Fixed a transient-initialization defect where systems with grid-following
+inverters could fail the `t=0` AC voltage health check (e.g. `ieee118_acdc`:
+`max |V| = 2.51 pu > 2.5 pu`). Root cause: the reduced consistent-initialization
+Newton eliminates the network voltage through a free `solveNetwork`, whose map
+`y(x)` becomes multi-valued once grid-following inverters inject near-constant
+power; the free solve locked onto a spurious high-voltage load-flow branch
+(`≈ 1.9 pu` for `ieee118_acdc`). A pre-existing benchmark had masked this by
+running the case with `enforce_voltage_health_check = false`.
+
+The fix (only `src/dynamics/DynamicSystem.cpp`) makes `initializeStatesFromPowerFlow`
+branch-aware: machine-dominated systems keep the exact-`g` reduced Newton from the
+trimmed state unchanged, while systems containing grid-following inverters restart
+from the power-flow seed and carry the network voltage as an explicit unknown in a
+coupled `(x, y)` Levenberg–Marquardt Newton that solves `[mask f; g] = 0`,
+selecting the physical branch, then tighten with the reduced Newton. `ieee118_acdc`
+now initializes at a consistent `max|V| ≈ 1.165 pu` and passes the health check;
+AC-only and machine/controller cases are numerically unchanged (e.g. the 2-bus
+SEXS catalog case retains its `1.29 pu` equilibrium). Verified on macOS Release:
+`test_transient_dynamics` 119/120 (the one failure is a pre-existing cross-ABI
+exception-wrapping issue in the `GFL DC-link fault control` validation test,
+confirmed identical on the baseline via `git stash`), `test_dynamic_model_catalog`
+8/8, `test_converter_coordination` 47/47, `test_intelligent_cyber_physical_reliability`
+7/7, `test_resilience_assessment` 39/39. See the transient runtime contract for the
+initialization semantics.
+
+## Live PowerSimulationsDynamics.jl cross-validation (34/34) and two stiff-machine fixes
+
+The env-gated executable PSD manifest (`tools/psd_validation/`, run with
+`HACDCPF_RUN_PSD_COMPARE=1` on tag `[dynamics][benchmark][psd][manifest][external]`)
+now clears **all 34 enabled cases against live PowerSimulationsDynamics.jl
+`ResidualModel`/`IDA` traces** — 1,069,529 pointwise assertions, every signal gate
+`passed=true`. Coverage spans classical/OneDOneQ/Marconato/Anderson–Fouad/GENROU/
+GENROE/GENSAL/GENSAE/CSVGN1 machines, AVR (AVRtype1/ESAC1A/SCRX/SEXS), governors
+(GAST/TGOV1/HYGOV), PSS (IEEEST/PSS2A/B/C), multi-machine, and the power-electronic
+families (GFM VSM/droop/VOC, GFL reduced/Kaura-PLL). The grid-following gate
+(`[dynamics][benchmark][psd][gridfollowing]`, test24 ReducedOrderPLL + test51
+KauraPLL) also passes live, with pre-step `p_oc` matching PSD to `~1e-6` — a live
+confirmation of the branch-aware IBR initialization above.
+
+Closing the last case (`psd-test41-stab1`, a GENROU + SEXS + STAB1 OMIB) required
+two further fixes, both pre-existing and independent of the IBR work:
+
+1. **Reachable init algebraic tolerance** (`src/dynamics/DynamicSystem.cpp`,
+   `solve_reduced_dynamic_initial_state`). The init algebraic tolerance was
+   tightened only to `0.1·dynamic_trim_tol`. A forward-difference reduced Jacobian
+   evaluated through an algebraic solve of accuracy `η` has `O(√η)` error, so that
+   decade left a `~1e-4` noise floor that stalled the stiff STAB1 hand-off (q-axis
+   emf and field residuals locked at `≈ 3.8e-4 > 1e-7`). The tolerance now targets
+   `dynamic_trim_tol²`, bounded a few decades under the caller's reachable network
+   tolerance so it stays achievable on stiff AC/DC networks (a DCDC-coupled DC bus
+   floors near `2e-11`; demanding `1e-14` there previously failed the network
+   Newton). stab1 now initializes to `‖dx/dt‖ ≈ 7.7e-8`.
+2. **Exciter voltage-reference step** (`src/dynamics/devices/BasicDynamicDevices.cpp`,
+   `Exciter::handleEvent`). A `Custom` event carrying `v_ref_pu` was matched against
+   the host generator component type, so the exciter never saw its own reference
+   step and `computeDerivatives` kept using the captured equilibrium reference —
+   field voltage stayed flat. The handler now matches the `Exciter` component type
+   and switches to `params_.v_ref_pu` (with `captured_ = false`), so the step is
+   applied at `t_event`. stab1's field voltage now tracks PSD (`rms 0.141`,
+   `max 0.300`, tol `0.3/0.8`), reproducing the committed baseline exactly; the
+   PSS2A/2B/2C v-ref cases (which share this event) remain green.
+
+A third, unrelated pre-existing failure was also closed. The
+`GFL DC-link fault control` test's `CHECK_THROWS_WITH` gates on VSC config
+validation lost their messages because a `std::invalid_argument` thrown in
+`apply_gfl_params` / the grid-following inverter validator was not matched by the
+builder's `catch (const std::exception&)` and fell through to the `catch (...)`
+"cross-ABI" wrapper. Diagnosis (via `abi::__cxa_current_exception_type`) confirmed
+the in-flight type is exactly `std::invalid_argument`, but the `std::logic_error`
+family RTTI typeinfo is not matched under this build's Apple `libc++abi`
+(pointer-based comparison), while `std::runtime_error` matches. It is not a
+static-library duplicate typeinfo and not dependency interposition — a subtle
+runtime RTTI-ABI split. As a bounded workaround the two VSC DC-fault-control
+config validations (`src/dynamics/DynamicModelBuilder.cpp` and
+`src/dynamics/devices/BasicDynamicDevices.cpp`) now throw `std::runtime_error`,
+which propagates its message intact. This is a workaround, not a root fix: any
+code that catches `std::logic_error`/`std::invalid_argument` specifically remains
+affected by the underlying RTTI split.
+
+Verified on macOS Release: full live manifest 34/34 (1,069,529 assertions),
+`test_transient_dynamics` 120/120, `test_dynamic_model_catalog` 8/8.
 
 ## SCUC solver threads and daily workers
 

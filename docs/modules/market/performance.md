@@ -523,7 +523,8 @@ HiGHS 初测没有明显收益。变量数量不是整数搜索时间的线性�
 
 源码：`market_operation.cpp::step_market_operation`。Gurobi 每次构造独立环境，
 复核 `../MIPSolvers/src/engine/solver/external/adapters.cpp::GurobiAdapter`。
-至多两路；准入边界≤118节点、≤128机组、≤16储能、≤24水库，CPU≥4，且每路线程数≤CPU/2。
+至多两路；准入边界≤118节点、≤128机组、≤16储能、≤24水库，CPU≥4，每路线程数≤CPU/2，
+且同日恢复实验数>1（单实验时 workers=1，顺序执行）。
 用户自动线程 0 在并行恢复内解析为每路 2，显式线程数保持原值；超预算或其他求解器顺序执行。
 此界限控制同时存活的 MILP 和 JSON 内存，未将 2000 节点直接投入并行。
 日窗内时间限制和 GAP 不变，两个任务各自持有原始完整时限。任一失败保留原失败证据。
@@ -835,6 +836,9 @@ schedule_feasible 且 prices_valid（或 inspect 完成）时退出码为0。对
 三轮，校验 SCUC 裁剪行数、LMP 不裁行、残差<=1e-6 和请求 gap 内目标一致；
 `tests/run_southern_root_cut_comparison.mjs` 对 native default/enhanced 交错两对，
 校验 profile 与根行准入上限生效。
+CTest 注册 `southern_market_2000_benchmark` 需 `HACDCPF_ENABLE_MARKET_SCALE_TESTS=ON`、
+仅 UNIX、需全量 Gurobi license（tests/CMakeLists.txt:59-71），默认构建不运行；
+与执行契约的门控声明一致。
 
 当前求解/定价方法选择以源码为准（`gurobi_method`、`solve_scaled`、`solve`）：
 LMP 阶段列数>=1000000 且 Gurobi 时走 `ordered-lp-barrier-8-v2`——固定
@@ -903,7 +907,10 @@ Reduced-2000（120火电/1320机组，2569364列/145040整数）120 s预算三�
 均无有效价格（`output/market-operation/local-2000-reduced/`）：HiGHS 380.485 s
 进程 wall/峰值15.526 GiB，TimeLimit 且原模型残差285.41的向量被拒；native
 56.178 s/13.410 GiB 根松弛失败；Gurobi 129.489 s/13.268 GiB TimeLimit 无
-incumbent。IEEE118 30 s对照：Gurobi 4.253 s、HiGHS 9.168 s 均有效（SCUC目标
+incumbent。上述秒值是外层进程 wall：由 Node 驱动
+`tests/run_southern_solver_comparison.mjs` 在父进程实测（含进程启动/退出开销），
+留存于该目录 comparison.json 的 runs[].wall_sec；各 per-run JSON 内层进程自测
+wall_sec 为 380.458/56.143/129.465 s，两者之差即进程级开销。IEEE118 30 s对照：Gurobi 4.253 s、HiGHS 9.168 s 均有效（SCUC目标
 相对差8.90e-6），native 44.157 s 超时无验证解；该诊断与系统测试重叠，不是
 受控速度排名（`output/market-operation/ieee118-solvers/comparison.json`）。
 

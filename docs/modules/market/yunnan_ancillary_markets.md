@@ -33,7 +33,7 @@
 13. 第47条非连续现货：`J_g=R*E_g/ΣE`。第48条连续现货：`J_g=R*F*C_g/ΣC`，`Y_u=R*(1-F)*U_u/ΣU`，F=0.5，C为未参加电能量市场的上网电量。点对网跨省主体的适用分摊电量及其补偿按50%计。分母为0须待外部处置，不能自动转嫁。
 14. 第49–50条：AGC考核费用独立平衡，按上网电量返还；点对网考核电量及返还权重50%；发用一体资源分别按上网、下网电量参与发电侧、用户侧。考核标准来自“两个细则”，本文件不提供完整考核函数。
 15. 第53条差错退补：月结前并入当月，月结后最近一次结算退补；1个月内完成，追溯原则上不超过6个月。54–66条规定披露、监测、市场力、干预和争议管理；须保留主体、报价/调整、测量及结算来源，不能用优化结果替代法定运营程序。67–70条修订、与两个细则衔接、参数审批和生效；2023调频规则同步废止。
-16. 第62条暂停市场交易时，对应时段的补偿结算价取最近一个交易日相同时段出清价：`Q_suspended,h=Q_previous_trading_day,h`，不是对全部时段求均价。前一交易日有效价格缺失不能用0替代。第57条出清信息下一个工作日12:00前发布、实时调整5个工作日内发布；日/月信息异议5个工作日内提出。
+16. 第62条暂停市场交易时，对应时段的补偿结算价取最近一个交易日相同时段出清价：`Q_suspended,h=Q_previous_trading_day,h`，不是对全部时段求均价。前一交易日有效价格缺失不能用0替代。（注：实现校验界为[0,15]，字段必填可防缺失但防不住显式填0占位，0价会进入结算；此为已知缝隙，后续收紧下界。）第57条出清信息下一个工作日12:00前发布、实时调整5个工作日内发布；日/月信息异议5个工作日内提出。
 
 ## 衔接的工程模型与预先验证标准
 
@@ -113,7 +113,7 @@ Validation：`test_southern_market '[ancillary]'`手算与失败注入、严格1
 | 值 / 单位 / 维度 | 后端权威源 | HTTP / GUI | 验证 |
 | --- | --- | --- | --- |
 | 参数与来源，Cmin MW、R1/R2 p.u. | `yunnan_ancillary.hpp::validate/defaults` | `config`，数值/研究开关；完整JSON可编辑所有字段 | 未知字段、数据类型、时间长度、非法ID/区间拒绝；保存重载 |
-| AGC厂/单机模式、稳定ID、机组集合 | 同上；机组ID为Southern authored generator ID、节点为AC域 | `config.agc_units`，AGC选择器、成员表/Canvas定位 | 12厂级AGC/36水电；重复成员及水电单机拒绝 |
+| AGC厂/单机模式、稳定ID、机组集合 | 同上；默认模板按水库聚合水电为厂级AGC（`reservoir/<id>`）、火电按单机（`generator/<id>`），k默认水电1.5/火电1，报价默认4/5，容量默认10 MW；机组ID为Southern authored generator ID、节点为AC域 | `config.agc_units`，AGC选择器、成员表/Canvas定位 | 12厂级AGC/36水电；重复成员及水电单机拒绝；边界内每台水电（含不打算中标者）必须是某AGC单元成员且有非空允许区间，否则校验抛错 |
 | 最近8个中标时段k、24小时报价与容量 | `prearrange`；外部已统计k，不从能量计划估计 | `k_history[8]`、`price_per_mw[24]`、`capacity_mw[24]` | 同价性能顺序、报价缺省、15元封顶、50%限制、最后一刻不可用 |
 | 24小时容量、缺口、参考价 | `prearrange`性能顺序与必要能力上界 | `result.ancillary.hours[]`、容量/价格曲线及原因表 | 两机各10MW、价6；短缺参考价null |
 | 98点u/一次/二次/基点 | `southern_market.cpp::build_model`，SCUC→SCED→LMP | `result.sced.generators[].{online,primary_reserve_mw,secondary_up_mw,secondary_down_mw,power_mw,stable}` | 原单位残差1e-6、UC/一次不变、厂级双向求和 |
@@ -123,7 +123,7 @@ Validation：`test_southern_market '[ancillary]'`手算与失败注入、严格1
 | 月度CNY及更正历史 | `post_statement/settle_month` | 会话`journal/month`，日期凭证、全月电量及结果表 | 最新有效日版本、完整日历月、跨日事件重放、日历退补窗口、重新计算全月分母 |
 
 公开C++入口为`yunnan_ancillary_defaults`、`validate_yunnan_ancillary`、`run_yunnan_ancillary_market`、`run_yunnan_ancillary_intraday`、`settle_yunnan_ancillary`、`post_yunnan_ancillary_statement`、`settle_yunnan_ancillary_month`，声明在`include/hacdcpf/market/southern_market.hpp`。
-`src/market/yunnan_ancillary.hpp`是本市场实现的私有JSON校验/排序助手；稀疏建模、原单位残差和求解器沿用`src/market/southern_market.cpp`。
+本市场规则逻辑（校验、封存、预安排出清、安全调整、计量、分摊、台账、月结）以 inline 形式实现于`src/market/yunnan_ancillary.hpp`与`src/market/yunnan_rules_workflow.hpp`两个私有头文件；MILP稀疏建模与求解接线在`src/market/southern_market.cpp`，原单位残差审计沿用该文件。
 
 `GET /api/session/yunnan_ancillary`返回`revision,busy,boundary,config,result,day_ahead_id,journal,month`；无边界时config/result为null。新增独立设备模板默认未合格，需要提供能力与来源后启用。
 `POST`按action严格校验字段：
@@ -135,7 +135,7 @@ Validation：`test_southern_market '[ancillary]'`手算与失败注入、严格1
 {"action":"month","revision":0,"request":{}}
 ```
 
-上述`|`表示两个可选动作而非实际动作字符串。save先完整校验再原子保存，清除日前/日内辅助结果并增加共享修订号；run使用锁定边界/配置快照。每次出清赋唯一`clearing_id`。日内仅允许替换workflow里的安全/运行记录，封存报价与主体配置必须与日前有效快照一致；复用SCUC完整解，重算实际SCED/LMP及按需AC。
+上述`|`表示两个可选动作而非实际动作字符串。save先完整校验再原子保存，清除日前/日内辅助结果并增加共享修订号；run使用锁定边界/配置快照。每次出清赋唯一`clearing_id`。日内仅可替换安全复核/暂停/实时指令及调增开关（`clearing_minutes`、`allow_uplift`），封存报价、主体配置与申报记录必须与日前快照一致；复用SCUC完整解，重算实际SCED/LMP及按需AC。
 GUI在日内配置下禁用日前运行按钮；重建日前申报须在完整配置中显式使用`workflow.stage=day_ahead`并清除只适用于日内的暂停/实时指令后保存。按钮入口拒绝时不清除现有结果。
 `workflow`严格包含`stage,clearing_minutes[24],bid_submissions,safety_reviews,allow_uplift,suspensions,realtime_adjustments`。时间按运行日00:00相对分钟，报价窗口-900..-720，出清不早于-660且每小时至少提前30分钟；相同时戳以事件ID作可复现排序，冲突的同主体同时刻实时指令拒绝。最后一个满足精度及容量上限的申报替换原申报，报价越界采用缺省；原直接容量数组越过50%上限时保留原申报并披露研究降额。
 第41条安全容量为设备必要界、复核上/下调容量、单主体需求50%上限的最小值。未合格主体禁止调增。补入仅从初始中标为0的序列外主体按序进行；调增受`workflow.allow_uplift`开关控制、以安全容量为上界，可为分数MW。实时指令按小时/秒排序，同一秒成批计算容量；出现任一容量缺口禁止结算。SCED以各主体整小时最大被调用容量构造保守包络，不把秒级指令等同于已执行动态仿真。

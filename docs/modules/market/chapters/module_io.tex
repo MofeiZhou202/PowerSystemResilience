@@ -1,0 +1,482 @@
+% module_io.tex -- 各模块输入输出（按公共入口组织）
+\section{各模块输入输出}\label{sec:market-module-io}
+
+本章按公共入口给出完整的输入/输出视图：每个入口统一为功能定位、输入参数表、
+输出字段表、边界与局限四部分。所有字段名、默认值、取值范围与索引空间均对照源码核实
+并注明出处；与“接口与参数”一节及各章重复处保持同一数值，公式语义以源码等价章为准。
+
+\subsection{通用索引空间与单位约定}
+\begin{itemize}
+  \item 通用引擎（\srcpath{include/hacdcpf/market/market\_simulation.hpp}）：功率 MW、能量 MWh、
+        价格 元/MWh（结算金额为元），时段为整数步索引，步长由 \fld{step\_duration\_hr} 给定；
+        \fld{commitment} 与 \fld{pricing} 共享同一时段索引空间。
+        \texttt{PricingPeriod} 内向量的索引空间逐字段标注于
+        \srcpath{include/hacdcpf/market/market\_simulation.hpp:87-116}：\fld{lmp\_per\_mwh}、
+        \fld{load\_shedding\_mw}、\fld{exogenous\_curtailment\_mw} 按 authored AC 母线顺序，
+        \fld{branch\_flow\_mw} 按 authored AC 支路顺序，
+        \fld{dc\_lmp\_per\_mwh}/\fld{dc\_bus\_voltage\_pu} 按 authored DC 母线顺序，
+        \fld{dc\_branch\_flow\_mw} 按 authored DC 支路顺序，
+        \fld{generator\_dispatch\_mw}/\fld{upward\_reserve\_mw} 为完整 authored 机组顺序，
+        换流器与 DC 储能向量分别按 authored VSC、DC/DC、\fld{dc.storage} 与
+        \fld{dc.dc\_storage} 顺序。HHI 使用百分数份额（$0\sim10000$），分子分母均经
+        $\max(0,\cdot)$ 截断（见源码等价章）。
+  \item 南方流水线：边界时序长度固定 $kT=98$（\srcpath{src/market/southern\_boundary.cpp:14}），
+        前 96 点为运行日 15 分钟点（\fld{duration\_hr}=\fld{weight\_hr}=0.25），第 97、98 点为
+        D+1 日峰/谷代表点（\srcpath{src/market/southern\_boundary.cpp:333-348}）；
+        PTDF 查询的 \fld{period} 取 $0\sim97$
+        （\srcpath{include/hacdcpf/market/southern\_market.hpp:20}）。
+  \item 南方实时：超短期窗口为 72 个 5 分钟点
+        （\srcpath{src/market/southern\_real\_time.hpp:16}），每个调度步执行 24 点窗口、
+        只承接前 3 个已执行点；独立定价为 8 个 15 分钟点
+        （\srcpath{src/market/southern\_market.cpp:2490-2492}）。
+  \item 云南辅助服务：调频申报/出清按 24 小时索引，小时 $h$ 对应能量点时序
+        $t=4h\sim4h+3$（\srcpath{src/market/yunnan\_ancillary.hpp:149}）；与 98 点能量
+        耦合时代表点（$t\ge96$）不保留调频容量
+        （\srcpath{src/market/yunnan\_rules\_workflow.hpp:182-187}）。
+\end{itemize}
+
+\subsection{通用 AC/DC 混合引擎}
+声明位置 \srcpath{include/hacdcpf/market/market\_simulation.hpp}，实现
+\srcpath{src/market/market\_simulation.cpp} 与 \srcpath{src/market/participant\_behavior.cpp}。
+
+\subsubsection{run\_day\_ahead\_market}
+\textbf{功能定位}：报价 $\to$ SCUC $\to$ 固定组合多时段 SCED/定价 $\to$ 可选 LODF N-1 割
+$\to$ AC 基态/事故认证 $\to$ 结算与 uplift 的日前全链路
+（\srcpath{include/hacdcpf/market/market\_simulation.hpp:715-718}）。输入系统不被修改。
+
+\textbf{输入参数}：\texttt{system}（\texttt{HybridPowerSystem}）、\texttt{time\_series}
+（\fld{num\_steps} 与 \fld{step\_duration\_hr} 决定时段索引与步长）与下表
+\texttt{MarketOptions}（全部默认值见
+\srcpath{include/hacdcpf/market/market\_simulation.hpp:417-478}）：
+\begin{paramtable}
+\fld{energy\_offer\_segments} & $K$ & 段 & $\ge1$ & $8$ & 能量报价分段数\\
+\fld{upward\_reserve\_fraction} & — & — & $0\sim1$ & $0.05$ & 上调备用需求占 AC+DC gross demand 比例\\
+\fld{value\_of\_lost\_load\_per\_mwh} & VOLL & 元/MWh & $>0$ & $10000$ & 失负荷价值\\
+\fld{exogenous\_curtailment\_penalty\_per\_mwh} & — & 元/MWh & $\ge0$ & $0$ & 弃注入罚因子\\
+\fld{pricing\_native\_max\_variables} & — & 变量 & $\ge0$ & $5000$ & 定价 LP 超此即直达 HiGHS；$0$=全部直达（见求解器家族节）\\
+\fld{structured\_scuc\_branching} & — & — & 布尔 & true & 结构化 SCUC 分支开关\\
+\fld{structured\_scuc\_min\_binary\_variables} & — & 变量 & $\ge0$ & $1000$ & 启用结构化分支的二元变量下限\\
+\fld{scuc\_mip\_relative\_gap} & — & — & $0\sim1$ & $0.01$ & SCUC 相对间隙（未证最优时 \fld{scuc\_optimality\_proven}=false）\\
+\fld{scuc\_time\_limit\_sec} & — & s & $>0$ & $120$ & SCUC 求解时限（跨迭代扣减）\\
+\fld{scuc\_max\_nodes} & — & 节点 & $\ge0$ & $50000$ & SCUC 分支定界节点上限\\
+\fld{optimize\_dc\_storage} & — & — & 布尔 & true & DC 储能是否进入优化\\
+\fld{enforce\_terminal\_dc\_storage\_soc} & — & — & 布尔 & true & DC 储能末态 SOC 约束\\
+\fld{enable\_network\_constraints} & — & — & 布尔 & true & AC 网络安全约束\\
+\fld{run\_ac\_validation} & — & — & 布尔 & true & 出清后非线性 AC 认证\\
+\fld{ac\_validation\_voltage\_tolerance\_pu} & — & pu & $>0$ & $10^{-5}$ & AC 认证电压容差\\
+\fld{ac\_validation\_thermal\_tolerance\_mva} & — & MVA & $>0$ & $10^{-4}$ & AC 认证热稳容差\\
+\fld{ac\_validation\_generator\_tolerance\_mw} & — & MW & $>0$ & $10^{-5}$ & AC 认证机组有功容差\\
+\fld{enable\_n1\_security} & — & — & 布尔 & false & 预防式 LODF N-1 割\\
+\fld{n1\_max\_iterations} & — & 次 & $\ge1$ & $8$ & N-1 割迭代上限\\
+\fld{n1\_max\_cuts\_per\_iteration} & — & 条 & $\ge1$ & $200$ & 每轮新增割上限\\
+\fld{n1\_max\_contingencies} & — & 个 & $\ge0$ & $0$ & 停运枚举上限；$0$=全部在役覆盖组件\\
+\fld{n1\_emergency\_rating\_multiplier} & — & — & $\ge0$ & $1.0$ & 事故限额倍率（乘 \fld{rate\_a\_mva}）\\
+\fld{n1\_violation\_tolerance\_mw} & — & MW & $>0$ & $10^{-5}$ & N-1 越限报告阈值\\
+\fld{parallel\_component\_n1} & — & — & 布尔 & true & 组件 N-1 校正 SCED 并行开关\\
+\fld{component\_n1\_parallel\_workers} & — & 线程 & $\ge0$ & $4$ & 并行 worker 数；$0$=硬件并发\\
+\fld{run\_ac\_contingency\_validation} & — & — & 布尔 & false & AC 事故认证（opt-in，失败保持显式）\\
+\fld{max\_ac\_contingencies} & — & 个 & $\ge0$ & $3$ & AC 事故认证枚举上限；$0$=全部有效 N-1 支路\\
+\fld{ac\_contingency\_voltage\_tolerance\_pu} & — & pu & $>0$ & $10^{-5}$ & 事故认证电压容差\\
+\fld{ac\_contingency\_thermal\_tolerance\_mva} & — & MVA & $>0$ & $10^{-4}$ & 事故认证热稳容差\\
+\fld{participants} & — & — & 数组 & 空 & 空=每台在役机组一个独立成本型参与者\\
+\end{paramtable}
+另有两个嵌套选项：\fld{uc\_options}（\texttt{TimeSeriesPFOptions}，承诺阶段求解选项，
+\fld{uc\_solver} 默认 \texttt{Auto}）与 \fld{ac\_validation\_options}
+（\texttt{PowerFlowOptions}）；两个非 owning 调度包络指针
+\fld{minimum\_dispatch\_schedule\_mw}/\fld{fixed\_dispatch\_schedule\_mw}（默认
+\texttt{nullptr}，完整 authored 机组顺序，非有限值表示不约束）仅被固定组合 SCED 定价层消费
+（\srcpath{include/hacdcpf/market/market\_simulation.hpp:449-455}）。
+
+\textbf{输出字段}（\texttt{MarketResult}，
+\srcpath{include/hacdcpf/market/market\_simulation.hpp:480-507}）：
+\begin{center}\footnotesize
+\begin{longtable}{@{}L{4.6cm}L{3.4cm}L{1.7cm}L{5.6cm}@{}}
+\toprule 字段名 & 类型 & 单位 & 索引空间/说明\\\midrule
+\endhead
+\fld{feasible} / \fld{status} & bool / string & — & 总可行与状态串；AC 认证失败置 \fld{feasible}=false 且 \fld{status}=\fld{"ac\_validation\_failed"}（见第~\ref{sec:market-numerical}~节）\\
+\fld{warnings} & string 数组 & — & 含定价求解器回退/直达 warning\\
+\fld{unsupported\_assets} & \texttt{Unsupported\allowbreak Market\allowbreak Asset} 数组 & — & 无市场契约的在役资产（目前 external\_grid、energy\_router），显式退回\\
+\fld{participants} / \fld{behavior\_actions} / \fld{offers} & 结构体数组 & — & 实际使用的参与者、行为审计与报价\\
+\fld{commitment} & \texttt{UCSchedule} & — & 与 \fld{pricing} 共享时段索引\\
+\fld{pricing} & \texttt{PricingPeriod} 数组 & 见各字段 & 按时段索引；子向量索引空间见本章通用约定（hpp:87-116）\\
+\fld{ac\_validation} & \texttt{ACValidationPeriod} 数组 & 见各字段 & 按时段索引；含违规明细与换流器模型范围\\
+\fld{ac\_power\_flow\_results} & \texttt{PowerFlowResult} 数组 & — & 各时段 AC 认证潮流原始结果\\
+\fld{generator\_settlement} & \texttt{GeneratorSettlement} 数组 & MWh/元 & authored 机组顺序；\fld{true\_cost} 与 \fld{as\_bid\_cost} 分离（hpp:244-257）\\
+\fld{dc\_storage\_settlement} & \texttt{DCStorageSettlement} 数组 & MWh/元 & DC 储能组件顺序（hpp:259-273）\\
+\fld{participant\_settlement} & \texttt{Participant\allowbreak Settlement} 数组 & MWh/元 & 参与者顺序（hpp:275-289）\\
+\fld{market\_power} & \texttt{MarketPowerMetrics} & \%/MW & HHI 百分数份额 $0\sim10000$（hpp:291-301）\\
+\fld{security} & \texttt{SecurityResult} & MW/元 & N-1 割轨迹、组件校正与 AC 事故明细（hpp:370-397）\\
+\fld{settlement} & \texttt{SettlementLedger} & 元 & 可审计现金流台账，含 \fld{congestion\_rent} 与 \fld{cashflow\_residual}（hpp:400-415）\\
+\fld{model\_scope} & \texttt{MarketModelScope} & — & 运行时按系统组成改写（见“诚实口径”节，hpp:120-136）\\
+\fld{performance} & \texttt{Market\allowbreak Performance\allowbreak Profile} & s/字节 & 规模估计与分阶段计时、求解器分派记录（hpp:139-197）\\
+\fld{commitment\_cost} / \fld{pricing\_objective} & double & 元 & 组合成本与定价目标值\\
+\fld{num\_pricing\_converged} / \fld{num\_ac\_converged} / \fld{num\_ac\_secure} & int & 时段 & 与 \fld{num\_steps} 对照的收敛计数\\
+\bottomrule
+\end{longtable}
+\end{center}
+
+\textbf{边界与局限}：线性化全混合口径、DC 损耗不进商业出清、不支持资产显式退回、
+SCUC 近似 gap 等，见“诚实口径”与“验证与边界局限”两节，本章不重复。
+
+\subsubsection{run\_real\_time\_market}
+\textbf{功能定位}：按已接受日前组合对实际注入再调度，并按两结算恒等式对偏差定价
+（日前计划按日前价、偏差按实时价），可选辅助服务绩效考核
+（\srcpath{include/hacdcpf/market/market\_simulation.hpp:723-728}）。
+
+\textbf{输入参数}：\texttt{system}、\texttt{day\_ahead\_time\_series}、
+\texttt{realized\_time\_series}（与日前同一时段索引空间）、\texttt{day\_ahead\_result} 与
+\texttt{RealTimeMarketOptions}（\fld{market\_options} 与日前同义，
+\fld{ancillary\_services} 见下表，默认值见
+\srcpath{include/hacdcpf/market/market\_simulation.hpp:513-522}）：
+\begin{paramtable}
+\fld{enabled} & — & — & 布尔 & false & 辅助服务结算开关\\
+\fld{generator\_imbalance\_tolerance\_fraction} & $\rho$ & — & $0\sim1$ & $0.02$ & 机组偏差容差（乘 $\max(|P^{instruction}|,1)$；门控见源码等价章）\\
+\fld{load\_imbalance\_tolerance\_fraction} & — & — & $0\sim1$ & $0.02$ & 负荷偏差容差\\
+\fld{generator\_imbalance\_penalty\_per\_mwh} & — & 元/MWh & $\ge0$ & $50$ & 机组不平衡罚价\\
+\fld{load\_imbalance\_penalty\_per\_mwh} & — & 元/MWh & $\ge0$ & $50$ & 负荷不平衡罚价\\
+\fld{reserve\_performance\_payment\_per\_mwh} & — & 元/MWh & $\ge0$ & $10$ & 备用履约支付单价\\
+\fld{reserve\_nonperformance\_penalty\_per\_mwh} & — & 元/MWh & $\ge0$ & $100$ & 备用未履约罚价\\
+\fld{reserve\_performance\_factor\_by\_generator} & — & — & $\ge0$ & 空 & 完整 authored 机组顺序；缺省条目按完美履约 $1.0$（hpp:509-512）\\
+\end{paramtable}
+
+\textbf{输出字段}（\texttt{RealTimeMarketResult}，
+\srcpath{include/hacdcpf/market/market\_simulation.hpp:624-636}）：
+\begin{center}\footnotesize
+\begin{longtable}{@{}L{4.6cm}L{3.4cm}L{1.7cm}L{5.6cm}@{}}
+\toprule 字段名 & 类型 & 单位 & 索引空间/说明\\\midrule
+\endhead
+\fld{feasible} / \fld{status} / \fld{warnings} & bool / string / 数组 & — & 实时链路状态\\
+\fld{ancillary\_services\_enabled} & bool & — & 实际是否启用辅助结算\\
+\fld{dispatch\_instruction\_market} & \texttt{MarketResult} & — & 调度指令出清（日前组合固定）\\
+\fld{real\_time\_market} & \texttt{MarketResult} & — & 实时再调度出清，结构同日前\\
+\fld{periods} & \texttt{RealTimePeriod} 数组 & MW/元 & 按时段索引：需求偏差、两价均值、偏差收付、备用指令/交付/缺额（hpp:532-550）\\
+\fld{generator\_deviation\_settlement} & \texttt{Generator\allowbreak Deviation\allowbreak Settlement} 数组 & MWh/元 & authored 机组顺序；含两结算收入 \fld{two\_settlement\_revenue} 与 \fld{net\_ancillary\_adjustment}（hpp:552-578）\\
+\fld{participant\_deviation\_settlement} & \texttt{Participant\allowbreak Deviation\allowbreak Settlement} 数组 & MWh/元 & 参与者顺序（hpp:580-603）\\
+\fld{settlement} & \texttt{Deviation\allowbreak Settlement\allowbreak Ledger} & 元 & 日前+实时合并现金台账（hpp:606-622）\\
+\fld{total\_absolute\_generator\_deviation\_mwh} & double & MWh & 全时段机组绝对偏差合计\\
+\bottomrule
+\end{longtable}
+\end{center}
+
+\textbf{边界与局限}：实时固定日前组合，不重做机组组合；惩罚偏差的备用指令门控与容差公式见
+源码等价章；辅助服务价格为外生参数，不是独立辅助市场出清。
+
+\subsubsection{run\_repeated\_market\_game}
+\textbf{功能定位}：确定性同步局部最优响应重复博弈：每个学习型参与者评估当前动作及
+$\pm$ 一个加价/扣留步长，对手固定；仅在两结算利润改善超过容差时接受更新
+（\srcpath{include/hacdcpf/market/market\_simulation.hpp:660-675,732-736}）。
+
+\textbf{输入参数}：\texttt{system}、日前/实际两条时间序列与 \texttt{RepeatedGameOptions}
+（默认值见 \srcpath{include/hacdcpf/market/market\_simulation.hpp:664-675}）：
+\begin{paramtable}
+\fld{max\_rounds} & — & 轮 & $\ge1$ & $8$ & 最大博弈轮数\\
+\fld{markup\_step\_fraction} & — & — & $0\sim1$ & $0.05$ & 加价试探步长\\
+\fld{withholding\_step\_fraction} & — & — & $0\sim1$ & $0.05$ & 容量扣留试探步长\\
+\fld{maximum\_markup\_fraction} & — & — & $0\sim1$ & $1.0$ & 加价上界\\
+\fld{maximum\_withholding\_fraction} & — & — & $0\sim1$ & $0.50$ & 扣留上界\\
+\fld{profit\_improvement\_tolerance} & — & 元 & $>0$ & $10^{-4}$ & 策略更新利润改善门槛\\
+\fld{include\_cost\_based\_participants} & — & — & 布尔 & false & 成本型参与者是否参与学习\\
+\fld{run\_real\_time} & — & — & 布尔 & true & 每轮是否跑实时两结算\\
+\fld{day\_ahead\_options} / \fld{real\_time\_options} & 结构体 & — & — & 默认 & 每轮日前/实时的完整选项\\
+\end{paramtable}
+
+\textbf{输出字段}（\texttt{RepeatedGameResult}，
+\srcpath{include/hacdcpf/market/market\_simulation.hpp:677-686}）：\fld{feasible}、
+\fld{converged}、\fld{status}、\fld{warnings}；\fld{rounds}（\texttt{RepeatedGameRound}
+数组，按轮索引，含两价均值、\fld{output\_hhi} 与逐参与者 \texttt{GameParticipantRound}
+的当前/下一行为与最优响应利润，hpp:638-658）；\fld{final\_participants}、
+\fld{final\_day\_ahead}（\texttt{MarketResult}）、\fld{final\_real\_time}
+（\texttt{RealTimeMarketResult}）。
+
+\textbf{边界与局限}：同步局部最优响应，不提供全局博弈均衡证明（见理论章 gapnote）。
+
+\subsubsection{make\_cost\_based\_offers / submit\_participant\_offers}
+\textbf{功能定位}：前者由物理成本曲线生成真实分段线性报价（竞争基准策略，
+\srcpath{include/hacdcpf/market/market\_simulation.hpp:691-693}）；后者解析所有权并提交
+参与者报价，无主在役机组被指派显式成本型参与者，重复所有权或非法机组位置被拒绝
+（\srcpath{include/hacdcpf/market/market\_simulation.hpp:698-701}；实现在
+\srcpath{src/market/participant\_behavior.cpp}）。
+
+\textbf{输入参数}：
+\begin{paramtable}
+\fld{segment\_count} & $K$ & 段 & $\ge1$ & $8$ & 两入口共有的分段数参数（hpp:693,701）\\
+\fld{participants} & — & — & 数组 & 空 & \texttt{MarketParticipant}：\fld{participant\_id}、\fld{generator\_positions}（\fld{ac.generators} 内位置）、\fld{behavior}（hpp:34-39）\\
+\fld{behavior.type} & — & — & 枚举 & CostBased & \texttt{Behavior\allowbreak Policy\allowbreak Type} 四值：\texttt{CostBased}/\allowbreak\texttt{Fixed\allowbreak Markup}/\allowbreak\texttt{Capacity\allowbreak Withholding}/\allowbreak\texttt{Markup\allowbreak And\allowbreak Withholding}（hpp:13-18）\\
+\fld{energy\_markup\_fraction} & $\mu$ & — & $0\sim1$ & $0$ & 能量加价（$0.20$=+20\%，hpp:20-29）\\
+\fld{capacity\_withholding\_fraction} & $w$ & — & $0\sim1$ & $0$ & 容量扣留比例\\
+\fld{commitment\_markup\_fraction} & $\mu^{commit}$ & — & $0\sim1$ & $0$ & 空载与启停加价（与能量加价分离）\\
+\fld{upward\_reserve\_price\_per\_mwh} & — & 元/MWh & $\ge0$ & $0$ & 备用报价\\
+\end{paramtable}
+
+\textbf{输出字段}：\texttt{make\_cost\_based\_offers} 返回 \texttt{GeneratorOffer} 数组
+（\fld{generator\_position} 为向量位置、\fld{generator\_index} 为稳定组件 ID，二者并存，
+hpp:47-66；分段生成公式见源码等价章）。\texttt{submit\_participant\_offers} 返回
+\texttt{OfferSubmission}：\fld{participants}、\fld{offers}、\fld{actions}
+（\texttt{BehaviorAction} 行为审计，hpp:68-77）与 \fld{warnings}（hpp:79-84）。
+
+\textbf{边界与局限}：报价截断与弦斜率定价的语义以源码等价章为准；行为参数只改报价，
+不改写真实成本（理论章结算恒等式）。
+
+\subsection{南方区域流水线}
+公开函数集中声明于 \srcpath{include/hacdcpf/market/southern\_market.hpp:11-70}，
+边界 schema 唯一来源为 \srcpath{src/market/southern\_boundary.cpp:southern\_market\_schema}。
+本小节按四条入口族组织；JSON 字段全集以 schema 与
+\srcpath{docs/modules/market/southern\_execution\_contract.md} 为准，此处列运行控制与
+结果字段。
+
+\subsubsection{日前出清 run\_southern\_day\_ahead\_market}
+\textbf{功能定位}：98 点南方日前三阶段（SCUC$\to$固定组合 SCED$\to$独立 LMP）加可选
+AC 安全迭代（\srcpath{include/hacdcpf/market/southern\_market.hpp:44}；实现
+\srcpath{src/market/southern\_market.cpp:2480}，委托 \fld{run\_southern\_market\_impl}）。
+输入为单个边界 JSON（先经 \fld{validate\_southern\_market} 全字段校验）。
+
+\textbf{输入参数}：边界 JSON 的 15 类边界表见第~\ref{sec:southern-execution}~节；运行控制
+集中在 \fld{execution} 子对象（默认值见
+\srcpath{src/market/southern\_boundary.cpp:486}，装配路径枚举见
+\srcpath{src/market/southern\_boundary.cpp:232}）：
+\begin{paramtable}
+\fld{solver} & — & — & highs/\allowbreak gurobi/\allowbreak native & highs & 求解后端（许可证不可用时显式报错）\\
+\fld{time\_limit\_sec} & — & s & $>0$ & $120$ & 各阶段求解时限\\
+\fld{mip\_gap} & — & — & $0\sim1$ & $0.01$ & SCUC 目标相对 gap\\
+\fld{threads} & — & 线程 & $\ge0$ & $0$ & 调度线程；$0$=后端默认（lmp 阶段内部固定单线程或 8 线程 barrier，见求解器家族节）\\
+\fld{ac\_security} & — & — & required/\allowbreak \fld{schedule\_only} & required & AC 安全反馈；\fld{schedule\_only} 时 \fld{feasible}=false\\
+\fld{security\_iterations} & — & 次 & $\ge1$ & $4$ & AC 安全割迭代上限\\
+\fld{price\_delta} & $\delta$ & MW & $>0$ & $0.05$ & LMP 出力邻域\\
+\fld{assembly\_mode} & — & — & cached/\allowbreak reference/\allowbreak verify & cached & 矩阵装配路径；\texttt{verify} 独立原装配逐元素核对（第~\ref{sec:southern-execution}~节）\\
+\fld{gurobi\_method} & — & — & auto/\allowbreak barrier/\allowbreak \fld{dual\_simplex} & auto & Gurobi 方法选择（\srcpath{src/market/southern\_market.cpp:1346-1353}）\\
+\end{paramtable}
+由工程系统生成边界时，\fld{southern\_market\_from\_system} 的 \fld{thermal\_limit}
+（$-1$=全部保留，$\ge0$ 为按排名保留火电数，且要求显式合成研究算例）见
+\srcpath{src/market/southern\_boundary.cpp:495-497}。
+
+\textbf{输出字段}（\srcpath{src/market/southern\_market.cpp:2307-2327} 初始化、
+:2329-2343 收尾）：
+\begin{center}\footnotesize
+\begin{longtable}{@{}L{4.6cm}L{3.4cm}L{1.7cm}L{5.6cm}@{}}
+\toprule 字段名 & 类型 & 单位 & 索引空间/说明\\\midrule
+\endhead
+\fld{mode} / \fld{schema\_version} & string & — & 固定 \fld{"southern\_day\_ahead"} 与边界版本\\
+\fld{status} / \fld{feasible} & string / bool & — & \fld{scuc\_failed}/\fld{sced\_failed}/\fld{lmp\_failed}/\fld{ac\_security\_failed}/\fld{converged} 等\\
+\fld{schedule\_feasible} / \fld{prices\_valid} & bool & — & 线性计划可行与独立 LMP 有效（对偶与残差通过才置真）\\
+\fld{boundary\_snapshot} / \fld{effective\_boundary} & JSON & — & 密封输入与经调频预出清等作用后的有效边界\\
+\fld{security\_iterations} & 数组 & — & 每轮 AC 安全审计与新增割记录\\
+\fld{sced} / \fld{lmp} & JSON & MW/\allowbreak 元/\allowbreak MWh & 阶段结果：原单位代回、逐约束残差；\fld{lmp} 含 \fld{prices\_valid} 与 \fld{lp\_algorithm}（\srcpath{src/market/southern\_market.cpp:1763-1765,1934-1938}）\\
+\fld{model\_scope} & JSON & — & \fld{time\_points}=98、\fld{day\_intervals}=96、无损 AC+恒定直流损耗口径与 limitations 数组\\
+\fld{diagnostic} & bool & — & \fld{balance\_policy=diagnostic} 时为研究诊断松弛，价格不作正常市场认证\\
+\fld{runtime\_sec} / \fld{validation\_sec} & double & s & 墙钟与校验耗时\\
+\fld{ancillary}（可选） & JSON & — & 接入云南辅助服务时的耦合结果（见云南小节）\\
+\bottomrule
+\end{longtable}
+\end{center}
+
+\textbf{边界与局限}：A1--A7 执行解释、局部 AC 灵敏度迭代、价格一致性与
+\texttt{schedule\_only} 口径见第~\ref{sec:southern-execution}~节；\fld{inspect\_southern\_market\_model}
+（southern\_market.hpp:68）只装配计数，不作可行或价格认证。
+
+\subsubsection{实时滚动 make\_southern\_realtime / step\_southern\_realtime}
+\textbf{功能定位}：南方第 3 章实时：24$\times$5 分钟滚动调度 + 独立 8$\times$15 分钟
+定价（\srcpath{include/hacdcpf/market/southern\_market.hpp:45-50}；实现
+\srcpath{src/market/southern\_market.cpp:2560-2584} 与
+\srcpath{src/market/southern\_real\_time.hpp}）。每步执行 24 点窗口但只承接前 3 个已执行点
+（\srcpath{src/market/southern\_market.cpp:2569}），展望窗口承接 24 点仅供参照
+（\fld{reference\_only}=true，:2574-2575）。
+
+\textbf{输入参数}（\fld{southern\_realtime\_defaults} 模板与校验界见
+\srcpath{src/market/southern\_real\_time.hpp:50-121}）：
+\begin{paramtable}
+\fld{schema\_version} & — & — & 固定串 & southern-realtime-2025-v1 & 实时配置版本（:80）\\
+\fld{start\_minute} & — & min & $0\sim1080$ & $0$ & 起始分钟，须 15 分钟对齐（:83）\\
+\fld{steps} & — & 步 & $1\sim8$ & $1$ & 滚动步数（:84）\\
+\fld{boundary} & — & — & 72 点 & 由 98 点重采样 & 72 个 5 分钟点，实体成员与密封商业字段不可改（:86-105）\\
+\fld{section\_margin\_fraction} & — & — & $0\sim0.99$ & $0$ & 断面控制裕度，按 $(1-margin)$ 收缩双向限额（:84,:132）\\
+\fld{reserve\_policy} & — & — & strict/\allowbreak penalized & strict & 备用策略（:85）\\
+\fld{reserve\_penalty} / \fld{pricing\_reserve\_penalty} & — & 元/MWh & $1\sim10^{9}$ & $10000$/\allowbreak $12000$ & 调度/定价备用罚因子（:55,:85）\\
+\fld{accident\_reserve} & — & MW & $0\sim10^{6}$ & 各区零需求模板 & 10 分钟事故备用，须覆盖全部区域（:109-110）\\
+\fld{pumped\_reserve} / \fld{hydro\_plants} & — & MW/MWh & $0\sim10^{6}$ & 空/均匀分解模板 & 抽蓄备用与水电窗口目标（:111-114）\\
+\fld{renewable\_forecasts} & — & MW & $0\sim10^{6}$ & 前一日保持模板 & 超短期预测与历史完备文件（:116-119）\\
+\fld{storage\_hour\_modes} & — & — & charge/\allowbreak discharge & 空 & 储能逐小时方向（:120）\\
+\end{paramtable}
+新能源缺测按四级递补：申报值 $\to$ 最近历史完备文件 $\to$ 调度预测 $\to$ 日前边界回退，
+逐级记录 \fld{origin} 与 \fld{assessment\_eligible}
+（\srcpath{src/market/southern\_real\_time.hpp:125-130}）。
+
+\textbf{输出字段}：任务对象 \srcpath{"southern-realtime-job-v1"}（\fld{schema\_version}）、
+\fld{config}、\fld{prepared}、\fld{forecast\_resolution}（逐点递补台账）、
+\fld{completed\_steps}、\fld{status}（ready/\allowbreak running/\allowbreak complete/\allowbreak failed）、\fld{runs}
+（每步 \fld{dispatch} 与 \fld{outlook}）与 \fld{hourly\_prices}（按母线/小时聚合，四个
+有效 15 分钟价齐全才给出均值，否则 null）
+（\srcpath{src/market/southern\_market.cpp:2562,2575-2582}）。单窗结果
+\fld{model\_scope} 声明 \fld{time\_points}=24、\fld{pricing\_points}=8
+（\srcpath{src/market/southern\_market.cpp:2490-2492}）。
+
+\textbf{边界与局限}：调度仿真而非正式市场或结算凭证；调频/深调峰为外部已确认边界；
+启停轨迹需观测历史、实时拒绝；承接状态字段见 \fld{realtime::carry}
+（\srcpath{src/market/southern\_real\_time.hpp:143-171}）。
+
+\subsubsection{预测 make\_market\_forecast / step / explain / statistics}
+\textbf{功能定位}：一周预测场景生成与逐场景滚动出清：强制
+\fld{total\_days}==7 且 \fld{horizon}==\fld{"week"}
+（\srcpath{src/market/market\_forecast.cpp:89}），联合采样 8 日边界、只出清统计 7 日
+（第 8 日仅为第 7 日峰谷预安排；\srcpath{src/market/market\_forecast.cpp:128-132} 及
+\fld{limitations}）。
+
+\textbf{输入参数}（默认值见 \srcpath{src/market/market\_forecast.cpp:64-78}，校验界见
+:80-119）：
+\begin{paramtable}
+\fld{mode} & — & — & probabilistic/\allowbreak interval & probabi\allowbreak listic & 概率或区间采样（:81-82）\\
+\fld{sample\_count} & — & 场景 & $1\sim512$ & $8$ & 场景数（:84）\\
+\fld{seed} & — & — & $0\sim2^{32}{-}1$ & $20250905$ & mt19937\_64 种子（:85）\\
+\fld{temporal\_rho} & $\rho$ & — & $-0.95\sim0.95$ & $0.5$ & 相邻日 AR(1) 相关（:86）\\
+\fld{operation} & — & — & 对象 & 周运营默认 & 必须为一周；\fld{reference\_days} 由预测中心生成，禁止外给（:89-90）\\
+\fld{marginals} & — & — & 7 元有序 & 均匀 $[0.9,1.1]$ & 因素序：\fld{load\_scale}、\fld{wind\_scale}、\fld{solar\_scale}、\fld{inflow\_scale}、\fld{generator\_bid\_scale}、\fld{load\_bid\_scale}、\fld{line\_limit\_scale}（\srcpath{src/market/market\_forecast.cpp:16}；注意无合并 \fld{bid\_scale}，与运营入口的 8 倍率不同）；分布按模式限 fixed/\allowbreak uniform/\allowbreak triangular/\allowbreak \fld{clipped\_normal} 或 interval（:96-104）\\
+\fld{correlation} & — & — & $7\times7$ PSD & 单位阵 & 对称单位对角、半正定（:112-118）；区间模式须零相关\\
+\end{paramtable}
+
+\textbf{输出字段}（\fld{market\_forecast\_statistics}，
+\srcpath{src/market/market\_forecast.cpp:226-259}）：
+\begin{center}\footnotesize
+\begin{longtable}{@{}L{4.6cm}L{3.4cm}L{1.7cm}L{5.6cm}@{}}
+\toprule 字段名 & 类型 & 单位 & 索引空间/说明\\\midrule
+\endhead
+\fld{mode} & string & — & 与配置一致\\
+\fld{total\_scenarios} / \fld{complete\_scenarios} / \fld{failed\_scenarios} & int & 场景 & 总数、完成数、失败数（失败/未运行保留为未知）\\
+\fld{complete\_scenarios\_with\_limit} / \fld{complete\_scenarios\_unproven} & int & 场景 & 限时完成与 gap 未证最优的场景计数（:250-251）\\
+\fld{periods} / \fld{nodes} / \fld{lines} & 数组 & — & 逐时段/节点/线路统计\\
+\fld{correlations} & 数组 & — & 输出量相关（Pearson，仅有效样本）\\
+\fld{week\_deficit\_mwh} / \fld{week\_surplus\_mwh} / \fld{week\_overload\_mwh} & 汇总对象 & MWh & 周能量缺额/富余/线路越限能量汇总（:257-259）\\
+\bottomrule
+\end{longtable}
+\end{center}
+任务对象另含 \fld{scenarios}（逐场景运营任务）、\fld{next\_scenario}、
+\fld{finished\_scenarios}、\fld{completed\_days}、\fld{total\_days}（=场景数$\times7$）、
+\fld{forecast\_days}=8、\fld{sampler} 标识串与 \fld{limitations}
+（\srcpath{src/market/market\_forecast.cpp:127-132}）。
+
+\textbf{边界与局限}：概率是所设输入分布下的 Monte Carlo 估计；区间采样不提供概率或严格
+最坏界；逐日滚动非全周联合最优，未做 AC 安全认证（\fld{limitations} 原文，
+:129-131）。
+
+\subsubsection{运营 make\_market\_operation / step / explain / recovery}
+\textbf{功能定位}：日/周/自然月逐日滚动运营：每日 98 点出清、跨日状态承接、异常触发
+解释与条件恢复重算（\srcpath{include/hacdcpf/market/southern\_market.hpp:30-34}；实现
+\srcpath{src/market/market\_operation.cpp}）。承接语义与公式见
+第~\ref{sec:southern-execution}~节“周月滚动与日末状态承接”。
+
+\textbf{输入参数}（配置键与校验界见
+\srcpath{src/market/market\_operation.cpp:271-330}）：
+\begin{paramtable}
+\fld{horizon} & — & — & day/\allowbreak week/\allowbreak month & — & day=1 日，week=7 日，month=自然月（须月初起算，:293-298）\\
+\fld{start\_date} & — & — & YYYY-MM-DD & — & 起始日期，校验为有效历日（:286-292）\\
+\fld{penalty\_per\_mwh} & — & 元/MWh & $1\sim10^{7}$ & — & 缺额罚因子（:299）\\
+\fld{explain} & — & — & 布尔 & — & 是否生成日解释（:300）\\
+\fld{explain\_trigger} & — & — & anomaly/\allowbreak always/\allowbreak manual & always & 解释触发方式（:272-273）\\
+\fld{recovery\_pricing} & — & — & \fld{dispatch\_only}/\allowbreak full & \fld{dispatch\_only} & 恢复重算的定价口径（:274-275）\\
+\fld{days} & — & — & 数组 & 空 & 逐日覆盖；长度为日数或日数+1（含末日预测，:301）\\
+\fld{days[].first\_slot} / \fld{last\_slot} & — & 15min 点 & $0\sim95$ & $0$/$95$ & 日出清窗口（:323-325）\\
+\fld{days[].} 八个日倍率 & — & — & $0\sim10$ & $1.0$ & \fld{load\_scale}、\fld{wind\_scale}、\fld{solar\_scale}、\fld{inflow\_scale}、\fld{bid\_scale}、\fld{line\_limit\_scale}、\fld{generator\_bid\_scale}、\fld{load\_bid\_scale}（\srcpath{src/market/market\_operation.cpp:17}，逐一校验 $0\sim10$ 于 :322）\\
+\fld{days[].generator\_outages} / \fld{branch\_outages} & — & — & 稳定 ID 数组 & 空 & 日停运，未知或重复 ID 拒绝（:326-330）\\
+\fld{solver\_options} & — & — & 对象 & — & \fld{solver}/\fld{time\_limit\_sec}/\fld{mip\_gap}/\fld{threads}/\fld{native\_root\_cuts}，并入 \fld{execution} 后再校验（:281-284）\\
+\fld{terminal\_forecast\_source} & — & — & authored/\allowbreak \fld{baseline\_template} & 自动 & 提供第 $+1$ 日时为 authored（:313-314）\\
+\fld{posthoc\_ac\_audit} & — & — & 布尔 & — & 事后 AC 审计开关（:276）\\
+\end{paramtable}
+
+\textbf{输出字段}：任务含 \fld{config}（归一化后含 \fld{solver\_options}）、\fld{base}
+与逐日结果；每日结果含 \fld{state\_start}/\fld{state\_end}（相邻日核对用）、
+\fld{cause\_analysis}、\fld{counterfactuals} 与 \fld{recovery\_execution}
+（\fld{workers}、\fld{experiments}、线程决议与 \fld{wall\_sec}，
+\srcpath{src/market/market\_operation.cpp:265,428-429,468}）；跨日承接由
+\fld{carry\_from} 生成（\srcpath{src/market/market\_operation.cpp:119}），仅当日结果有效才
+推进（见第~\ref{sec:southern-execution}~节）。
+
+\textbf{边界与局限}：恢复实验只对当日实际偏离参考的因素各做一次单因素重算
+（:404-413）；并行准入为 Gurobi 后端、实验数 $>1$、母线 $\le118$、机组 $\le128$、
+储能 $\le16$、水库 $\le24$、核数 $\ge4$ 且每解线程 $\le$ 核数一半，满足时
+\fld{workers}=2 否则 1（:415-426）；时序日从不并行。滚动模式拒绝跨日非空启停轨迹
+（:303-305）。
+
+\subsection{云南辅助服务}
+入口声明于 \srcpath{include/hacdcpf/market/southern\_market.hpp:51-66}（
+\fld{yunnan\_ancillary\_defaults}、\fld{validate\_yunnan\_ancillary}、
+\fld{run\_yunnan\_ancillary\_market}、\fld{run\_yunnan\_ancillary\_intraday}、
+\fld{settle\_yunnan\_ancillary}、\fld{post\_yunnan\_ancillary\_statement}、
+\fld{settle\_yunnan\_ancillary\_month}），接线于
+\srcpath{src/market/southern\_market.cpp:2586-2592}，规则实现于
+\srcpath{src/market/yunnan\_ancillary.hpp} 与 \srcpath{src/market/yunnan\_rules\_workflow.hpp}。
+
+\subsubsection{调频出清（日前/日内）}
+\textbf{功能定位}：云南 2025 小时 AGC 预安排：小时容量需求
+$C_{\min}+R_1\cdot$负荷$+R_2\cdot$新能源，按排序价升序授予，再与固定组合/一次调频的
+能量 SCED 耦合校验容量充分性（\srcpath{src/market/yunnan\_ancillary.hpp:123-233}；
+日内阶段见 \srcpath{src/market/yunnan\_rules\_workflow.hpp:121-178}）。
+
+\textbf{输入参数}（\fld{schema\_version}=\fld{"yunnan-agc-2025-v1"}，校验见
+\srcpath{src/market/yunnan\_ancillary.hpp:35-89}，模板见 :91-121）：
+\begin{paramtable}
+\fld{research} & — & — & 布尔 & true & 非研究模式强制 \fld{cmin\_mw}=450（:42）\\
+\fld{cmin\_mw} & $C_{\min}$ & MW & $0\sim10^{6}$ & $450$ & 调频容量基值（:41,:93）\\
+\fld{load\_ratio} & $R_1$ & — & $0\sim1$ & $0.005$ & 负荷比例（:43,:93）\\
+\fld{renewable\_ratio} & $R_2$ & — & $0\sim1$ & $0.003$ & 新能源比例（:43,:93）\\
+\fld{agc\_units} & — & — & 名册 & 模板生成 & AGC 名册强制：全部水电机组须在册（含未中标，:87-88）；成员仅水电/火电，水电须 plant 模式（:56,:73-74）；默认模板按 reservoir/<id> 与 generator/<id> 分组（:101）\\
+\fld{agc\_units[].k\_history} & $k$ & — & 8 点 & 水电 1.5/火电 1 & 近 8 次中标性能指数，均值须 $>0$（:58-60）\\
+\fld{agc\_units[].price\_per\_mw} & — & 元/MW & 24 点、0.1 步长 & 水电 4/火电 5 & 里程报价；越界 $[3,8]$ 时用 \fld{default\_price\_per\_mw}（:61,:200-201）\\
+\fld{agc\_units[].capacity\_mw} & — & MW & 24 点、1 步长 & $10$ & 申报容量（:62）\\
+\fld{members[].safe\_intervals\_mw} & — & MW & $\le16$ 段 & 模板两段 & 水电安全运行区（强制、递增不交），火电为空（:76-84）\\
+\fld{workflow.clearing\_minutes} & — & min & $[-660,1410]$ & 全 $-660$ & 逐小时出清时刻；须 $\le60h-30$（规则第 29 条，\srcpath{src/market/yunnan\_rules\_workflow.hpp:38-39}）\\
+\fld{workflow.bid\_submissions} & — & — & 数组 & 空 & 报价分钟须落在 D-1 窗口 $[-900,-720]$（:49）；精度或容量非法的申报不替换既有有效申报（:101-119）\\
+\fld{workflow.suspensions} & — & — & 数组 & 空 & 暂停时段以前一交易日价结算，历史价校验界 $[0,15]$（已知缝隙，:60-63）\\
+\fld{workflow.allow\_uplift} & — & — & 布尔 & true & 安全容量上调许可（:40）\\
+\end{paramtable}
+耦合出清要求外部调频中标量为零（\fld{regulation\_up/down\_mw} 必须全 0，
+\srcpath{src/market/yunnan\_ancillary.hpp:47-48}）；独立 AGC 资源（储能/可控负荷）
+字段与校验见 \srcpath{src/market/yunnan\_rules\_workflow.hpp:76-99}。
+
+\textbf{输出字段}（\srcpath{src/market/yunnan\_ancillary.hpp:137-146,211-229}；
+日内调整日志见 \srcpath{src/market/yunnan\_rules\_workflow.hpp:123-178}）：
+\begin{center}\footnotesize
+\begin{longtable}{@{}L{4.6cm}L{3.4cm}L{1.7cm}L{5.6cm}@{}}
+\toprule 字段名 & 类型 & 单位 & 索引空间/说明\\\midrule
+\endhead
+\fld{status} & string & — & \fld{capacity\_prearranged}/\fld{capacity\_shortfall}；耦合后改写为 \fld{prearranged\_schedule\_only}/\fld{intraday\_schedule\_only} 等（\srcpath{src/market/southern\_market.cpp:2331-2340}）\\
+\fld{capacity\_sufficient} & bool & — & 任一小时缺额即 false\\
+\fld{hours[]} & 数组 & — & 按 0$\sim$23 小时索引：\fld{demand\_mw}、\fld{awarded\_mw}、\fld{shortage\_mw}、\fld{reference\_price\_per\_mw}（缺额小时为 null）\\
+\fld{hours[].bids[]} & 数组 & — & 按排序价升序：\fld{k}、\fld{effective\_price\_per\_mw}、\fld{ranking\_price\_per\_mw}=$bid\cdot k_{\max}/k$（yunnan\_ancillary.hpp:209）、\fld{declared\_mw}、\fld{capability\_upper\_bound\_mw}、\fld{adjusted\_mw}、\fld{award\_mw}、\fld{reasons}\\
+\fld{clearing\_price\_per\_mw} & number/null & 元/MW & 日内阶段取参考价（封顶 $\min(15,\cdot)$，:151,:224）；暂停时段取历史价\\
+\fld{realtime\_dispatch} / \fld{realtime\_capacity\_audit} & 数组 & — & 日内实时调整与逐秒容量审计（:159-177）\\
+\fld{model\_limitations} & string 数组 & — & 研究出清口径声明（:139-146）\\
+\bottomrule
+\end{longtable}
+\end{center}
+
+\textbf{边界与局限}：规则型研究出清；AGC 资格、近 8 次性能与安全区为署名输入非独立认证；
+不提供里程推断（申报端明确无 AGC mileage）；暂停时段历史价校验界 $[0,15]$ 为已知缝隙
+（见 \srcpath{docs/modules/market/yunnan\_ancillary\_markets.md}）。
+
+\subsubsection{结算、账单与月结}
+\textbf{功能定位}：基于署名 AGC 指令/响应计量事件的日结
+（\fld{settle\_yunnan\_ancillary}）、账单入账与更正
+（\fld{post\_yunnan\_ancillary\_statement}）与月结
+（\fld{settle\_yunnan\_ancillary\_month}）（
+\srcpath{src/market/yunnan\_rules\_workflow.hpp:208-260,294-317,330-391}）。
+
+\textbf{输入参数}：
+\begin{paramtable}
+\fld{measurements[]} & — & — & 逐机组小时 & — & 计量事件：\fld{unit\_id}、\fld{hour}、\fld{test\_period}、\fld{own\_unavailability\_seconds}、\fld{events}（显式指令/响应，空=署名零指令；:218-231）\\
+\fld{events[].metrics} & — & — & 对象 & — & 调节速率/时延/误差（额定功率分数），$k_1,k_2,k_3$ 与 $m$ 系数见 :190-197\\
+\fld{allocation.continuous\_spot} & — & — & 布尔 & — & 连续现货口径（分母权重切换，:264-292）\\
+\fld{allocation.generation\_share} & $F$ & — & $0\sim1$ & — & 发电侧分摊比例；非研究日结与月结均强制 $F=0.5$（:304,:385）\\
+\fld{allocation.participants[]} & — & MWh/元 & 数组 & — & \fld{point\_to\_grid}（点对网权重减半）、\fld{export\_mwh}、\fld{nonmarket\_export\_mwh}、\fld{import\_mwh}（:270-277）\\
+\fld{entry.book} / \fld{delivery\_date} 等 & — & — & 日期串 & — & 账单入账：先交付后入账；更正须指名最新原账单（:330-349）\\
+\fld{request.month} & — & — & YYYY-MM & — & 月结月份，缺日即不完整返回（:371-381）\\
+\end{paramtable}
+
+\textbf{输出字段}：日结计量 \fld{metering.\allowbreak rows[]}（\fld{mileage\_mw}、\fld{performance\_m}、
+\fld{price\_per\_mw}、\fld{compensation\_cny}，:250）与 \fld{allocation.\allowbreak rows[]}
+（分摊/\allowbreak 返还/\allowbreak 净额与平衡残差，:288-291）；入账返回追加后的 journal（含
+\fld{entry\_id}、\fld{unit\_identity}、\fld{raw\_compensation\_delta\_cny}，:350-366）；
+月结 \fld{settle\_month} 先按月内最新日结计量求和、再套用月度电量分母一次，
+输出 \fld{entry\_ids}、\fld{missing\_days} 与分摊结果（:371-391）。
+
+\textbf{边界与局限}：结算需要日内出清且 \fld{settlement\_eligible}、能量计划可行、
+非诊断松弛、实时容量充足（:209-213）；计量缺失只标 \fld{complete}=false 并列入
+\fld{missing\_measurements}，不以零交付伪造（:253-258）；更正窗口为发现后 1 个日历月、
+交付日起 6 个月回溯（:347-348）；月结 $F=0.5$ 为规则强制定值（:385）。
