@@ -214,6 +214,7 @@ static const SolverConfig kConfigs[] = {
     { "Seed+A/B[S]",    true,  0, "choose", "",    true,  0,     0, engine::CutType::All },
     { "NoCuts[S]",      false, 0, "choose", "",    false, 50000, -1, engine::CutType::None },
 };
+static int g_threads = 1;
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Test case descriptor
@@ -546,7 +547,7 @@ static RunRecord run_direct_highs_reference(const TestCase& tc,
     Highs highs;
     highs.setOptionValue("output_flag", false);
     highs.setOptionValue("log_to_console", false);
-    highs.setOptionValue("threads", static_cast<HighsInt>(1));
+    highs.setOptionValue("threads", static_cast<HighsInt>(std::max(1, g_threads)));
     highs.setOptionValue("mip_rel_gap", 1e-4);
     highs.setOptionValue("time_limit", std::max(0.001, time_limit_sec));
     if (mip_lp_solver && mip_lp_solver[0] != '\0') {
@@ -1440,6 +1441,12 @@ int main(int argc, char** argv)
             time_limit = std::atof(argv[++i]);
             if (time_limit <= 0.0) {
                 std::fprintf(stderr, "--time-limit must be positive\n");
+                return 1;
+            }
+        } else if (std::strcmp(argv[i], "--threads") == 0 && i + 1 < argc) {
+            g_threads = std::atoi(argv[++i]);
+            if (g_threads <= 0) {
+                std::fprintf(stderr, "--threads must be positive\n");
                 return 1;
             }
         } else {
