@@ -20,6 +20,7 @@
 #pragma once
 
 #include <cstdint>
+#include <chrono>
 #include <string>
 #include <vector>
 
@@ -34,6 +35,7 @@ namespace mipsolvers::engine {
 /// Statistics from presolve reductions.
 struct PresolveStats {
   bool infeasible{false};
+  bool timed_out{false};
   std::string infeasibility_reason;
   int rows_removed{0};
   int cols_removed{0};
@@ -77,6 +79,11 @@ struct PresolveOptions {
   double zero_tol{1e-10};
   double bound_tol{1e-9};
   bool verbose{false};
+  // Global presolve budget in seconds. Non-positive or non-finite means
+  // unlimited. The deadline is checked at reduction boundaries and during
+  // probing waves (Achterberg, Constraint Integer Programming, 2007,
+  // Sections 4.1-4.2: reductions must not publish an incomplete model).
+  double time_limit_sec{0.0};
 };
 
 /// Main MILP presolve class.
@@ -189,6 +196,10 @@ class MILPPresolve {
   std::vector<int> orig_to_reduced_row_;
   std::vector<ProbingImplication> probing_implications_original_;
   std::vector<ProbingImplication> probing_implications_reduced_;
+
+  std::chrono::steady_clock::time_point run_start_{};
+
+  bool deadline_expired() const;
 
   // How many ineq rows in the original model (first m_ineq entries = A, rest = Aeq)
   int m_ineq_orig_{0};

@@ -1280,6 +1280,16 @@ bool solve_lp_relaxation_with_vendored_highs(const LPModel& lp,
       out.dual_bound = std::numeric_limits<double>::infinity();
       return true;
     }
+    if (model_status == HighsModelStatus::kTimeLimit) {
+      // Preserve the nested LP's termination certificate without treating a
+      // partial iterate or dual value as certified. Derivation and measured
+      // mismatch: docs/archive/native_milp_cplex_gap_improvement_2026-09-12.md,
+      // "Deadline propagation measurement".
+      primal.stats.status = "Time limit";
+      out.primal = std::move(primal);
+      out.dual_bound = std::numeric_limits<double>::infinity();
+      return true;
+    }
     if (!primal.stats.success) {
       if (opt.verbose ||
           bc_env_options().value("MIPSOLVERS_HIGHS_LP_KERNEL_TRACE") != nullptr) {

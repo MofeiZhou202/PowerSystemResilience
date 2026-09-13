@@ -1011,8 +1011,17 @@
                  root_frac_bin_count, root_total_bin_count);
     }
   }
+  const int parallel_launch_threads = std::max(1, resolve_num_threads(opt));
+  const double parallel_launch_remaining_sec = bc_remaining_sec();
+  const double parallel_launch_min_remaining_sec =
+      opt.time_limit_sec > 0.0 && std::isfinite(opt.time_limit_sec)
+          ? std::max(0.25, 0.25 * opt.time_limit_sec)
+          : 0.25;
   const bool allow_concurrent_tree =
-      false;
+      parallel_tree_allowed && gap_needs_tree &&
+      parallel_launch_threads >= 2 &&
+      parallel_launch_remaining_sec >= parallel_launch_min_remaining_sec &&
+      !bc_optional_root_budget_expired();
   if (parallel_tree_allowed && gap_needs_tree && !allow_concurrent_tree) {
     parallel_schedule_reason = "late_tree_stable_root";
     if (opt.verbose) {

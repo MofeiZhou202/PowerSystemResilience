@@ -1,6 +1,7 @@
 /// End-to-end MILP benchmark over MIPLIB 2017 MPS instances.
 ///
-/// The runner keeps MPS integrality and compares four explicitly named paths:
+/// The runner keeps MPS integrality and compares five explicitly named paths:
+///   cplex-mip             CPLEX owns the complete MIP solve
 ///   highs-mip              HiGHS owns the complete MIP solve
 ///   scip-mip               SCIP owns the complete MIP solve
 ///   native-highs-lp        native B&C with the HiGHS node-LP kernel
@@ -57,6 +58,7 @@
 #include "mipsolvers/engine/bc/options.hpp"
 #include "mipsolvers/engine/bc/stats.hpp"
 #include "mipsolvers/engine/problem_types.hpp"
+#include "mipsolvers/engine/solver/external/adapters.hpp"
 #include "mipsolvers/engine/solver/native/milp/bc/milp_presolve.hpp"
 
 namespace fs = std::filesystem;
@@ -83,6 +85,7 @@ struct Config {
   int limit{0};
   int sample{0};
   int max_nodes{50000};
+  int native_threads{1};
   int seed{0};
   std::vector<int> seeds;
   double time_limit_sec{60.0};
@@ -184,6 +187,11 @@ struct Result {
   bool incumbent_timeline_available{false};
   bool bound_event_stream_available{false};
   bool native_diagnostics_available{false};
+  int parallel_requested_threads{1};
+  int parallel_effective_threads{1};
+  int parallel_explorer_threads{0};
+  bool parallel_tree_launched{false};
+  std::string parallel_schedule_reason{"unavailable"};
   double read_ms{0.0};
   double shared_decompress_ms{0.0};
   double solve_ms{0.0};
@@ -487,6 +495,9 @@ bool parse_args(int argc, char** argv, Config& cfg) {
     } else if (arg == "--max-nodes") {
       const char* v = value("--max-nodes"); if (!v) return false;
       cfg.max_nodes = std::max(1, std::atoi(v));
+    } else if (arg == "--native-threads") {
+      const char* v = value("--native-threads"); if (!v) return false;
+      cfg.native_threads = std::max(1, std::atoi(v));
     } else if (arg == "--seed") {
       const char* v = value("--seed"); if (!v) return false;
       cfg.seed = std::max(0, std::atoi(v));
@@ -589,7 +600,7 @@ bool parse_args(int argc, char** argv, Config& cfg) {
           << "Usage: miplib2017_benchmark [options]\n"
           << "  --data-dir DIR       recursively scan DIR for .mps[.gz]\n"
           << "  --solu FILE          MIPLIB .solu reference file\n"
-          << "  --solvers A,B        highs-mip,scip-mip,native-highs-lp,"
+          << "  --solvers A,B        cplex-mip,highs-mip,scip-mip,native-highs-lp,"
              "native-native-lp,native-presolve-highs-audit\n"
           << "  --case A,B           instance-name substring filters\n"
           << "  --limit N            run first N selected instances (0 = all)\n"
@@ -619,6 +630,7 @@ bool parse_args(int argc, char** argv, Config& cfg) {
           << "  --native-tree-restart-min-remaining SEC  remaining-time trigger threshold\n"
           << "  --gap VALUE          relative MIP gap (default 1e-4)\n"
           << "  --max-nodes N        native B&C node limit\n"
+          << "  --native-threads N   requested native B&C threads (default 1)\n"
           << "  --seed N             deterministic backend seed\n"
           << "  --seeds A,B,C        explicit distinct backend seeds\n"
           << "  --csv FILE           raw result CSV\n"
@@ -1103,7 +1115,6 @@ Result run_highs(const Instance& instance, const Config& cfg) {
   if (cfg.highs_verbose) highs.setOptionValue("mip_report_level", 2);
   highs.setOptionValue("threads", 1);
   highs.setOptionValue("random_seed", cfg.seed);
-  highs.setOptionValue("time_limit", cfg.time_limit_sec);
   highs.setOptionValue("mip_rel_gap", cfg.gap);
 
   const auto read_start = std::chrono::steady_clock::now();
@@ -1114,6 +1125,9 @@ Result run_highs(const Instance& instance, const Config& cfg) {
     result.status = "read error";
     return result;
   }
+  // Import and optimize are separate benchmark phases. Apply the solve limit
+  // only after parsing; see the integration derivation, mismatch investigation.
+  highs.setOptionValue("time_limit", cfg.time_limit_sec);
 
   const HighsStatus callback_status = highs.setCallback(
       [&result, &instance](int callback_type, const std::string&,
@@ -1203,6 +1217,53 @@ Result run_highs(const Instance& instance, const Config& cfg) {
                                            : std::numeric_limits<double>::quiet_NaN(),
                        result.best_bound,
                        result.has_solution ? &result.x : nullptr);
+  }
+  return result;
+}
+
+Result run_cplex(const Instance& instance, const Config& cfg) {
+  Result result;
+  set_dimensions(instance, result);
+  result.solver = "cplex-mip";
+  result.collection_scope = "cplex_summary";
+  if (!instance.native_supported) {
+    result.available = false;
+    result.status =
+        "MIPModel cannot represent semi-continuous/semi-integer variables";
+    return result;
+  }
+
+  eng::CplexOptions options;
+  options.time_limit_sec = cfg.time_limit_sec;
+  options.mip_gap = cfg.gap;
+  options.threads = 1;
+  options.random_seed = cfg.seed;
+  eng::CplexAdapter cplex(options);
+  if (!cplex.available()) {
+    result.available = false;
+  }
+  const eng::SolveResult solve = cplex.solve_milp(instance.mip);
+  const eng::CplexSolveInfo info = eng::last_cplex_solve_info();
+  result.read_ms = 1000.0 * info.model_import_sec.value_or(0.0);
+  result.solve_ms = 1000.0 * info.optimize_sec.value_or(0.0);
+  result.status = solve.stats.status;
+  result.has_solution = info.has_solution && solve.stats.success &&
+                        solve.x.size() == instance.columns;
+  result.optimal = info.optimal;
+  result.proven = info.proven;
+  result.timed_out = info.timed_out;
+  result.gap = result.has_solution ? solve.stats.mip_gap
+                                   : std::numeric_limits<double>::infinity();
+  if (info.node_count.has_value()) {
+    result.node_count_available = true;
+    result.nodes = *info.node_count;
+  }
+  if (info.best_bound.has_value()) {
+    result.best_bound = *info.best_bound + instance.objective_offset;
+  }
+  if (result.has_solution) {
+    result.objective = solve.stats.objective + instance.objective_offset;
+    result.x = solve.x;
   }
   return result;
 }
@@ -1459,7 +1520,7 @@ Result run_native(const Instance& instance, const Config& cfg,
   options.time_limit_sec = cfg.time_limit_sec;
   options.gap_tol = cfg.gap;
   options.max_nodes = cfg.max_nodes;
-  options.num_threads = 1;
+  options.num_threads = cfg.native_threads;
   options.random_seed = static_cast<unsigned long long>(cfg.seed);
   options.verbose = cfg.native_verbose;
   options.enable_domain_heuristics = false;
@@ -1571,6 +1632,15 @@ Result run_native(const Instance& instance, const Config& cfg,
       native.bc_stats.bound_events_dropped_uncertified_dual;
   result.native_diagnostics_available =
       native.bc_stats.native_diagnostics_available;
+  result.parallel_requested_threads =
+      native.bc_stats.parallel_requested_threads;
+  result.parallel_effective_threads =
+      native.bc_stats.parallel_effective_threads;
+  result.parallel_explorer_threads =
+      native.bc_stats.parallel_explorer_threads;
+  result.parallel_tree_launched = native.bc_stats.parallel_tree_launched;
+  result.parallel_schedule_reason =
+      native.bc_stats.parallel_schedule_reason;
   result.has_solution = native.stats.success && native.x.size() == instance.columns;
   result.nodes = native.bc_stats.nodes_explored;
   result.lp_solves = native.bc_stats.lp_solve_count_available
@@ -1884,7 +1954,7 @@ Result run_native_presolve_highs_audit(const Instance& instance,
     options.time_limit_sec = cfg.time_limit_sec;
     options.gap_tol = cfg.gap;
     options.max_nodes = cfg.max_nodes;
-    options.num_threads = 1;
+    options.num_threads = cfg.native_threads;
     const eng::BCResult solved = eng::solve_milp_bc(reduced, options);
     result.status = solved.bc_stats.status.empty() ? solved.stats.status
                                                    : solved.bc_stats.status;
@@ -1933,6 +2003,7 @@ Result run_native_presolve_highs_audit(const Instance& instance,
 
 Result run_solver(const Instance& instance, const Config& cfg,
                   const std::string& solver) {
+  if (solver == "cplex-mip") return run_cplex(instance, cfg);
   if (solver == "highs-mip") return run_highs(instance, cfg);
   if (solver == "scip-mip") return run_scip(instance, cfg);
   if (solver == "native-highs-lp") return run_native(instance, cfg, false);
@@ -2346,6 +2417,13 @@ json result_json(const Result& r) {
                                         r.first_incumbent_lp_solves >= 0
                                         ? json(r.first_incumbent_lp_solves)
                                         : json(nullptr)},
+      {"native_parallel", r.native_diagnostics_available ? json{
+          {"requested_threads", r.parallel_requested_threads},
+          {"effective_threads", r.parallel_effective_threads},
+          {"explorer_threads", r.parallel_explorer_threads},
+          {"tree_launched", r.parallel_tree_launched},
+          {"schedule_reason", r.parallel_schedule_reason}}
+          : json(nullptr)},
       {"native_presolve", r.native_diagnostics_available ? json{
           {"attempted", r.native_presolve_attempted},
           {"adopted", r.native_presolve_adopted},
@@ -2565,6 +2643,19 @@ Result worker_result_from_json(const json& input) {
       availability.value("bound_events", false);
   result.native_diagnostics_available =
       availability.value("native_diagnostics", false);
+  const json native_parallel =
+      input.contains("native_parallel") && input["native_parallel"].is_object()
+          ? input["native_parallel"] : json::object();
+  result.parallel_requested_threads =
+      native_parallel.value("requested_threads", 1);
+  result.parallel_effective_threads =
+      native_parallel.value("effective_threads", 1);
+  result.parallel_explorer_threads =
+      native_parallel.value("explorer_threads", 0);
+  result.parallel_tree_launched =
+      native_parallel.value("tree_launched", false);
+  result.parallel_schedule_reason =
+      native_parallel.value("schedule_reason", "unavailable");
   result.rows = input.value("rows", 0);
   result.columns = input.value("columns", 0);
   result.nonzeros = input.value("nonzeros", std::int64_t{0});
@@ -2918,6 +3009,7 @@ Result run_solver_isolated(const Instance& instance, const Config& cfg,
       "--time-limit", precise_number(cfg.time_limit_sec),
       "--gap", precise_number(cfg.gap),
       "--max-nodes", std::to_string(cfg.max_nodes),
+      "--native-threads", std::to_string(cfg.native_threads),
       "--seed", std::to_string(cfg.seed),
       "--native-node-estimate", cfg.native_node_estimate};
   if (cfg.highs_verbose) arguments.push_back("--highs-verbose");
@@ -3201,6 +3293,7 @@ void write_json(const fs::path& path, const Config& cfg,
   out["reference_objective_tolerance"] =
       std::max(kAuditTolerance, cfg.gap);
   out["threads"] = 1;
+  out["native_threads"] = cfg.native_threads;
   out["seed"] = cfg.seeds.size() == 1 ? json(cfg.seeds.front()) : json(nullptr);
   out["seeds"] = cfg.seeds;
   out["repeats"] = cfg.repeats;
@@ -3319,7 +3412,7 @@ int main(int argc, char** argv) {
     return 2;
   }
   const std::set<std::string> valid_solvers{
-      "highs-mip", "scip-mip", "native-highs-lp", "native-native-lp",
+      "cplex-mip", "highs-mip", "scip-mip", "native-highs-lp", "native-native-lp",
       "native-presolve-highs-audit"};
 
   const bool any_worker_option = !cfg.worker_instance.empty() ||

@@ -35,7 +35,8 @@
         // State publication is deferred until the admission test below.
       } else if (root_cut_ipm) {
         const double cut_remaining =
-            bc_remaining_sec() - bc_post_root_finalize_reserve_sec;
+            std::min(bc_remaining_sec() - bc_post_root_finalize_reserve_sec,
+                     cut_stage_remaining_sec());
         if (cut_remaining <= 0.0) break;
         root_cut_ipm->set_solve_time_limit(cut_remaining);
         auto t_cut_solve0 = std::chrono::steady_clock::now();
@@ -194,7 +195,8 @@
       simplex_opt.optimality_tol = std::max(1e-10, opt.lp_tol * 0.1);
       simplex_opt.verbose = false;
       const double cut_remaining =
-          bc_remaining_sec() - bc_post_root_finalize_reserve_sec;
+          std::min(bc_remaining_sec() - bc_post_root_finalize_reserve_sec,
+                   cut_stage_remaining_sec());
       if (cut_remaining <= 0.0) break;
       simplex_opt.time_limit_sec = cut_remaining;
       auto t_cut_solve0 = std::chrono::steady_clock::now();

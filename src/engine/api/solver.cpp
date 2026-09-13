@@ -187,6 +187,11 @@ std::size_t SolverEngine::register_default_adapters() {
     register_if_missing(gurobi);
   }
 
+  auto cplex = std::make_shared<CplexAdapter>();
+  if (cplex->available()) {
+    register_if_missing(cplex);
+  }
+
   auto highs = std::make_shared<HighsAdapter>();
   if (highs->available()) {
     register_if_missing(highs);

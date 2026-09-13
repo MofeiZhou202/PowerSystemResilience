@@ -767,6 +767,18 @@ if(MIPSOLVERS_HAVE_GUROBI)
     MIPSOLVERS_HAVE_GUROBI=1 HACDCPF_HAVE_GUROBI=1)
 endif()
 
+# ── IBM ILOG CPLEX ───────────────────────────────────────────────────────────
+# The Callable Library is optional and licensed separately. Keep its absolute
+# installation path out of exported targets.
+if(MIPSOLVERS_HAVE_CPLEX)
+  target_include_directories(mipsolvers PRIVATE ${MIPSOLVERS_CPLEX_INCLUDE_DIRS})
+  foreach(_cplex_lib IN LISTS MIPSOLVERS_CPLEX_LIBRARIES)
+    target_link_libraries(mipsolvers PRIVATE "$<BUILD_INTERFACE:${_cplex_lib}>")
+  endforeach()
+  target_compile_definitions(mipsolvers PUBLIC
+    MIPSOLVERS_HAVE_CPLEX=1 HACDCPF_HAVE_CPLEX=1)
+endif()
+
 # ── PaPILO ────────────────────────────────────────────────────────────────────
 # PRIVATE：papilo_presolve.hpp 使用完全前向声明，不 #include 任何 papilo 头文件，
 # 消费者无需 papilo 头文件或链接路径。

@@ -86,7 +86,8 @@ std::vector<std::string> default_priority_for(ProblemClass cls) {
 }
 
 bool is_external_adapter_name(const std::string& name) {
-  return name == "HiGHS" || name == "Ipopt" || name == "Scip" || name == "Gurobi";
+  return name == "HiGHS" || name == "Ipopt" || name == "Scip" ||
+         name == "Gurobi" || name == "CPLEX";
 }
 
 bool is_native_adapter_name(const std::string& name) {

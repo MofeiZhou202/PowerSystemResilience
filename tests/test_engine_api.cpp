@@ -105,6 +105,63 @@ NLPModel make_rosenbrock_nlp() {
 }  // namespace
 #endif
 
+#ifndef HACDCPF_HAVE_CPLEX
+TEST_CASE("SolverEngine default adapters omit CPLEX when not compiled",
+          "[engine][api][cplex]") {
+  SolverEngine eng(/*register_defaults=*/true);
+  const auto solvers = eng.list_solvers(ProblemClass::MILP);
+  CHECK(std::find(solvers.begin(), solvers.end(), "CPLEX") == solvers.end());
+}
+#else
+TEST_CASE("SolverEngine registers CPLEX when its environment is available",
+          "[engine][api][cplex]") {
+  CplexAdapter adapter;
+  SolverEngine eng(/*register_defaults=*/true);
+  const auto solvers = eng.list_solvers(ProblemClass::MILP);
+  const bool registered =
+      std::find(solvers.begin(), solvers.end(), "CPLEX") != solvers.end();
+  CHECK(registered == adapter.available());
+}
+
+TEST_CASE("CPLEX preserves a two-sided MILP row",
+          "[engine][api][cplex][milp]") {
+  CplexOptions options;
+  options.time_limit_sec = 10.0;
+  options.threads = 1;
+  CplexAdapter adapter(options);
+  if (!adapter.available()) SKIP("CPLEX environment or license unavailable");
+
+  // min x+y subject to 1 <= x+y <= 2, x,y integer in [0,2].
+  MIPModel mip;
+  mip.linear_part.sense = Sense::Minimize;
+  mip.linear_part.c = Eigen::Vector2d::Ones();
+  mip.linear_part.A.resize(1, 2);
+  mip.linear_part.A.insert(0, 0) = 1.0;
+  mip.linear_part.A.insert(0, 1) = 1.0;
+  mip.linear_part.A.makeCompressed();
+  mip.linear_part.row_lhs = Eigen::VectorXd::Constant(1, 1.0);
+  mip.linear_part.b = Eigen::VectorXd::Constant(1, 2.0);
+  mip.linear_part.Aeq.resize(0, 2);
+  mip.linear_part.beq.resize(0);
+  mip.linear_part.vars = {
+      VariableMeta{VarType::Integer, 0.0, 2.0},
+      VariableMeta{VarType::Integer, 0.0, 2.0},
+  };
+  mip.integer_idx = {0, 1};
+
+  const SolveResult result = adapter.solve_milp(mip);
+  const CplexSolveInfo info = last_cplex_solve_info();
+  INFO("status=" << result.stats.status);
+  REQUIRE(result.stats.success);
+  CHECK(info.optimal);
+  CHECK(info.proven);
+  // Fixed objective gate: integration derivation, Quantitative prediction.
+  CHECK(result.stats.objective == Approx(1.0).margin(1e-4));
+  REQUIRE(result.x.size() == 2);
+  CHECK(result.x.sum() == Approx(1.0).margin(1e-4));
+}
+#endif
+
 // ─── SolverEngine construction ────────────────────────────────────────────────
 TEST_CASE("SolverEngine default construction registers adapters", "[engine][api]") {
   SolverEngine eng(/*register_defaults=*/true);

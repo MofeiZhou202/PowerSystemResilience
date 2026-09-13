@@ -1580,6 +1580,18 @@
 	      (void)highs_root_owner->setOptionValue(
 	          "hacdcpf_root_oracle_stop_after_root_round",
 	          stop_after_root_round);
+	      if (opt.time_limit_sec > 0.0 &&
+	          std::isfinite(opt.time_limit_sec)) {
+	        // Every nested root owner inherits the global deadline less the
+	        // existing finalization reserve. Derivation and bounded-overrun
+	        // contract: docs/archive/native_milp_cplex_gap_improvement_
+	        // 2026-09-12.md, "Pre-registered rationale".
+	        const double root_owner_budget_sec = std::max(
+	            0.001,
+	            bc_remaining_sec() - bc_post_root_finalize_reserve_sec);
+	        (void)highs_root_owner->setOptionValue("time_limit",
+	                                                root_owner_budget_sec);
+	      }
 	      const HighsStatus run_status = highs_root_owner->run();
 	      root_xpool_authority_lpsolver =
 	          highs_root_owner->hacdcpfRootLpSolver();
@@ -2226,6 +2238,40 @@
   int effective_cuts_per_round = opt.cuts_per_round;
   bool is_scuc_like = false;  // set below in root-fractional diagnostic block
   std::string root_cut_skip_reason;
+  // Allocate a bounded share of the remaining root budget to cuts. The cap
+  // prevents cut separation from starving incumbent heuristics and tree
+  // proof on short solves (Achterberg, 2007, Sections 4.1-4.2, 8.1).
+  const double cut_usable_budget_sec =
+      std::isfinite(bc_remaining_sec())
+          ? std::max(0.0, bc_remaining_sec() -
+                              bc_post_root_finalize_reserve_sec)
+          : std::numeric_limits<double>::infinity();
+  const double cut_budget_sec =
+      std::isfinite(cut_usable_budget_sec)
+          ? 0.35 * cut_usable_budget_sec
+          : std::numeric_limits<double>::infinity();
+  const auto cut_stage_start = std::chrono::steady_clock::now();
+  auto cut_stage_remaining_sec = [&]() -> double {
+    if (!std::isfinite(cut_budget_sec)) {
+      return std::numeric_limits<double>::infinity();
+    }
+    return cut_budget_sec - std::chrono::duration<double>(
+                                std::chrono::steady_clock::now() -
+                                cut_stage_start)
+                                .count();
+  };
+  if (std::isfinite(cut_budget_sec)) {
+    if (cut_budget_sec < 2.0) {
+      effective_cut_rounds = std::min(effective_cut_rounds, 3);
+    } else {
+      // A conservative 50 ms/round lower bound avoids allocating more rounds
+      // than can complete even when the first separation is unusually cheap.
+      effective_cut_rounds = std::min(
+          effective_cut_rounds,
+          std::max(0, static_cast<int>(cut_budget_sec / 0.05)));
+    }
+    if (cut_budget_sec <= 0.05) effective_cut_rounds = 0;
+  }
   const bool highs_root_pipeline_active =
       opt.auto_highs_root_pipeline && opt.cuts != CutType::None;
   if (!highs_root_pipeline_active &&
@@ -2568,7 +2614,8 @@
     double prof_gen_ms [[maybe_unused]] = 0, prof_sf_ms [[maybe_unused]] = 0, prof_solve_ms [[maybe_unused]] = 0;
     [[maybe_unused]] int prof_rounds = 0;
     for (int k = 0; k < effective_cut_rounds; ++k) {
-      if (bc_optional_root_budget_expired()) break;
+      if (bc_optional_root_budget_expired() ||
+          cut_stage_remaining_sec() <= 0.0) break;
       const int prev_ineq_rows = static_cast<int>(root_lp.A.rows());
       const auto round_basis_hint = root.basis_hint;
       const auto round_x_relax = root.x_relax;
@@ -2725,7 +2772,9 @@
         cut_solve_opt.use_ipm_root = false;
         cut_solve_opt.use_simplex_lp_nodes = true;
         cut_solve_opt.time_limit_sec = std::max(
-            0.001, bc_remaining_sec() - bc_post_root_finalize_reserve_sec);
+            0.001,
+            std::min(bc_remaining_sec() - bc_post_root_finalize_reserve_sec,
+                     cut_stage_remaining_sec()));
         LPRelaxationResult incremental_relax = solve_lp_relaxation(
             root_lp, &round_x_relax, round_basis_hint.get(), cut_solve_opt);
         if (incremental_relax.primal.stats.success &&

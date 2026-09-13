@@ -48,6 +48,10 @@
 #include <scip/scipdefplugins.h>
 #endif
 
+#ifdef HACDCPF_HAVE_CPLEX
+#include <ilcplex/cplex.h>
+#endif
+
 namespace fs = std::filesystem;
 
 namespace mipsolvers::engine {
@@ -2688,6 +2692,337 @@ SolveResult IpoptAdapter::solve_nlp(const NLPModel& prob_in) const {
   out.stats.status = "Unavailable: external Ipopt executable adapter is disabled by default; build embedded Ipopt";
   return out;
 #endif
+}
+
+// ---------------------------------------------------------------------------
+// CplexAdapter — native Callable Library adapter
+// ---------------------------------------------------------------------------
+#ifdef HACDCPF_HAVE_CPLEX
+namespace {
+
+std::string cplex_error(CPXENVptr env, int code) {
+  char buffer[CPXMESSAGEBUFSIZE]{};
+  const char* message = CPXgeterrorstring(env, code, buffer);
+  return message != nullptr ? std::string(message)
+                            : "CPLEX error " + std::to_string(code);
+}
+
+std::string cplex_status(CPXENVptr env, int status) {
+  char buffer[CPXMESSAGEBUFSIZE]{};
+  const char* message = CPXgetstatstring(env, status, buffer);
+  return message != nullptr ? std::string(message)
+                            : "CPLEX status " + std::to_string(status);
+}
+
+struct CplexProblemGuard {
+  CPXENVptr env{nullptr};
+  CPXLPptr problem{nullptr};
+  CplexProblemGuard(CPXENVptr environment, CPXLPptr lp)
+      : env(environment), problem(lp) {}
+  CplexProblemGuard(const CplexProblemGuard&) = delete;
+  CplexProblemGuard& operator=(const CplexProblemGuard&) = delete;
+  ~CplexProblemGuard() {
+    if (problem != nullptr) CPXfreeprob(env, &problem);
+  }
+};
+
+bool cplex_status_proven(int status) {
+  return status == CPXMIP_OPTIMAL || status == CPXMIP_OPTIMAL_TOL ||
+         status == CPXMIP_INFEASIBLE || status == CPXMIP_UNBOUNDED ||
+         status == CPXMIP_INForUNBD;
+}
+
+bool cplex_status_optimal(int status) {
+  return status == CPXMIP_OPTIMAL || status == CPXMIP_OPTIMAL_TOL;
+}
+
+bool cplex_status_timed_out(int status) {
+  return status == CPXMIP_TIME_LIM_FEAS || status == CPXMIP_TIME_LIM_INFEAS;
+}
+
+}  // namespace
+#endif
+
+namespace {
+thread_local CplexSolveInfo cplex_solve_info;
+}
+
+CplexSolveInfo last_cplex_solve_info() { return cplex_solve_info; }
+
+CplexAdapter::CplexAdapter() : CplexAdapter(CplexOptions{}) {}
+
+CplexAdapter::CplexAdapter(CplexOptions options) : options_(options) {
+  if (!(options.time_limit_sec > 0.0) || !std::isfinite(options.time_limit_sec) ||
+      options.mip_gap < 0.0 || !std::isfinite(options.mip_gap) ||
+      options.threads < 0) {
+    throw std::invalid_argument(
+        "Invalid CPLEX time limit, MIP gap, or thread count");
+  }
+#ifdef HACDCPF_HAVE_CPLEX
+  int status = 0;
+  CPXENVptr env = CPXopenCPLEX(&status);
+  if (env == nullptr) {
+    initialization_error_ = cplex_error(nullptr, status);
+    return;
+  }
+  env_ = env;
+  // IBM ILOG CPLEX 22.1.1 Callable Library parameter reference. These are
+  // direct experiment controls, not algorithmic tuning constants.
+  if ((status = CPXsetintparam(env, CPXPARAM_ScreenOutput, CPX_OFF)) != 0 ||
+      (status = CPXsetdblparam(env, CPXPARAM_TimeLimit,
+                               options.time_limit_sec)) != 0 ||
+      (status = CPXsetdblparam(env, CPXPARAM_MIP_Tolerances_MIPGap,
+                               options.mip_gap)) != 0 ||
+      (status = CPXsetintparam(env, CPXPARAM_Threads, options.threads)) != 0 ||
+      (status = CPXsetintparam(env, CPXPARAM_RandomSeed,
+                               options.random_seed)) != 0) {
+    initialization_error_ = cplex_error(env, status);
+    CPXcloseCPLEX(&env);
+    env_ = nullptr;
+  }
+#else
+  initialization_error_ = "CPLEX Callable Library not linked";
+#endif
+}
+
+CplexAdapter::~CplexAdapter() {
+#ifdef HACDCPF_HAVE_CPLEX
+  auto* env = static_cast<CPXENVptr>(env_);
+  if (env != nullptr) {
+    CPXcloseCPLEX(&env);
+    env_ = nullptr;
+  }
+#endif
+}
+
+std::string CplexAdapter::name() const { return "CPLEX"; }
+
+bool CplexAdapter::supports(ProblemClass cls) const {
+  return cls == ProblemClass::MILP;
+}
+
+bool CplexAdapter::available() const {
+#ifdef HACDCPF_HAVE_CPLEX
+  return env_ != nullptr;
+#else
+  return false;
+#endif
+}
+
+SolveResult CplexAdapter::solve_milp(const MIPModel& prob) const {
+  cplex_solve_info = {};
+  SolveResult out;
+  out.stats.solver_name = name();
+#ifndef HACDCPF_HAVE_CPLEX
+  (void)prob;
+#endif
+#ifdef HACDCPF_HAVE_CPLEX
+  const auto total_start = std::chrono::steady_clock::now();
+  if (!available()) {
+    out.stats.status = "Unavailable: " + initialization_error_;
+    return out;
+  }
+  const ValidationReport validation = validate(prob);
+  if (!validation.valid) {
+    out.stats.status = "Invalid MILP: " +
+        (validation.errors.empty() ? std::string("validation failed")
+                                   : validation.errors.front());
+    return out;
+  }
+
+  auto* env = static_cast<CPXENVptr>(env_);
+  int status = 0;
+  CplexProblemGuard guard{env, CPXcreateprob(env, &status, "mipsolvers_milp")};
+  if (guard.problem == nullptr) {
+    out.stats.status = cplex_error(env, status);
+    return out;
+  }
+
+  const LPModel& lp = prob.linear_part;
+  const int n = static_cast<int>(lp.c.size());
+  const int m_ineq = static_cast<int>(lp.A.rows());
+  const int m_eq = static_cast<int>(lp.Aeq.rows());
+  std::vector<int> upper_row(static_cast<std::size_t>(m_ineq), -1);
+  std::vector<int> lower_row(static_cast<std::size_t>(m_ineq), -1);
+  std::vector<int> equality_row(static_cast<std::size_t>(m_eq), -1);
+  std::vector<double> rhs;
+  std::vector<char> row_sense;
+  rhs.reserve(static_cast<std::size_t>(2 * m_ineq + m_eq));
+  row_sense.reserve(static_cast<std::size_t>(2 * m_ineq + m_eq));
+
+  // Exact two-sided-row expansion; see
+  // docs/archive/cplex_callable_library_integration_2026-09-12.md, Claim.
+  for (int i = 0; i < m_ineq; ++i) {
+    if (std::isfinite(lp.b[i])) {
+      upper_row[static_cast<std::size_t>(i)] = static_cast<int>(rhs.size());
+      rhs.push_back(lp.b[i]);
+      row_sense.push_back('L');
+    }
+    const double lhs = lp_row_lhs_or_neg_inf(lp, i);
+    if (std::isfinite(lhs)) {
+      lower_row[static_cast<std::size_t>(i)] = static_cast<int>(rhs.size());
+      rhs.push_back(lhs);
+      row_sense.push_back('G');
+    }
+  }
+  for (int i = 0; i < m_eq; ++i) {
+    equality_row[static_cast<std::size_t>(i)] = static_cast<int>(rhs.size());
+    rhs.push_back(lp.beq[i]);
+    row_sense.push_back('E');
+  }
+  if (rhs.size() > static_cast<std::size_t>(std::numeric_limits<int>::max())) {
+    out.stats.status = "CPLEX model has more rows than the Callable Library API supports";
+    return out;
+  }
+
+  std::vector<int> matbeg(static_cast<std::size_t>(n));
+  std::vector<int> matcnt(static_cast<std::size_t>(n));
+  std::vector<int> matind;
+  std::vector<double> matval;
+  const std::size_t reserve_nnz =
+      2 * static_cast<std::size_t>(lp.A.nonZeros()) +
+      static_cast<std::size_t>(lp.Aeq.nonZeros());
+  matind.reserve(reserve_nnz);
+  matval.reserve(reserve_nnz);
+  for (int j = 0; j < n; ++j) {
+    matbeg[static_cast<std::size_t>(j)] = static_cast<int>(matind.size());
+    for (Eigen::SparseMatrix<double>::InnerIterator it(lp.A, j); it; ++it) {
+      const int source_row = static_cast<int>(it.row());
+      const int upper = upper_row[static_cast<std::size_t>(source_row)];
+      const int lower = lower_row[static_cast<std::size_t>(source_row)];
+      if (upper >= 0) {
+        matind.push_back(upper);
+        matval.push_back(it.value());
+      }
+      if (lower >= 0) {
+        matind.push_back(lower);
+        matval.push_back(it.value());
+      }
+    }
+    for (Eigen::SparseMatrix<double>::InnerIterator it(lp.Aeq, j); it; ++it) {
+      matind.push_back(equality_row[static_cast<std::size_t>(it.row())]);
+      matval.push_back(it.value());
+    }
+    const std::size_t count = matind.size() -
+        static_cast<std::size_t>(matbeg[static_cast<std::size_t>(j)]);
+    if (matind.size() > static_cast<std::size_t>(std::numeric_limits<int>::max()) ||
+        count > static_cast<std::size_t>(std::numeric_limits<int>::max())) {
+      out.stats.status =
+          "CPLEX model has more nonzeros than the Callable Library API supports";
+      return out;
+    }
+    matcnt[static_cast<std::size_t>(j)] = static_cast<int>(count);
+  }
+
+  std::vector<double> objective(static_cast<std::size_t>(n));
+  std::vector<double> lower_bound(static_cast<std::size_t>(n));
+  std::vector<double> upper_bound(static_cast<std::size_t>(n));
+  std::vector<char> column_type(static_cast<std::size_t>(n), 'C');
+  for (int j = 0; j < n; ++j) {
+    objective[static_cast<std::size_t>(j)] = lp.c[j];
+    lower_bound[static_cast<std::size_t>(j)] =
+        variable_has_finite_lower_bound(lp.vars[static_cast<std::size_t>(j)].lb)
+            ? lp.vars[static_cast<std::size_t>(j)].lb : -CPX_INFBOUND;
+    upper_bound[static_cast<std::size_t>(j)] =
+        variable_has_finite_upper_bound(lp.vars[static_cast<std::size_t>(j)].ub)
+            ? lp.vars[static_cast<std::size_t>(j)].ub : CPX_INFBOUND;
+  }
+  for (int index : prob.integer_idx) {
+    column_type[static_cast<std::size_t>(index)] = 'I';
+  }
+  for (int index : prob.binary_idx) {
+    column_type[static_cast<std::size_t>(index)] = 'B';
+    lower_bound[static_cast<std::size_t>(index)] =
+        std::max(0.0, lower_bound[static_cast<std::size_t>(index)]);
+    upper_bound[static_cast<std::size_t>(index)] =
+        std::min(1.0, upper_bound[static_cast<std::size_t>(index)]);
+  }
+
+  // CPXcopylp consumes CSC arrays in one call. The construction above is
+  // O(n+m+nnz); see the integration derivation, Cost model.
+  status = CPXcopylp(env, guard.problem, n, static_cast<int>(rhs.size()),
+                     lp.sense == Sense::Minimize ? CPX_MIN : CPX_MAX,
+                     objective.data(), rhs.data(), row_sense.data(),
+                     matbeg.data(), matcnt.data(), matind.data(), matval.data(),
+                     lower_bound.data(), upper_bound.data(), nullptr);
+  if (status == 0) {
+    status = CPXcopyctype(env, guard.problem, column_type.data());
+  }
+  if (status == 0 && prob.initial_solution.size() == n) {
+    std::vector<int> indices(static_cast<std::size_t>(n));
+    for (int j = 0; j < n; ++j) indices[static_cast<std::size_t>(j)] = j;
+    const int begin[] = {0};
+    const int effort[] = {CPX_MIPSTART_AUTO};
+    status = CPXaddmipstarts(env, guard.problem, 1, n, begin, indices.data(),
+                            prob.initial_solution.data(), effort, nullptr);
+  }
+  const auto optimize_start = std::chrono::steady_clock::now();
+  cplex_solve_info.model_import_sec =
+      std::chrono::duration<double>(optimize_start - total_start).count();
+  if (status != 0) {
+    out.stats.status = cplex_error(env, status);
+    out.stats.runtime_sec = *cplex_solve_info.model_import_sec;
+    return out;
+  }
+
+  status = CPXmipopt(env, guard.problem);
+  const auto extract_start = std::chrono::steady_clock::now();
+  cplex_solve_info.optimize_sec =
+      std::chrono::duration<double>(extract_start - optimize_start).count();
+  struct ExtractionTimer {
+    std::chrono::steady_clock::time_point start;
+    ~ExtractionTimer() {
+      cplex_solve_info.result_extract_sec = std::chrono::duration<double>(
+          std::chrono::steady_clock::now() - start).count();
+    }
+  } extraction_timer{extract_start};
+  if (status != 0) {
+    out.stats.status = cplex_error(env, status);
+    out.stats.runtime_sec = std::chrono::duration<double>(
+        std::chrono::steady_clock::now() - total_start).count();
+    return out;
+  }
+
+  const int solution_status = CPXgetstat(env, guard.problem);
+  cplex_solve_info.status = solution_status;
+  cplex_solve_info.proven = cplex_status_proven(solution_status);
+  cplex_solve_info.optimal = cplex_status_optimal(solution_status);
+  cplex_solve_info.timed_out = cplex_status_timed_out(solution_status);
+  out.stats.status = cplex_status(env, solution_status);
+
+  double objective_value = 0.0;
+  cplex_solve_info.has_solution =
+      CPXgetobjval(env, guard.problem, &objective_value) == 0;
+  out.stats.success = cplex_solve_info.has_solution;
+  out.stats.strict_convergence = cplex_solve_info.optimal;
+  out.stats.acceptable_convergence = cplex_solve_info.proven;
+  if (cplex_solve_info.has_solution) {
+    out.stats.objective = objective_value;
+    out.x.resize(n);
+    if (CPXgetx(env, guard.problem, out.x.data(), 0, n - 1) != 0) {
+      out.x.resize(0);
+      out.stats.success = false;
+      cplex_solve_info.has_solution = false;
+      out.stats.status = "CPLEX solution extraction failed";
+    }
+    double mip_gap = 0.0;
+    if (CPXgetmiprelgap(env, guard.problem, &mip_gap) == 0) {
+      out.stats.mip_gap = mip_gap;
+    }
+  }
+  double best_bound = 0.0;
+  if (CPXgetbestobjval(env, guard.problem, &best_bound) == 0) {
+    cplex_solve_info.best_bound = best_bound;
+  }
+  cplex_solve_info.node_count =
+      static_cast<long long>(CPXgetnodecnt(env, guard.problem));
+  out.stats.iterations = CPXgetmipitcnt(env, guard.problem);
+  out.stats.runtime_sec = std::chrono::duration<double>(
+      std::chrono::steady_clock::now() - total_start).count();
+#else
+  out.stats.status = "Unavailable: CPLEX Callable Library not linked";
+#endif
+  return out;
 }
 
 // ---------------------------------------------------------------------------

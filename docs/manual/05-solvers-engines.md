@@ -21,7 +21,7 @@ SolverEngine -> StrategyDispatcher -> PresolveManager
                               SolverAdapter 注册表
                          / 原生内核       \ 外部适配器
                         v                  v
-        LE/NLE/LP/QP/NLP/MILP/CONIC   HiGHS/Ipopt/SCIP/Gurobi
+        LE/NLE/LP/QP/NLP/MILP/CONIC   HiGHS/Ipopt/SCIP/Gurobi/CPLEX
                         |
                         v
               PostsolveManager -> api::Result
@@ -47,6 +47,7 @@ SolverEngine -> StrategyDispatcher -> PresolveManager
 | `Ipopt` | NLP | Ipopt TNLP/NL 文件适配 | 否 |
 | `SCIP` | MILP/MINLP | MPS/PIP 文件适配 | 否 |
 | `Gurobi` | LP/QP/MILP | 原生 C API（需运行时许可证） | 是 |
+| `CPLEX` | MILP | 原生 Callable Library（需运行时许可证） | 否 |
 
 两点容易误解：
 
@@ -150,7 +151,7 @@ MINLP 复用 B&C 外框、在连续松弛处调 NLP 路径；一般非凸 MINLP 
 enum class StrategyPolicy {
   Auto,          // 按问题特征的引擎启发式
   NativeFirst,   // 原生适配器优先
-  ExternalFirst, // 外部适配器（Gurobi、HiGHS…）优先
+  ExternalFirst, // 外部适配器（Gurobi、CPLEX、HiGHS…）优先
 };
 
 struct SolveOptions {
@@ -328,8 +329,9 @@ public:
 `NativeNewton`、`NativeIPMLPAdapter`、`NativePDLPAdapter`、
 `NativeLCQPAdapter`、`NativeIPMAdapter`、`NativeNLPAdapter`、
 `NativeConicIPM`、`StrictHiGHS`、`NativeBranchAndCut`、`Gurobi`（若可用）、
-`HiGHS`、`Ipopt`、`SCIP`。可选外部库只有 `available()` 为真时才进入注册表；
-**Gurobi 不参与普通自动回退**。
+`CPLEX`（若可用）、`HiGHS`、`Ipopt`、`SCIP`。可选外部库只有
+`available()` 为真时才进入注册表；**Gurobi 与 CPLEX 不参与普通自动回退**，
+但可通过 `preferred_solver` 或 `set_solver_preference` 精确选择。
 
 调度流程（`src/engine/api/solver.cpp::SolverEngine::solve`）：
 
@@ -423,6 +425,18 @@ LP、改界重优化和加割后的热启动——这是 B&C 节点内核选单�
 - 节点 LP 的“不可行”只有在原模型尺度上通过可信后端/证书审计后才能剪枝；
   扰动回退只用于寻找候选，不能单独证明；
 - 并行线程必须以同一快照读取 incumbent，避免撕裂读导致不同剪枝决定。
+
+Native MILPPresolve uses the enclosing B&C wall-clock deadline. It polls at
+reduction boundaries and during probing; when the budget expires it publishes
+no partial reduced model and returns `Time limit reached` in original-space
+coordinates.
+
+Root cut rounds are capped from the remaining budget (35% allocation after
+the finalization reserve). When a verified incumbent leaves a certified gap,
+the parallel proof tree may start immediately after root state publication;
+the launch requires at least two threads and 25% of the original time limit
+remaining. This allows tree proof to overlap with later root heuristics while
+keeping root LP/cut state single-writer.
 
 ### 5.3 原始-对偶 IPM / Mehrotra（`NativeIPMLPAdapter`）
 

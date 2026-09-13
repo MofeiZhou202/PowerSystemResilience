@@ -280,12 +280,16 @@ foreach ($c in $cases) {
 
 `miplib2017_benchmark` 递归扫描 `.mps[.gz]` 目录并用 `.solu` 参考文件审计：
 
+模型导入与优化分别计为 `read_ms`、`solve_ms`；后端的 `--time-limit` 在导入
+完成后才应用于优化阶段，避免大 MPS 解析挤占搜索预算。
+
 ```
 --data-dir DIR       recursively scan DIR for .mps[.gz]
 --solu FILE          MIPLIB .solu reference file
---solvers A,B        highs-mip,scip-mip,native-highs-lp,native-native-lp 等
+--solvers A,B        cplex-mip,highs-mip,scip-mip,native-highs-lp 等
 --case A,B           instance-name substring filters
 --limit N / --sample N / --repeat N / --time-limit SEC
+--native-threads N   Native B&C 请求线程数；JSON 同时记录实际线程与调度原因
 ```
 
 示例：
@@ -295,6 +299,44 @@ tests\Release\miplib2017_benchmark.exe `
   --data-dir <miplib2017 数据集目录> --solu <miplib2017.solu> `
   --solvers highs-mip,native-highs-lp --sample 20 --repeat 3 --time-limit 300
 ```
+
+启用 CPLEX 的 Windows 构建可加入 `cplex-mip`。必须先把 Studio 的 DLL 目录
+加入 `PATH`（见第 2 章），然后用相同实例、线程、seed、gap 和时限运行：
+
+```powershell
+tests\Release\miplib2017_benchmark.exe `
+  --data-dir <miplib2017 数据集目录> --solu <miplib2017.solu> `
+  --solvers cplex-mip,highs-mip,native-highs-lp `
+  --seeds 0 --repeat 1 --time-limit 3 --native-threads 1 --case mas74,sct2 `
+  --json reports\miplib_cplex_pilot.json --csv reports\miplib_cplex_pilot.csv
+```
+
+Native 的 `native_parallel` 结果对象同时给出请求线程数、实际有效线程数、
+explorer 数、并行树是否启动及调度原因。比较 1/4 线程时必须核对这些字段；
+严格 HiGHS 根流水线和等待 incumbent 的调度均可能使一次运行保持串行。
+
+2026-09-12 的 Windows/MSVC Release 小样本中，CPLEX 在 `mas74`、`sct2`
+的三秒最终 gap 分别为 10.3008% 和 0.02690%，HiGHS 为 17.4666% 和
+23.4491%，Native/HiGHS-LP 为 39.6664% 和 3.1466%；六个 incumbent 均通过
+原模型审计。CPLEX 模型导入分别只占 import+optimize 的 0.00548% 和
+0.02509%。但六次运行均未证明最优，PAR-10 均为 30 秒；两个实例、一个 seed
+不足以支持“比肩 Gurobi”或总体领先结论。Native 在 `sct2` 上还出现三秒配置却
+运行 8.739 秒的 deadline 失真，因此这轮只能作为接口正确性和短时 gap pilot。
+完整命令、build flags、基线 commit 与预测对照见
+[CPLEX 集成记录](../archive/cplex_callable_library_integration_2026-09-12.md)。
+
+随后对本机已有的全部 12 个样本按相同 seed/gap/三秒设置复跑 CPLEX 与
+HiGHS，并修正 HiGHS time limit 曾在 `readModel` 前生效的计时口径错误。修正后
+CPLEX 为 1 个 proven、8 个 feasible、0 个审计失败，HiGHS 为 0、5、0；双方
+都有 incumbent 的 5 例中，CPLEX 最终 gap 较小 4 例，HiGHS 较小 1 例。
+CPLEX 的 PAR-10 shifted geomean 为 23460.1 ms，HiGHS 为 30000.0 ms；CPLEX
+最大 import/(import+optimize) 为 4.6122%，通过预注册的 5% 门。
+
+该扩展仍不是严格等墙钟排名：Windows runner 没有进程级 hard deadline，记录到
+CPLEX 最大 `solve_ms=3712`、HiGHS 最大 `solve_ms=10033`。它也只有一个 seed，
+且本构建关闭 Gurobi，因此只能视为 CPLEX 的有利短预算信号，不能证明通用 MILP
+性能已与 Gurobi 比肩。机器可读结果为 `reports/miplib_cplex_12case.json` 和
+`reports/miplib_cplex_12case.csv`（`reports/` 默认被 Git 忽略）。
 
 ### 9.4.4 Release 冒烟基准
 

@@ -59,16 +59,49 @@
   out.effective_environment = solve_environment->active_settings();
   out.stats.solver_name = "NativeBranchAndCut";
   out.stats.status = bc_status::kNotStarted;
+  // Start the single solve clock before any optional HiGHS/native presolve so
+  // every nested phase receives the same remaining budget. This is the
+  // deadline contract used by HiGHS root evaluation and the native tree
+  // (Achterberg, Constraint Integer Programming, 2007, Sections 4.1-4.2).
+  const auto t0 = std::chrono::steady_clock::now();
+  auto bc_elapsed_sec = [&]() -> double {
+    return std::chrono::duration<double>(std::chrono::steady_clock::now() - t0)
+        .count();
+  };
+  auto bc_remaining_sec = [&]() -> double {
+    if (!(opt.time_limit_sec > 0.0) || !std::isfinite(opt.time_limit_sec)) {
+      return std::numeric_limits<double>::infinity();
+    }
+    return opt.time_limit_sec - bc_elapsed_sec();
+  };
+  auto bc_time_limit_expired = [&]() -> bool {
+    return opt.time_limit_sec > 0.0 && bc_elapsed_sec() >= opt.time_limit_sec;
+  };
+  const double bc_post_root_finalize_reserve_sec =
+      opt.time_limit_sec > 0.0 && std::isfinite(opt.time_limit_sec)
+          ? std::min(1.0, std::max(0.05, 0.10 * opt.time_limit_sec))
+          : 0.0;
+  auto bc_optional_root_budget_expired = [&]() -> bool {
+    return opt.time_limit_sec > 0.0 &&
+           bc_remaining_sec() <= bc_post_root_finalize_reserve_sec;
+  };
   const bool requested_highs_root_native_tree_contract =
       opt.highs_root_native_tree_contract;
+  HiGHSPresolvedModelStats strict_highs_preflight;
+  bool strict_highs_preflight_available = false;
   if (requested_highs_root_native_tree_contract) {
+    if (bc_remaining_sec() <= 0.0) {
+      opt.highs_root_native_tree_contract = false;
+    } else {
     // retain_postsolve: the same pass that defines the strict working space
     // must own the postsolve certificate for native tree incumbents. See
     // "Strict Tree-Incumbent Postsolve Ownership" in
     // docs/native_milp_root_quality_restart_prerequisites_2026-08-13.md.
     const auto& preflight = cached_highs_presolve_side_state(
-        prob.linear_part, std::max(0.001, opt.time_limit_sec), nullptr,
+        prob.linear_part, std::max(0.001, bc_remaining_sec()), nullptr,
         /*retain_postsolve=*/true);
+    strict_highs_preflight = preflight;
+    strict_highs_preflight_available = true;
     // The compositional root contract requires a retained affine map into a
     // genuine HiGHS-reduced working model. Identity/not-reduced models stay on
     // the established native pipeline; derivation and p200 measurements are in
@@ -77,6 +110,7 @@
         preflight.presolve_ok && preflight.highs_status == "reduced" &&
         preflight.presolved_lp_available &&
         preflight.side_state_available;
+    }
   }
   const auto highs_contract = apply_bc_strict_highs_contract(opt);
   const bool requested_vendored_highs_lp =
@@ -187,32 +221,6 @@
     return out;
   };
 
-  const auto t0 = std::chrono::steady_clock::now();
-  auto bc_elapsed_sec = [&]() -> double {
-    return std::chrono::duration<double>(std::chrono::steady_clock::now() - t0)
-        .count();
-  };
-  auto bc_remaining_sec = [&]() -> double {
-    if (!(opt.time_limit_sec > 0.0) || !std::isfinite(opt.time_limit_sec)) {
-      return std::numeric_limits<double>::infinity();
-    }
-    return opt.time_limit_sec - bc_elapsed_sec();
-  };
-  auto bc_time_limit_expired = [&]() -> bool {
-    return opt.time_limit_sec > 0.0 && bc_elapsed_sec() >= opt.time_limit_sec;
-  };
-  // Root queue construction and proof bookkeeping have a measurable fixed
-  // cost on large models. Stop optional root work slightly early so a short
-  // solve limit includes that finalization instead of overrunning after the
-  // last heuristic LP finishes.
-  const double bc_post_root_finalize_reserve_sec =
-      opt.time_limit_sec > 0.0 && std::isfinite(opt.time_limit_sec)
-          ? std::min(1.0, std::max(0.05, 0.10 * opt.time_limit_sec))
-          : 0.0;
-  auto bc_optional_root_budget_expired = [&]() -> bool {
-    return opt.time_limit_sec > 0.0 &&
-           bc_remaining_sec() <= bc_post_root_finalize_reserve_sec;
-  };
 
   // Reject pathologically poor candidate incumbents. A candidate whose
   // (minimize-convention) objective exceeds the reference dual bound by more
@@ -1573,11 +1581,14 @@
   // comparison --check keeps objectives exact).
   PresolveOptions native_presolve_options;
   native_presolve_options.do_probing = opt.native_presolve_probing;
+  native_presolve_options.time_limit_sec =
+      std::max(0.001, bc_remaining_sec());
   MILPPresolve native_ps(native_presolve_options);
   bool native_model_reduced = false;
   if (!strict_highs_root_fixed_point && !papilo_model_reduced &&
       !highs_mip_model_reduced &&
-      !bc_env_flag_enabled("MIPSOLVERS_NATIVE_TOPLEVEL_PRESOLVE_OFF")) {
+      !bc_env_flag_enabled("MIPSOLVERS_NATIVE_TOPLEVEL_PRESOLVE_OFF") &&
+      !bc_time_limit_expired()) {
     out.bc_stats.native_presolve_attempted = true;
     std::vector<int> nps_bin, nps_int;
     // run() rewrites the LPModel in place, so presolve on a copy and only adopt
@@ -1603,6 +1614,14 @@
         nps_stats.probing_max_touched_cols;
     out.bc_stats.native_presolve_probing_truncated =
         nps_stats.probing_truncated;
+    if (nps_stats.timed_out) {
+      if (opt.verbose) {
+        fmt::print(stderr, "[NATIVE-PRESOLVE] time limit reached after {:.1f}ms\n",
+                   nps_stats.presolve_time_sec * 1000.0);
+      }
+      publish_verified_warm_start_time_limit();
+      return return_with_profile();
+    }
     if (nps_stats.infeasible) {
       out.stats.status = bc_status::kInfeasibleNativePresolve;
       if (opt.verbose) {
@@ -1657,6 +1676,10 @@
       // system. See the production-presolve derivation in
       // docs/native_milp_root_source_eligibility_2026-08-13.md.
       highs_presolve_side_state = highs_mip_ps.side_state;
+    } else if (strict_highs_preflight_available) {
+      // The strict root preflight already owns the retained postsolve stack;
+      // reuse it instead of paying for a second HiGHS presolve pass.
+      highs_presolve_side_state = strict_highs_preflight;
     } else {
       highs_presolve_side_state =
           cached_highs_presolve_side_state(

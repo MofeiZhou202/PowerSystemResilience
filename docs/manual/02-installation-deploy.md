@@ -40,6 +40,7 @@ Windows 上严禁混用 MSVC 库与 MinGW C++ 构建。Windows 有两个受支�
 - configure 会检查 `third_party/eigen/unsupported/Eigen/MatrixFunctions`，防止被裁剪过的 Eigen 头文件子集"静默通过"离线依赖检查。
 - reference BLAS/LAPACK 只是可靠的离线兜底。**生产环境若数值核性能重要，请使用 OpenBLAS、MKL 或其他优化实现**。
 - Gurobi 永不随包分发。构建期检测到其头文件与库、且 `GRBloadenv()` 能初始化有效运行许可时，它是首选 LP/QP/MILP 后端；缺失安装、许可缺失/过期或求解失败时，在 `SolveOptions::allow_fallback` 为 true（默认）的情况下自动回退到内嵌 HiGHS 与原生求解器。需要不含 Gurobi 的包时设 `MIPSOLVERS_USE_GUROBI=OFF`。
+- CPLEX 同样永不随包分发。其 Callable Library 适配器默认关闭；本机构建须显式设置 `MIPSOLVERS_USE_CPLEX=ON`，并保证 IBM 安装、许可证和运行时 DLL 均可用。当前接口覆盖线性 MILP，不覆盖 LP/QP，也不能表示 semi-continuous 或 semi-integer 列。
 
 ### oneMKL 的本地化 staging（Windows 默认配置必需）
 
@@ -145,6 +146,34 @@ cmake --build build/windows-source --config Release --parallel 8
 ```
 
 此路径由 CMake 逻辑支持，但必须在部署包实际使用的 Visual Studio、oneAPI、Windows SDK 与架构组合上重新验证。
+
+### Windows 启用本地 CPLEX 22.1.1
+
+CPLEX Studio 根目录应包含 `cplex/include/ilcplex/cplex.h`。例如本机安装在
+`C:\Program Files\IBM\ILOG\CPLEX_Studio2211` 时：
+
+```powershell
+cmake -S . -B build/windows-msvc-cplex -G "Visual Studio 17 2022" -A x64 `
+  -DCMAKE_BUILD_TYPE=Release `
+  -DMIPSOLVERS_USE_CPLEX=ON `
+  -DCPLEX_STUDIO_DIR="C:/Program Files/IBM/ILOG/CPLEX_Studio2211" `
+  -DMIPSOLVERS_USE_GUROBI=OFF `
+  -DMIPSOLVERS_ENABLE_IPO=OFF
+cmake --build build/windows-msvc-cplex --config Release `
+  --target test_engine_api test_milp_solver miplib2017_benchmark --parallel 8
+```
+
+链接 `stat_mda/cplex2211.lib` 后，Windows 进程仍需能找到
+`cplex2211.dll`。运行测试或 benchmark 前设置：
+
+```powershell
+$env:PATH = 'C:\Program Files\IBM\ILOG\CPLEX_Studio2211\cplex\bin\x64_win64;' + $env:PATH
+```
+
+也可用环境变量 `CPLEX_STUDIO_DIR2211` 或 `CPLEX_STUDIO_DIR` 提供根目录。
+IBM 头文件、库、DLL 与许可证均不进入源码包；CPLEX 构建只能在具有相容
+Studio 安装和授权的机器上运行。若同时需要 MIPLIB benchmark，仍须按下节提供
+ZLIB。`CplexAdapter` 每个实例持有一个 CPLEX environment，同一实例不得并发调用。
 
 ### 实测注意事项（2026-08-18，Windows）
 
@@ -388,6 +417,7 @@ ctest --test-dir build-win --build-config Release --output-on-failure --parallel
 | `MIPSOLVERS_PAPILO_BOOST_DIR` | 内嵌 | 覆盖 PaPILO 的本地 Boost include 根 |
 | `MIPSOLVERS_PAPILO_ROOT` | 空 | 无源码树时指定本地已安装 PaPILO 前缀 |
 | `MIPSOLVERS_USE_GUROBI` | `ON` | 探测已安装 Gurobi；缺失不致命 |
+| `MIPSOLVERS_USE_CPLEX` | `OFF` | 探测本地 CPLEX Callable Library；缺失不致命 |
 | `MIPSOLVERS_USE_SYSTEM_FMT` | `OFF` | 选择使用系统 fmt |
 | `MIPSOLVERS_USE_OPENMP` | `ON` | 检测到 OpenMP 时启用 |
 

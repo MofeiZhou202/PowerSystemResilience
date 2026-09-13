@@ -3,6 +3,8 @@
 
 option(MIPSOLVERS_USE_GUROBI
   "Enable Gurobi detection and native C API adapter when available" OFF)
+option(MIPSOLVERS_USE_CPLEX
+  "Enable CPLEX detection and native Callable Library adapter when available" OFF)
 option(MIPSOLVERS_USE_PAPILO
   "Enable local PaPILO presolve when available" ON)
 
@@ -44,6 +46,40 @@ if(MIPSOLVERS_USE_GUROBI)
   unset(_mipsolvers_gurobi_hints)
 else()
   message(STATUS "mipsolvers: Gurobi disabled (MIPSOLVERS_USE_GUROBI=OFF)")
+endif()
+
+set(MIPSOLVERS_HAVE_CPLEX OFF)
+set(MIPSOLVERS_CPLEX_INCLUDE_DIRS "")
+set(MIPSOLVERS_CPLEX_LIBRARIES "")
+if(MIPSOLVERS_USE_CPLEX)
+  set(_mipsolvers_cplex_hints
+      "${CPLEX_STUDIO_DIR}"
+      "$ENV{CPLEX_STUDIO_DIR2211}"
+      "$ENV{CPLEX_STUDIO_DIR}"
+      "C:/Program Files/IBM/ILOG/CPLEX_Studio2211"
+      /opt/ibm/ILOG/CPLEX_Studio2211)
+  find_path(MIPSOLVERS_CPLEX_INCLUDE_DIR NAMES ilcplex/cplex.h
+    HINTS ${_mipsolvers_cplex_hints}
+    PATH_SUFFIXES cplex/include)
+  find_library(MIPSOLVERS_CPLEX_LIBRARY NAMES cplex2211 cplex2210 cplex
+    HINTS ${_mipsolvers_cplex_hints}
+    PATH_SUFFIXES
+      cplex/lib/x64_windows_msvc14/stat_mda
+      cplex/lib/x86-64_linux/static_pic
+      cplex/lib/x86-64_linux/static_mt
+      cplex/lib/x86-64_linux)
+  if(MIPSOLVERS_CPLEX_INCLUDE_DIR AND MIPSOLVERS_CPLEX_LIBRARY)
+    set(MIPSOLVERS_HAVE_CPLEX ON)
+    set(MIPSOLVERS_CPLEX_INCLUDE_DIRS ${MIPSOLVERS_CPLEX_INCLUDE_DIR})
+    set(MIPSOLVERS_CPLEX_LIBRARIES ${MIPSOLVERS_CPLEX_LIBRARY})
+    message(STATUS "mipsolvers: CPLEX detected: ${MIPSOLVERS_CPLEX_LIBRARY}")
+  else()
+    message(STATUS
+      "mipsolvers: CPLEX enabled but not detected; packaged solvers remain active")
+  endif()
+  unset(_mipsolvers_cplex_hints)
+else()
+  message(STATUS "mipsolvers: CPLEX disabled (MIPSOLVERS_USE_CPLEX=OFF)")
 endif()
 
 if(MIPSOLVERS_USE_PAPILO)
