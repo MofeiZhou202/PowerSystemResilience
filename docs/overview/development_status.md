@@ -1,10 +1,75 @@
 # Development Status
 
-Updated: 2026-09-12
+Updated: 2026-09-13
 
 This is the living handoff for verified build state and active engineering work.
 Update it in place; do not create dated copies. Source, registered tests, and
 the current Git worktrees remain authoritative.
+
+## MIPSolvers main upgrade full regression (2026-09-13)
+
+The clean sibling MIPSolvers `main` at
+`864b1479d35e3258281986b5c376b603b6598568` was adopted as the dependency pin.
+Relative to the previous pin `aef3be077ef2adf06286184fc8c4a5cf04138a74`,
+the two new commits add the CPLEX adapter/deadline telemetry and Windows
+deadline/LP-cancellation integration. On macOS 26.6.2 arm64 with AppleClang
+21.0.0, `cmake --preset full-dev
+-DHACDCDSS_SKIP_MIPSOLVERS_DIRTY_CHECK=OFF` configured successfully and
+`cmake --build --preset full-dev --clean-first` rebuilt the vendored HiGHS
+1.15.1, SCIP, Ipopt, SuiteSparse/MUMPS, MIPSolvers, `hacdcpf`, all Simulation
+tools/tests, and `run_gui_server`. The installed prebuilt third-party package
+was rejected for an ABI/compiler mismatch, so the regression used the in-tree
+vendored sources. Because MIPSolvers is added `EXCLUDE_FROM_ALL`, its 20
+registered developer test/benchmark executables were also built explicitly
+before CTest; all 20 passed in the combined run. CPLEX was disabled because its
+SDK was not available in this configuration, so this run does not validate the
+new CPLEX adapter at runtime. After updating the pin and relinking Ipopt and all
+dependent executables, the focused 20-test MIPSolvers set passed again 20/20 in
+13.03 s.
+
+The first complete `ctest --test-dir build/full-dev --output-on-failure
+--parallel 8` run exposed three Simulation-side regressions. All are closed:
+the NK AC/DC reliability oracle now validates the producer's zero-coverage
+contract (`leave_one_out_has_coverage=false` and undefined relative-error,
+zero-sample mean, projection, and speedup fields serialized as JSON `null`);
+the LCC DAT browser test double implements the Plotly `purge()` call used by
+the empty chart path; and mobile full-result layouts hide the residual 5 px
+library splitter together with the component library and Canvas. A focused
+nine-test reliability/GUI regression passed 9/9 in 43.49 s.
+
+Real-browser inspection used the production `run_gui_server` and the built-in
+`cyber_physical_reliability_demo`. Its NSQ workflow and Plotly results rendered
+at both 390x844 and 1440x1000. At mobile width, document and viewport widths
+were both 390 px, `rightPanel` covered exactly x=0..390,
+`libraryResizer` was `display:none` with zero width, and the workflow/result
+regions did not overlap. At desktop width the 5 px splitter was restored and
+the Canvas and 340 px result panel remained adjacent without overlap or page-
+level horizontal overflow.
+
+The first post-fix full run then revealed a separate latent Playwright test
+timeout in `yunnan_ancillary_e2e`: two intended 120 s `waitForFunction`
+timeouts occupied the function-argument position and therefore retained the
+30 s default. Supplying `undefined` for the argument and the timeout as the
+third parameter made the isolated test pass in 49.94 s and the parallel full-
+suite instance pass in 58.06 s. The final complete full-dev rerun finished all
+1863 registered tests in 794.16 s with 0 failures: 1859 passed and 4 were
+conditionally skipped. The skips were the unavailable formal-SOC JSON fixture,
+the unavailable BM/LM DSP fixture, and two unavailable external GridLAB-D
+comparisons. CPLEX remained unavailable and is not runtime-validated by this
+green baseline.
+
+After closing those regressions, `cmake --preset macos-release` followed by
+`cmake --build --preset macos-release --clean-first -j8` completed successfully
+against the same clean MIPSolvers pin. The incompatible prebuilt third-party
+package was again rejected and the vendored HiGHS, SCIP, Ipopt,
+SuiteSparse/MUMPS, MIPSolvers, `hacdcpf`, tools, tests, and `run_gui_server`
+were rebuilt from source. The resulting top-level arm64 Mach-O executable is
+`build/macos-release/run_gui_server` (44 MB, SHA-256
+`78314717415bc7a18ac9e2219ae81f7f4505caf0ee1eef034aea0e5cc0dda45f`). A
+temporary launch on port 18089 served `/xjtu/` and returned the built-in case
+catalog from `/api/cases`; the smoke server was then stopped. This rebuild did
+not repeat the full `macos-release` CTest suite; the complete 1863-test result
+above is the independently verified `full-dev` baseline.
 
 ## Southern A1–A7 hand-oracle anchors
 

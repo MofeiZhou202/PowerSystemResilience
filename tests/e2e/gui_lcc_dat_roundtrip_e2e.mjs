@@ -120,7 +120,7 @@ async function main() {
     page.on('pageerror', error => pageErrors.push(error.message));
     await page.route('https://cdn.plot.ly/**', route => route.fulfill({
       contentType: 'text/javascript',
-      body: 'window.Plotly={newPlot:()=>Promise.resolve(),react:()=>Promise.resolve(),Plots:{resize:()=>{}}};',
+      body: 'window.Plotly={newPlot:()=>Promise.resolve(),react:()=>Promise.resolve(),purge:()=>{},Plots:{resize:()=>{}}};',
     }));
     await page.goto(baseUrl + '/xjtu/', { waitUntil: 'domcontentloaded' });
     await page.waitForFunction(() =>

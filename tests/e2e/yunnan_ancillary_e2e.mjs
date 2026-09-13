@@ -47,7 +47,11 @@ try {
   assert.equal((await api('yunnan_ancillary')).revision, saved.revision);
   await api('yunnan_ancillary', { action: 'run', revision: saved.revision - 1, config: saved.config }, 409);
   await page.locator('#ancillaryRun').click();
-  await page.waitForFunction(() => document.querySelector('#ancillaryStatus').textContent.includes('调频预安排完成'), { timeout: 120000 });
+  await page.waitForFunction(
+    () => document.querySelector('#ancillaryStatus').textContent.includes('调频预安排完成'),
+    undefined,
+    { timeout: 120000 },
+  );
   const result = (await api('yunnan_ancillary')).result;
   assert.equal(result.schedule_feasible, true); assert.equal(result.prices_valid, true);
   assert.equal(result.ancillary.settlement_cny, null);
@@ -78,7 +82,11 @@ try {
   await page.locator('#ancillaryWorkflow').locator('xpath=ancestor::details').evaluate(e => { e.open = true; });
   await page.locator('#ancillaryWorkflow').fill(JSON.stringify(workflow));
   await page.locator('#ancillaryIntraday').click();
-  await page.waitForFunction(() => document.querySelector('#ancillaryStatus').textContent.includes('日内调频出清完成'), { timeout: 120000 });
+  await page.waitForFunction(
+    () => document.querySelector('#ancillaryStatus').textContent.includes('日内调频出清完成'),
+    undefined,
+    { timeout: 120000 },
+  );
   const current = await api('yunnan_ancillary'), intraday = current.result;
   assert.equal(intraday.scuc.reused_day_ahead, true); assert.equal(intraday.ancillary.settlement_eligible, true);
   assert.equal(await page.locator('#ancillaryRun').isEnabled(), false);
