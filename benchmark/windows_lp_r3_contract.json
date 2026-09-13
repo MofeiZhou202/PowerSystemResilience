@@ -1,0 +1,55 @@
+{
+  "schema_version": 2,
+  "protocol": "r3-release-isolation-20260913",
+  "code_baseline_commit": "1e61b2434b07f2bb5a71839048e71fea97ccf586",
+  "performance_baseline_commit": "78939619f31ebe19b9399c8f52d5c35f6d6c06ba",
+  "references": {
+    "performance": {
+      "path": "benchmark/r3_reference/performance.json",
+      "sha256": "e1325cf4e1bf82e12a902f8b0a18a6a47956f73fcf5b79b126c5a536598e059d"
+    },
+    "recovery": {
+      "path": "benchmark/r3_reference/recovery.json",
+      "sha256": "a62a5a4d3d109d3ddc7c26542d9666e07a1ac6cd59e49ae894eae46c611e7986"
+    }
+  },
+  "blocks": 20,
+  "threads": [
+    2,
+    4
+  ],
+  "case_limits": {
+    "median_ratio": 1.1,
+    "p95_ratio": 1.1
+  },
+  "aggregate_limits": {
+    "median_ratio": 1.05,
+    "p95_ratio": 1.1
+  },
+  "greenbea": {
+    "median_4t_interval_ms": [
+      3000,
+      3300
+    ],
+    "paired_delta_median_upper_ms": 0,
+    "p95_4t_over_2t": 1.1,
+    "recovery_p95_ratio": 1.1,
+    "telemetry_median_upper_ms": 0.5
+  },
+  "corpus": {
+    "adlittle": "db211f7bf735518a246a2a0e385ec51abc09cd601da7ae50d6c3fe083cb6f94b",
+    "afiro": "04992b87e57e57c1c417c96b846833bfa12e055eeaa623f043c45fc773b5be41",
+    "agg": "d7844795d0c799f5cdc1416c8d242f5e8f351f5a3271f42a2d428f170abf1f03",
+    "bandm": "696daa77a79a0715c2fad877285e49bd7fcd7f5513f3cb83fbe0be916b6d8c81",
+    "beaconfd": "7138e7b58b1d6160f1ad42112a61ed00b5db1c92d73dc48d77f6a26fc717dbfc",
+    "blend": "38e1d84a38f1e0adaa16d3dd0abe758f6cea13a21f33681aa92742b693260aef",
+    "sc50a": "36bfce2f419555712bf1b9a8477541199073c7654475d933475cea6db0abe2f2",
+    "sc50b": "bfc47ffcf8f037552130a75142a203dc768d82d15c3b7b9f718c444ffa472f15",
+    "sc105": "062d034400be956757316a9bde8e6de3d221a88fb5dc502def743f1883e23ec3",
+    "sc205": "bcecc8d8cafd08c6d97cf8e39a740f5d777e317600bb9f6f158f2ceb550005f9",
+    "dfl001": "85d47c5f8a5fc53772eabac1805b7a1af72431cad9e14d26d673043980952730",
+    "greenbea": "cb701e3ba5153e385b8cb6426e34b5d23bad4b1b9c9a037802e351c24b0f653d",
+    "maros-r7": "e97f59ab32a8280526c26c210aacabd6e0c05300e67a0d4afd00b95d245f8db7"
+  },
+  "pivot_probe_sha256": "8326a123eb45f350da4d6a58fcb2cb1ed429a3e7d8e9f80ce99adfe7df81cc28"
+}

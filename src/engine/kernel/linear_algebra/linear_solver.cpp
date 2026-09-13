@@ -804,6 +804,7 @@ bool MKLPardisoAdaptiveSolver::solve(const Eigen::VectorXd& rhs,
 
   if (ldlt_stable && ldlt_perturbed == 0) {
     impl_->selected = Impl::Backend::LDLT;
+    lp_timing::note_adaptive_backend(true);
     x = std::move(x_ldlt);
     if (std::getenv("MIPSOLVERS_IPM_VERBOSE") != nullptr) {
       std::fprintf(stderr,
@@ -856,7 +857,9 @@ bool MKLPardisoAdaptiveSolver::solve(const Eigen::VectorXd& rhs,
                                              : Impl::Backend::LU;
   }
   x = impl_->selected == Impl::Backend::LDLT ? std::move(x_ldlt)
-                                              : std::move(x_lu);
+                                               : std::move(x_lu);
+  lp_timing::note_adaptive_backend(
+      impl_->selected == Impl::Backend::LDLT);
   return x.allFinite();
 }
 

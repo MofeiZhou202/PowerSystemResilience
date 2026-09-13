@@ -8,7 +8,7 @@ on:
   workflow_dispatch:
     inputs:
       release_gate:
-        description: Run the stable-hardware Windows release gate
+        description: Run legacy Windows 2T regression checks (does not approve R3)
         required: false
         type: boolean
         default: false
@@ -69,10 +69,13 @@ jobs:
         run: |
           marker_pattern='TO''DO|FIX''ME|X''XX|HA''CK|place''holder|not.?imple''mented|st''ub'
           if git diff --unified=0 "origin/${{ github.event.repository.default_branch }}...HEAD" |
+            grep -v '^+++ ' |
             grep -inE "^\+.*(${marker_pattern})"; then
             echo "Incomplete implementation marker found in added lines."
             exit 1
           fi
+      - name: R3 evidence validator tests
+        run: python -m unittest discover -s benchmark -p test_r3_gate.py -v
 
   release-windows:
     if: >-
@@ -120,7 +123,7 @@ jobs:
           python tools/windows_lp_stability.py --stage stability
           --binary-dir tests
           --output reports/release-gate
-      - name: Stable-hardware performance gate
+      - name: Legacy schema-v1 2T regression check (not R3 approval)
         run: >-
           python benchmark/check_lp_release_gate.py
           --result reports/release-gate/summary.json

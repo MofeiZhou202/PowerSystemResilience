@@ -26,6 +26,9 @@ def main() -> int:
     args = parser.parse_args()
     result = load(args.result)
     baseline = load(args.baseline)
+    if baseline.get("schema_version") == 2:
+        from r3_gate import check
+        return check(args.result, args.baseline)
     if baseline.get("schema_version") != 1:
         raise SystemExit("unsupported LP release baseline schema")
 
@@ -102,7 +105,7 @@ def main() -> int:
         for failure in failures:
             print(f"  - {failure}")
         return 1
-    print("LP release gate passed")
+    print("Legacy schema-v1 2T regression gate passed; R3 release NOT approved")
     return 0
 
 

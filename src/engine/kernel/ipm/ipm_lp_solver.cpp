@@ -11,7 +11,116 @@
 #include "mipsolvers/engine/kernel/lp_kernel/dual_simplex.hpp"
 #include "mipsolvers/engine/presolve/lp_presolve.hpp"
 
+#include <bit>
+#include <cstdint>
+#include <iomanip>
+#include <sstream>
+
+#include <nlohmann/json.hpp>
+
 namespace mipsolvers::engine {
+
+namespace {
+
+struct LPRecoveryTransition {
+  bool enabled{false};
+  int seed_size{0};
+  std::uint64_t seed_hash{14695981039346656037ULL};
+  double seed_norm_inf{std::numeric_limits<double>::quiet_NaN()};
+  double seed_norm_2{std::numeric_limits<double>::quiet_NaN()};
+  double seed_objective{std::numeric_limits<double>::quiet_NaN()};
+  double seed_capture_ms{0.0};
+};
+
+LPRecoveryTransition capture_lp_recovery_transition(
+    const Eigen::VectorXd* seed, const Eigen::VectorXd& objective) {
+  LPRecoveryTransition transition;
+  const char* flag = std::getenv("MIPSOLVERS_LP_FACTOR_TIMING");
+  transition.enabled = flag && *flag && *flag != '0';
+  if (!transition.enabled || !seed) return transition;
+
+  const auto capture_start = std::chrono::steady_clock::now();
+  transition.seed_size = static_cast<int>(seed->size());
+  transition.seed_norm_inf = seed->lpNorm<Eigen::Infinity>();
+  transition.seed_norm_2 = seed->norm();
+  transition.seed_objective = objective.dot(*seed);
+  // FNV-1a over canonical low-to-high IEEE-754 bytes is an identity diagnostic,
+  // not a distance or numerical decision.  See the joint R3 state model in
+  // general_solver_performance_program_2026-09-13.md.
+  for (Eigen::Index i = 0; i < seed->size(); ++i) {
+    const std::uint64_t bits = std::bit_cast<std::uint64_t>((*seed)[i]);
+    for (unsigned shift = 0; shift < 64; shift += 8) {
+      transition.seed_hash ^=
+          static_cast<std::uint8_t>((bits >> shift) & 0xffU);
+      transition.seed_hash *= 1099511628211ULL;
+    }
+  }
+  transition.seed_capture_ms =
+      std::chrono::duration<double, std::milli>(
+          std::chrono::steady_clock::now() - capture_start)
+          .count();
+  return transition;
+}
+
+void emit_lp_recovery_transition(const LPRecoveryTransition& transition,
+                                 int rows, int cols,
+                                 const char* entry_reason,
+                                 int requested_mkl_threads,
+                                 int recovery_mkl_threads,
+                                 const SolveResult& source,
+                                 const SolveResult& recovery) {
+  if (!transition.enabled) return;
+  const auto prepare_start = std::chrono::steady_clock::now();
+  std::ostringstream hash;
+  hash << std::hex << std::setfill('0') << std::setw(16)
+       << transition.seed_hash;
+  nlohmann::json record = {
+      {"schema_version", 2},
+      {"rows", rows},
+      {"cols", cols},
+      {"entry_reason", entry_reason},
+      {"requested_mkl_threads", requested_mkl_threads},
+      {"recovery_mkl_threads", recovery_mkl_threads},
+      {"source_iterations", source.stats.iterations},
+      {"source_runtime_ms", source.stats.runtime_sec * 1000.0},
+      {"source_primal_feas", source.stats.primal_feas},
+      {"source_dual_feas", source.stats.dual_feas},
+      {"source_complementarity", source.stats.complementarity},
+      {"source_relative_primal_residual",
+       source.stats.relative_primal_residual},
+      {"source_relative_dual_residual", source.stats.relative_dual_residual},
+      {"source_relative_gap", source.stats.relative_gap},
+      {"seed_present", transition.seed_size > 0},
+      {"seed_size", transition.seed_size},
+      {"seed_hash", hash.str()},
+      {"seed_norm_inf", transition.seed_norm_inf},
+      {"seed_norm_2", transition.seed_norm_2},
+      {"seed_objective", transition.seed_objective},
+      {"seed_capture_ms", transition.seed_capture_ms},
+      {"recovery_iterations", recovery.stats.iterations},
+      {"recovery_runtime_ms", recovery.stats.runtime_sec * 1000.0},
+      {"recovery_success", recovery.stats.success},
+      {"recovery_primal_feas", recovery.stats.primal_feas},
+      {"recovery_dual_feas", recovery.stats.dual_feas},
+      {"recovery_complementarity", recovery.stats.complementarity},
+      {"recovery_relative_primal_residual",
+       recovery.stats.relative_primal_residual},
+      {"recovery_relative_dual_residual",
+       recovery.stats.relative_dual_residual},
+      {"recovery_relative_gap", recovery.stats.relative_gap},
+  };
+  std::string payload = record.dump();
+  const double record_prepare_ms =
+      std::chrono::duration<double, std::milli>(
+          std::chrono::steady_clock::now() - prepare_start)
+          .count();
+  payload.pop_back();
+  payload += ",\"record_prepare_ms\":" + std::to_string(record_prepare_ms) +
+             "}";
+  std::fprintf(stderr, "LP-RECOVERY %s\n", payload.c_str());
+}
+
+}  // namespace
 
 bool IPMLPOptimalityAudit::acceptable(double primal_tolerance,
                                       double dual_tolerance,
@@ -305,7 +414,9 @@ SolveResult NativeIPMLPAdapter::solve_lp_with_presolve_snapshot(
                               LpPresolveMatrixWorkspace>& matrix_workspace =
                               {}) -> SolveResult {
     auto run_variant = [&](int rounds, IPMNewtonFormulation form,
-                           const Eigen::VectorXd* override_start = nullptr) {
+                           const Eigen::VectorXd* override_start = nullptr,
+                           const char* entry_reason = "primary",
+                           int source_iterations = 0) {
       // Windows remediation R4: cancellation also gates robustness retries.
       if (opt_.cancel_flag && opt_.cancel_flag->load(std::memory_order_relaxed)) {
         SolveResult cancelled;
@@ -323,7 +434,7 @@ SolveResult NativeIPMLPAdapter::solve_lp_with_presolve_snapshot(
       return solve_lp_impl(p, override_start ? *override_start : start,
                            rounds, budget, backend_policy, form,
                            publication_tol_scale, objective_offset,
-                           matrix_workspace);
+                           matrix_workspace, entry_reason, source_iterations);
     };
     auto merit = [](const SolveResult& result) {
       if (result.stats.success) return 0.0;
@@ -415,7 +526,39 @@ SolveResult NativeIPMLPAdapter::solve_lp_with_presolve_snapshot(
                   res.x.allFinite()
               ? &res.x
               : nullptr;
-      res = run_variant(opt_.ruiz_rounds, formulation, recovery_start);
+      // Default-off experiment, independent of diagnostic enablement; see
+      // general_solver_performance_program_2026-09-13.md, R3 release isolation.
+      // The default path does not install a new MKL resource scope.
+      const char* cap_flag =
+          std::getenv("MIPSOLVERS_EXPERIMENTAL_LP_RECOVERY_CAP2");
+      const bool experimental_cap =
+          cap_flag && std::string_view(cap_flag) == "1";
+      const int current_mkl_limit = mkl_max_threads();
+      const int recovery_mkl_limit =
+          experimental_cap && current_mkl_limit > 2 ? 2 : current_mkl_limit;
+      const char* recovery_reason =
+          normal_stalled
+              ? "normal_stalled"
+              : (factorization_failed ? "factorization_failed"
+                                      : "normal_rejected");
+      const LPRecoveryTransition recovery_transition =
+          capture_lp_recovery_transition(recovery_start, p.c);
+      auto run_recovery = [&]() {
+        return run_variant(opt_.ruiz_rounds, formulation, recovery_start,
+                           recovery_reason, res.stats.iterations);
+      };
+      SolveResult recovery = [&]() {
+        if (experimental_cap) {
+          const ScopedMklThreadLimit recovery_thread_limit(recovery_mkl_limit);
+          return run_recovery();
+        }
+        return run_recovery();
+      }();
+      emit_lp_recovery_transition(
+          recovery_transition, static_cast<int>(p.A.rows() + p.Aeq.rows()),
+          static_cast<int>(p.c.size()), recovery_reason, current_mkl_limit,
+          recovery_mkl_limit, res, recovery);
+      res = std::move(recovery);
     }
     if (!res.stats.success &&
         res.stats.status != "Inaccurate Newton direction" &&
@@ -701,12 +844,15 @@ SolveResult NativeIPMLPAdapter::solve_lp_impl(const LPModel& prob,
                                                IPMNewtonFormulation
                                                    formulation,
                                                double publication_tol_scale,
-                                               double objective_offset,
-                                               const std::shared_ptr<const
+                                                   double objective_offset,
+                                                   const std::shared_ptr<const
                                                    LpPresolveMatrixWorkspace>&
-                                                   matrix_workspace) const {
+                                                   matrix_workspace,
+                                               const char* entry_reason,
+                                               int source_iterations) const {
   lp_timing::Run factor_timing(static_cast<int>(prob.A.rows() + prob.Aeq.rows()),
-                              static_cast<int>(prob.c.size()), ruiz_rounds);
+                              static_cast<int>(prob.c.size()), ruiz_rounds,
+                              entry_reason, source_iterations);
   const bool has_warm_start = (x0.size() == prob.c.size());
   const bool ipm_verbose_env = (std::getenv("MIPSOLVERS_IPM_VERBOSE") != nullptr);
   SolveResult out;
@@ -1689,6 +1835,11 @@ SolveResult NativeIPMLPAdapter::solve_lp_impl(const LPModel& prob,
 #else
   const bool aug_use_pardiso = false;
 #endif
+
+  factor_timing.set_formulation(
+      use_banded ? "banded"
+                 : (use_dense ? "dense"
+                              : (use_augmented ? "augmented" : "normal")));
 
   graph_timing.finish();
   // === Initialization ===

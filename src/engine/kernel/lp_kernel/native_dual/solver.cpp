@@ -1,5 +1,6 @@
 #include "certificate.hpp"
 #include "primal.hpp"
+#include "pivot_trace.hpp"
 
 #include <algorithm>
 #include <chrono>
@@ -1243,6 +1244,8 @@ MinorOutcome minor_iteration(State& state, Statistics& statistics) {
     if (std::abs(entering.theta) < 1e-9) ++statistics.degenerate_dual_steps;
     if (std::abs(primal_step) < 1e-9) ++statistics.degenerate_primal_steps;
     ++statistics.iterations;
+    emit_pivot_trace(static_cast<int>(state.phase), leaving.row, entering.col,
+                     leaving_col, column_pivot, primal_step, dual_step);
     if (state.phase == Phase::DualOne) {
       ++statistics.dual_phase_one_iterations;
     } else {

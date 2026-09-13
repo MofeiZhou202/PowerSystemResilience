@@ -829,3 +829,14 @@ $\mathrm{obj}_{\text{const}} - \max$）。竞速两分支的 \texttt{time\_limit
 都是同一截止期的剩余量；环境变量 \texttt{MIPSOLVERS\_LP\_SELECTOR\_DEBUG}
 只打印胜者名，不影响选择。
 \end{boundarynote}
+
+\paragraph{独立的逐 pivot 发布证据.}
+\texttt{MIPSOLVERS\_LP\_PIVOT\_TRACE=1} 在已提交的 dual/primal
+transaction 后输出 phase、row、entering/leaving 和 pivot/step 的
+binary64 位串；primal bound flip 用 row=-1 区分，未定义的代数 pivot
+与 dual step 字段为零。关闭时不格式化和写入，记录不回馈定价或比值检验。
+对应源码为
+\srcpath{src/engine/kernel/lp\_kernel/native\_dual/pivot\_trace.hpp:emit\_pivot\_trace}。
+相同探针分别加入基准和候选二进制，逐字节比较固定语料的实际输出，
+拒绝空 trace。该检查只证明所记录轨迹相同，不证明所有 LP 或内部全部
+浮点状态相同；源码范围和迭代数不能替代这一证据。合同见测试手册 R3。

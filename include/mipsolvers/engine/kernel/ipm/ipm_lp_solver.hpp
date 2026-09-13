@@ -227,7 +227,9 @@ class NativeIPMLPAdapter final : public SolverAdapter {
                             double objective_offset = 0.0,
                             const std::shared_ptr<const
                                 LpPresolveMatrixWorkspace>& matrix_workspace =
-                                {}) const;
+                                {},
+                            const char* entry_reason = "primary",
+                            int source_iterations = 0) const;
 
   SolveResult solve_lp_with_presolve_snapshot(
       const LPModel& prob, const Eigen::VectorXd& x0,

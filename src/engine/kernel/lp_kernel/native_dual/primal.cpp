@@ -1,4 +1,5 @@
 #include "primal.hpp"
+#include "pivot_trace.hpp"
 #include "pricing.hpp"
 #include "primal_pricing.hpp"
 
@@ -695,6 +696,8 @@ Result run_primal_phase(
       refresh_entering_column(state, pricing_heap, devex, devex_mode,
                               entering.col);
       ++statistics.bound_flips;
+      emit_pivot_trace(static_cast<int>(state.phase), -1, entering.col,
+                       entering.col, 0.0, primal_delta, 0.0);
       ++statistics.iterations;
       ++profile.pivots;
       continue;
@@ -950,6 +953,8 @@ Result run_primal_phase(
                               leaving_col);
     }
     state.objective = candidate_objective;
+    emit_pivot_trace(static_cast<int>(state.phase), leaving.row, entering.col,
+                     leaving_col, pivot, leaving.step, dual_step);
     ++statistics.iterations;
     ++profile.pivots;
     ++state.updates_since_rebuild;

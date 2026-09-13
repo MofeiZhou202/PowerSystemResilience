@@ -710,6 +710,17 @@ $\max(\mathrm{pf}, \mathrm{df}, \mu)$ 小者''裁决。speculative
 对应源码为 \srcpath{src/engine/kernel/ipm/ipm\_lp\_solver.cpp:NativeIPMLPAdapter::solve\_lp\_with\_presolve\_snapshot}
 （lambda \texttt{direct\_solve}、\texttt{run\_variant}、\texttt{keep\_better}）。
 
+LP 恢复线程限制是默认关闭的实验：只有环境变量
+\texttt{MIPSOLVERS\_EXPERIMENTAL\_LP\_RECOVERY\_CAP2} 严格等于
+\texttt{1} 时才在增广恢复期间安装至多两个 MKL 线程的局部作用域。
+默认恢复继承调用方资源范围。该实验尚未通过 R3 发布合同。
+\texttt{MIPSOLVERS\_LP\_FACTOR\_TIMING} 控制独立的只读诊断：关闭时
+不遍历 seed；开启时输出版本为 2 的 factor/recovery 记录，包含 seed
+范数、目标、位指纹及后端选择序列。超过记录容量会显式标记 overflow，
+验收器拒绝不完整序列。诊断字段不参与数值裁决。对应源码为
+\srcpath{src/engine/kernel/ipm/ipm\_lp\_solver.cpp:capture\_lp\_recovery\_transition}、
+\srcpath{src/engine/kernel/ipm/ipm\_lp\_solver.cpp:emit\_lp\_recovery\_transition}。
+
 \paragraph{缓存节点路径.}
 \texttt{prepare\_for\_node\_solves} 缓存基 LP 副本、G 行翻号、Ruiz 缩放、
 CSR/散布表与符号分解；\texttt{solve\_cached\_node\_lp} 每节点只重建界

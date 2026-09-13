@@ -410,8 +410,14 @@ LP 计时默认关闭，手动诊断时设置 `MIPSOLVERS_LP_FACTOR_TIMING=1`。
 | `variant_ms` | 单次变体墙钟时间，等于前四项之和 |
 | `retry_ms` / `retries` | LP 正则化重分解的时间与次数；时间与上述分类重叠，不能再次加总；不包含外层变体重跑和后端自适应尝试 |
 | `*_calls` | 相应已插桩 API 区间的调用次数，不等同于 MKL 内部调用次数 |
+| `entry_reason` | 本变体的入口原因：`primary`，或 normal stalled/rejected、factorization failure 后重建分解的恢复入口；后者可能继承有限 primal state |
+| `source_iterations` | 外层变体切换前已执行的迭代数；主入口为 0 |
+| `formulation` | 本变体实际选择的 `normal`、`augmented`、`banded`、`dense`，尚未选路时为 `unselected` |
+| `adaptive_backend_sequence` | PARDISO adaptive 每次首次选择的顺序，`L` 为 LDLT、`U` 为 LU；仅为观测字段 |
 
 仅统计调用线程的区间墙钟，不将 MKL 工作线程的 CPU 时间相加。该诊断不覆盖 macOS Accelerate 内部的分解细分；本次验收范围为 Windows 后端。旧 `setup_sub_normal_only` 输出只覆盖普通方程部分路径，不能据此判断 augmented 路径未发生分解。
+
+发生 normal-to-augmented 恢复时，同一诊断开关还会生成 `LP-RECOVERY` 记录及对应的 `*.recoveries.json`。记录关联 source/recovery 的迭代数、耗时、缩放与原模型 KKT 指标，并给出 retained primal seed 的维数、范数、目标值和逐位 FNV-1a 指纹。指纹仅用于判断两个 seed 是否逐位相同，不表示数值距离，也不参与求解决策。脚本要求每条 recovery 与非 `primary` factor record 一一对应；诊断关闭时不遍历 seed。
 
 ### 9.7.1 本轮实测与运行建议
 
@@ -567,3 +573,57 @@ Neither a new installer nor a repeated all-module performance matrix is
 certified by this publication. Raw logs are under the Simulation workspace's
 `build/windows-branch-publication/`; retained downstream values and failure
 messages are included in the linked machine-readable evidence.
+
+### 9.10 R3 发布合同与实验隔离
+
+`benchmark/check_lp_release_gate.py` 按合同版本分派。schema-v1 仅检查旧的
+2T 回归，任何通过信息均不批准 R3。schema-v2 使用
+`benchmark/windows_lp_r3_contract.json`，从原始进程/求解/诊断日志重新计算，
+缺少一个合同项即失败。历史基线按字节保存于 `benchmark/r3_reference/`，
+SHA256 锁定；性能参考仍是 `78939619`，pivot 代码基准是 `1e61b243`。
+
+默认 LP 恢复继承调用方线程预算。只有精确设置
+`MIPSOLVERS_EXPERIMENTAL_LP_RECOVERY_CAP2=1` 才开启未批准的两线程 cap，
+它不由诊断开关隐式启用。R3-C2 仍仅是研究提案。
+`MIPSOLVERS_LP_FACTOR_TIMING=1` 开启 observational telemetry；关闭时没有
+诊断 seed 遍历，诊断不参与数值裁决。LP-FACTOR/LP-RECOVERY 的
+`schema_version=2` 是遥测版本，不等于 R3 gate 已通过。backend sequence
+溢出显式标记，验收拒绝静默截断。稳定性采集器清除外部数值实验环境变量，
+固定 OMP=1、MKL_DYNAMIC=FALSE 和请求的 2T/4T 预算。
+
+固定合同包含 20 个交错独立进程 block × 2T/4T、120/120 原模型精度、
+每次 dfl001=44 / maros-r7=21、recovery/factor 一一对应、schema 与计时闭合、
+greenbea 配对及边际 median 均改善、原有 4T median 区间 [3000,3300] ms、
+P95 与恢复长尾上限、每案例与 aggregate 的独立回归上限。2835 ms 未满足
+该区间，不能改称合同成功。13 案例固定 LP 语料也必须完成 20-block
+baseline/candidate 配对检查，单案例失败不能由 aggregate 收益抵消。
+
+真实 pivot 证据通过 `MIPSOLVERS_LP_PIVOT_TRACE=1` 从两个独立二进制生成。
+同一只读探针应用于基准 checkout 与候选，输出 committed dual/primal
+transaction 的 phase、row、entering/leaving 和 pivot/step 的 binary64 位。
+primal bound flip 以 row=-1 表示；没有代数 pivot/dual step 的字段为零。
+比较原始 trace 行的每个字节，拒绝空输出。探针关闭时不格式化或写入；
+trace 运行与性能测量分离。源码无 diff、迭代相同或单元测试成功均不能
+替代这些跨二进制文件。该证据只覆盖固定语料的实际轨迹。
+
+采集和检查命令（两个二进制必须先完成规定 Release 构建，且不要并发测时）：
+
+```powershell
+python tools/windows_lp_stability.py --stage stability --output reports/r3-validation/stability
+python tools/r3_collect_evidence.py --stage trace --baseline-binary <baseline.exe> --candidate-binary <candidate.exe> --baseline-build <baseline-build> --candidate-build <candidate-build> --output reports/r3-validation
+python tools/r3_collect_evidence.py --stage broad --baseline-binary <baseline.exe> --candidate-binary <candidate.exe> --baseline-build <baseline-build> --candidate-build <candidate-build> --output reports/r3-validation
+python tools/r3_collect_evidence.py --stage checks --baseline-binary <baseline.exe> --candidate-binary <candidate.exe> --baseline-build <baseline-build> --candidate-build <candidate-build> --output reports/r3-validation
+python benchmark/check_lp_release_gate.py --result reports/r3-validation/evidence.json --baseline benchmark/windows_lp_r3_contract.json
+python -m unittest discover -s benchmark -p test_r3_gate.py -v
+```
+
+完整 Release CTest（串行）和四个指定独立测试、文档锚点、Python 编译、
+差异检查仍是额外必需证据。gate 的数值输出保存在 `evidence.gate.json`，
+不得把未执行项或合成测试数据写成发布通过。遥测可以独立审查发布；
+cap/新策略必须通过完整合同及广泛语料，C2 还须先完成同一 retained seed
+至少三个独立进程的 serial recovery 迭代完全固定验证。
+
+R3 gate 还核验隔离基准 checkout 的实际 HEAD 以及唯一允许的观测探针修改，
+并锁定探针头文件哈希。当前构建证据读取 Visual Studio 生成的 MSVC 工程配置。
+Native-IPM benchmark 将 CLI iteration budget 截至每 variant 最多 2000；返回
+iterations 不是全部回退 variant 的迭代总和。
