@@ -2368,14 +2368,17 @@
       (presolved_m > opt.cut_budget_xlarge_row_threshold);
   const int resolved_threads = resolve_num_threads(opt);
   const bool par_mode = (resolved_threads > 1);
-  bool parallel_tree_allowed = par_mode;
-  std::string parallel_schedule_reason = par_mode ? "enabled" : "single_thread";
+  bool parallel_tree_allowed = par_mode && opt.enable_parallel_tree;
+  std::string parallel_schedule_reason =
+      !par_mode ? "single_thread"
+                : (opt.enable_parallel_tree ? "enabled"
+                                            : "disabled_by_policy");
   out.bc_stats.parallel_requested_threads = resolved_threads;
   out.bc_stats.parallel_effective_threads = 1;
   out.bc_stats.parallel_explorer_threads = 0;
   out.bc_stats.parallel_tree_launched = false;
   out.bc_stats.parallel_schedule_reason =
-      par_mode ? "pending" : "single_thread";
+      parallel_tree_allowed ? "pending" : parallel_schedule_reason;
   const bool force_root_cut_audit = opt.root_cut_audit_force_separation;
   if (!highs_root_pipeline_active &&
       !force_root_cut_audit && root_propagation_local_cutoff_tightened &&

@@ -476,6 +476,25 @@ SolveResult StrictHighsBranchAndCutAdapter::solve_milp(const MIPModel& prob) con
   return out;
 }
 
+SolveResult StrictHighsBranchAndCutAdapter::solve_milp(
+    const MIPModel& prob, const SolveContext& context) const {
+  BCOptions effective = make_strict_highs_problem_options(prob, opt_);
+  if (context.has_deadline()) {
+    effective.time_limit_sec = std::min(
+        effective.time_limit_sec, context.backend_time_limit_sec(0.0));
+  }
+  if (context.has_explicit_thread_budget()) {
+    effective.num_threads = effective.num_threads > 0
+                                ? std::min(effective.num_threads,
+                                           context.thread_budget())
+                                : context.thread_budget();
+  }
+  NativeBranchAndCutAdapter delegate(std::move(effective));
+  SolveResult out = delegate.solve_milp(prob, context);
+  out.stats.solver_name = name();
+  return out;
+}
+
 std::string NativeBranchAndCutAdapter::name() const {
   return "NativeBranchAndCut";
 }
@@ -575,6 +594,31 @@ SolveResult NativeBranchAndCutAdapter::solve_milp(const MIPModel& prob) const {
   return out;
 }
 
+SolveResult NativeBranchAndCutAdapter::solve_milp(
+    const MIPModel& prob, const SolveContext& context) const {
+  if (context.stop_requested()) {
+    SolveResult out;
+    out.stats.solver_name = name();
+    out.stats.status = context.deadline_expired() ? "Time limit" : "Cancelled";
+    return out;
+  }
+  BCOptions effective = opt_;
+  if (context.has_deadline()) {
+    effective.time_limit_sec = std::min(
+        effective.time_limit_sec, context.backend_time_limit_sec(0.0));
+  }
+  if (context.has_explicit_thread_budget()) {
+    effective.num_threads = effective.num_threads > 0
+                                ? std::min(effective.num_threads,
+                                           context.thread_budget())
+                                : context.thread_budget();
+  }
+  if (context.random_seed() != 0) {
+    effective.random_seed = context.random_seed();
+  }
+  return NativeBranchAndCutAdapter(std::move(effective)).solve_milp(prob);
+}
+
 SolveResult NativeBranchAndCutAdapter::solve_minlp(const MINLPModel& prob) const {
   BCResult bc = solve_minlp_bc(prob, opt_);
   SolveResult out;
@@ -582,6 +626,31 @@ SolveResult NativeBranchAndCutAdapter::solve_minlp(const MINLPModel& prob) const
   out.stats = std::move(bc.stats);
   out.stats.solver_name = name();
   return out;
+}
+
+SolveResult NativeBranchAndCutAdapter::solve_minlp(
+    const MINLPModel& prob, const SolveContext& context) const {
+  if (context.stop_requested()) {
+    SolveResult out;
+    out.stats.solver_name = name();
+    out.stats.status = context.deadline_expired() ? "Time limit" : "Cancelled";
+    return out;
+  }
+  BCOptions effective = opt_;
+  if (context.has_deadline()) {
+    effective.time_limit_sec = std::min(
+        effective.time_limit_sec, context.backend_time_limit_sec(0.0));
+  }
+  if (context.has_explicit_thread_budget()) {
+    effective.num_threads = effective.num_threads > 0
+                                ? std::min(effective.num_threads,
+                                           context.thread_budget())
+                                : context.thread_budget();
+  }
+  if (context.random_seed() != 0) {
+    effective.random_seed = context.random_seed();
+  }
+  return NativeBranchAndCutAdapter(std::move(effective)).solve_minlp(prob);
 }
 
 }  // namespace mipsolvers::engine

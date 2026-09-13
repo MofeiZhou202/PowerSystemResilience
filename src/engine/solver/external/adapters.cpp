@@ -424,7 +424,7 @@ std::optional<SolveResult> solve_lp_with_embedded_highs(const LPModel& prob,
                                                         const std::string& solver_name,
                                                         const Eigen::VectorXd* mip_start,
                                                         bool pricing = false,
-                                                        double pricing_time_limit = kHighsInf) {
+                                                        double solve_time_limit = kHighsInf) {
   const auto t0 = std::chrono::steady_clock::now();
   SolveResult out;
   out.stats.solver_name = solver_name;
@@ -506,13 +506,18 @@ std::optional<SolveResult> solve_lp_with_embedded_highs(const LPModel& prob,
   highs.setOptionValue("output_flag", highs_log_on);
   highs.setOptionValue("log_to_console", highs_log_on);
   highs.setOptionValue("threads", 1);
+  if (solve_time_limit < kHighsInf &&
+      highs.setOptionValue("time_limit", solve_time_limit) ==
+          HighsStatus::kError) {
+    out.stats.status = "HiGHS rejected solve deadline";
+    return out;
+  }
   // Fixed ordered-LP price selection; docs/solvers.md, deterministic pricing.
   if (pricing && (highs.setOptionValue("solver", "simplex") == HighsStatus::kError ||
       highs.setOptionValue("simplex_strategy", 1) == HighsStatus::kError ||
       highs.setOptionValue("parallel", "off") == HighsStatus::kError ||
       highs.setOptionValue("random_seed", 0) == HighsStatus::kError ||
-      highs.setOptionValue("presolve", "on") == HighsStatus::kError ||
-      highs.setOptionValue("time_limit", pricing_time_limit) == HighsStatus::kError)) {
+      highs.setOptionValue("presolve", "on") == HighsStatus::kError)) {
     out.stats.status = "HiGHS rejected deterministic pricing options";
     return out;
   }
@@ -1922,6 +1927,25 @@ SolveResult HighsAdapter::solve_lp(const LPModel& prob) const {
   return out;
 }
 
+SolveResult HighsAdapter::solve_lp(const LPModel& prob,
+                                   const SolveContext& context) const {
+  if (context.stop_requested()) {
+    SolveResult out;
+    out.stats.solver_name = name();
+    out.stats.status = context.deadline_expired() ? "Time limit" : "Cancelled";
+    return out;
+  }
+#ifdef HACDCPF_HAVE_HIGHS_LIB
+  Highs::resetGlobalScheduler(/*blocking=*/true);
+  if (auto embedded = solve_lp_with_embedded_highs(
+          prob, false, name(), nullptr, false,
+          context.backend_time_limit_sec(kHighsInf))) {
+    return *embedded;
+  }
+#endif
+  return solve_lp(prob);
+}
+
 SolveResult HighsAdapter::solve_milp(const MIPModel& prob) const {
   const auto t0 = std::chrono::steady_clock::now();
   const ValidationReport vr = validate(prob);
@@ -2052,6 +2076,36 @@ SolveResult HighsAdapter::solve_milp(const MIPModel& prob) const {
   fs::remove(opt_path, ec);
   fs::remove(log_path, ec);
   return out;
+}
+
+SolveResult HighsAdapter::solve_milp(const MIPModel& prob,
+                                     const SolveContext& context) const {
+  if (context.stop_requested()) {
+    SolveResult out;
+    out.stats.solver_name = name();
+    out.stats.status = context.deadline_expired() ? "Time limit" : "Cancelled";
+    return out;
+  }
+#ifdef HACDCPF_HAVE_HIGHS_LIB
+  LPModel lp = prob.linear_part;
+  for (int idx : prob.integer_idx) lp.vars[idx].type = VarType::Integer;
+  for (int idx : prob.binary_idx) {
+    lp.vars[idx].type = VarType::Binary;
+    lp.vars[idx].lb = std::max(0.0, lp.vars[idx].lb);
+    lp.vars[idx].ub = std::min(1.0, lp.vars[idx].ub);
+  }
+  Highs::resetGlobalScheduler(/*blocking=*/true);
+  const Eigen::VectorXd* mip_start =
+      prob.initial_solution.size() == static_cast<int>(lp.vars.size())
+          ? &prob.initial_solution
+          : nullptr;
+  if (auto embedded = solve_lp_with_embedded_highs(
+          lp, true, name(), mip_start, false,
+          context.backend_time_limit_sec(kHighsInf))) {
+    return *embedded;
+  }
+#endif
+  return solve_milp(prob);
 }
 
 IpoptAdapter::IpoptAdapter(std::string executable)
@@ -2487,6 +2541,23 @@ SolveResult ScipAdapter::solve_minlp(const MINLPModel& prob_in) const {
 }
 
 SolveResult IpoptAdapter::solve_nlp(const NLPModel& prob_in) const {
+  return solve_nlp_impl(prob_in, 1e20);
+}
+
+SolveResult IpoptAdapter::solve_nlp(const NLPModel& prob_in,
+                                    const SolveContext& context) const {
+  if (context.stop_requested()) {
+    SolveResult out;
+    out.stats.solver_name = name();
+    out.stats.status = context.deadline_expired() ? "Time limit" : "Cancelled";
+    return out;
+  }
+  return solve_nlp_impl(
+      prob_in, context.backend_time_limit_sec(1e20));
+}
+
+SolveResult IpoptAdapter::solve_nlp_impl(const NLPModel& prob_in,
+                                         double time_limit_sec) const {
 #ifdef HACDCPF_HAVE_IPOPT
   const auto t0 = std::chrono::steady_clock::now();
 #endif
@@ -2573,6 +2644,11 @@ SolveResult IpoptAdapter::solve_nlp(const NLPModel& prob_in) const {
   app->Options()->SetStringValue(
       "hessian_approximation",
       prob.lagrangian_hess ? "exact" : "limited-memory");
+  if (time_limit_sec < 1e20) {
+    // Ipopt 3.14 options reference, max_wall_time; this is the remaining part
+    // of the call-wide monotonic deadline rather than a fresh fallback budget.
+    app->Options()->SetNumericValue("max_wall_time", time_limit_sec);
+  }
   if (prob.solver_options.adaptive_barrier) {
     app->Options()->SetStringValue("mu_strategy", "adaptive");
   }
@@ -2785,6 +2861,37 @@ bool CplexAdapter::available() const {
 #else
   return false;
 #endif
+}
+
+SolveResult CplexAdapter::solve_milp(const MIPModel& prob,
+                                     const SolveContext& context) const {
+  if (context.stop_requested()) {
+    SolveResult out;
+    out.stats.solver_name = name();
+    out.stats.status = context.deadline_expired() ? "Time limit" : "Cancelled";
+    return out;
+  }
+  // Preserve the existing CPLEX=ON path byte-for-byte for default API calls.
+  if (!context.has_deadline() && !context.has_explicit_thread_budget() &&
+      context.random_seed() == 0) {
+    return solve_milp(prob);
+  }
+  CplexOptions effective = options_.value_or(CplexOptions{});
+  if (context.has_deadline()) {
+    effective.time_limit_sec = std::min(
+        effective.time_limit_sec,
+        context.backend_time_limit_sec(effective.time_limit_sec));
+  }
+  if (context.has_explicit_thread_budget()) {
+    effective.threads = context.thread_budget();
+  }
+  if (context.random_seed() != 0) {
+    effective.random_seed =
+        static_cast<int>(context.random_seed() & 0x7fffffffU);
+  }
+  // IBM ILOG CPLEX 22.1.1 Callable Library TimeLimit/Threads/RandomSeed.
+  CplexAdapter scoped(effective);
+  return scoped.solve_milp(prob);
 }
 
 SolveResult CplexAdapter::solve_milp(const MIPModel& prob) const {

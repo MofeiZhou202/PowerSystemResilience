@@ -158,3 +158,158 @@ audits remain the native correctness gates.
 
 This paired run also confirms that native telemetry and deadline fields remain
 separate from CPLEX summaries. No concurrent-tree behavior was enabled.
+
+## Main re-integration after Windows release update
+
+Source baseline: `d7632c58`, macOS arm64 Release,
+`MIPSOLVERS_USE_CPLEX=ON`, CPLEX Studio 22.1.1 from
+`/Applications/CPLEX_Studio2211`, IPO and native-architecture flags off.
+
+### Windows paths, telemetry, and hard deadline
+
+The benchmark now supervises Windows workers with a Job Object configured with
+`JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE`, creates each worker suspended, assigns it
+before resuming, and terminates the full job at the absolute hard deadline.
+Filesystem paths remain UTF-16 from `std::filesystem::path`; non-path command
+arguments use strict UTF-8-to-UTF-16 conversion instead of the Windows active
+code page. The benchmark uses a UTF-16 `wmain` entry point and reconstructs
+path arguments from normalized UTF-8, so the worker does not round-trip paths
+through the Windows active code page. Windows CI covers this contract with a
+Unicode data-directory Job Object smoke test. The cross-platform CI wrapper
+returned exit code 124 in `0.135361s`
+for the fixed `0.1s` probe, below the pre-registered `0.6s` gate. The native
+Windows Job Object path requires the new Windows CI run for direct validation.
+
+The hosted Ubuntu/Windows correctness matrix intentionally disables CPLEX,
+MKL, and optional external dependencies because those runners do not carry the
+licensed installation. Local macOS validation remains CPLEX-enabled. The CI
+does not include the self-hosted performance gate from the release branch.
+
+The release branch's generated module manuals, persistent-session API, vendored
+binary dependency tree, and self-hosted performance baselines are not copied as
+part of this integration. They describe branch-specific code and deployment
+topology that `main` does not yet expose, so importing the prose alone would
+make the `main` documentation inaccurate. Likewise,
+`docs/miplib2017_benchmark_protocol_2026-08-25.md` remains at its current path
+because live `main` code and CPLEX documentation cite it there. Those artifacts
+require separate implementation-aware reviews rather than a bulk documentation
+merge.
+
+### Unified cooperative deadline and LP cancellation
+
+`SolveContext` owns one absolute `steady_clock` deadline across normalization,
+dispatch, and fallback. Native B&C, embedded HiGHS, Ipopt, CPLEX, native dual
+simplex, and native LP IPM receive only the remaining budget. A no-limit
+CPLEX call retains the previous adapter path and defaults; the CPLEX API focused
+gate passed 24 assertions, including both the unchanged default SolverEngine
+path and an explicit deadline/thread/seed path.
+
+The LP interface gate uses the identity
+`T_return = T_first_result + T_cancel_join + T_bookkeeping`: a latency
+portfolio may select the first audited answer, but it cannot return while a
+losing worker still borrows the model. Telemetry is O(1) scalar recording and
+does not alter pivots, tolerances, or factorization choices. The fixed protocol
+is:
+
+```bash
+python3 tools/run_with_hard_deadline.py --timeout 120 -- \
+  tests/netlib_solver_benchmark \
+  --data-dir tests/data \
+  --cases afiro,sc205,fit1p \
+  --solvers native-auto-throughput,native-auto-latency \
+  --threads 4 --time-limit 5 --repeat 3 \
+  --json /tmp/mipsolvers_lp_portfolio_gate.json
+```
+
+Before running it, the acceptance prediction is 18 of 18 accurate
+original-model results; throughput reports one worker with limit four and zero
+cancellation wait; latency reports two workers with limit two; every run has
+nonnegative timing fields and satisfies
+`runtime >= first_result + cancel_wait` up to one nanosecond of representation
+slack. No wall-time improvement is predicted or promoted by this interface
+gate. A Windows policy recommendation still requires the stable-machine
+release protocol.
+
+The fixed run met the prediction: 18 of 18 results passed original-model
+objective and feasibility audits. All nine throughput runs reported one worker,
+limit four, and zero cancellation wait; all nine latency runs reported two
+workers with limit two. There were zero timing-identity violations. Throughput
+first-result time ranged from `0.000089s` to `0.113598s`; latency first-result
+time ranged from `0.000145s` to `0.015553s`, while cancellation join wait ranged
+from `0.000019s` to `0.143080s`. The large tail confirms the stated cooperative
+cancellation limitation rather than supporting a hard in-process bound.
+
+The native LP latency portfolio now joins both workers before returning.
+Telemetry separates first-result latency from cooperative cancellation wait.
+On the fixed one-row LP, the first result arrived in `0.000075s` and the losing
+worker joined after another `0.000774s`; all six lifecycle assertions passed.
+Throughput mode with a one-thread budget launched exactly one worker. These
+measurements satisfy the correctness and ordering prediction, but they do not
+establish a general cancellation-latency bound for noninterruptible sparse
+factorizations. That requires the Windows NETLIB protocol before any default
+thread recommendation.
+
+For an explicit budget `N`, throughput mode applies the oneMKL thread-local
+limit `N` to its single worker, while latency mode applies
+`max(1, floor(N / 2))` to each of its two workers. This is a resource partition,
+not a speedup claim; the existing fixed Windows NETLIB protocol remains the
+acceptance gate for any default-policy change. The same per-worker value is
+passed to native dual-simplex pricing, preventing its internal kernel from
+silently multiplying the portfolio worker budget.
+
+The post-partition focused run measured the four-thread throughput contract as
+one worker with limit four and `0.000936s` runtime. The four-thread latency
+contract measured two workers with limit two each, first result at
+`0.000052s`, cancellation join wait `0.000022s`, and total runtime `0.000081s`.
+Measured worker counts and limits match the prediction exactly; the timing is
+reported as lifecycle evidence only, not as a general performance conclusion.
+
+### Concurrent-tree evaluation and mismatch
+
+Parallel tree search is now an explicit experiment: `num_threads > 1` alone
+does not enable it, and the MIPLIB runner requires
+`--native-concurrent-tree`. The disabled four-thread control reported
+`requested=4`, `effective=1`, `explorers=0`, `tree_launched=false`, and
+`schedule_reason=disabled_by_policy`.
+
+The fixed three-second, 5000-node, seed-zero comparison measured:
+
+| Case | Serial nodes / ms | Concurrent nodes / ms | Audit | Concurrent state |
+|---|---:|---:|---|---|
+| `mas74` | 831 / 2703.197 | 4000 / 3022.514 | pass / pass | 4 explorers, launched |
+| `sct2` | 10 / 2701.381 | 69 / 3048.698 | pass / pass | 4 explorers, launched |
+
+`mas74` increased explored nodes by `381.35%`, exceeding the predicted minimum
+of 20%. However, `sct2` did not remain root-serial, so the control assumption
+was false. Following the mismatch protocol, the implementation was checked
+first (the opt-in reached the existing late-tree scheduler), then the model
+assumption was rejected: this sample does not provide a valid serial control
+under the current root schedule. No instance-specific gate or tuning was added.
+Concurrent tree remains disabled by default pending a broader fixed cohort with
+throughput, proof progress, deterministic audit, and oversubscription metrics.
+
+### Final CPLEX-enabled regression
+
+Command:
+
+```bash
+cmake --build build/codex-cplex-macos-make --parallel 6
+ctest --test-dir build/codex-cplex-macos-make --output-on-failure -j 1
+```
+
+The first run was 19 of 20 tests in `2.33s`, with no new failure. The sole
+failure was the pre-existing `Native NLP nonlinear multiplier initialization
+preserves centrality` assertion: expected `0.02`, actual `0.002`. It was
+reproduced before this change with fixed seed 1. History identifies an
+implementation-fidelity mismatch in the regression itself: the test was added
+when the barrier floor was `0.1 * tol_complementarity`; commit `e003dbb1`
+changed the documented rule to one additional barrier decade,
+`0.01 * tol_complementarity`, without updating the expected product. The test
+must express `max(mu_min, 0.01 * tol_complementarity, mu_init)` directly. This
+repairs the stale oracle and does not change the numerical algorithm or relax a
+current tolerance.
+
+After correcting that stale oracle, the same CPLEX-enabled command completed
+20 of 20 tests in `16.45s`; the post-portability rerun completed 20 of 20 in
+`2.50s`, the resource-partition cold rerun completed 20 of 20 in `18.14s`, and
+the final current-worktree rerun completed 20 of 20 in `2.49s`.

@@ -24,6 +24,25 @@
 
 namespace mipsolvers::engine {
 
+ScopedMklThreadLimit::ScopedMklThreadLimit(int threads) {
+#ifdef HACDCPF_HAVE_MKL_PARDISO
+  if (threads > 0) {
+    // oneMKL Developer Reference, mkl_set_num_threads_local; resource split
+    // derivation: docs/native_windows_experience_integration_2026-09-13.md.
+    previous_ = mkl_set_num_threads_local(threads);
+    active_ = true;
+  }
+#else
+  (void)threads;
+#endif
+}
+
+ScopedMklThreadLimit::~ScopedMklThreadLimit() {
+#ifdef HACDCPF_HAVE_MKL_PARDISO
+  if (active_) mkl_set_num_threads_local(previous_);
+#endif
+}
+
 namespace {
 
 bool is_empty_square_system(const Eigen::SparseMatrix<double>& a) {

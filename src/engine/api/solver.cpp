@@ -42,6 +42,12 @@ api::Result to_api_result(const SolveResult& in) {
   out.stats.dual_objective = in.stats.dual_objective;
   out.stats.mip_gap = in.stats.mip_gap;
   out.stats.runtime_sec = in.stats.runtime_sec;
+  out.stats.thread_budget = in.stats.thread_budget;
+  out.stats.portfolio_workers = in.stats.portfolio_workers;
+  out.stats.worker_thread_limit = in.stats.worker_thread_limit;
+  out.stats.portfolio_first_result_sec = in.stats.portfolio_first_result_sec;
+  out.stats.portfolio_cancel_wait_sec = in.stats.portfolio_cancel_wait_sec;
+  out.stats.hard_deadline_enforced = in.stats.hard_deadline_enforced;
   out.stats.status = in.stats.status;
   out.stats.solver_name = in.stats.solver_name;
   out.stats.cglp_cuts_added = in.stats.cglp_cuts_added;
@@ -217,18 +223,24 @@ std::vector<std::string> SolverEngine::list_solvers(ProblemClass cls) const {
 
 api::Result SolverEngine::solve(api::ProblemVariant problem,
                                 const SolveOptions& options) const {
+  const SolveContext context(options);
   // problem arrives by value (moved in by rvalue callers); normalize_problem
   // takes it by value too, so the chain below is copy-free after the single
   // unavoidable copy at the public boundary for lvalue callers.
   const api::ProblemVariant normalized = normalize_problem(std::move(problem));
   throw_if_invalid(normalized);
-  const SolveResult internal = dispatcher_.solve(
+  SolveResult internal = dispatcher_.solve(
       registry_,
       normalized,
       options.preferred_solver,
       options.allow_fallback,
       options.strategy_policy,
-      options.class_strategy_policy);
+      options.class_strategy_policy,
+      context);
+  internal.stats.thread_budget = context.thread_budget();
+  // In-process solvers cooperate with the deadline. Process supervisors own
+  // hard enforcement; reporting otherwise would overstate this API contract.
+  internal.stats.hard_deadline_enforced = false;
   return to_api_result(internal);
 }
 

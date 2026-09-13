@@ -998,7 +998,7 @@
   // launch parallel path (after root heuristics) handles tree if needed.
   // ════════════════════════════════════════════════════════════════════════
   const bool gap_needs_tree = has_incumbent && !root_gap_closed();
-  if (!parallel_tree_allowed && par_mode &&
+  if (!parallel_tree_allowed && par_mode && opt.enable_parallel_tree &&
       opt.parallel_proof_on_incumbent_gap &&
       parallel_schedule_reason == "serial_low_fractionality_root" &&
       gap_needs_tree) {

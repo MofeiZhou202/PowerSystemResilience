@@ -800,7 +800,13 @@ TEST_CASE("Native NLP nonlinear multiplier initialization preserves centrality",
   REQUIRE(detail.mu_ineq.size() == detail.z_slack.size());
   const Eigen::VectorXd products =
       detail.z_slack.cwiseProduct(detail.mu_ineq);
-  CHECK(products[0] == Approx(2e-2).epsilon(1e-12));
+  // Nocedal--Wright (2006), Sec. 19.6; current barrier-floor derivation in
+  // docs/native_windows_experience_integration_2026-09-13.md.
+  const double expected_nonlinear_product = std::max(
+      options.mu_init,
+      std::max(options.mu_min, 0.01 * options.tol_complementarity));
+  CHECK(products[0] ==
+        Approx(expected_nonlinear_product).epsilon(1e-12));
   CHECK(products[1] == Approx(0.1).epsilon(1e-12));
   CHECK(products[2] == Approx(0.1).epsilon(1e-12));
   CHECK(detail.mu_ineq[0] < 1e-4);

@@ -1,0 +1,85 @@
+name: correctness
+
+on:
+  push:
+    branches: [main, 'release/**']
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  correctness:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04, windows-2022]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ilammy/msvc-dev-cmd@v1
+        if: runner.os == 'Windows'
+        with:
+          arch: x64
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      # Hosted runners do not have a CPLEX installation or license.
+      - name: Configure correctness build
+        shell: bash
+        run: >-
+          cmake -S . -B build/ci -G Ninja
+          -DCMAKE_BUILD_TYPE=Release
+          -DMIPSOLVERS_BUILD_TESTS=ON
+          -DMIPSOLVERS_BUILD_SCUC=OFF
+          -DMIPSOLVERS_BUILD_SCUC_CASE_BUILDER=OFF
+          -DMIPSOLVERS_BUILD_PYTHON=OFF
+          -DMIPSOLVERS_BUILD_LOCAL_IPOPT=OFF
+          -DMIPSOLVERS_USE_MKL=OFF
+          -DMIPSOLVERS_USE_MUMPS=OFF
+          -DMIPSOLVERS_USE_SUITESPARSE=OFF
+          -DMIPSOLVERS_USE_SUPERLU=OFF
+          -DMIPSOLVERS_USE_GUROBI=OFF
+          -DMIPSOLVERS_USE_CPLEX=OFF
+          -DMIPSOLVERS_ENABLE_NATIVE_ARCH=OFF
+          -DMIPSOLVERS_ENABLE_IPO=OFF
+      - name: Build
+        run: cmake --build build/ci --parallel 2
+      - name: Hard-deadline probe
+        shell: bash
+        run: |
+          set +e
+          python tools/run_with_hard_deadline.py --timeout 0.1 -- \
+            python -c "import time; time.sleep(10)"
+          status=$?
+          set -e
+          test "$status" -eq 124
+      - name: Windows Unicode-path Job Object smoke
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $data = Join-Path $env:RUNNER_TEMP 'mipsolvers-路径'
+          $result = Join-Path $data 'result.json'
+          New-Item -ItemType Directory -Force -Path $data | Out-Null
+          Copy-Item tests/data/miplib2017/benchmark/nw04.mps.gz $data
+          & tests/miplib2017_benchmark.exe `
+            --data-dir $data `
+            --solvers native-highs-lp `
+            --case nw04 `
+            --repeat 1 `
+            --time-limit 1 `
+            --hard-timeout-grace 2 `
+            --max-nodes 20 `
+            --json $result
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $payload = Get-Content -Raw $result | ConvertFrom-Json
+          if (-not $payload.hard_deadline_enforced) { exit 1 }
+          if ($payload.results.Count -ne 1) { exit 1 }
+          if ($payload.native_concurrent_tree) { exit 1 }
+          if ($payload.results[0].status -like 'worker *') { exit 1 }
+      - name: Correctness tests
+        run: >-
+          python tools/run_with_hard_deadline.py --timeout 3000 --
+          ctest --test-dir build/ci --output-on-failure --timeout 300

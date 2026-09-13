@@ -28,6 +28,12 @@ struct Stats {
   double dual_objective{std::numeric_limits<double>::quiet_NaN()};
   double mip_gap{0.0};
   double runtime_sec{0.0};
+  int thread_budget{0};
+  int portfolio_workers{0};
+  int worker_thread_limit{0};
+  double portfolio_first_result_sec{0.0};
+  double portfolio_cancel_wait_sec{0.0};
+  bool hard_deadline_enforced{false};
   std::string status;
   std::string solver_name;
   int cglp_cuts_added{0};

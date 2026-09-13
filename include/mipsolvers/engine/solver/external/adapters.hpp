@@ -14,8 +14,12 @@ class HighsAdapter final : public SolverAdapter {
   std::string name() const override;
   bool supports(ProblemClass cls) const override;
   SolveResult solve_lp(const LPModel& prob) const override;
+  SolveResult solve_lp(const LPModel& prob,
+                       const SolveContext& context) const override;
   SolveResult solve_pricing_lp(const LPModel& prob, double time_limit_sec) const;
   SolveResult solve_milp(const MIPModel& prob) const override;
+  SolveResult solve_milp(const MIPModel& prob,
+                         const SolveContext& context) const override;
 
   bool available() const;
   const std::string& executable() const;
@@ -31,11 +35,15 @@ class IpoptAdapter final : public SolverAdapter {
   std::string name() const override;
   bool supports(ProblemClass cls) const override;
   SolveResult solve_nlp(const NLPModel& prob) const override;
+  SolveResult solve_nlp(const NLPModel& prob,
+                        const SolveContext& context) const override;
 
   bool available() const;
   const std::string& executable() const;
 
  private:
+  SolveResult solve_nlp_impl(const NLPModel& prob,
+                             double time_limit_sec) const;
   std::string executable_;
 };
 
@@ -97,6 +105,8 @@ class CplexAdapter final : public SolverAdapter {
   std::string name() const override;
   bool supports(ProblemClass cls) const override;
   SolveResult solve_milp(const MIPModel& prob) const override;
+  SolveResult solve_milp(const MIPModel& prob,
+                         const SolveContext& context) const override;
   bool available() const;
 
  private:

@@ -7,6 +7,7 @@
 #include "mipsolvers/engine/solver/adapter_registry.hpp"
 #include "mipsolvers/engine/api/options.hpp"
 #include "mipsolvers/engine/api/problem.hpp"
+#include "mipsolvers/engine/solve_context.hpp"
 
 namespace mipsolvers::engine::strategy {
 
@@ -33,7 +34,8 @@ class StrategyDispatcher {
                     const std::string& preferred_solver,
                     bool allow_fallback,
                     StrategyPolicy default_policy,
-                    const std::map<ProblemClass, StrategyPolicy>& class_policy) const;
+                    const std::map<ProblemClass, StrategyPolicy>& class_policy,
+                    const SolveContext& context) const;
 
  private:
   std::vector<SolverAdapterPtr> candidate_adapters(const AdapterRegistry& registry,

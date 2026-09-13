@@ -534,6 +534,20 @@ TEST_CASE("B&C: result records the effective solve environment",
         next_result.effective_environment.end());
 }
 
+TEST_CASE("B&C: concurrent tree requires explicit experimental opt-in",
+          "[bc][parallel][policy]") {
+  BCOptions opt;
+  opt.num_threads = 4;
+  opt.enable_parallel_tree = false;
+  const BCResult result = solve_milp_bc(make_knapsack_10(), opt);
+
+  REQUIRE(result.stats.success);
+  CHECK(result.bc_stats.parallel_requested_threads == 4);
+  CHECK_FALSE(result.bc_stats.parallel_tree_launched);
+  CHECK(result.bc_stats.parallel_effective_threads == 1);
+  CHECK(result.bc_stats.parallel_schedule_reason == "disabled_by_policy");
+}
+
 TEST_CASE("B&C: bound events retain audited user-space incumbents",
           "[bc][progress][audit]") {
   const MIPModel mip = make_knapsack_10();

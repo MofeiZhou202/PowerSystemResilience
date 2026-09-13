@@ -14,15 +14,19 @@ class NativeDualSimplexLPAdapter final : public SolverAdapter {
  public:
   explicit NativeDualSimplexLPAdapter(
       double time_limit_sec = 0.0,
-      const std::atomic<bool>* cancel_flag = nullptr);
+      const std::atomic<bool>* cancel_flag = nullptr,
+      int kernel_threads = 0);
 
   std::string name() const override;
   bool supports(ProblemClass cls) const override;
   SolveResult solve_lp(const LPModel& prob) const override;
+  SolveResult solve_lp(const LPModel& prob,
+                       const SolveContext& context) const override;
 
  private:
   double time_limit_sec_{0.0};
   const std::atomic<bool>* cancel_flag_{nullptr};
+  int kernel_threads_{0};
 };
 
 /// Concurrent LP portfolio (the default native LP path).
@@ -42,8 +46,12 @@ class NativeAutoLPAdapter final : public SolverAdapter {
   std::string name() const override;
   bool supports(ProblemClass cls) const override;
   SolveResult solve_lp(const LPModel& prob) const override;
+  SolveResult solve_lp(const LPModel& prob,
+                       const SolveContext& context) const override;
 
  private:
+  SolveResult solve_with_context(const LPModel& prob,
+                                 const SolveContext* context) const;
   double time_limit_sec_{0.0};
 };
 

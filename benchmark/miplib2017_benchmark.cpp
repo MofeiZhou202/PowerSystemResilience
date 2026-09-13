@@ -35,7 +35,12 @@
 #include <utility>
 #include <vector>
 
-#ifndef _WIN32
+#ifdef _WIN32
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#include <windows.h>
+#else
 #include <sys/types.h>
 #include <sys/wait.h>
 #include <unistd.h>
@@ -86,6 +91,7 @@ struct Config {
   int sample{0};
   int max_nodes{50000};
   int native_threads{1};
+  bool native_concurrent_tree{false};
   int seed{0};
   std::vector<int> seeds;
   double time_limit_sec{60.0};
@@ -457,6 +463,16 @@ bool matches_case(const std::string& name,
   return false;
 }
 
+fs::path command_line_path(const char* utf8) {
+#ifdef _WIN32
+  // The Windows entry point normalizes UTF-16 argv to UTF-8. Reconstruct the
+  // native wide path explicitly instead of consulting the active code page.
+  return fs::u8path(utf8);
+#else
+  return fs::path(utf8);
+#endif
+}
+
 bool parse_args(int argc, char** argv, Config& cfg) {
   bool saw_seed = false;
   bool saw_seeds = false;
@@ -470,13 +486,17 @@ bool parse_args(int argc, char** argv, Config& cfg) {
       return argv[++i];
     };
     if (arg == "--data-dir") {
-      const char* v = value("--data-dir"); if (!v) return false; cfg.data_dir = v;
+      const char* v = value("--data-dir"); if (!v) return false;
+      cfg.data_dir = command_line_path(v);
     } else if (arg == "--solu") {
-      const char* v = value("--solu"); if (!v) return false; cfg.solution_file = v;
+      const char* v = value("--solu"); if (!v) return false;
+      cfg.solution_file = command_line_path(v);
     } else if (arg == "--csv") {
-      const char* v = value("--csv"); if (!v) return false; cfg.csv_path = v;
+      const char* v = value("--csv"); if (!v) return false;
+      cfg.csv_path = command_line_path(v);
     } else if (arg == "--json") {
-      const char* v = value("--json"); if (!v) return false; cfg.json_path = v;
+      const char* v = value("--json"); if (!v) return false;
+      cfg.json_path = command_line_path(v);
     } else if (arg == "--solvers") {
       const char* v = value("--solvers"); if (!v) return false;
       cfg.solvers = split(v, ',');
@@ -498,6 +518,8 @@ bool parse_args(int argc, char** argv, Config& cfg) {
     } else if (arg == "--native-threads") {
       const char* v = value("--native-threads"); if (!v) return false;
       cfg.native_threads = std::max(1, std::atoi(v));
+    } else if (arg == "--native-concurrent-tree") {
+      cfg.native_concurrent_tree = true;
     } else if (arg == "--seed") {
       const char* v = value("--seed"); if (!v) return false;
       cfg.seed = std::max(0, std::atoi(v));
@@ -566,7 +588,7 @@ bool parse_args(int argc, char** argv, Config& cfg) {
       cfg.native_probe_reliability = std::max(0, std::atoi(v));
     } else if (arg == "--native-primal-hint") {
       const char* v = value("--native-primal-hint"); if (!v) return false;
-      cfg.native_primal_hint_file = v;
+      cfg.native_primal_hint_file = command_line_path(v);
     } else if (arg == "--native-audit-hint-only") {
       cfg.native_audit_hint_only = true;
     } else if (arg == "--native-tree-restart") {
@@ -588,10 +610,10 @@ bool parse_args(int argc, char** argv, Config& cfg) {
       cfg.native_tree_restart_min_remaining_sec = std::max(0.0, std::atof(v));
     } else if (arg == "--worker-instance") {
       const char* v = value("--worker-instance"); if (!v) return false;
-      cfg.worker_instance = v;
+      cfg.worker_instance = command_line_path(v);
     } else if (arg == "--worker-output") {
       const char* v = value("--worker-output"); if (!v) return false;
-      cfg.worker_output = v;
+      cfg.worker_output = command_line_path(v);
     } else if (arg == "--worker-solver") {
       const char* v = value("--worker-solver"); if (!v) return false;
       cfg.worker_solver = v;
@@ -631,6 +653,7 @@ bool parse_args(int argc, char** argv, Config& cfg) {
           << "  --gap VALUE          relative MIP gap (default 1e-4)\n"
           << "  --max-nodes N        native B&C node limit\n"
           << "  --native-threads N   requested native B&C threads (default 1)\n"
+          << "  --native-concurrent-tree  opt in to experimental parallel tree\n"
           << "  --seed N             deterministic backend seed\n"
           << "  --seeds A,B,C        explicit distinct backend seeds\n"
           << "  --csv FILE           raw result CSV\n"
@@ -1519,6 +1542,7 @@ Result run_native(const Instance& instance, const Config& cfg,
   options.gap_tol = cfg.gap;
   options.max_nodes = cfg.max_nodes;
   options.num_threads = cfg.native_threads;
+  options.enable_parallel_tree = cfg.native_concurrent_tree;
   options.random_seed = static_cast<unsigned long long>(cfg.seed);
   options.verbose = cfg.native_verbose;
   options.enable_domain_heuristics = false;
@@ -2983,22 +3007,127 @@ std::string precise_number(double value) {
   return out.str();
 }
 
+#ifdef _WIN32
+class UniqueWinHandle {
+ public:
+  explicit UniqueWinHandle(HANDLE handle = nullptr) : handle_(handle) {}
+  ~UniqueWinHandle() {
+    if (valid()) CloseHandle(handle_);
+  }
+  UniqueWinHandle(const UniqueWinHandle&) = delete;
+  UniqueWinHandle& operator=(const UniqueWinHandle&) = delete;
+
+  HANDLE get() const noexcept { return handle_; }
+  bool valid() const noexcept {
+    return handle_ != nullptr && handle_ != INVALID_HANDLE_VALUE;
+  }
+
+ private:
+  HANDLE handle_;
+};
+
+std::wstring widen_utf8(const std::string& text) {
+  if (text.empty()) return {};
+  const int length = MultiByteToWideChar(
+      CP_UTF8, MB_ERR_INVALID_CHARS, text.data(), static_cast<int>(text.size()),
+      nullptr, 0);
+  if (length <= 0) {
+    throw std::runtime_error("invalid UTF-8 worker argument");
+  }
+  std::wstring wide(static_cast<std::size_t>(length), L'\0');
+  if (MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, text.data(),
+                          static_cast<int>(text.size()), wide.data(), length) !=
+      length) {
+    throw std::runtime_error("failed to convert worker argument to UTF-16");
+  }
+  return wide;
+}
+
+std::string narrow_utf16(const wchar_t* text) {
+  if (text == nullptr || *text == L'\0') return {};
+  const int length = WideCharToMultiByte(CP_UTF8, WC_ERR_INVALID_CHARS, text,
+                                         -1, nullptr, 0, nullptr, nullptr);
+  if (length <= 0) {
+    throw std::runtime_error("invalid UTF-16 command-line argument");
+  }
+  std::string utf8(static_cast<std::size_t>(length), '\0');
+  if (WideCharToMultiByte(CP_UTF8, WC_ERR_INVALID_CHARS, text, -1,
+                          utf8.data(), length, nullptr, nullptr) != length) {
+    throw std::runtime_error("failed to convert command line to UTF-8");
+  }
+  utf8.resize(static_cast<std::size_t>(length - 1));
+  return utf8;
+}
+
+// Microsoft C/C++ command-line parsing rules: backslashes are doubled only
+// when they precede a quote or the closing quote.
+std::wstring quote_windows_argument(const std::wstring& argument) {
+  std::wstring quoted{L'"'};
+  std::size_t backslashes = 0;
+  for (const wchar_t ch : argument) {
+    if (ch == L'\\') {
+      ++backslashes;
+    } else if (ch == L'"') {
+      quoted.append(backslashes * 2 + 1, L'\\');
+      quoted.push_back(ch);
+      backslashes = 0;
+    } else {
+      quoted.append(backslashes, L'\\');
+      quoted.push_back(ch);
+      backslashes = 0;
+    }
+  }
+  quoted.append(backslashes * 2, L'\\');
+  quoted.push_back(L'"');
+  return quoted;
+}
+
+std::wstring windows_command_line(
+    const std::vector<std::wstring>& arguments) {
+  std::wstring command_line;
+  for (const std::wstring& argument : arguments) {
+    if (!command_line.empty()) command_line.push_back(L' ');
+    command_line += quote_windows_argument(argument);
+  }
+  return command_line;
+}
+#endif
+
 Result run_solver_isolated(const Instance& instance, const Config& cfg,
                            const std::string& solver,
                            const fs::path& executable) {
-#ifdef _WIN32
-  // Windows needs a CreateProcess implementation before this benchmark can
-  // claim a hard deadline there. Keep the platform limitation explicit.
-  return run_solver(instance, cfg, solver);
-#else
   Result fallback;
   set_dimensions(instance, fallback);
   fallback.solver = solver;
 
   const auto stamp = std::chrono::steady_clock::now().time_since_epoch().count();
+#ifdef _WIN32
+  const auto process_id = static_cast<unsigned long>(GetCurrentProcessId());
+#else
+  const auto process_id = static_cast<long long>(getpid());
+#endif
   const fs::path output_path = fs::temp_directory_path() /
-      ("miplib_worker_" + std::to_string(static_cast<long long>(getpid())) +
+      ("miplib_worker_" + std::to_string(process_id) +
        "_" + std::to_string(stamp) + ".json");
+
+#ifdef _WIN32
+  std::vector<std::wstring> arguments{
+      executable.wstring(),
+      L"--worker-instance", instance.solver_path.wstring(),
+      L"--worker-output", output_path.wstring(),
+      L"--worker-solver", widen_utf8(solver),
+      L"--time-limit", widen_utf8(precise_number(cfg.time_limit_sec)),
+      L"--gap", widen_utf8(precise_number(cfg.gap)),
+      L"--max-nodes", widen_utf8(std::to_string(cfg.max_nodes)),
+      L"--native-threads", widen_utf8(std::to_string(cfg.native_threads)),
+      L"--seed", widen_utf8(std::to_string(cfg.seed)),
+      L"--native-node-estimate", widen_utf8(cfg.native_node_estimate)};
+  auto add_flag = [&](const wchar_t* flag) { arguments.emplace_back(flag); };
+  auto add_value = [&](const wchar_t* flag, const std::string& value) {
+    arguments.emplace_back(flag);
+    arguments.push_back(widen_utf8(value));
+  };
+#else
   std::vector<std::string> arguments{
       executable.string(),
       "--worker-instance", instance.solver_path.string(),
@@ -3010,56 +3139,263 @@ Result run_solver_isolated(const Instance& instance, const Config& cfg,
       "--native-threads", std::to_string(cfg.native_threads),
       "--seed", std::to_string(cfg.seed),
       "--native-node-estimate", cfg.native_node_estimate};
-  if (cfg.highs_verbose) arguments.push_back("--highs-verbose");
-  if (cfg.native_verbose) arguments.push_back("--native-verbose");
+  auto add_flag = [&](const char* flag) { arguments.emplace_back(flag); };
+  auto add_value = [&](const char* flag, const std::string& value) {
+    arguments.emplace_back(flag);
+    arguments.push_back(value);
+  };
+#endif
+  if (cfg.highs_verbose) add_flag(
+#ifdef _WIN32
+      L"--highs-verbose"
+#else
+      "--highs-verbose"
+#endif
+  );
+  if (cfg.native_verbose) add_flag(
+#ifdef _WIN32
+      L"--native-verbose"
+#else
+      "--native-verbose"
+#endif
+  );
+  if (cfg.native_concurrent_tree) add_flag(
+#ifdef _WIN32
+      L"--native-concurrent-tree"
+#else
+      "--native-concurrent-tree"
+#endif
+  );
   if (!cfg.native_papilo_presolve) {
-    arguments.push_back("--native-no-papilo-presolve");
+    add_flag(
+#ifdef _WIN32
+        L"--native-no-papilo-presolve"
+#else
+        "--native-no-papilo-presolve"
+#endif
+    );
   }
   if (!cfg.native_presolve_probing) {
-    arguments.push_back("--native-no-presolve-probing");
+    add_flag(
+#ifdef _WIN32
+        L"--native-no-presolve-probing"
+#else
+        "--native-no-presolve-probing"
+#endif
+    );
   }
-  if (!cfg.native_cuts) arguments.push_back("--native-no-cuts");
+  if (!cfg.native_cuts) add_flag(
+#ifdef _WIN32
+      L"--native-no-cuts"
+#else
+      "--native-no-cuts"
+#endif
+  );
   if (!cfg.native_objective_propagation) {
-    arguments.push_back("--native-no-objective-propagation");
+    add_flag(
+#ifdef _WIN32
+        L"--native-no-objective-propagation"
+#else
+        "--native-no-objective-propagation"
+#endif
+    );
   }
   if (!cfg.native_reduced_cost_fixing) {
-    arguments.push_back("--native-no-reduced-cost-fixing");
+    add_flag(
+#ifdef _WIN32
+        L"--native-no-reduced-cost-fixing"
+#else
+        "--native-no-reduced-cost-fixing"
+#endif
+    );
   }
   if (cfg.native_row_propagation_rounds == 0) {
-    arguments.push_back("--native-no-row-propagation");
+    add_flag(
+#ifdef _WIN32
+        L"--native-no-row-propagation"
+#else
+        "--native-no-row-propagation"
+#endif
+    );
   } else {
-    arguments.push_back("--native-row-propagation-rounds");
-    arguments.push_back(
+    add_value(
+#ifdef _WIN32
+        L"--native-row-propagation-rounds",
+#else
+        "--native-row-propagation-rounds",
+#endif
         std::to_string(cfg.native_row_propagation_rounds));
   }
-  arguments.push_back("--native-probe-max");
-  arguments.push_back(std::to_string(cfg.native_probe_max));
-  arguments.push_back("--native-probe-reliability");
-  arguments.push_back(std::to_string(cfg.native_probe_reliability));
+  add_value(
+#ifdef _WIN32
+      L"--native-probe-max",
+#else
+      "--native-probe-max",
+#endif
+      std::to_string(cfg.native_probe_max));
+  add_value(
+#ifdef _WIN32
+      L"--native-probe-reliability",
+#else
+      "--native-probe-reliability",
+#endif
+      std::to_string(cfg.native_probe_reliability));
   if (!cfg.native_primal_hint_file.empty()) {
-    arguments.push_back("--native-primal-hint");
-    arguments.push_back(cfg.native_primal_hint_file.string());
+#ifdef _WIN32
+    arguments.emplace_back(L"--native-primal-hint");
+    arguments.push_back(cfg.native_primal_hint_file.wstring());
+#else
+    add_value("--native-primal-hint", cfg.native_primal_hint_file.string());
+#endif
   }
   if (cfg.native_audit_hint_only) {
-    arguments.push_back("--native-audit-hint-only");
+    add_flag(
+#ifdef _WIN32
+        L"--native-audit-hint-only"
+#else
+        "--native-audit-hint-only"
+#endif
+    );
   }
   if (cfg.native_tree_restart) {
-    arguments.push_back("--native-tree-restart");
+    add_flag(
+#ifdef _WIN32
+        L"--native-tree-restart"
+#else
+        "--native-tree-restart"
+#endif
+    );
   }
-  arguments.push_back("--native-tree-restart-max");
-  arguments.push_back(std::to_string(cfg.native_tree_restart_max));
-  arguments.push_back("--native-tree-restart-min-nodes");
-  arguments.push_back(std::to_string(cfg.native_tree_restart_min_nodes));
-  arguments.push_back("--native-tree-restart-min-open-nodes");
-  arguments.push_back(std::to_string(cfg.native_tree_restart_min_open_nodes));
-  arguments.push_back("--native-tree-restart-min-improvement");
-  arguments.push_back(precise_number(
-      cfg.native_tree_restart_min_improvement));
-  arguments.push_back("--native-tree-restart-min-remaining");
-  arguments.push_back(precise_number(
-      cfg.native_tree_restart_min_remaining_sec));
+  add_value(
+#ifdef _WIN32
+      L"--native-tree-restart-max",
+#else
+      "--native-tree-restart-max",
+#endif
+      std::to_string(cfg.native_tree_restart_max));
+  add_value(
+#ifdef _WIN32
+      L"--native-tree-restart-min-nodes",
+#else
+      "--native-tree-restart-min-nodes",
+#endif
+      std::to_string(cfg.native_tree_restart_min_nodes));
+  add_value(
+#ifdef _WIN32
+      L"--native-tree-restart-min-open-nodes",
+#else
+      "--native-tree-restart-min-open-nodes",
+#endif
+      std::to_string(cfg.native_tree_restart_min_open_nodes));
+  add_value(
+#ifdef _WIN32
+      L"--native-tree-restart-min-improvement",
+#else
+      "--native-tree-restart-min-improvement",
+#endif
+      precise_number(cfg.native_tree_restart_min_improvement));
+  add_value(
+#ifdef _WIN32
+      L"--native-tree-restart-min-remaining",
+#else
+      "--native-tree-restart-min-remaining",
+#endif
+      precise_number(cfg.native_tree_restart_min_remaining_sec));
 
   const auto process_start = std::chrono::steady_clock::now();
+#ifdef _WIN32
+  // Win32 Job Objects, JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE: the parent owns
+  // both the absolute deadline and every descendant of the benchmark worker.
+  UniqueWinHandle job(CreateJobObjectW(nullptr, nullptr));
+  if (!job.valid()) {
+    fallback.status = "worker job creation failed: error=" +
+                      std::to_string(GetLastError());
+    return fallback;
+  }
+  JOBOBJECT_EXTENDED_LIMIT_INFORMATION job_limits{};
+  job_limits.BasicLimitInformation.LimitFlags =
+      JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+  if (!SetInformationJobObject(job.get(), JobObjectExtendedLimitInformation,
+                               &job_limits, sizeof(job_limits))) {
+    fallback.status = "worker job configuration failed: error=" +
+                      std::to_string(GetLastError());
+    return fallback;
+  }
+
+  std::wstring command_line;
+  try {
+    command_line = windows_command_line(arguments);
+  } catch (const std::exception& error) {
+    fallback.status = std::string("worker command-line error: ") + error.what();
+    return fallback;
+  }
+  STARTUPINFOW startup{};
+  startup.cb = sizeof(startup);
+  PROCESS_INFORMATION process_info{};
+  if (!CreateProcessW(executable.c_str(), command_line.data(), nullptr, nullptr,
+                      FALSE, CREATE_SUSPENDED | CREATE_NO_WINDOW, nullptr,
+                      nullptr, &startup, &process_info)) {
+    fallback.status = "worker process creation failed: error=" +
+                      std::to_string(GetLastError());
+    return fallback;
+  }
+  UniqueWinHandle process(process_info.hProcess);
+  UniqueWinHandle thread(process_info.hThread);
+  if (!AssignProcessToJobObject(job.get(), process.get())) {
+    const DWORD error = GetLastError();
+    TerminateProcess(process.get(), error);
+    WaitForSingleObject(process.get(), INFINITE);
+    fallback.status = "worker job assignment failed: error=" +
+                      std::to_string(error);
+    return fallback;
+  }
+  if (ResumeThread(thread.get()) == static_cast<DWORD>(-1)) {
+    const DWORD error = GetLastError();
+    TerminateJobObject(job.get(), error);
+    WaitForSingleObject(process.get(), INFINITE);
+    fallback.status = "worker resume failed: error=" + std::to_string(error);
+    return fallback;
+  }
+
+  const double hard_limit_sec =
+      cfg.time_limit_sec + cfg.hard_timeout_grace_sec;
+  const double elapsed_sec = std::chrono::duration<double>(
+      std::chrono::steady_clock::now() - process_start).count();
+  const double remaining_ms =
+      std::ceil(std::max(0.0, hard_limit_sec - elapsed_sec) * 1000.0);
+  const DWORD wait_ms = remaining_ms >= static_cast<double>(INFINITE - 1)
+                            ? INFINITE - 1
+                            : static_cast<DWORD>(remaining_ms);
+  const DWORD wait_result = WaitForSingleObject(process.get(), wait_ms);
+  if (wait_result == WAIT_TIMEOUT) {
+    TerminateJobObject(job.get(), ERROR_TIMEOUT);
+    WaitForSingleObject(process.get(), INFINITE);
+    fallback.solve_ms = std::chrono::duration<double, std::milli>(
+        std::chrono::steady_clock::now() - process_start).count();
+    fallback.timed_out = true;
+    fallback.hard_timeout = true;
+    fallback.status = "Hard process timeout";
+    std::error_code error;
+    fs::remove(output_path, error);
+    return fallback;
+  }
+  if (wait_result != WAIT_OBJECT_0) {
+    const DWORD error = GetLastError();
+    TerminateJobObject(job.get(), error);
+    WaitForSingleObject(process.get(), INFINITE);
+    fallback.status = "worker wait failed: error=" + std::to_string(error);
+    std::error_code remove_error;
+    fs::remove(output_path, remove_error);
+    return fallback;
+  }
+  DWORD exit_code = 0;
+  if (!GetExitCodeProcess(process.get(), &exit_code) || exit_code != 0) {
+    fallback.status = "worker exit " + std::to_string(exit_code);
+    std::error_code error;
+    fs::remove(output_path, error);
+    return fallback;
+  }
+#else
   const pid_t child = fork();
   if (child == 0) {
     std::vector<char*> argv;
@@ -3129,6 +3465,7 @@ Result run_solver_isolated(const Instance& instance, const Config& cfg,
     fs::remove(output_path, error);
     return fallback;
   }
+#endif
 
   try {
     std::ifstream input(output_path);
@@ -3147,7 +3484,6 @@ Result run_solver_isolated(const Instance& instance, const Config& cfg,
     fs::remove(output_path, remove_error);
     return fallback;
   }
-#endif
 }
 
 std::vector<Summary> summarize(const Config& cfg,
@@ -3281,17 +3617,14 @@ void write_json(const fs::path& path, const Config& cfg,
   out["solution_file"] = cfg.solution_file.string();
   out["time_limit_sec"] = cfg.time_limit_sec;
   out["hard_timeout_grace_sec"] = cfg.hard_timeout_grace_sec;
-#ifdef _WIN32
-  out["hard_deadline_enforced"] = false;
-#else
   out["hard_deadline_enforced"] = true;
-#endif
   out["gap"] = cfg.gap;
   out["audit_tolerance"] = kAuditTolerance;
   out["reference_objective_tolerance"] =
       std::max(kAuditTolerance, cfg.gap);
   out["threads"] = 1;
   out["native_threads"] = cfg.native_threads;
+  out["native_concurrent_tree"] = cfg.native_concurrent_tree;
   out["seed"] = cfg.seeds.size() == 1 ? json(cfg.seeds.front()) : json(nullptr);
   out["seeds"] = cfg.seeds;
   out["repeats"] = cfg.repeats;
@@ -3400,7 +3733,7 @@ void print_summary(const std::vector<Summary>& summaries) {
 
 }  // namespace
 
-int main(int argc, char** argv) {
+int benchmark_main(int argc, char** argv) {
   Config cfg;
   if (!parse_args(argc, argv, cfg)) return argc > 1 ? 1 : 0;
   if (cfg.native_node_estimate != "sum" &&
@@ -3487,10 +3820,11 @@ int main(int argc, char** argv) {
   std::printf("%s\n", std::string(125, '-').c_str());
 
   std::error_code executable_error;
-  fs::path executable = fs::weakly_canonical(fs::absolute(argv[0]),
+  const fs::path executable_arg = command_line_path(argv[0]);
+  fs::path executable = fs::weakly_canonical(fs::absolute(executable_arg),
                                              executable_error);
   if (executable_error || executable.empty()) {
-    executable = fs::absolute(argv[0]);
+    executable = fs::absolute(executable_arg);
   }
 
   std::vector<Result> results;
@@ -3572,3 +3906,26 @@ int main(int argc, char** argv) {
   }
   return results.empty() ? 2 : 0;
 }
+
+#ifdef _WIN32
+int wmain(int argc, wchar_t** argv) {
+  try {
+    std::vector<std::string> utf8_arguments;
+    utf8_arguments.reserve(static_cast<std::size_t>(argc));
+    for (int i = 0; i < argc; ++i) {
+      utf8_arguments.push_back(narrow_utf16(argv[i]));
+    }
+    std::vector<char*> narrow_argv;
+    narrow_argv.reserve(utf8_arguments.size());
+    for (std::string& argument : utf8_arguments) {
+      narrow_argv.push_back(argument.data());
+    }
+    return benchmark_main(argc, narrow_argv.data());
+  } catch (const std::exception& error) {
+    std::cerr << "Command-line conversion failed: " << error.what() << "\n";
+    return 2;
+  }
+}
+#else
+int main(int argc, char** argv) { return benchmark_main(argc, argv); }
+#endif

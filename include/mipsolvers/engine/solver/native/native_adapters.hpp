@@ -80,6 +80,8 @@ class StrictHighsBranchAndCutAdapter final : public SolverAdapter {
   std::string name() const override;
   bool supports(ProblemClass cls) const override;
   SolveResult solve_milp(const MIPModel& prob) const override;
+  SolveResult solve_milp(const MIPModel& prob,
+                         const SolveContext& context) const override;
 
  private:
   BCOptions opt_;
@@ -92,7 +94,11 @@ class NativeBranchAndCutAdapter final : public SolverAdapter {
   std::string name() const override;
   bool supports(ProblemClass cls) const override;
   SolveResult solve_milp(const MIPModel& prob) const override;
+  SolveResult solve_milp(const MIPModel& prob,
+                         const SolveContext& context) const override;
   SolveResult solve_minlp(const MINLPModel& prob) const override;
+  SolveResult solve_minlp(const MINLPModel& prob,
+                          const SolveContext& context) const override;
 
  private:
   BCOptions opt_;

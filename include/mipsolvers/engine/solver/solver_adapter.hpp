@@ -6,6 +6,7 @@
 #include <vector>
 
 #include "mipsolvers/engine/problem_types.hpp"
+#include "mipsolvers/engine/solve_context.hpp"
 
 namespace mipsolvers::engine {
 
@@ -36,6 +37,12 @@ struct SolveStats {
   double dual_objective{std::numeric_limits<double>::quiet_NaN()};
   double mip_gap{0.0};
   double runtime_sec{0.0};
+  int thread_budget{0};
+  int portfolio_workers{0};
+  int worker_thread_limit{0};
+  double portfolio_first_result_sec{0.0};
+  double portfolio_cancel_wait_sec{0.0};
+  bool hard_deadline_enforced{false};
   // Native dual-simplex benchmark telemetry. These remain zero for other
   // solvers and do not participate in termination or correctness decisions.
   int dual_phase_one_iterations{0};
@@ -110,6 +117,25 @@ class SolverAdapter {
   virtual SolveResult solve_milp(const MIPModel& prob) const;
   virtual SolveResult solve_minlp(const MINLPModel& prob) const;
   virtual SolveResult solve_conic(const ConicModel& prob) const;
+
+  // Defaults retain source and behavioral compatibility for adapters that do
+  // not yet expose cooperative cancellation.
+  virtual SolveResult solve_le(const SparseLinSys& prob,
+                               const SolveContext& context) const;
+  virtual SolveResult solve_nle(const NonlinearSystem& prob,
+                                const SolveContext& context) const;
+  virtual SolveResult solve_lp(const LPModel& prob,
+                               const SolveContext& context) const;
+  virtual SolveResult solve_qp(const QPModel& prob,
+                               const SolveContext& context) const;
+  virtual SolveResult solve_nlp(const NLPModel& prob,
+                                const SolveContext& context) const;
+  virtual SolveResult solve_milp(const MIPModel& prob,
+                                 const SolveContext& context) const;
+  virtual SolveResult solve_minlp(const MINLPModel& prob,
+                                  const SolveContext& context) const;
+  virtual SolveResult solve_conic(const ConicModel& prob,
+                                  const SolveContext& context) const;
 
  protected:
   SolveResult unsupported_result(ProblemClass cls) const;

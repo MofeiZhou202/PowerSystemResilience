@@ -68,4 +68,44 @@ SolveResult SolverAdapter::solve_conic(const ConicModel&) const {
   return unsupported_result(ProblemClass::CONIC);
 }
 
+SolveResult SolverAdapter::solve_le(const SparseLinSys& prob,
+                                    const SolveContext&) const {
+  return solve_le(prob);
+}
+
+SolveResult SolverAdapter::solve_nle(const NonlinearSystem& prob,
+                                     const SolveContext&) const {
+  return solve_nle(prob);
+}
+
+SolveResult SolverAdapter::solve_lp(const LPModel& prob,
+                                    const SolveContext&) const {
+  return solve_lp(prob);
+}
+
+SolveResult SolverAdapter::solve_qp(const QPModel& prob,
+                                    const SolveContext&) const {
+  return solve_qp(prob);
+}
+
+SolveResult SolverAdapter::solve_nlp(const NLPModel& prob,
+                                     const SolveContext&) const {
+  return solve_nlp(prob);
+}
+
+SolveResult SolverAdapter::solve_milp(const MIPModel& prob,
+                                      const SolveContext&) const {
+  return solve_milp(prob);
+}
+
+SolveResult SolverAdapter::solve_minlp(const MINLPModel& prob,
+                                       const SolveContext&) const {
+  return solve_minlp(prob);
+}
+
+SolveResult SolverAdapter::solve_conic(const ConicModel& prob,
+                                       const SolveContext&) const {
+  return solve_conic(prob);
+}
+
 }  // namespace mipsolvers::engine

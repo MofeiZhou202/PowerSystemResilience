@@ -9,6 +9,20 @@
 
 namespace mipsolvers::engine {
 
+/// Thread-local oneMKL worker limit for one solver call. When MKL is not
+/// linked this guard is a no-op.
+class ScopedMklThreadLimit {
+ public:
+  explicit ScopedMklThreadLimit(int threads);
+  ~ScopedMklThreadLimit();
+  ScopedMklThreadLimit(const ScopedMklThreadLimit&) = delete;
+  ScopedMklThreadLimit& operator=(const ScopedMklThreadLimit&) = delete;
+
+ private:
+  [[maybe_unused]] int previous_{0};
+  [[maybe_unused]] bool active_{false};
+};
+
 /// Abstract sparse linear solver interface (self-contained in solver module).
 class SparseLinearSolver {
  public:

@@ -120,6 +120,8 @@ struct IPMNodeBatchEntry {
 /// centering corrections.  Returns constraint duals and Farkas certificates.
 class NativeIPMLPAdapter final : public SolverAdapter {
  public:
+  using SolverAdapter::solve_lp;
+
   explicit NativeIPMLPAdapter(IPMLPOptions opt = {});
   ~NativeIPMLPAdapter();
 
@@ -127,6 +129,8 @@ class NativeIPMLPAdapter final : public SolverAdapter {
   bool supports(ProblemClass cls) const override;
 
   SolveResult solve_lp(const LPModel& prob) const override;
+  SolveResult solve_lp(const LPModel& prob,
+                       const SolveContext& context) const override;
 
   /// Solve LP with warm-start from a previous primal solution.
   /// When x0 is provided, the IPM uses it as initial primal point instead

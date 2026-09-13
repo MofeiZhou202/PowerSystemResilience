@@ -231,6 +231,9 @@ struct BCOptions {
   // Parallelism
   // ═══════════════════════════════════════════════════════════════════════
   int num_threads{-1};
+  /// Experimental parallel tree. Thread counts above one may still be used by
+  /// non-tree kernels; tree concurrency requires this explicit opt-in.
+  bool enable_parallel_tree{false};
   int cut_worker_queue_size{64};
   int cut_worker_queue_timeout_ms{50};
   int max_plunge_depth{10};

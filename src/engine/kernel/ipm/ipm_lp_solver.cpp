@@ -202,6 +202,32 @@ SolveResult NativeIPMLPAdapter::solve_lp(const LPModel& prob) const {
   return solve_lp(prob, empty);
 }
 
+SolveResult NativeIPMLPAdapter::solve_lp(
+    const LPModel& prob, const SolveContext& context) const {
+  if (context.stop_requested()) {
+    SolveResult out;
+    out.stats.solver_name = name();
+    out.stats.status = context.deadline_expired() ? "Time limit" : "Cancelled";
+    return out;
+  }
+  IPMLPOptions effective = opt_;
+  if (context.has_deadline()) {
+    const double remaining = context.backend_time_limit_sec(0.0);
+    effective.time_limit_sec = effective.time_limit_sec > 0.0
+                                   ? std::min(effective.time_limit_sec,
+                                              remaining)
+                                   : remaining;
+  }
+  std::atomic<bool> cancelled{false};
+  std::stop_callback callback(context.stop_token(), [&cancelled] {
+    cancelled.store(true, std::memory_order_relaxed);
+  });
+  effective.cancel_flag = &cancelled;
+  const ScopedMklThreadLimit thread_limit(
+      context.has_explicit_thread_budget() ? context.thread_budget() : 0);
+  return NativeIPMLPAdapter(std::move(effective)).solve_lp(prob);
+}
+
 SolveResult NativeIPMLPAdapter::solve_lp(const LPModel& prob, const Eigen::VectorXd& x0) const {
   const auto solve_start = std::chrono::steady_clock::now();
   const bool has_warm_start = x0.size() == prob.c.size();
