@@ -21,6 +21,8 @@
 5. [Native LP 内点法设计](native_ipm_design.md)：现代 IPM 文献、当前实现
    差距、HSD/IP-PMM 路线和可证伪验收门槛。
 6. [Engine API](engine.md)：C++ 模型、选项、结果和适配器接口参考。
+7. [CPLEX Callable Library](cplex_callable_library.md)：可选 MILP adapter 的
+   模型映射、跨平台构建合同和验证记录。
 
 ## 用户文档
 

@@ -59,6 +59,54 @@ class ScipAdapter final : public SolverAdapter {
   std::string executable_;
 };
 
+/// CPLEX adapter using the native Callable Library C API.
+/// Defaults and validation gates: docs/cplex_callable_library.md,
+/// "Cost model and fixed validation".
+struct CplexOptions {
+  double time_limit_sec{3600.0};
+  double mip_gap{1e-9};
+  int threads{0};
+  int random_seed{0};
+};
+
+// Last solve_milp on the calling thread. Timing intervals bracket the CPLEX
+// import, optimize and extraction calls; null means that phase was not reached.
+struct CplexSolveInfo {
+  std::optional<double> model_import_sec;
+  std::optional<double> optimize_sec;
+  std::optional<double> result_extract_sec;
+  std::optional<double> best_bound;
+  std::optional<long long> node_count;
+  int status{0};
+  bool has_solution{false};
+  bool proven{false};
+  bool optimal{false};
+  bool timed_out{false};
+};
+CplexSolveInfo last_cplex_solve_info();
+
+class CplexAdapter final : public SolverAdapter {
+ public:
+  CplexAdapter();
+  explicit CplexAdapter(CplexOptions options);
+  ~CplexAdapter() override;
+
+  CplexAdapter(const CplexAdapter&) = delete;
+  CplexAdapter& operator=(const CplexAdapter&) = delete;
+
+  std::string name() const override;
+  bool supports(ProblemClass cls) const override;
+  SolveResult solve_milp(const MIPModel& prob) const override;
+  bool available() const;
+
+ private:
+  std::optional<CplexOptions> options_;
+  std::string initialization_error_;
+#ifdef HACDCPF_HAVE_CPLEX
+  void* env_{nullptr};  // CPXENVptr (opaque to avoid a public header dependency)
+#endif
+};
+
 /// Gurobi adapter using the native C API (requires libgurobi linked at build time).
 struct GurobiOptions {
   double time_limit_sec{3600};

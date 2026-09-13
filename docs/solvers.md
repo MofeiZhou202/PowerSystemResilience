@@ -124,7 +124,7 @@ SolverEngine -> StrategyDispatcher -> PresolveManager
                               SolverAdapter 注册表
                          / 原生内核       \ 外部适配器
                         v                  v
-        LE/NLE/LP/QP/NLP/MILP/CONIC   HiGHS/Ipopt/SCIP/Gurobi
+        LE/NLE/LP/QP/NLP/MILP/CONIC   HiGHS/Ipopt/SCIP/Gurobi/CPLEX
                         |
                         v
               PostsolveManager -> api::Result
@@ -155,6 +155,7 @@ SolverEngine -> StrategyDispatcher -> PresolveManager
 | `Ipopt` | NLP | Ipopt TNLP 适配 | `external/adapters.cpp` |
 | `SCIP` | MILP/MINLP | MPS/PIP 适配 | `external/adapters.cpp` |
 | `Gurobi` | LP/QP/MILP | 原生 C API 适配 | `external/adapters.cpp` |
+| `CPLEX` | MILP | 原生 Callable Library 适配 | `external/adapters.cpp` |
 
 注意：`StrictHiGHS` 不是第二套自研 B&C。它通过
 `make_strict_highs_production_options` 强制 HiGHS MIP 合约；
@@ -203,7 +204,28 @@ CSR 行访问索引和按行连续的值副本，供 PRICE、行活动与割分�
 6. 后处理恢复变量、目标和状态，返回统一结果。
 
 默认注册顺序可直接在 `SolverEngine::register_default_adapters` 审核。可选外部库
-只有在 `available()` 为真时才进入注册表；Gurobi 不参与普通自动回退。
+只有在 `available()` 为真时才进入注册表。Gurobi 和 CPLEX 不在各问题类的默认
+优先级列表中，但启用且 `allow_fallback=true` 时，仍会在所有具名默认候选失败后
+作为 registry 余项参与末位回退；也可通过 `preferred_solver` 或
+`set_solver_preference` 显式选择。
+
+### 2.4 CPLEX MILP adapter
+
+`CplexAdapter` uses `CPXcopylp` to import the original column-compressed
+linear model, expands each finite side of a ranged row independently, applies
+integer and binary types with `CPXcopyctype`, and calls `CPXmipopt`. Objective
+sense and variable order are preserved. `CplexSolveInfo` exposes per-thread
+import/optimize/extraction timings plus status, incumbent availability, best
+bound, relative gap and node count.
+
+The adapter is opt-in at build time and is not in the named automatic MILP
+priority list. In an enabled build it remains eligible as a final registry
+fallback after those candidates fail. Its public scope is linear MILP; LP, QP,
+semi-continuous and semi-integer interfaces are outside the current adapter
+contract. One adapter instance owns one CPLEX environment and is not safe for
+concurrent calls. The mathematical mapping, platform measurements and fixed
+validation protocol are recorded in
+[`cplex_callable_library.md`](cplex_callable_library.md).
 
 ## 3. 公共线性代数与 KKT
 

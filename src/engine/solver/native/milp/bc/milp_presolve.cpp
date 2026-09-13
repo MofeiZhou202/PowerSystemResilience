@@ -38,6 +38,15 @@ static constexpr double kInf = 1e20;
 
 MILPPresolve::MILPPresolve(PresolveOptions opts) : opts_(std::move(opts)) {}
 
+bool MILPPresolve::deadline_expired() const {
+  if (!(opts_.time_limit_sec > 0.0) || !std::isfinite(opts_.time_limit_sec)) {
+    return false;
+  }
+  return std::chrono::duration<double>(std::chrono::steady_clock::now() -
+                                       run_start_)
+             .count() >= opts_.time_limit_sec;
+}
+
 // ============================================================================
 // init_from_lp: build internal representation from LPModel
 // ============================================================================
@@ -1130,9 +1139,6 @@ int MILPPresolve::run_probing() {
   if (m_orig_ > 2000) max_probes = std::min(max_probes, 100);
   if (m_orig_ > 5000) max_probes = std::min(max_probes, 50);
 
-  const auto deadline =
-      std::chrono::steady_clock::now() + std::chrono::seconds(1);
-
   struct TrailEntry {
     int col;
     bool is_lb;
@@ -1284,16 +1290,18 @@ int MILPPresolve::run_probing() {
          world.complete && !world.infeasible && wave < max_waves &&
          !pending_rows.empty();
          ++wave) {
-      if (std::chrono::steady_clock::now() >= deadline) {
+      if (deadline_expired()) {
         world.complete = false;
+        stats_.timed_out = true;
         break;
       }
       current_rows.clear();
       current_rows.swap(pending_rows);
       for (const int row : current_rows) {
         if (stats_.probing_rows_processed >= opts_.max_probing_row_visits ||
-            std::chrono::steady_clock::now() >= deadline) {
+            deadline_expired()) {
           world.complete = false;
+          if (deadline_expired()) stats_.timed_out = true;
           stats_.probing_truncated = true;
           break;
         }
@@ -1396,11 +1404,16 @@ int MILPPresolve::run_probing() {
   };
 
   for (int probe = 0; probe < max_probes; ++probe) {
+    if ((probe & 255) == 0 && deadline_expired()) {
+      stats_.timed_out = true;
+      return 0;
+    }
     if (probing_implications_original_.size() >=
             opts_.max_probing_implications ||
         stats_.probing_rows_processed >= opts_.max_probing_row_visits ||
-        std::chrono::steady_clock::now() >= deadline) {
+        deadline_expired()) {
       stats_.probing_truncated = true;
+      if (deadline_expired()) stats_.timed_out = true;
       break;
     }
     const int trigger = candidates[static_cast<std::size_t>(probe)];
@@ -1788,6 +1801,7 @@ PresolveStats MILPPresolve::run(LPModel& lp,
                                  std::vector<int>& binary_idx,
                                  std::vector<int>& integer_idx) {
   auto t0 = std::chrono::steady_clock::now();
+  run_start_ = t0;
   stats_ = PresolveStats{};
   undo_stack_.clear();
   probing_implications_original_.clear();
@@ -1795,17 +1809,38 @@ PresolveStats MILPPresolve::run(LPModel& lp,
 
   init_from_lp(lp);
 
-  if (detect_infeasibility("initialization")) {
+  if (deadline_expired()) {
+    stats_.timed_out = true;
     stats_.final_rows = stats_.orig_rows;
     stats_.final_cols = stats_.orig_cols;
     stats_.final_nnz = stats_.orig_nnz;
   }
 
-  for (int round = 0; !stats_.infeasible && round < opts_.max_rounds; ++round) {
+  if (!stats_.timed_out && detect_infeasibility("initialization")) {
+    stats_.final_rows = stats_.orig_rows;
+    stats_.final_cols = stats_.orig_cols;
+    stats_.final_nnz = stats_.orig_nnz;
+  }
+
+  for (int round = 0;
+       !stats_.infeasible && !stats_.timed_out && round < opts_.max_rounds;
+       ++round) {
+    if (deadline_expired()) {
+      stats_.timed_out = true;
+      break;
+    }
     int changes = 0;
 
     auto run_reduction = [&](auto&& reduction, const char* phase) {
+      if (deadline_expired()) {
+        stats_.timed_out = true;
+        return false;
+      }
       changes += reduction();
+      if (deadline_expired()) {
+        stats_.timed_out = true;
+        return false;
+      }
       return !stats_.infeasible && !detect_infeasibility(phase);
     };
 
@@ -1856,10 +1891,11 @@ PresolveStats MILPPresolve::run(LPModel& lp,
     if (changes == 0) break;
   }
 
-  if (!stats_.infeasible) {
+  if (!stats_.infeasible && !stats_.timed_out) {
     rebuild_model(lp, binary_idx, integer_idx);
   } else {
-    // No reduced model is published on an infeasibility certificate.
+    // No reduced model is published on an infeasibility or timeout
+    // certificate; the caller retains the original coordinate system.
     stats_.final_rows = stats_.orig_rows;
     stats_.final_cols = stats_.orig_cols;
     stats_.final_nnz = stats_.orig_nnz;

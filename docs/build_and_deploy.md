@@ -37,6 +37,10 @@ The reference BLAS/LAPACK is intended as a reliable offline fallback. Use
 OpenBLAS, MKL, or another optimized implementation for production workloads
 where numeric-kernel performance matters.
 
+IBM ILOG CPLEX is an optional, separately licensed dependency and is never
+bundled. Its Callable Library adapter is disabled by default and currently
+supports linear MILP only.
+
 ## Prerequisites
 
 All platforms require CMake 3.20 or newer and a C++20 compiler.
@@ -181,6 +185,41 @@ This path is supported by the CMake logic but must be validated on the exact
 Visual Studio, oneAPI, Windows SDK, and architecture combination used for the
 deployment package.
 
+### Optional CPLEX Callable Library
+
+Enable CPLEX explicitly and provide the Studio root when it is outside the
+standard locations. On Apple Silicon with CPLEX Studio 22.1.1:
+
+```bash
+cmake -S . -B build/macos-cplex \
+  -DCMAKE_BUILD_TYPE=Release \
+  -DMIPSOLVERS_USE_CPLEX=ON \
+  -DCPLEX_STUDIO_DIR=/Applications/CPLEX_Studio2211 \
+  -DMIPSOLVERS_USE_GUROBI=OFF
+cmake --build build/macos-cplex --target test_engine_api test_milp_solver
+```
+
+The detector accepts the `arm64_osx` and `x86-64_osx` dynamic and
+`static_pic` layouts. A static macOS link also adds the `CoreFoundation` and
+`IOKit` frameworks required by IBM's shipped example Makefile.
+
+For Visual Studio 2022 x64:
+
+```powershell
+cmake -S . -B build/windows-cplex -G "Visual Studio 17 2022" -A x64 `
+  -DMIPSOLVERS_USE_CPLEX=ON `
+  -DCPLEX_STUDIO_DIR="C:/Program Files/IBM/ILOG/CPLEX_Studio2211" `
+  -DMIPSOLVERS_USE_GUROBI=OFF
+cmake --build build/windows-cplex --config Release `
+  --target test_engine_api test_milp_solver miplib2017_benchmark
+$env:PATH = 'C:\Program Files\IBM\ILOG\CPLEX_Studio2211\cplex\bin\x64_win64;' + $env:PATH
+```
+
+`CPLEX_STUDIO_DIR2211` and `CPLEX_STUDIO_DIR` are also accepted as environment
+variables. Headers, libraries, runtime files and licence data remain external
+to the repository. Each `CplexAdapter` owns one CPLEX environment; do not call
+the same adapter instance concurrently.
+
 ## Precompiled third-party package
 
 Third-party libraries can be compiled once and reused by development builds.
@@ -317,6 +356,8 @@ Release dependency package from being linked into a Debug MSVC build.
 | `MIPSOLVERS_PAPILO_BOOST_DIR` | bundled | Override the local Boost include root for PaPILO |
 | `MIPSOLVERS_PAPILO_ROOT` | empty | Explicit local installed PaPILO prefix when no source tree is used |
 | `MIPSOLVERS_USE_GUROBI` | `ON` | Detect installed Gurobi; absence is nonfatal |
+| `MIPSOLVERS_USE_CPLEX` | `OFF` | Detect an installed CPLEX Callable Library; absence is nonfatal |
+| `CPLEX_STUDIO_DIR` | empty | Explicit CPLEX Studio installation root |
 | `MIPSOLVERS_USE_SYSTEM_FMT` | `OFF` | Opt in to system fmt |
 | `MIPSOLVERS_USE_OPENMP` | `ON` | Enable OpenMP when detected |
 
@@ -343,6 +384,13 @@ preferred LP/QP/MILP backend. Missing installation, missing/expired licence,
 or a failed solve automatically falls back to bundled HiGHS and native
 solvers when `SolveOptions::allow_fallback` is true (the default). Set
 `MIPSOLVERS_USE_GUROBI=OFF` for a package that must not link Gurobi.
+
+CPLEX is likewise never bundled. A CPLEX-enabled executable must be deployed
+with a compatible Callable Library runtime and licence. On macOS, verify that
+`otool -L` resolves `libcplex*.dylib`; on Windows, add the matching
+`cplex/bin/x64_win64` directory to `PATH` and verify with
+`dumpbin /DEPENDENTS`. A CPLEX-enabled installed static `mipsolvers` archive
+still requires the consumer to provide the platform CPLEX link dependency.
 
 ### macOS
 

@@ -59,16 +59,102 @@
   out.effective_environment = solve_environment->active_settings();
   out.stats.solver_name = "NativeBranchAndCut";
   out.stats.status = bc_status::kNotStarted;
+  // The outer B&C solve owns one absolute budget. Every nested phase receives
+  // only its remaining share; Achterberg (2007), Sections 4.1-4.2, and
+  // docs/native_windows_experience_integration_2026-09-13.md.
+  const auto t0 = std::chrono::steady_clock::now();
+  auto bc_elapsed_sec = [&]() -> double {
+    return std::chrono::duration<double>(std::chrono::steady_clock::now() - t0)
+        .count();
+  };
+  auto bc_remaining_sec = [&]() -> double {
+    if (!(opt.time_limit_sec > 0.0) || !std::isfinite(opt.time_limit_sec)) {
+      return std::numeric_limits<double>::infinity();
+    }
+    return opt.time_limit_sec - bc_elapsed_sec();
+  };
+  auto bc_time_limit_expired = [&]() -> bool {
+    return opt.time_limit_sec > 0.0 && bc_elapsed_sec() >= opt.time_limit_sec;
+  };
+  const double bc_post_root_finalize_reserve_sec =
+      opt.time_limit_sec > 0.0 && std::isfinite(opt.time_limit_sec)
+          ? std::min(1.0, std::max(0.05, 0.10 * opt.time_limit_sec))
+          : 0.0;
+  auto bc_optional_root_budget_expired = [&]() -> bool {
+    return opt.time_limit_sec > 0.0 &&
+           bc_remaining_sec() <= bc_post_root_finalize_reserve_sec;
+  };
   const bool requested_highs_root_native_tree_contract =
       opt.highs_root_native_tree_contract;
+  // HiGHS presolve performs a full sparse-model import before its internal
+  // timeout checks become effective. For very large models that import is an
+  // O(rows + cols + nnz) non-cooperative interval, so strict preflight and the
+  // auxiliary VB-side pass share one conservative size gate. The threshold is
+  // fixed by the deadline mismatch cohort; see
+  // docs/native_windows_experience_integration_2026-09-13.md.
+  constexpr int kStrictPreflightMaxRows = 100000;
+  constexpr int kStrictPreflightMaxCols = 100000;
+  constexpr int kStrictPreflightMaxNnz = 1000000;
+  const int strict_preflight_rows =
+      static_cast<int>(prob.linear_part.A.rows()) +
+      static_cast<int>(prob.linear_part.Aeq.rows());
+  const int strict_preflight_cols =
+      static_cast<int>(prob.linear_part.vars.size());
+  const int strict_preflight_nnz =
+      static_cast<int>(prob.linear_part.A.nonZeros()) +
+      static_cast<int>(prob.linear_part.Aeq.nonZeros());
+  const bool strict_preflight_size_supported =
+      strict_preflight_rows <= kStrictPreflightMaxRows &&
+      strict_preflight_cols <= kStrictPreflightMaxCols &&
+      strict_preflight_nnz <= kStrictPreflightMaxNnz;
+  const bool skip_noncooperative_highs_presolve =
+      requested_highs_root_native_tree_contract &&
+      !strict_preflight_size_supported;
+  HiGHSPresolvedModelStats strict_highs_preflight;
+  bool strict_highs_preflight_available = false;
   if (requested_highs_root_native_tree_contract) {
+    if (bc_time_limit_expired()) {
+      opt.highs_root_native_tree_contract = false;
+    } else {
+    if (!strict_preflight_size_supported) {
+      opt.highs_root_native_tree_contract = false;
+      opt.auto_highs_root_pipeline = false;
+      if (bc_env_flag_enabled("MIPSOLVERS_BC_TIMELINE")) {
+        fmt::print(stderr,
+                   "[B&C-TL] phase=strict_preflight_skip reason=size_gate "
+                   "rows={} cols={} nnz={} limits={}/{}/{}\n",
+                   strict_preflight_rows, strict_preflight_cols,
+                   strict_preflight_nnz, kStrictPreflightMaxRows,
+                   kStrictPreflightMaxCols, kStrictPreflightMaxNnz);
+      }
+    } else {
+    const auto strict_preflight_start = std::chrono::steady_clock::now();
+    if (bc_env_flag_enabled("MIPSOLVERS_BC_TIMELINE")) {
+      fmt::print(stderr, "[B&C-TL] phase=strict_preflight_start time_ms={:.0f}\n",
+                 std::chrono::duration<double, std::milli>(
+                     strict_preflight_start - t0).count());
+    }
     // retain_postsolve: the same pass that defines the strict working space
     // must own the postsolve certificate for native tree incumbents. See
     // "Strict Tree-Incumbent Postsolve Ownership" in
     // docs/native_milp_root_quality_restart_prerequisites_2026-08-13.md.
     const auto& preflight = cached_highs_presolve_side_state(
-        prob.linear_part, std::max(0.001, opt.time_limit_sec), nullptr,
+        prob.linear_part, std::max(0.001, bc_remaining_sec()), nullptr,
         /*retain_postsolve=*/true);
+    strict_highs_preflight = preflight;
+    strict_highs_preflight_available = true;
+    const auto strict_preflight_end = std::chrono::steady_clock::now();
+    if (bc_env_flag_enabled("MIPSOLVERS_BC_TIMELINE")) {
+      fmt::print(stderr,
+                 "[B&C-TL] phase=strict_preflight_end time_ms={:.0f} "
+                 "duration_ms={:.0f} status={} presolve_ok={} remaining={:.3f}\n",
+                 std::chrono::duration<double, std::milli>(
+                     strict_preflight_end - t0).count(),
+                 std::chrono::duration<double, std::milli>(
+                     strict_preflight_end - strict_preflight_start).count(),
+                 preflight.highs_status, preflight.presolve_ok ? 1 : 0,
+                 bc_remaining_sec());
+    }
     // The compositional root contract requires a retained affine map into a
     // genuine HiGHS-reduced working model. Identity/not-reduced models stay on
     // the established native pipeline; derivation and p200 measurements are in
@@ -77,6 +163,8 @@
         preflight.presolve_ok && preflight.highs_status == "reduced" &&
         preflight.presolved_lp_available &&
         preflight.side_state_available;
+    }
+    }
   }
   const auto highs_contract = apply_bc_strict_highs_contract(opt);
   const bool requested_vendored_highs_lp =
@@ -185,33 +273,6 @@
     sync_propagation_profile();
     --propagation_profile_scope_depth;
     return out;
-  };
-
-  const auto t0 = std::chrono::steady_clock::now();
-  auto bc_elapsed_sec = [&]() -> double {
-    return std::chrono::duration<double>(std::chrono::steady_clock::now() - t0)
-        .count();
-  };
-  auto bc_remaining_sec = [&]() -> double {
-    if (!(opt.time_limit_sec > 0.0) || !std::isfinite(opt.time_limit_sec)) {
-      return std::numeric_limits<double>::infinity();
-    }
-    return opt.time_limit_sec - bc_elapsed_sec();
-  };
-  auto bc_time_limit_expired = [&]() -> bool {
-    return opt.time_limit_sec > 0.0 && bc_elapsed_sec() >= opt.time_limit_sec;
-  };
-  // Root queue construction and proof bookkeeping have a measurable fixed
-  // cost on large models. Stop optional root work slightly early so a short
-  // solve limit includes that finalization instead of overrunning after the
-  // last heuristic LP finishes.
-  const double bc_post_root_finalize_reserve_sec =
-      opt.time_limit_sec > 0.0 && std::isfinite(opt.time_limit_sec)
-          ? std::min(1.0, std::max(0.05, 0.10 * opt.time_limit_sec))
-          : 0.0;
-  auto bc_optional_root_budget_expired = [&]() -> bool {
-    return opt.time_limit_sec > 0.0 &&
-           bc_remaining_sec() <= bc_post_root_finalize_reserve_sec;
   };
 
   // Reject pathologically poor candidate incumbents. A candidate whose
@@ -337,7 +398,7 @@
           static_cast<HighsInt>(opt.highs_mip_root_simplex_iteration_limit));
     }
     highs.setOptionValue("mip_rel_gap", opt.gap_tol);
-    highs.setOptionValue("time_limit", std::max(0.001, opt.time_limit_sec));
+    highs.setOptionValue("time_limit", std::max(0.001, bc_remaining_sec()));
     highs.setOptionValue("mip_max_nodes",
                          static_cast<HighsInt>(std::max(1, opt.max_nodes)));
     highs.setOptionValue("mip_feasibility_tolerance",
@@ -494,8 +555,10 @@
           opt.verbose || bc_env_flag_enabled("MIPSOLVERS_BC_TIMELINE");
         const auto t_seed0 = std::chrono::steady_clock::now();
         const double seed_time_limit = std::max(
-            0.001, std::min(opt.highs_strict_seed_native_ipm_basis_time_limit_sec,
-                            0.25 * opt.time_limit_sec));
+            0.001,
+            std::min({opt.highs_strict_seed_native_ipm_basis_time_limit_sec,
+                      0.25 * opt.time_limit_sec,
+                      bc_remaining_sec()}));
         if (seed_trace) {
           std::fprintf(stderr,
             "[STRICT_HIGHS] Native IPM crash-basis seed start "
@@ -1469,7 +1532,9 @@
     HighsLpPresolveConfig cfg;
     cfg.enabled = true;
     cfg.nnz_floor = 0;
-    cfg.nnz_cap = 0;
+    cfg.nnz_cap = skip_noncooperative_highs_presolve
+                      ? kStrictPreflightMaxNnz
+                      : 0;
     cfg.min_shrink = 1.0;
     cfg.time_limit_sec = std::max(
         0.001, bc_remaining_sec() - bc_post_root_finalize_reserve_sec);
@@ -1564,11 +1629,14 @@
   // comparison --check keeps objectives exact).
   PresolveOptions native_presolve_options;
   native_presolve_options.do_probing = opt.native_presolve_probing;
+  native_presolve_options.time_limit_sec =
+      std::max(0.001, bc_remaining_sec());
   MILPPresolve native_ps(native_presolve_options);
   bool native_model_reduced = false;
   if (!strict_highs_root_fixed_point && !papilo_model_reduced &&
       !highs_mip_model_reduced &&
-      !bc_env_flag_enabled("MIPSOLVERS_NATIVE_TOPLEVEL_PRESOLVE_OFF")) {
+      !bc_env_flag_enabled("MIPSOLVERS_NATIVE_TOPLEVEL_PRESOLVE_OFF") &&
+      !bc_time_limit_expired()) {
     out.bc_stats.native_presolve_attempted = true;
     std::vector<int> nps_bin, nps_int;
     // run() rewrites the LPModel in place, so presolve on a copy and only adopt
@@ -1594,6 +1662,10 @@
         nps_stats.probing_max_touched_cols;
     out.bc_stats.native_presolve_probing_truncated =
         nps_stats.probing_truncated;
+    if (nps_stats.timed_out) {
+      publish_verified_warm_start_time_limit();
+      return return_with_profile();
+    }
     if (nps_stats.infeasible) {
       out.stats.status = bc_status::kInfeasibleNativePresolve;
       if (opt.verbose) {
@@ -1639,7 +1711,10 @@
       strict_highs_root_fixed_point ||
       bc_env_flag_enabled("MIPSOLVERS_REPLAY_HIGHS_PRESOLVE_VB") ||
       bc_env_flag_enabled("MIPSOLVERS_HIGHS_PRESOLVE_STATS");
-  if (highs_presolve_vb_source_requested) {
+  const bool highs_presolve_vb_source_allowed =
+      highs_presolve_vb_source_requested &&
+      !skip_noncooperative_highs_presolve;
+  if (highs_presolve_vb_source_allowed) {
     bool highs_presolve_cache_hit = false;
     if (highs_mip_ps.attempted) {
       // The retained production pass owns the exact postsolve stack and side
@@ -1648,6 +1723,11 @@
       // system. See the production-presolve derivation in
       // docs/native_milp_root_source_eligibility_2026-08-13.md.
       highs_presolve_side_state = highs_mip_ps.side_state;
+    } else if (strict_highs_preflight_available) {
+      // The retained preflight owns the affine map and postsolve stack. Reuse
+      // it instead of paying for a second pass in the same solve; see the
+      // integration derivation's single-deadline ownership contract.
+      highs_presolve_side_state = strict_highs_preflight;
     } else {
       highs_presolve_side_state =
           cached_highs_presolve_side_state(

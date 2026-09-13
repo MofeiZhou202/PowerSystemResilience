@@ -857,6 +857,12 @@
     persistent_lp_state.set_cut_basis(root.basis_hint);
   }
   [[maybe_unused]] auto t_cuts_done = std::chrono::steady_clock::now();
+  // Diagnostic-only checkpoints for the unified-deadline mismatch audit.
+  // The samples do not steer the algorithm; they expose root setup work that
+  // occurs after the last root LP/cut timestamp. Derivation and validation
+  // contract: docs/native_windows_experience_integration_2026-09-13.md.
+  [[maybe_unused]] auto t_root_setup0 = t_cuts_done;
+  [[maybe_unused]] auto t_root_setup_seed_done = t_cuts_done;
   if (opt.verbose) {
     fmt::print(stderr, "[B&C ROOT] root_lp={:.1f}ms binv={:.1f}ms cuts={:.1f}ms (postcut_overhead={:.1f}ms final_sf={:.1f}ms)\n",
             std::chrono::duration<double, std::milli>(t_root1 - t_root0).count(),
@@ -1172,6 +1178,15 @@
 	  };
 	  (void)seed_root_transformed_cutpool_domain_rows();
 	  (void)synchronize_cutpool_clique_objective_sources("root_cutpool_seed");
+  t_root_setup_seed_done = std::chrono::steady_clock::now();
+  if (opt.verbose && bc_env_flag_enabled("MIPSOLVERS_BC_TIMELINE")) {
+    fmt::print(stderr,
+               "[B&C-TL] phase=root_setup_seed time_ms={:.0f} delta_ms={:.0f}\n",
+               std::chrono::duration<double, std::milli>(
+                   t_root_setup_seed_done - t0).count(),
+               std::chrono::duration<double, std::milli>(
+                   t_root_setup_seed_done - t_root_setup0).count());
+  }
   auto note_root_subsolve = [&](const char* name, double ms, bool success,
                                 bool incumbent_hit = false,
                                 int lp_solves = 0) {
@@ -2145,6 +2160,36 @@
 	    const Eigen::VectorXd root_x_seed_before_resolve = root.x_seed;
 	    const double root_bound_before_resolve = root.bound;
 	    apply_node_bounds(root_lp.vars, root.lb, root.ub);
+	    // This resolve is a nested root phase and must inherit the outer absolute
+	    // deadline. Reusing the original root_solve_opt budget can allocate a
+	    // second full solve interval after the incumbent has already consumed
+	    // the budget (Achterberg (2007), Sections 4.1-4.2; see the deadline
+	    // mismatch derivation in docs/native_windows_experience_integration_2026-09-13.md).
+	    const double incumbent_resolve_remaining_sec =
+	        bc_remaining_sec() - bc_post_root_finalize_reserve_sec;
+	    if (incumbent_resolve_remaining_sec <= 0.001) {
+	      root_lp = root_lp_before_resolve;
+	      root_relax = root_relax_before_resolve;
+	      root.basis_hint = root_basis_before_resolve;
+	      root.x_relax = root_x_before_resolve;
+	      root.x_seed = root_x_seed_before_resolve;
+	      root.bound = root_bound_before_resolve;
+	      root.lp_refresh_needed = true;
+	      record_conformance_propagation(
+	          "root_incumbent_propagation", root_inc_sources,
+	          root_inc_delta.first, root_inc_delta.second, 0,
+	          /*resolved=*/true, /*resolve_ok=*/false, old_bound, root.bound,
+	          root_inc_detail + " root_resolve_skipped_deadline=1");
+	      if (bc_conf_diag_enabled() || trace_bc_timeline) {
+	        fmt::print(stderr,
+	                   "[B&C ROOT-INC-PROP] {} root_resolve_skipped_deadline "
+	                   "remaining={:.3f}s\n",
+	                   reason != nullptr ? reason : "incumbent",
+	                   std::max(0.0, incumbent_resolve_remaining_sec));
+	      }
+	      return;
+	    }
+	    root_solve_opt.time_limit_sec = incumbent_resolve_remaining_sec;
 	    const auto t_inc_resolve0 = std::chrono::steady_clock::now();
 	    LPRelaxationResult inc_relax = solve_lp_relaxation(
 	        root_lp, &root.x_relax, root.basis_hint.get(), root_solve_opt);
@@ -2699,7 +2744,17 @@
     return try_fixed_integer_repair("randomized_round", xr);
   };
 
-  auto t_pp_a = std::chrono::steady_clock::now();
+	  auto t_pp_a = std::chrono::steady_clock::now();
+  if (opt.verbose && bc_env_flag_enabled("MIPSOLVERS_BC_TIMELINE")) {
+    fmt::print(stderr,
+               "[B&C-TL] phase=root_setup_complete time_ms={:.0f} "
+               "seed_to_complete_ms={:.0f} total_setup_ms={:.0f}\n",
+               std::chrono::duration<double, std::milli>(t_pp_a - t0).count(),
+               std::chrono::duration<double, std::milli>(
+                   t_pp_a - t_root_setup_seed_done).count(),
+               std::chrono::duration<double, std::milli>(
+                   t_pp_a - t_root_setup0).count());
+  }
   if (!strict_highs_lp_contract) {
     run_highs_randomized_rounding();
   }

@@ -1580,6 +1580,17 @@
 	      (void)highs_root_owner->setOptionValue(
 	          "hacdcpf_root_oracle_stop_after_root_round",
 	          stop_after_root_round);
+	      if (opt.time_limit_sec > 0.0 &&
+	          std::isfinite(opt.time_limit_sec)) {
+	        // The root owner inherits the outer deadline instead of starting a
+	        // new budget; Achterberg (2007), Sections 4.1-4.2, and
+	        // docs/native_windows_experience_integration_2026-09-13.md.
+	        const double root_owner_budget_sec = std::max(
+	            0.001,
+	            bc_remaining_sec() - bc_post_root_finalize_reserve_sec);
+	        (void)highs_root_owner->setOptionValue("time_limit",
+	                                                root_owner_budget_sec);
+	      }
 	      const HighsStatus run_status = highs_root_owner->run();
 	      root_xpool_authority_lpsolver =
 	          highs_root_owner->hacdcpfRootLpSolver();
@@ -1727,7 +1738,17 @@
 	                   : strict_highs_eval_error);
 	  }
 
+	  // Root source separation scans the full sparse matrix and can generate
+	  // several O(nnz * binary) candidate families before the next deadline
+	  // poll. Keep it out of the short-budget path for the same large-model
+	  // regime excluded from non-cooperative HiGHS presolve; see
+	  // docs/native_windows_experience_integration_2026-09-13.md.
+	  const bool root_source_size_supported =
+	      n <= kStrictPreflightMaxCols &&
+	      static_cast<int>(root_lp.A.nonZeros() + root_lp.Aeq.nonZeros()) <=
+	          kStrictPreflightMaxNnz;
 	  const bool run_highs_style_root_source_loop =
+	      root_source_size_supported &&
 	      !strict_highs_root_fixed_point &&
 	      opt.cuts != CutType::None &&
           root_highs_presolved_side_state_first_class &&
@@ -1738,6 +1759,13 @@
 	                                      declared_branchable_cols.end(), 1)),
 	                                      root_implied_integer_count,
 	                                      root.bound);
+	  if (!root_source_size_supported && trace_root_source_loop) {
+	    fmt::print(stderr,
+	               "[B&C ROOT-SOURCE-SKIP] reason=size_gate cols={} nnz={} "
+	               "limits={}/{}\n",
+	               n, static_cast<int>(root_lp.A.nonZeros() + root_lp.Aeq.nonZeros()),
+	               kStrictPreflightMaxCols, kStrictPreflightMaxNnz);
+	  }
       if (!run_highs_style_root_source_loop && opt.auto_highs_root_pipeline &&
           opt.cuts != CutType::None && strict_highs_root_fixed_point &&
           root_highs_presolved_side_state_first_class &&

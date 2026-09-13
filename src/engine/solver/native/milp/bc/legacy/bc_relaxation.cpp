@@ -1280,6 +1280,15 @@ bool solve_lp_relaxation_with_vendored_highs(const LPModel& lp,
       out.dual_bound = std::numeric_limits<double>::infinity();
       return true;
     }
+    if (model_status == HighsModelStatus::kTimeLimit) {
+      // A partial iterate is not a primal or dual certificate. Preserve the
+      // outer deadline state without publishing it; integration derivation in
+      // docs/native_windows_experience_integration_2026-09-13.md.
+      primal.stats.status = "Time limit";
+      out.primal = std::move(primal);
+      out.dual_bound = std::numeric_limits<double>::infinity();
+      return true;
+    }
     if (!primal.stats.success) {
       if (opt.verbose ||
           bc_env_options().value("MIPSOLVERS_HIGHS_LP_KERNEL_TRACE") != nullptr) {
