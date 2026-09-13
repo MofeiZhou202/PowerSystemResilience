@@ -7,6 +7,7 @@
 #include <cstdlib>
 #include <filesystem>
 #include <fstream>
+#include <iomanip>
 #include <algorithm>
 #include <map>
 #include <limits>
@@ -19,6 +20,7 @@
 #include <vector>
 
 #include "mipsolvers/core/string_utils.hpp"
+#include "mipsolvers/engine/kernel/linear_algebra/linear_solver.hpp"
 #include "mipsolvers/engine/util/problem_validation.hpp"
 
 #ifdef HACDCPF_HAVE_HIGHS_LIB
@@ -424,7 +426,9 @@ std::optional<SolveResult> solve_lp_with_embedded_highs(const LPModel& prob,
                                                         const std::string& solver_name,
                                                         const Eigen::VectorXd* mip_start,
                                                         bool pricing = false,
-                                                        double pricing_time_limit = kHighsInf) {
+                                                        double time_limit = kHighsInf,
+                                                        int threads = 1,
+                                                        std::uint32_t random_seed = 0) {
   const auto t0 = std::chrono::steady_clock::now();
   SolveResult out;
   out.stats.solver_name = solver_name;
@@ -505,14 +509,18 @@ std::optional<SolveResult> solve_lp_with_embedded_highs(const LPModel& prob,
   const bool highs_log_on = std::getenv("MIPSOLVERS_HIGHS_ADAPTER_LOG") != nullptr;
   highs.setOptionValue("output_flag", highs_log_on);
   highs.setOptionValue("log_to_console", highs_log_on);
-  highs.setOptionValue("threads", 1);
+  highs.setOptionValue("threads", threads);
+  highs.setOptionValue("random_seed", static_cast<HighsInt>(random_seed));
+  if (std::isfinite(time_limit) && time_limit > 0.0) {
+    highs.setOptionValue("time_limit", time_limit);
+  }
   // Fixed ordered-LP price selection; docs/solvers.md, deterministic pricing.
   if (pricing && (highs.setOptionValue("solver", "simplex") == HighsStatus::kError ||
       highs.setOptionValue("simplex_strategy", 1) == HighsStatus::kError ||
       highs.setOptionValue("parallel", "off") == HighsStatus::kError ||
-      highs.setOptionValue("random_seed", 0) == HighsStatus::kError ||
+      highs.setOptionValue("random_seed", static_cast<HighsInt>(random_seed)) == HighsStatus::kError ||
       highs.setOptionValue("presolve", "on") == HighsStatus::kError ||
-      highs.setOptionValue("time_limit", pricing_time_limit) == HighsStatus::kError)) {
+      highs.setOptionValue("time_limit", time_limit) == HighsStatus::kError)) {
     out.stats.status = "HiGHS rejected deterministic pricing options";
     return out;
   }
@@ -1836,13 +1844,48 @@ SolveResult HighsAdapter::solve_pricing_lp(const LPModel& prob, double time_limi
 }
 
 SolveResult HighsAdapter::solve_lp(const LPModel& prob) const {
+  return solve_lp_impl(prob, kHighsInf, 1, 0);
+}
+
+std::string precise_decimal(double value) {
+  std::ostringstream out;
+  out << std::setprecision(std::numeric_limits<double>::max_digits10) << value;
+  return out.str();
+}
+
+SolveResult stopped_context_result(const std::string& solver_name,
+                                   const SolveContext& context) {
+  SolveResult out;
+  out.stats.solver_name = solver_name;
+  out.stats.status = context.deadline_expired() ? "Time limit" : "Cancelled";
+  return out;
+}
+
+SolveResult HighsAdapter::solve_lp(const LPModel& prob,
+                                   const SolveContext& context) const {
+  if (context.stop_requested()) {
+    return stopped_context_result(name(), context);
+  }
+  return solve_lp_impl(prob,
+                       context.backend_time_limit_sec(kHighsInf),
+                       context.has_explicit_thread_budget()
+                           ? context.thread_budget()
+                           : 1,
+                       context.random_seed());
+}
+
+SolveResult HighsAdapter::solve_lp_impl(const LPModel& prob,
+                                        double time_limit_sec,
+                                        int threads,
+                                        std::uint32_t random_seed) const {
   const auto t0 = std::chrono::steady_clock::now();
 #ifdef HACDCPF_HAVE_HIGHS_LIB
   // A previous MILP solve can initialize HiGHS's process-global scheduler
   // with a different thread count. Reset it before the LP helper requests its
   // deterministic single-thread configuration.
   Highs::resetGlobalScheduler(/*blocking=*/true);
-  if (auto embedded = solve_lp_with_embedded_highs(prob, false, name(), nullptr)) {
+  if (auto embedded = solve_lp_with_embedded_highs(
+          prob, false, name(), nullptr, false, time_limit_sec, threads, random_seed)) {
     return *embedded;
   }
 #endif
@@ -1873,6 +1916,9 @@ SolveResult HighsAdapter::solve_lp(const LPModel& prob) const {
   {
     std::ofstream ofs(opt_path);
     ofs << "log_file = " << log_path.string() << "\n";
+    if (std::isfinite(time_limit_sec)) ofs << "time_limit = " << time_limit_sec << "\n";
+    ofs << "threads = " << threads << "\n";
+    ofs << "random_seed = " << random_seed << "\n";
   }
 
   const std::string cmd = shell_quote(executable_) + " --model_file " + shell_quote(mps_path) +
@@ -1936,6 +1982,26 @@ SolveResult HighsAdapter::solve_lp(const LPModel& prob) const {
 }
 
 SolveResult HighsAdapter::solve_milp(const MIPModel& prob) const {
+  return solve_milp_impl(prob, kHighsInf, 1, 0);
+}
+
+SolveResult HighsAdapter::solve_milp(const MIPModel& prob,
+                                     const SolveContext& context) const {
+  if (context.stop_requested()) {
+    return stopped_context_result(name(), context);
+  }
+  return solve_milp_impl(prob,
+                         context.backend_time_limit_sec(kHighsInf),
+                         context.has_explicit_thread_budget()
+                             ? context.thread_budget()
+                             : 1,
+                         context.random_seed());
+}
+
+SolveResult HighsAdapter::solve_milp_impl(const MIPModel& prob,
+                                          double time_limit_sec,
+                                          int threads,
+                                          std::uint32_t random_seed) const {
   const auto t0 = std::chrono::steady_clock::now();
   const ValidationReport vr = validate(prob);
   if (!vr.valid) {
@@ -1962,7 +2028,8 @@ SolveResult HighsAdapter::solve_milp(const MIPModel& prob) const {
       prob.initial_solution.size() == static_cast<int>(lp.vars.size())
           ? &prob.initial_solution
           : nullptr;
-  if (auto embedded = solve_lp_with_embedded_highs(lp, true, name(), mip_start)) {
+  if (auto embedded = solve_lp_with_embedded_highs(
+          lp, true, name(), mip_start, false, time_limit_sec, threads, random_seed)) {
     return *embedded;
   }
 #endif
@@ -1990,6 +2057,9 @@ SolveResult HighsAdapter::solve_milp(const MIPModel& prob) const {
     std::ofstream ofs(opt_path);
     ofs << "mip_rel_gap = 1e-4\n";
     ofs << "log_file = " << log_path.string() << "\n";
+    if (std::isfinite(time_limit_sec)) ofs << "time_limit = " << time_limit_sec << "\n";
+    ofs << "threads = " << threads << "\n";
+    ofs << "random_seed = " << random_seed << "\n";
     // Optional: enable HiGHS' built-in MIP timer (per-clock report) so we can
     // compare phase-by-phase against the native B&C diagnostics. Activated
     // by HACDCPF_HIGHS_ANALYSIS=<level> (e.g. 128 for kHighsAnalysisLevelMipTime).
@@ -2114,6 +2184,21 @@ const std::string& ScipAdapter::executable() const {
 }
 
 SolveResult ScipAdapter::solve_milp(const MIPModel& prob) const {
+  return solve_milp_impl(prob, 300.0, 0, 0);
+}
+
+SolveResult ScipAdapter::solve_milp(const MIPModel& prob,
+                                    const SolveContext& context) const {
+  if (context.stop_requested()) return stopped_context_result(name(), context);
+  return solve_milp_impl(
+      prob, std::min(300.0, context.backend_time_limit_sec(300.0)),
+      context.has_explicit_thread_budget() ? context.thread_budget() : 0,
+      context.random_seed());
+}
+
+SolveResult ScipAdapter::solve_milp_impl(const MIPModel& prob,
+                                         double time_limit_sec, int threads,
+                                         std::uint32_t random_seed) const {
   const auto t0 = std::chrono::steady_clock::now();
   SolveResult out;
   out.stats.solver_name = name();
@@ -2167,12 +2252,36 @@ SolveResult ScipAdapter::solve_milp(const MIPModel& prob) const {
         std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
     return out;
   }
-  SCIPincludeDefaultPlugins(scip_env);
-  SCIPsetIntParam(scip_env, "display/verblevel", 0);
-  // 0.1% relative gap matches the native B&C / HiGHS UC tolerance; the time cap
-  // guards against pathological instances while still returning any incumbent.
-  SCIPsetRealParam(scip_env, "limits/gap", 1e-3);
-  SCIPsetRealParam(scip_env, "limits/time", 300.0);
+  auto fail_scip = [&](const char* operation, SCIP_RETCODE rc) {
+    if (scip_env != nullptr) SCIPfree(&scip_env);
+    out.stats.success = false;
+    out.stats.status = std::string(operation) + " failed (rc=" +
+                       std::to_string(static_cast<int>(rc)) + ")";
+    fs::remove(mps_path, ec);
+    out.stats.runtime_sec = std::chrono::duration<double>(
+        std::chrono::steady_clock::now() - t0).count();
+    return out;
+  };
+  if ((scip_rc = SCIPincludeDefaultPlugins(scip_env)) != SCIP_OKAY)
+    return fail_scip("SCIPincludeDefaultPlugins", scip_rc);
+  if ((scip_rc = SCIPsetIntParam(scip_env, "display/verblevel", 0)) != SCIP_OKAY)
+    return fail_scip("SCIPsetIntParam(display/verblevel)", scip_rc);
+  // SCIP 9 parameter reference, limits/time, lp/threads,
+  // randomization/randomseedshift; call-wide allocation is derivation R1.
+  if ((scip_rc = SCIPsetRealParam(scip_env, "limits/gap", 1e-3)) != SCIP_OKAY)
+    return fail_scip("SCIPsetRealParam(limits/gap)", scip_rc);
+  if ((scip_rc = SCIPsetRealParam(scip_env, "limits/time", time_limit_sec)) != SCIP_OKAY)
+    return fail_scip("SCIPsetRealParam(limits/time)", scip_rc);
+  if (threads > 0) {
+    if ((scip_rc = SCIPsetIntParam(scip_env, "lp/threads", threads)) != SCIP_OKAY)
+      return fail_scip("SCIPsetIntParam(lp/threads)", scip_rc);
+    if ((scip_rc = SCIPsetIntParam(scip_env, "parallel/maxnthreads", threads)) != SCIP_OKAY)
+      return fail_scip("SCIPsetIntParam(parallel/maxnthreads)", scip_rc);
+  }
+  if ((scip_rc = SCIPsetIntParam(
+           scip_env, "randomization/randomseedshift",
+           static_cast<int>(random_seed & 0x7fffffffU))) != SCIP_OKAY)
+    return fail_scip("SCIPsetIntParam(randomization/randomseedshift)", scip_rc);
 
   scip_rc = SCIPreadProb(scip_env, mps_path.string().c_str(), nullptr);
   if (scip_rc != SCIP_OKAY) {
@@ -2185,7 +2294,8 @@ SolveResult ScipAdapter::solve_milp(const MIPModel& prob) const {
     return out;
   }
 
-  SCIPsolve(scip_env);
+  if ((scip_rc = SCIPsolve(scip_env)) != SCIP_OKAY)
+    return fail_scip("SCIPsolve", scip_rc);
   const SCIP_STATUS scip_status = SCIPgetStatus(scip_env);
   SCIP_SOL* scip_sol = SCIPgetBestSol(scip_env);
   if (scip_sol != nullptr && SCIPgetNSols(scip_env) > 0) {
@@ -2228,7 +2338,16 @@ SolveResult ScipAdapter::solve_milp(const MIPModel& prob) const {
   return out;
 #else
   // ── External SCIP subprocess ────────────────────────────────────────────────
-  const std::string cmd = shell_quote(executable_) +
+  std::string resource_commands =
+      " -c \"set limits time " + precise_decimal(time_limit_sec) + "\"";
+  if (threads > 0) {
+    resource_commands += " -c \"set lp threads " + std::to_string(threads) +
+                         "\" -c \"set parallel maxnthreads " +
+                         std::to_string(threads) + "\"";
+  }
+  resource_commands += " -c \"set randomization randomseedshift " +
+                       std::to_string(random_seed & 0x7fffffffU) + "\"";
+  const std::string cmd = shell_quote(executable_) + resource_commands +
                           " -c \"set limits gap 0.001\" -c \"read " + shell_quote(mps_path) +
                           "\" -c \"optimize\" -c \"write solution " + shell_quote(sol_path) +
                           "\" -c \"quit\" > " + shell_null_device() + " 2>&1";
@@ -2261,6 +2380,21 @@ SolveResult ScipAdapter::solve_milp(const MIPModel& prob) const {
 }
 
 SolveResult ScipAdapter::solve_minlp(const MINLPModel& prob_in) const {
+  return solve_minlp_impl(prob_in, 30.0, 0, 0, nullptr);
+}
+
+SolveResult ScipAdapter::solve_minlp(const MINLPModel& prob_in,
+                                     const SolveContext& context) const {
+  if (context.stop_requested()) return stopped_context_result(name(), context);
+  return solve_minlp_impl(
+      prob_in, std::min(30.0, context.backend_time_limit_sec(30.0)),
+      context.has_explicit_thread_budget() ? context.thread_budget() : 0,
+      context.random_seed(), &context);
+}
+
+SolveResult ScipAdapter::solve_minlp_impl(
+    const MINLPModel& prob_in, double time_limit_sec, int threads,
+    std::uint32_t random_seed, const SolveContext* context) const {
   const auto t0 = std::chrono::steady_clock::now();
   SolveResult out;
   out.stats.solver_name = name();
@@ -2312,7 +2446,8 @@ SolveResult ScipAdapter::solve_minlp(const MINLPModel& prob_in) const {
     }
 
     IpoptAdapter nlp_fallback;
-    const SolveResult rel = nlp_fallback.solve_nlp(relaxed);
+    const SolveResult rel = context ? nlp_fallback.solve_nlp(relaxed, *context)
+                                    : nlp_fallback.solve_nlp(relaxed);
     if (!rel.stats.success || rel.x.size() != static_cast<int>(relaxed.vars.size())) {
       out.stats.status = "MINLP fallback failed: " + rel.stats.status;
       return;
@@ -2387,8 +2522,17 @@ SolveResult ScipAdapter::solve_minlp(const MINLPModel& prob_in) const {
     return out;
   }
 
-  const std::string cmd = shell_quote(executable_) +
-                          " -c \"set limits time 30\" -c \"read " + pip_path.string() +
+  std::string resource_commands =
+      " -c \"set limits time " + precise_decimal(time_limit_sec) + "\"";
+  if (threads > 0) {
+    resource_commands += " -c \"set lp threads " + std::to_string(threads) +
+                         "\" -c \"set parallel maxnthreads " +
+                         std::to_string(threads) + "\"";
+  }
+  resource_commands += " -c \"set randomization randomseedshift " +
+                       std::to_string(random_seed & 0x7fffffffU) + "\"";
+  const std::string cmd = shell_quote(executable_) + resource_commands +
+                          " -c \"read " + pip_path.string() +
                           "\" -c \"optimize\" -c \"write solution " + sol_path.string() +
                           "\" -c \"quit\" > " + shell_null_device() + " 2>&1";
 
@@ -2405,9 +2549,34 @@ SolveResult ScipAdapter::solve_minlp(const MINLPModel& prob_in) const {
     out.stats.runtime_sec = std::chrono::duration<double>(t1 - t0).count();
     return out;
   }
-  SCIPincludeDefaultPlugins(scip_env);
-  SCIPsetIntParam(scip_env, "display/verblevel", 0);
-  SCIPsetRealParam(scip_env, "limits/time", 30.0);
+  auto fail_scip = [&](const char* operation, SCIP_RETCODE rc) {
+    if (scip_env != nullptr) SCIPfree(&scip_env);
+    out.stats.success = false;
+    out.stats.status = std::string(operation) + " failed (rc=" +
+                       std::to_string(static_cast<int>(rc)) + ")";
+    fs::remove(pip_path, ec);
+    out.stats.runtime_sec = std::chrono::duration<double>(
+        std::chrono::steady_clock::now() - t0).count();
+    return out;
+  };
+  if ((scip_rc = SCIPincludeDefaultPlugins(scip_env)) != SCIP_OKAY)
+    return fail_scip("SCIPincludeDefaultPlugins", scip_rc);
+  if ((scip_rc = SCIPsetIntParam(scip_env, "display/verblevel", 0)) != SCIP_OKAY)
+    return fail_scip("SCIPsetIntParam(display/verblevel)", scip_rc);
+  // SCIP 9 parameter reference, limits/time, lp/threads,
+  // randomization/randomseedshift; call-wide allocation is derivation R1.
+  if ((scip_rc = SCIPsetRealParam(scip_env, "limits/time", time_limit_sec)) != SCIP_OKAY)
+    return fail_scip("SCIPsetRealParam(limits/time)", scip_rc);
+  if (threads > 0) {
+    if ((scip_rc = SCIPsetIntParam(scip_env, "lp/threads", threads)) != SCIP_OKAY)
+      return fail_scip("SCIPsetIntParam(lp/threads)", scip_rc);
+    if ((scip_rc = SCIPsetIntParam(scip_env, "parallel/maxnthreads", threads)) != SCIP_OKAY)
+      return fail_scip("SCIPsetIntParam(parallel/maxnthreads)", scip_rc);
+  }
+  if ((scip_rc = SCIPsetIntParam(
+           scip_env, "randomization/randomseedshift",
+           static_cast<int>(random_seed & 0x7fffffffU))) != SCIP_OKAY)
+    return fail_scip("SCIPsetIntParam(randomization/randomseedshift)", scip_rc);
 
   scip_rc = SCIPreadProb(scip_env, pip_path.string().c_str(), nullptr);
   if (scip_rc != SCIP_OKAY) {
@@ -2419,7 +2588,8 @@ SolveResult ScipAdapter::solve_minlp(const MINLPModel& prob_in) const {
     return out;
   }
 
-  SCIPsolve(scip_env);
+  if ((scip_rc = SCIPsolve(scip_env)) != SCIP_OKAY)
+    return fail_scip("SCIPsolve", scip_rc);
 
   SCIP_STATUS scip_status = SCIPgetStatus(scip_env);
   const bool scip_solved = (scip_status == SCIP_STATUS_OPTIMAL ||
@@ -2500,6 +2670,21 @@ SolveResult ScipAdapter::solve_minlp(const MINLPModel& prob_in) const {
 }
 
 SolveResult IpoptAdapter::solve_nlp(const NLPModel& prob_in) const {
+  return solve_nlp_impl(prob_in, 1e20);
+}
+
+SolveResult IpoptAdapter::solve_nlp(const NLPModel& prob_in,
+                                    const SolveContext& context) const {
+  if (context.stop_requested()) return stopped_context_result(name(), context);
+  const ScopedMklThreadLimit thread_limit(
+      context.has_explicit_thread_budget() ? context.thread_budget() : 0);
+  return solve_nlp_impl(
+      prob_in,
+      context.backend_time_limit_sec(1e20));
+}
+
+SolveResult IpoptAdapter::solve_nlp_impl(const NLPModel& prob_in,
+                                         double time_limit_sec) const {
 #ifdef HACDCPF_HAVE_IPOPT
   const auto t0 = std::chrono::steady_clock::now();
 #endif
@@ -2587,6 +2772,9 @@ SolveResult IpoptAdapter::solve_nlp(const NLPModel& prob_in) const {
   app->Options()->SetStringValue(
       "hessian_approximation",
       prob.lagrangian_hess ? "exact" : "limited-memory");
+  // Ipopt options reference, max_wall_time; shared-deadline model is R1 in
+  // general_solver_performance_program_2026-09-13.md.
+  app->Options()->SetNumericValue("max_wall_time", time_limit_sec);
   // SolveResult exposes the caller's original constraint and variable bounds
   // together with Ipopt's multipliers. Solve that exact contract: Ipopt's
   // default bound relaxation can otherwise leave tiny signed violations whose
@@ -2807,6 +2995,26 @@ bool CplexAdapter::available() const {
 #else
   return false;
 #endif
+}
+
+SolveResult CplexAdapter::solve_milp(const MIPModel& prob,
+                                     const SolveContext& context) const {
+  if (context.stop_requested()) return stopped_context_result(name(), context);
+  CplexOptions effective = options_.value_or(CplexOptions{});
+  if (context.has_deadline()) {
+    effective.time_limit_sec = std::min(
+        effective.time_limit_sec,
+        context.backend_time_limit_sec(effective.time_limit_sec));
+  }
+  if (context.has_explicit_thread_budget()) {
+    effective.threads = context.thread_budget();
+  }
+  effective.random_seed =
+      static_cast<int>(context.random_seed() & 0x7fffffffU);
+  // CPLEX Callable Library time/thread/seed parameters are applied by the
+  // scoped adapter constructor; call-wide allocation is derivation R1.
+  CplexAdapter scoped(effective);
+  return scoped.solve_milp(prob);
 }
 
 SolveResult CplexAdapter::solve_milp(const MIPModel& prob) const {
@@ -3924,6 +4132,22 @@ static int gurobi_scuc_cut_callback(
   return 0;
 }
 
+int apply_gurobi_context(GRBmodel* model, const SolveContext* context) {
+  if (context == nullptr) return 0;
+  GRBenv* model_env = GRBgetenv(model);
+  if (GRBsetdblparam(model_env, "TimeLimit",
+                     context->backend_time_limit_sec(GRB_INFINITY)) != 0) {
+    return 1;
+  }
+  if (context->has_explicit_thread_budget() &&
+      GRBsetintparam(model_env, "Threads", context->thread_budget()) != 0) {
+    return 1;
+  }
+  return GRBsetintparam(
+      model_env, "Seed",
+      static_cast<int>(context->random_seed() % 2000000001U));
+}
+
 }  // anonymous namespace
 
 #endif  // HACDCPF_HAVE_GUROBI
@@ -3949,14 +4173,15 @@ GurobiAdapter::~GurobiAdapter() {
 
 GurobiAdapter::GurobiAdapter(GurobiOptions options) : GurobiAdapter() {
   if (!std::isfinite(options.time_limit_sec) || options.time_limit_sec <= 0 ||
-      !std::isfinite(options.mip_gap) || options.mip_gap < 0 || options.mip_gap > 1 || options.threads < 0 || options.threads > 1024 || options.method < -1 || options.method > 5 || options.crossover < -1 || options.crossover > 4)
+      !std::isfinite(options.mip_gap) || options.mip_gap < 0 || options.mip_gap > 1 || options.threads < 0 || options.threads > 1024 || options.random_seed < 0 || options.random_seed > 2000000000 || options.method < -1 || options.method > 5 || options.crossover < -1 || options.crossover > 4)
     throw std::invalid_argument("Invalid Gurobi time limit, MIP gap, threads or method");
   options_ = options;
 #ifdef HACDCPF_HAVE_GUROBI
   if (env_) {
     auto* env = static_cast<GRBenv*>(env_);
     if (GRBsetdblparam(env,"TimeLimit",options.time_limit_sec) || GRBsetdblparam(env,"MIPGap",options.mip_gap) ||
-        GRBsetintparam(env,"Threads",options.threads) || GRBsetintparam(env,"Method",options.method) || GRBsetintparam(env,"Crossover",options.crossover)) throw std::invalid_argument("Gurobi rejected solve options");
+        GRBsetintparam(env,"Threads",options.threads) || GRBsetintparam(env,"Seed",options.random_seed) ||
+        GRBsetintparam(env,"Method",options.method) || GRBsetintparam(env,"Crossover",options.crossover)) throw std::invalid_argument("Gurobi rejected solve options");
   }
 #endif
 }
@@ -4008,14 +4233,26 @@ SolveResult GurobiAdapter::solve_relaxation_lp(const LPModel& prob, double relat
 }
 
 SolveResult GurobiAdapter::solve_lp(const LPModel& prob) const {
+  return solve_lp_impl(prob, nullptr);
+}
+
+SolveResult GurobiAdapter::solve_lp(const LPModel& prob,
+                                    const SolveContext& context) const {
+  if (context.stop_requested()) return stopped_context_result(name(), context);
+  return solve_lp_impl(prob, &context);
+}
+
+SolveResult GurobiAdapter::solve_lp_impl(
+    const LPModel& prob, const SolveContext* context) const {
   if (options_) {
     MIPModel linear; linear.linear_part = prob;
-    return solve_milp(linear);
+    return solve_milp_impl(linear, context);
   }
   SolveResult out;
   out.stats.solver_name = name();
 #ifndef HACDCPF_HAVE_GUROBI
   (void)prob;  // Gurobi disabled at compile time; parameter is unavailable.
+  (void)context;
 #endif
 #ifdef HACDCPF_HAVE_GUROBI
   const auto t0 = std::chrono::steady_clock::now();
@@ -4027,6 +4264,12 @@ SolveResult GurobiAdapter::solve_lp(const LPModel& prob) const {
   GRBmodel* model = nullptr;
   if (GRBnewmodel(env, &model, "lp", 0, nullptr, nullptr, nullptr, nullptr, nullptr) != 0) {
     out.stats.status = "Gurobi: failed to create model";
+    return out;
+  }
+  // Gurobi Parameter Reference, TimeLimit/Threads/Seed; context model is R1.
+  if (apply_gurobi_context(model, context) != 0) {
+    out.stats.status = "Gurobi rejected SolveContext parameters";
+    GRBfreemodel(model);
     return out;
   }
 
@@ -4141,10 +4384,22 @@ SolveResult GurobiAdapter::solve_lp(const LPModel& prob) const {
 }
 
 SolveResult GurobiAdapter::solve_qp(const QPModel& prob) const {
+  return solve_qp_impl(prob, nullptr);
+}
+
+SolveResult GurobiAdapter::solve_qp(const QPModel& prob,
+                                    const SolveContext& context) const {
+  if (context.stop_requested()) return stopped_context_result(name(), context);
+  return solve_qp_impl(prob, &context);
+}
+
+SolveResult GurobiAdapter::solve_qp_impl(
+    const QPModel& prob, const SolveContext* context) const {
   SolveResult out;
   out.stats.solver_name = name();
 #ifndef HACDCPF_HAVE_GUROBI
   (void)prob;
+  (void)context;
 #endif
 #ifdef HACDCPF_HAVE_GUROBI
   const auto t0 = std::chrono::steady_clock::now();
@@ -4156,6 +4411,11 @@ SolveResult GurobiAdapter::solve_qp(const QPModel& prob) const {
   GRBmodel* model = nullptr;
   if (GRBnewmodel(env, &model, "qp", 0, nullptr, nullptr, nullptr, nullptr, nullptr) != 0) {
     out.stats.status = "Gurobi: failed to create model";
+    return out;
+  }
+  if (apply_gurobi_context(model, context) != 0) {
+    out.stats.status = "Gurobi rejected SolveContext parameters";
+    GRBfreemodel(model);
     return out;
   }
 
@@ -4257,11 +4517,23 @@ thread_local GurobiSolveTiming gurobi_solve_timing;
 GurobiSolveTiming last_gurobi_solve_timing() { return gurobi_solve_timing; }
 
 SolveResult GurobiAdapter::solve_milp(const MIPModel& prob) const {
+  return solve_milp_impl(prob, nullptr);
+}
+
+SolveResult GurobiAdapter::solve_milp(const MIPModel& prob,
+                                      const SolveContext& context) const {
+  if (context.stop_requested()) return stopped_context_result(name(), context);
+  return solve_milp_impl(prob, &context);
+}
+
+SolveResult GurobiAdapter::solve_milp_impl(
+    const MIPModel& prob, const SolveContext* context) const {
   gurobi_solve_timing = {};
   SolveResult out;
   out.stats.solver_name = name();
 #ifndef HACDCPF_HAVE_GUROBI
   (void)prob;
+  (void)context;
 #endif
 #ifdef HACDCPF_HAVE_GUROBI
   const auto t0 = std::chrono::steady_clock::now();
@@ -4273,6 +4545,11 @@ SolveResult GurobiAdapter::solve_milp(const MIPModel& prob) const {
   GRBmodel* model = nullptr;
   if (GRBnewmodel(env, &model, "milp", 0, nullptr, nullptr, nullptr, nullptr, nullptr) != 0) {
     out.stats.status = "Gurobi: failed to create model";
+    return out;
+  }
+  if (apply_gurobi_context(model, context) != 0) {
+    out.stats.status = "Gurobi rejected SolveContext parameters";
+    GRBfreemodel(model);
     return out;
   }
 
@@ -4694,12 +4971,18 @@ SolveResult GurobiAdapter::solve_milp(const MIPModel& prob) const {
       GRBsetdblparam(model_env, "MIPGap", options_->mip_gap);
       GRBsetdblparam(model_env, "MIPGapAbs", 0);
       GRBsetintparam(model_env, "Threads", options_->threads);
+      GRBsetintparam(model_env, "Seed", options_->random_seed);
       // Gurobi 13 Method parameter; dedicated barrier vs concurrent LP policy
       // and fixed performance acceptance protocol are documented in docs/solvers.md.
       GRBsetintparam(model_env, "Method", options_->method);
       GRBsetintparam(model_env, "Crossover", options_->crossover);
       GRBsetdblparam(model_env, "FeasibilityTol", 1e-8);
       GRBsetdblparam(model_env, "IntFeasTol", 1e-8);
+    }
+    if (apply_gurobi_context(model, context) != 0) {
+      out.stats.status = "Gurobi rejected SolveContext parameters";
+      GRBfreemodel(model);
+      return out;
     }
 
     // Output to stderr when MIPSOLVERS_GUROBI_VERBOSE is set.

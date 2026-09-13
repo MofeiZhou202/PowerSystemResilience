@@ -98,6 +98,7 @@ endif()
 # ── Engine source files ───────────────────────────────────────────────────────
 add_library(mipsolvers STATIC
   src/engine/api/solver.cpp
+  src/engine/api/session.cpp
   src/engine/strategy/dispatcher.cpp
   src/engine/strategy/warmstart.cpp
   src/engine/strategy/highs_presolve_side_state.cpp

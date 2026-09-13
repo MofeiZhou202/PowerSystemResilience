@@ -146,4 +146,18 @@ third_party/install/
 
 .github/
 
+# The solver correctness and stable-hardware release gates are source files.
+!.github/
+.github/*
+!.github/workflows/
+.github/workflows/*
+!.github/workflows/ci.yml
+
 tests/data/
+
+# Module manual build artifacts (docs/modules LaTeX)
+docs/modules/**/*.pdf
+docs/modules/**/*.aux
+docs/modules/**/*.log
+docs/modules/**/*.out
+docs/modules/**/*.toc

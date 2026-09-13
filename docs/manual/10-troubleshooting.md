@@ -42,7 +42,7 @@
 
 ### 独立 benchmark 源文件在 MSVC 下编译失败：`__VERSION__` 未定义
 
-- **现象**：全量构建时 `benchmark/native_dual_bfrt_simd_benchmark.cpp`（第 277 行附近）报编译错误，GCC 专有宏 `__VERSION__` 在 MSVC 下不存在。
+- **现象**：全量构建时 `benchmark/native_dual_bfrt_simd_benchmark.cpp`（`main` 中打印编译器版本处）报编译错误，GCC 专有宏 `__VERSION__` 在 MSVC 下不存在。
 - **原因**：该文件用 `__VERSION__` 打印编译器版本，是 GCC/Clang 专有宏。
 - **解决**：已在源码中修复为 `_MSC_FULL_VER` 守护（MSVC 用 `_MSC_FULL_VER` 报告版本，与 `miplib2017_benchmark.cpp`、`netlib_solver_benchmark.cpp` 中既有的守护方式一致），当前无目标过滤的全量构建可通过。若你手上有该文件的本地改动覆盖了修复，请对齐到同一守护模式。
 

@@ -42,6 +42,26 @@ void set_mkl_num_threads(int threads) {
 #endif
 }
 
+ScopedMklThreadLimit::ScopedMklThreadLimit(int threads) {
+#ifdef HACDCPF_HAVE_MKL_PARDISO
+  if (threads > 0) {
+    // oneMKL Developer Reference, mkl_set_num_threads_local: the setting is
+    // local to this calling thread and the return value is the prior limit.
+    // Resource split: general_solver_performance_program_2026-09-13.md, R2.
+    previous_ = mkl_set_num_threads_local(threads);
+    active_ = true;
+  }
+#else
+  (void)threads;
+#endif
+}
+
+ScopedMklThreadLimit::~ScopedMklThreadLimit() {
+#ifdef HACDCPF_HAVE_MKL_PARDISO
+  if (active_) mkl_set_num_threads_local(previous_);
+#endif
+}
+
 namespace {
 
 bool is_empty_square_system(const Eigen::SparseMatrix<double>& a) {

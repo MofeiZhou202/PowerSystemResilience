@@ -753,6 +753,11 @@ LMP 对偶来源：Gurobi / NativeBranchAndCut 可直接提取约束对偶；HiG
 
 顶层容器 `SCUCOutput` 含三部分：`scuc`（MILP 结果）、`sced`（LP 结果，未运行时 `converged=false`）、`lmp`（节点电价结果，未运行时 `converged=false`）。`scuc_output_to_json` 输出的典型形态：
 
+> 注意（2026-09-13 与源码核对）：C++ 层 `SCUCSolveResult` 还填充
+> `segment_dispatch`、`wind_curtailment`、`solar_curtailment`、`section_flows`
+> 四个矩阵，但 `solve_result_to_json` **不序列化它们**——JSON 消费方拿不到，
+> 需要时只能在 C++ API 层读取。
+
 ```json
 {
   "meta": { "solver": "Auto", "num_periods": 24, "num_buses": 39,

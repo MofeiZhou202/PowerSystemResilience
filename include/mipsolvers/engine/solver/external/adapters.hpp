@@ -1,5 +1,6 @@
 #pragma once
 
+#include <cstdint>
 #include <optional>
 #include <string>
 
@@ -14,13 +15,21 @@ class HighsAdapter final : public SolverAdapter {
   std::string name() const override;
   bool supports(ProblemClass cls) const override;
   SolveResult solve_lp(const LPModel& prob) const override;
+  SolveResult solve_lp(const LPModel& prob,
+                       const SolveContext& context) const override;
   SolveResult solve_pricing_lp(const LPModel& prob, double time_limit_sec) const;
   SolveResult solve_milp(const MIPModel& prob) const override;
+  SolveResult solve_milp(const MIPModel& prob,
+                         const SolveContext& context) const override;
 
   bool available() const;
   const std::string& executable() const;
 
  private:
+  SolveResult solve_lp_impl(const LPModel& prob, double time_limit_sec,
+                            int threads, std::uint32_t random_seed) const;
+  SolveResult solve_milp_impl(const MIPModel& prob, double time_limit_sec,
+                              int threads, std::uint32_t random_seed) const;
   std::string executable_;
 };
 
@@ -31,11 +40,15 @@ class IpoptAdapter final : public SolverAdapter {
   std::string name() const override;
   bool supports(ProblemClass cls) const override;
   SolveResult solve_nlp(const NLPModel& prob) const override;
+  SolveResult solve_nlp(const NLPModel& prob,
+                        const SolveContext& context) const override;
 
   bool available() const;
   const std::string& executable() const;
 
  private:
+  SolveResult solve_nlp_impl(const NLPModel& prob,
+                             double time_limit_sec) const;
   std::string executable_;
 };
 
@@ -50,12 +63,21 @@ class ScipAdapter final : public SolverAdapter {
   /// symbolic-objective detour.  This makes SCIP a first-class MILP backend
   /// (e.g. unit commitment) alongside HiGHS and the native branch-and-cut.
   SolveResult solve_milp(const MIPModel& prob) const override;
+  SolveResult solve_milp(const MIPModel& prob,
+                         const SolveContext& context) const override;
   SolveResult solve_minlp(const MINLPModel& prob) const override;
+  SolveResult solve_minlp(const MINLPModel& prob,
+                          const SolveContext& context) const override;
 
   bool available() const;
   const std::string& executable() const;
 
  private:
+  SolveResult solve_milp_impl(const MIPModel& prob, double time_limit_sec,
+                              int threads, std::uint32_t random_seed) const;
+  SolveResult solve_minlp_impl(const MINLPModel& prob, double time_limit_sec,
+                               int threads, std::uint32_t random_seed,
+                               const SolveContext* context) const;
   std::string executable_;
 };
 
@@ -95,6 +117,8 @@ class CplexAdapter final : public SolverAdapter {
   std::string name() const override;
   bool supports(ProblemClass cls) const override;
   SolveResult solve_milp(const MIPModel& prob) const override;
+  SolveResult solve_milp(const MIPModel& prob,
+                         const SolveContext& context) const override;
   bool available() const;
 
  private:
@@ -110,6 +134,7 @@ struct GurobiOptions {
   double time_limit_sec{3600};
   double mip_gap{1e-9};
   int threads{0};
+  int random_seed{0};
   int method{-1};
   int crossover{-1};
 };
@@ -135,14 +160,26 @@ class GurobiAdapter final : public SolverAdapter {
   std::string name() const override;
   bool supports(ProblemClass cls) const override;
   SolveResult solve_lp(const LPModel& prob) const override;
+  SolveResult solve_lp(const LPModel& prob,
+                       const SolveContext& context) const override;
   SolveResult solve_pricing_lp(const LPModel& prob);
   SolveResult solve_relaxation_lp(const LPModel& prob, double relative_tolerance);
   SolveResult solve_qp(const QPModel& prob) const override;
+  SolveResult solve_qp(const QPModel& prob,
+                       const SolveContext& context) const override;
   SolveResult solve_milp(const MIPModel& prob) const override;
+  SolveResult solve_milp(const MIPModel& prob,
+                         const SolveContext& context) const override;
 
   bool available() const;
 
  private:
+  SolveResult solve_lp_impl(const LPModel& prob,
+                            const SolveContext* context) const;
+  SolveResult solve_qp_impl(const QPModel& prob,
+                            const SolveContext* context) const;
+  SolveResult solve_milp_impl(const MIPModel& prob,
+                              const SolveContext* context) const;
   std::optional<GurobiOptions> options_;
 #ifdef HACDCPF_HAVE_GUROBI
   void* env_{nullptr};  // GRBenv* (opaque to avoid header dependency)

@@ -1,0 +1,831 @@
+% source_equivalent_lp_kernel.tex —— engine 模块实现转写章：原生对偶单纯形 LP 内核
+% 本文件为实现转写章（非理论章），遵循 docs/modules/README.md 数学模型规范第 1/2/4 条。
+
+\section{原生对偶单纯形 LP 内核：源码等价转写}
+\label{sec:engine-source-lp-kernel}
+
+\subsection{转写范围与口径}
+\label{subsec:engine-lp-kernel-scope}
+
+本章转写以下工作树文件在 2026-09-13 版本实际执行的计算：
+
+\begin{itemize}
+  \item 内核主循环与状态机：\srcpath{src/engine/kernel/lp\_kernel/native\_dual/solver.cpp}、
+        \srcpath{src/engine/kernel/lp\_kernel/native\_dual/state.cpp}、
+        \srcpath{src/engine/kernel/lp\_kernel/native\_dual/primal.cpp}、
+        \srcpath{src/engine/kernel/lp\_kernel/native\_dual/certificate.cpp}；
+  \item 定价与比率测试：\srcpath{src/engine/kernel/lp\_kernel/native\_dual/pricing.cpp}、
+        \srcpath{src/engine/kernel/lp\_kernel/native\_dual/primal\_pricing.hpp}；
+  \item 基分解封装与数据结构：\srcpath{src/engine/kernel/lp\_kernel/native\_dual/factor.cpp}、
+        \srcpath{src/engine/kernel/lp\_kernel/native\_dual/factor.hpp}、
+        \srcpath{src/engine/kernel/lp\_kernel/native\_dual/model.hpp}、
+        \srcpath{src/engine/kernel/lp\_kernel/native\_dual/partitioned\_row\_matrix.hpp}、
+        \srcpath{src/engine/kernel/lp\_kernel/native\_dual\_core.hpp}；
+  \item legacy 包装层：\srcpath{src/engine/kernel/lp\_kernel/dual\_simplex.cpp}、
+        \srcpath{src/engine/kernel/lp\_kernel/dual\_simplex\_api.cpp}；
+  \item portfolio 选择器：\srcpath{src/engine/solver/native/native\_lp\_selector.cpp}。
+\end{itemize}
+
+每组公式后以``对应源码为 \texttt{文件:函数名}''给出锚点；匿名命名空间内的函数按名称引用，
+lambda 按 \texttt{lambda 名（lambda）} 引用。本章只转写代码执行的赋值、残差、阈值与分支；
+算法动机（Harris 1973、Bland 1977、Maros 2003、Goldfarb--Reid 1977 等）以代码内引用为准，
+不作独立推导。代码中由环境变量开启的替代路径（\texttt{MIPSOLVERS\_DS\_*} 系列）在首次出现处
+就地声明。
+
+\begin{boundarynote}
+本章不覆盖 vendored HiGHS 单纯形桥（\texttt{solve\_standard\_form\_with\_vendored\_highs}，
+仅在选择器中作为后端分支提及）、锥/非线性内核（另章转写），也不覆盖
+\texttt{MIPSOLVERS\_DS\_PROFILE} 纯测量通道——该通道只累积耗时与计数，不改变任何数值结果。
+\end{boundarynote}
+
+% ─────────────────────────────────────────────────────────────────────────────
+\subsection{标准形与包装层}
+\label{subsec:engine-lp-stdform}
+
+\paragraph{标准形构造.}
+\compmeta{StandardFormLP}{include/mipsolvers/engine/kernel/lp\_kernel/dual\_simplex.hpp}
+内核消费的标准形为
+\begin{equation}
+  \max_{x}\; \bar{c}^{\top} x \quad \text{s.t.}\quad A x = b,\quad
+  0 \le x \le u,
+  \label{eq:lpkernel:stdform}
+\end{equation}
+其中 $u$ 允许取 $+\infty$。构造规则（原问题 \texttt{LPModel} 含不等式块 $A x \le b$、
+等式块 $A_{eq} x = b_{eq}$ 与变量界 $[\ell_j, u_j]$）：
+
+\begin{enumerate}
+  \item 下界平移：$\sigma_j = \ell_j$（$\ell_j$ 有限），否则 $\sigma_j = u_j$
+        （$u_j$ 有限），否则 $\sigma_j = 0$；RHS 平移为
+        $\hat b = b - A\sigma$、$\hat b_{eq} = b_{eq} - A_{eq}\sigma$；
+  \item 行定向：rhs 为 $+\infty$ 而 lhs 有限的 G 行保留 lhs 为右端（surplus 形式）；
+        rhs 为负的 L/E 行整体乘 $-1$ 并翻号 sense；双边行
+        $\mathrm{lhs} \le a^{\top}x \le \mathrm{rhs}$ 保留为一行加有界松弛，
+        松弛上界 $\max(0, \mathrm{rhs}-\mathrm{lhs})$，若平移后 rhs 为负则从下端重写；
+  \item 列布局：$[x_{\text{orig}}\;|\; s_{\text{slack}}\;|\; s_{\text{surplus}}\;|\;
+        s_{\text{artificial}}\;|\; q_{\text{negative}}]$；G 行取 surplus（系数 $-1$）
+        加 artificial，E 行取 artificial，L 行取 slack（系数 $+1$）；
+        无有限下界的原变量分裂 $x_j = x_j^{+} - q_j$，$q$ 列系数取负；
+  \item 矩阵装配按 CSC 终序直接写入，系数绝对值 $\le 10^{-15}$ 的项被丢弃
+        （硬编码阈值 \texttt{1e-15}）；
+  \item 目标：最大化形 $\bar c$ 满足 $\bar c_j = -c^{\min}_j$（原变量）、
+        $\bar c_{q_j} = c^{\min}_j$，其余为 $0$；常数项
+        $\mathrm{obj}_{\text{const}} = (c^{\min})^{\top}\sigma$；上界数组
+        $u_j = u_j^{\text{orig}} - \sigma_j$（有限时），ranged 松弛取行宽，
+        其余辅助列 $+\infty$。
+\end{enumerate}
+对应源码为 \srcpath{src/engine/kernel/lp\_kernel/dual\_simplex\_api.cpp:build\_standard\_form\_lp}。
+界哨兵约定：公开模型层的 $\ge 10^{19}$ 有限哨兵（如 $10^{20}$）在边界处统一归一为
+数学 $+\infty$：\texttt{canonical\_upper\_bound} 与 \texttt{has\_finite\_upper\_bound}
+均以 \texttt{kModelBoundSentinel}${}=10^{19}$ / \texttt{kUpperBoundSentinel}${}=10^{19}$ 判定。
+对应源码为 \srcpath{src/engine/kernel/lp\_kernel/native\_dual/state.cpp:canonical\_upper\_bound}、
+\srcpath{src/engine/kernel/lp\_kernel/dual\_simplex\_api.cpp:has\_finite\_upper\_bound}。
+
+\paragraph{Ruiz 均衡.}
+\texttt{solve\_lp\_with\_basis\_impl} 在构造标准形后固定执行 10 轮 Ruiz 均衡：
+每轮先取当前矩阵各行的行内最大模 $r_i$ 与各列的列内最大模 $c_j$，置
+\begin{equation}
+  D_r^{(t)} = \operatorname{diag}\bigl(1/\sqrt{r_i}\bigr),\qquad
+  D_c^{(t)} = \operatorname{diag}\bigl(1/\sqrt{c_j}\bigr),
+\end{equation}
+（模 $\le 10^{-15}$ 的行列因子取 $1$），然后 $A \leftarrow D_r^{(t)} A D_c^{(t)}$、
+$b \leftarrow D_r^{(t)} b$、$\bar c \leftarrow D_c^{(t)} \bar c$、
+$u_j \leftarrow u_j / D^{(t)}_{c,j}$（有限时），并把因子累乘进
+\texttt{row\_scale}/\texttt{col\_scale}。早停：第 $t \ge 2$ 轮起，若
+$\max\{|r_i - 1|, |c_j - 1|\} < 10^{-2}$ 则终止。
+对应源码为 \srcpath{src/engine/kernel/lp\_kernel/dual\_simplex\_api.cpp:ruiz\_scale\_standard\_form}。
+解还原 $x^{\text{orig}} = \sigma + D_c\, x^{\text{std}}$（分裂列再减去 $q$ 分量）。
+对应源码为 \srcpath{src/engine/kernel/lp\_kernel/dual\_simplex.cpp:extract\_solution}。
+
+\paragraph{节点 LP 的增量界更新.}
+B\&C 节点只改少量下界时，\texttt{update\_standard\_form\_bounds\_incremental}
+对下界变化 $d = \sigma_j^{\text{new}} - \sigma_j^{\text{old}}$ 执行
+\begin{equation}
+  b_i \leftarrow b_i - r_i \cdot s_i \cdot A_{ij} \cdot d
+  \quad (i \in \operatorname{supp} A_{\cdot j}),\qquad
+  \mathrm{obj}_{\text{const}} \mathrel{+}= \pm c_j d,\qquad
+  u_j \leftarrow (u_j^{\text{old,orig}} - \sigma_j^{\text{new}})/D_{c,j},
+\end{equation}
+其中 $r_i$ 为行缩放、$s_i$ 为行符号；$|d| < 10^{-15}$ 时跳过数值更新但仍更新界。
+先校验整条变更序列（旧值与缓存状态须在
+$10^{-12}\max(1,|\cdot|)$ 内一致）再修改，任何一个下界失去有限性即返回失败并
+要求整体重建。\texttt{StandardFormBoundTransaction} 在应用前快照受影响列的
+$(\sigma_j, u_j)$、受影响行的 $b_i$ 与目标常数，\texttt{rollback} 逐项恢复。
+对应源码为 \srcpath{src/engine/kernel/lp\_kernel/dual\_simplex\_api.cpp:update\_standard\_form\_bounds\_incremental}、
+\srcpath{src/engine/kernel/lp\_kernel/dual\_simplex\_api.cpp:StandardFormBoundTransaction::apply}、
+\srcpath{src/engine/kernel/lp\_kernel/dual\_simplex\_api.cpp:StandardFormBoundTransaction::rollback}。
+
+\paragraph{原空间发布审计.}
+每个自称成功的求解都要通过原空间残差审计
+\begin{equation}
+  \mathrm{viol} \le \tau \cdot \mathrm{scale},\qquad
+  \mathrm{scale} = \max\bigl(1, \max_i |b_i|, \max_i |b^{eq}_i|\bigr),
+\end{equation}
+其中 viol 聚合行两侧违反、等式残差与变量界违反；$|\mathrm{side}| \ge 10^{19}$
+（\texttt{kSideSentinel}）的行端点既不参与 viol 也不参与 scale
+（防 $10^{20}$ 哨兵放大接受域）。审计失败则把结果改写为
+``Residual audit rejected''。对应源码为
+\srcpath{src/engine/kernel/lp\_kernel/dual\_simplex.cpp:lp\_solution\_residual\_acceptable}、
+\srcpath{src/engine/kernel/lp\_kernel/dual\_simplex.cpp:solve\_lp\_with\_basis}；
+标准形坐标版本为 \srcpath{src/engine/kernel/lp\_kernel/dual\_simplex.cpp:sf\_solution\_residual\_acceptable}
+（行/列量分别除以 $D_r$、乘以 $D_c$ 还原原单位，人工列残余以同一门限检查）。
+
+% ─────────────────────────────────────────────────────────────────────────────
+\subsection{内核状态与不变量}
+\label{subsec:engine-lp-state}
+
+\compmeta{detail::State}{src/engine/kernel/lp\_kernel/native\_dual/model.hpp}
+内核在 \eqref{eq:lpkernel:stdform} 上维护：基位置序 \texttt{basis}（第 $p$ 个基位置
+存放列号）、成员标记 \texttt{basic}、非基侧标 \texttt{move}（$\mathrm{Up}=+1$ 取下界、
+$\mathrm{Down}=-1$ 取上界、$\mathrm{Fixed}=0$）、基变量值 $x_B$、既约成本
+$d$、每行 DSE 权重 $w$、工作成本 $\tilde c$ 及其相对原成本的扰动/平移日志
+（\texttt{SparseCostJournal}：稀疏表项超过约 $n/8$ 时稠密化，
+见 \srcpath{src/engine/kernel/lp\_kernel/native\_dual/model.hpp:SparseCostJournal}）。
+
+每次 minor 迭代保持的不变量由 \texttt{audit} 定义并在各终止点强制重检：
+\begin{align}
+  \|A x - b\|_{\infty} &\le \varepsilon_{\text{feas}}
+      \max\bigl(1, \|b\|_{\infty}\bigr),
+  \label{eq:lpkernel:audit-eq}\\
+  \max_{p} |d_{\texttt{basis}[p]}| &\le \varepsilon_{\text{opt}},\\
+  \ell_{\texttt{basis}[p]} - \varepsilon_{\text{feas}} \le x_{B,p}
+      &\le u_{\texttt{basis}[p]} + \varepsilon_{\text{feas}}
+      &&(\text{要求原始可行时}),\\
+  \operatorname{sign}(m_j)\, d_j &\le \varepsilon_{\text{opt}}
+      &&(\text{要求对偶可行时}),
+\end{align}
+其中 $x$ 由 \texttt{full\_primal} 组装（非基取侧标指定的界，基变量取 $x_B$）。
+\texttt{exact\_residual=true} 时 \eqref{eq:lpkernel:audit-eq} 的残差用
+\texttt{long double} 累加。对应源码为
+\srcpath{src/engine/kernel/lp\_kernel/native\_dual/state.cpp:audit}、
+\srcpath{src/engine/kernel/lp\_kernel/native\_dual/state.cpp:equation\_residual\_vector}、
+\srcpath{src/engine/kernel/lp\_kernel/native\_dual/state.cpp:full\_primal}。
+单点查询：\texttt{primal\_infeasibility} 返回
+$\max(\ell - x_B, 0)$（side $=-1$）或 $\max(x_B - u, 0)$（side $=+1$），
+\texttt{dual\_infeasibility} 返回 $\max(0, \operatorname{sign}(m_j) d_j)$。
+对应源码为 \srcpath{src/engine/kernel/lp\_kernel/native\_dual/state.cpp:primal\_infeasibility}、
+\srcpath{src/engine/kernel/lp\_kernel/native\_dual/state.cpp:dual\_infeasibility}。
+
+\paragraph{行分区矩阵.}
+\texttt{PartitionedRowMatrix} 持有标准形矩阵的 CSR 视图，每行的存储槽被划分为
+非基前缀 $[\texttt{row\_start}, \texttt{nonbasic\_end})$ 与基后缀；每次进/出基以
+$O(\mathrm{nnz}(j))$ 的槽交换增量维护（\texttt{set\_basic}/\texttt{set\_nonbasic}），
+使 dual PRICE 只扫非基列。\texttt{build} 从 CSC 转置一次并记录每个槽的 CSC 源位置
+（\texttt{csc\_pos\_}）以支持 Ruiz 重缩放后的数值重绑定
+（\texttt{rebind\_values}）。\texttt{verify} 为调试期全量一致性审计
+（\texttt{MIPSOLVERS\_DS\_VERIFY\_PARTITION} 开启时才在提交路径调用）。
+对应源码为 \srcpath{src/engine/kernel/lp\_kernel/native\_dual/partitioned\_row\_matrix.hpp:PartitionedRowMatrix}、
+\srcpath{src/engine/kernel/lp\_kernel/native\_dual/state.cpp:resync\_partition\_row}、
+\srcpath{src/engine/kernel/lp\_kernel/native\_dual/state.cpp:apply\_partition\_row\_swap}。
+
+% ─────────────────────────────────────────────────────────────────────────────
+\subsection{因子化契约：BasisFactor}
+\label{subsec:engine-lp-factor}
+
+\compmeta{detail::BasisFactor}{src/engine/kernel/lp\_kernel/native\_dual/factor.hpp}
+\texttt{BasisFactor} 包装 vendored HFactor 后端（详见
+第~\ref{sec:engine-source-ipm-kkt}~章线性代数节），对外提供：
+
+\paragraph{重建与秩修复.}
+\texttt{rebuild} 先校验基集合（基数 $=m$、列号在界内、无重复），然后调用
+\texttt{factorize\_with\_logicals} 做秩揭示分解：先把每行逻辑列映射为隐式单位列
+参与分解，若报告秩亏则把报告奇异位置的基列替换为该行的逻辑列，再在真实列空间
+重建一次。秩亏数累加进 \texttt{rank\_repairs}。若秩亏为零但基被改变则视为失败。
+对应源码为 \srcpath{src/engine/kernel/lp\_kernel/native\_dual/factor.cpp:BasisFactor::rebuild}；
+后端的隐式逻辑列修复为
+\srcpath{src/engine/kernel/linear\_algebra/hfactor\_backend.cpp:HFactorBackend::factorize\_with\_logicals\_impl}。
+
+\paragraph{检查型求解与后向误差门.}
+\texttt{checked\_ftran}/\texttt{checked\_btran} 的接受准则是分量无关的后向误差：
+\begin{equation}
+  \|r\|_{\infty} \;\le\; 256\,\varepsilon \cdot
+  \max\bigl(1,\; \|B\|_{\infty}\|x\|_{\infty} + \|b\|_{\infty}\bigr),
+  \qquad r = b - Bx\ \text{或}\ b - B^{\top} y,
+  \label{eq:lpkernel:backward}
+\end{equation}
+其中 $\|B\|_{\infty}$（转置情形用 $\|B^{\top}\|_{\infty}$）由当前基列绝对值和
+维护，进/出基时增量更新且只增不减（保守上界，INVERT 时精确重算）。
+对应源码为 \srcpath{src/engine/kernel/lp\_kernel/native\_dual/factor.cpp:BasisFactor::backward\_error\_acceptable}、
+\srcpath{src/engine/kernel/lp\_kernel/native\_dual/factor.cpp:BasisFactor::update\_norms\_after\_exchange}；
+常数 \texttt{kBackwardErrorMultiplier}${}=256$ 见
+\srcpath{src/engine/kernel/lp\_kernel/native\_dual/factor.cpp:BasisFactor::solve\_checked} 同文件匿名命名空间。
+不满足 \eqref{eq:lpkernel:backward} 时执行一轮迭代改进：残差用
+\texttt{long double} 重组装，以同一因子解校正量并加到解上，再复检
+\eqref{eq:lpkernel:backward}；改进路径置 \texttt{needs\_rebuild=true}。
+对应源码为 \srcpath{src/engine/kernel/lp\_kernel/native\_dual/factor.cpp:BasisFactor::refine\_checked}。
+
+\paragraph{基更新.}
+生产路径 \texttt{update\_indexed} 不接收显式方向向量：它要求此前恰好各执行过一次
+\texttt{ftran\_for\_update} 与 \texttt{btran\_for\_update}（capture 语义），
+由后端在其捕获的 AQ/EP 工作区上完成 Forrest--Tomlin 更新；捕获序号与因子代数
+不匹配则拒绝（响亮失败）。对应源码为
+\srcpath{src/engine/kernel/lp\_kernel/native\_dual/factor.cpp:BasisFactor::update\_indexed}、
+\srcpath{src/engine/kernel/linear\_algebra/hfactor\_backend.cpp:HFactorBackend::update\_captured}。
+\texttt{needs\_rebuild} 透传后端的 \texttt{refactor\_hint\_}（HFactor 在
+Update 阶段报告的数值不稳定提示）。
+对应源码为 \srcpath{include/mipsolvers/engine/kernel/linear\_algebra/hfactor\_backend.hpp:HFactorBackend}。
+
+\paragraph{跨调用复用.}
+仅当矩阵对象地址不变、基位置序逐元素相同、且持久化的 eta 计数等于当前更新计数时，
+\texttt{reusable\_for} 允许下一次求解复用该因子（revised-simplex 重优化契约）。
+对应源码为 \srcpath{src/engine/kernel/lp\_kernel/native\_dual/factor.cpp:BasisFactor::reusable\_for}。
+
+% ─────────────────────────────────────────────────────────────────────────────
+\subsection{主循环：步进序列与不变量}
+\label{subsec:engine-lp-mainloop}
+
+\texttt{solve} $\to$ \texttt{solve\_impl} $\to$ \texttt{run\_phase}。
+\texttt{run\_phase} 是 major/minor 双层循环：外层每次先做
+\texttt{major\_rebuild}（INVERT + 状态重构，见 \ref{subsec:engine-lp-rebuild} 节），
+内层反复执行 \texttt{minor\_iteration}，直到出基/入基失败、达到限值或触发重建。
+
+\paragraph{minor 迭代：提案—认证—提交.}
+一个 dual minor 迭代按严格三段执行（S3 管线）：
+\begin{enumerate}
+  \item \textbf{提案}（只读状态 + scratch）：\texttt{choose\_leaving} 选出基行；
+        以打包 PRICE 计算主元行 $\hat a^{\top} = \rho^{\top} A$
+        （$\rho = B^{-\top} e_p$ 为 pivotal BTRAN 结果）；
+        \texttt{choose\_entering\_bfrt} 完成 BFRT 比率测试并产出事务
+        \texttt{PivotTransaction}（入基列、翻转集、工作成本平移集、BFRT RHS）；
+        对入基列做 FTRAN 得方向 $d = B^{-1} A_q$；
+  \item \textbf{认证}（不改状态）：主元行有限性；
+        \texttt{certify\_bfrt\_dual\_feasibility} 解析验证更新后既约成本
+        \begin{equation}
+          \tilde d_j = d_j + \Delta_{\text{dual}}\, \hat a_j + s_j,
+          \qquad \Delta_{\text{dual}} = \mathrm{side}\cdot\theta,
+          \label{eq:lpkernel:rc-update}
+        \end{equation}
+        对每个非基、非入基列满足 $\operatorname{sign}(m_j') \tilde d_j \le
+        \varepsilon_{\text{opt}}$（$s_j$ 为本事务的工作成本平移，翻转列的
+        $m_j'$ 已反号）；
+        \texttt{certify\_bfrt\_leaving\_agreement} 验证 BFRT 翻转的 FTRAN 像
+        $\delta = B^{-1} r_{\text{flip}}$ 与出基行变化一致：剩余步
+        \begin{equation}
+          \Delta_{\text{rem}} = x_{B,p} - \delta_p - \ell_{\text{leave}}
+          \quad(\text{或上界}),\qquad
+          \mathrm{side}\cdot\Delta_{\text{rem}} \ge
+          -\, 1024\,\varepsilon \max\bigl(1, |x_{B,p}|, |\delta_p|,
+          |\mathrm{bound}|\bigr),
+          \label{eq:lpkernel:leaving-agreement}
+        \end{equation}
+        容差内的错号噪声截断为 $0$；完全覆盖（\texttt{covered\_violation}
+        $=$ \texttt{violation}）时 $\Delta_{\text{rem}} = 0$；
+  \item \textbf{提交}（原子）：\texttt{update\_indexed} 是唯一可失败的提交步骤；
+        成功后依次发布：翻转列 \texttt{move} 反号、出基列 \texttt{move} 按其
+        可入基侧重置、入基列 \texttt{move=Fixed}、\texttt{basis}$[p]\leftarrow q$、
+        循环签名增量更新、DSE 权重事务写入、\texttt{basic} 位翻转、行分区交换、
+        原始值事务 $x_B \leftarrow x_B - \delta - d\cdot\Delta_{\text{primal}}$
+        （出基位置取 $\mathrm{bound} + \Delta_{\text{primal}}$，
+        $\Delta_{\text{primal}} = \Delta_{\text{rem}} / d_p$）、
+        既约成本按 \eqref{eq:lpkernel:rc-update} 应用（基列、入基列置 $0$）、
+        工作成本平移累加进 \texttt{cost\_shift} 日志并置
+        \texttt{costs\_shifted}。
+\end{enumerate}
+对应源码为 \srcpath{src/engine/kernel/lp\_kernel/native\_dual/solver.cpp:minor\_iteration}、
+\srcpath{src/engine/kernel/lp\_kernel/native\_dual/solver.cpp:certify\_bfrt\_dual\_feasibility}、
+\srcpath{src/engine/kernel/lp\_kernel/native\_dual/solver.cpp:certify\_bfrt\_leaving\_agreement}、
+\srcpath{src/engine/kernel/lp\_kernel/native\_dual/solver.cpp:build\_primal\_transaction}。
+
+\begin{boundarynote}
+提交段的任何认证失败都返回 \texttt{NumericalTrouble} 并触发外层重建；只有
+\texttt{update\_indexed} 失败会留下``因子已更新、状态未发布''的半提交，但此时
+因子仍与旧基一致以外的唯一变化是拒绝交换——HFactor 端拒绝即未修改，因此状态
+保持自洽。该顺序是刻意的：所有可失败步骤要么在提交前（认证），要么是唯一提交点。
+\end{boundarynote}
+
+\paragraph{入基列主元读取.}
+$d_p$ 优先从后端捕获的 AQ 工作区 $O(1)$ 读取（\texttt{captured\_aq\_value}），
+捕获失效时退回打包 FTRAN 像的坐标查询；$d_p$ 非有限或为 $0$ 均为数值失败。
+对应源码为 \srcpath{src/engine/kernel/lp\_kernel/native\_dual/solver.cpp:minor\_iteration}、
+\srcpath{src/engine/kernel/lp\_kernel/native\_dual/factor.cpp:BasisFactor::captured\_aq\_value}。
+
+\paragraph{限值与中切断界.}
+内层循环首检 \texttt{max\_iter} 与墙钟/\texttt{cancel\_flag}；中断时调用
+\texttt{certify\_interrupted\_dual\_bound}：仅 Phase II 下，丢弃全部稳定化增量
+（\texttt{restore\_original\_cost}）、以检查型求解重构状态、按原既约成本重分类
+非基侧标、并以同一 \texttt{audit} 认证对偶可行。成功时
+\texttt{dual\_bound\_certified=true}，\texttt{objective\_const - max\_objective}
+是原 LP 最优值的严格下界（弱对偶）。Phase II 且提供
+\texttt{incumbent\_bound} 时每 \texttt{incumbent\_check\_interval} 次迭代检查
+目标截断 $\mathrm{obj} \ge \mathrm{incumbent} - \varepsilon_{\text{opt}}$。
+对应源码为 \srcpath{src/engine/kernel/lp\_kernel/native\_dual/solver.cpp:certify\_interrupted\_dual\_bound}、
+\srcpath{src/engine/kernel/lp\_kernel/native\_dual/solver.cpp:run\_phase}。
+
+% ─────────────────────────────────────────────────────────────────────────────
+\subsection{出基选择（CHUZR）}
+\label{subsec:engine-lp-chuzr}
+
+\paragraph{DSE 启发式与惰性堆.}
+默认出基按 DSE 价值量
+\begin{equation}
+  \mathrm{merit}(p) = \frac{v_p^{2}}{w_p},
+  \qquad v_p = \texttt{primal\_infeasibility}(p),
+  \label{eq:lpkernel:chuzr-merit}
+\end{equation}
+在惰性最大堆中取最大者（同价值量取较小行号）；堆项带版本号，过期项在弹堆时丢弃。
+\texttt{primal\_changes} 事务行增量刷新堆（\texttt{refresh\_leaving\_heap}），
+堆项数超过 $4m$ 或任何刷新失败则整堆失效、下次全量重建。
+弹出候选若是 taboo 行则记录跳过并继续；所有候选均 taboo 时退回最早到期的
+taboo 行并调用 \texttt{release\_taboo\_row}（aspiration：把定价时钟拨过其任期）。
+对应源码为 \srcpath{src/engine/kernel/lp\_kernel/native\_dual/pricing.cpp:choose\_leaving}、
+\srcpath{src/engine/kernel/lp\_kernel/native\_dual/pricing.cpp:push\_leaving\_row}、
+\srcpath{src/engine/kernel/lp\_kernel/native\_dual/pricing.cpp:refresh\_leaving\_heap}、
+\srcpath{src/engine/kernel/lp\_kernel/native\_dual/state.cpp:release\_taboo\_row}。
+
+\paragraph{权重核验.}
+选出出基行后执行 pivotal BTRAN 得 $\rho$；SteepestEdge 模式下比较缓存权重与
+精确权重 $\|\rho\|_2^2$，若
+\begin{equation}
+  \bigl|\|\rho\|_2^2 - w_p\bigr| > 2048\,\varepsilon \max\bigl(1, \|\rho\|_2^2\bigr)
+\end{equation}
+则以精确值覆写缓存并重推堆项。该权重只是排序启发，不是可行性证书——主元有效性
+由行/列一致性与重构独立保证。对应源码为
+\srcpath{src/engine/kernel/lp\_kernel/native\_dual/pricing.cpp:choose\_leaving}。
+
+\paragraph{认证精确 CHUZR（可选模式）.}
+\texttt{DualEdgeWeightInitialization::CertifiedExact} 下改用
+\texttt{choose\_leaving\_certified\_exact}：先用 Cauchy--Schwarz 与检查型 BTRAN
+接受域构造每行的权重下界
+\begin{equation}
+  \underline{w}_p = \Bigl(\frac{1 - 256\varepsilon}
+      {\|A_{\texttt{basis}[p]}\|_2 + (256\varepsilon + \gamma_m)
+      \|B^{\top}\|_{\infty}}\Bigr)^{2},
+  \qquad \gamma_m = \frac{m\varepsilon}{1 - m\varepsilon},
+\end{equation}
+得价值量上界 $v_p^2/\underline{w}_p$，按降序只对可能夺冠的行做检查型
+\texttt{basis\_inverse\_row\_sparse\_entries}，以精确 $\|\rho\|_2^2$ 重算价值量并
+淘汰（\texttt{certified\_dse\_rejections} 计数）。对应源码为
+\srcpath{src/engine/kernel/lp\_kernel/native\_dual/pricing.cpp:choose\_leaving\_certified\_exact}、
+\srcpath{src/engine/kernel/lp\_kernel/native\_dual/factor.cpp:BasisFactor::basis\_inverse\_row\_sparse\_entries}。
+
+\paragraph{Bland 回退.}
+\texttt{bland\_active} 时 \texttt{choose\_leaving\_bland} 直接取最小列号的
+原始不可行基行，绕过堆与 taboo 表，并使堆失效。对应源码为
+\srcpath{src/engine/kernel/lp\_kernel/native\_dual/pricing.cpp:choose\_leaving\_bland}。
+
+% ─────────────────────────────────────────────────────────────────────────────
+\subsection{入基选择：BFRT 比率测试}
+\label{subsec:engine-lp-bfrt}
+
+\texttt{choose\_entering\_bfrt} 是有界变量翻转比率测试（bound-flipping ratio test）
+的精确断点实现。记出基侧标 $s_r \in \{-1, +1\}$、非基列 $j$ 的方向
+$d^{m}_j = \operatorname{sign}(m_j)$、主元行分量 $\hat a_j$。
+
+\paragraph{候选分类.}
+对每个活跃列（非基且 $m_j \ne 0$）：
+\begin{equation}
+  \alpha_j = s_r \, d^{m}_j \, \hat a_j,\qquad
+  e^{\text{cheap}}_j = C_j \cdot \max_k |\rho_k|,
+  \label{eq:lpkernel:bfrt-alpha}
+\end{equation}
+其中 $C_j$ 是 \texttt{initialize} 预计算的每列主导系数
+\begin{equation}
+  C_j = 2\bigl(\gamma_{k_j} + 256\varepsilon\bigr) \|A_j\|_1,\qquad
+  \gamma_{k} = \frac{k\varepsilon}{1 - k\varepsilon},
+  \label{eq:lpkernel:bfrt-coef}
+\end{equation}
+保证 $C_j \max|\rho| \ge$ 精确点积误差界
+$\texttt{dot\_error\_bound}(j) = \gamma_{k_j} \sum_i |\rho_i A_{ij}| +
+256\varepsilon \sum_i |\rho_i A_{ij}|$。
+对应源码为 \srcpath{src/engine/kernel/lp\_kernel/native\_dual/pricing.cpp:dot\_error\_bound}、
+\srcpath{src/engine/kernel/lp\_kernel/native\_dual/state.cpp:initialize}。
+
+稳定性预滤使用随因子龄期升档的主元门限
+\begin{equation}
+  \tau_{\text{stab}} =
+  \begin{cases}
+    10^{-9}, & \texttt{updates\_since\_rebuild} < 10,\\
+    3\times 10^{-8}, & 10 \le \texttt{updates\_since\_rebuild} < 20,\\
+    10^{-6}, & \texttt{updates\_since\_rebuild} \ge 20.
+  \end{cases}
+  \label{eq:lpkernel:stable-tol}
+\end{equation}
+分类规则（Phase II 快速路径）：$\alpha_j \le 0$ 且
+$\alpha_j + e^{\text{cheap}}_j \le 0$ 的列直接排除；$0 < \alpha_j \le
+\tau_{\text{stab}}$ 的列计入 \texttt{unstable\_pivot\_rejections} 并置
+\texttt{stability\_blocked}；$\alpha_j > \tau_{\text{stab}}$ 且
+$\alpha_j > e^{\text{cheap}}_j$ 的列获廉价认证（默认策略 M）；仅边界情形
+（\texttt{MIPSOLVERS\_DS\_EXACT\_RATIO} 开启的策略 E，或 lean 模式下
+$\alpha_j \le e^{\text{cheap}}_j$ 者）才消费精确 \texttt{dot\_error\_bound}。
+认证列的 margin 与断点为
+\begin{equation}
+  \mathrm{margin}_j = \max\bigl(0, -d^{m}_j d_j\bigr),\qquad
+  \theta_j = \mathrm{margin}_j / \alpha_j
+  \quad(\text{long double}),
+  \label{eq:lpkernel:breakpoint}
+\end{equation}
+$\theta_j$ 非有限即失败。对应源码为
+\srcpath{src/engine/kernel/lp\_kernel/native\_dual/pricing.cpp:choose\_entering\_bfrt}。
+
+\begin{boundarynote}
+Phase I（\texttt{Phase::DualOne}）或未持误差系数时走通用的
+\texttt{BfrtScanEvaluation} 逐列求值路径（同一组判定式，支持
+\texttt{kernel\_threads}$>1$ 且候选数 $\ge 8192$ 时线程池并行；合并按原 PRICE
+顺序进行，所有容量和、计数与插入序与线程数逐位无关）。默认 Phase II 走
+\texttt{classify\_candidate} 分支自由路径；\texttt{MIPSOLVERS\_DS\_SPLIT\_BFRT\_SCAN}
+另启 aarch64 NEON 预滤变体（同一谓词的向量化实现）。
+对应源码为 \srcpath{src/engine/kernel/lp\_kernel/native\_dual/pricing.cpp:prefilter\_active\_phase\_two}。
+\end{boundarynote}
+
+\paragraph{容量行走与翻转组选择.}
+候选按 $\theta$ 升序分组（组内按列号升序；前 8 组用选择算法，之后全排序）；
+从 $\mathrm{covered} = 10^{-12}$（\texttt{kInitialTotalChange}，EXPAND 容差）
+起逐组累加组容量 $\sum \alpha_j \mathrm{range}_j$，首个使
+\begin{equation}
+  \mathrm{covered} + \mathrm{group\_change} \ge v_p
+  \quad\text{或组内含无限 range}
+  \label{eq:lpkernel:capacity-walk}
+\end{equation}
+的组为选中组；此前各组全部有限 range 候选进入翻转集。容量耗尽
+（无选中组）时令事务为空，由调用方走不可行证书分支；Phase I 下还会先做
+投影残差局部证明
+\begin{equation}
+  v_p - \mathrm{covered} \le |\rho^{\top}(b - Ax)| +
+  \Bigl|\sum_p r^{B}_p (x_{B,p} - x^{0}_{\texttt{basis}[p]})\Bigr|
+  + (k + m + 256)\varepsilon\max(\cdot) + E_{\text{stab}},
+\end{equation}
+成立才接受最终恰好覆盖组。对应源码为
+\srcpath{src/engine/kernel/lp\_kernel/native\_dual/pricing.cpp:choose\_entering\_bfrt}。
+
+\paragraph{Harris 两段.}
+第一段在选中组起的候选后缀上放宽比率界：
+\begin{equation}
+  \bar\theta = \min_{j \ge \text{选中组}}\;
+  \frac{\varepsilon_{\text{opt}} - d^{m}_j d_j}{\alpha_j}
+  \quad(\text{long double}).
+  \label{eq:lpkernel:harris1}
+\end{equation}
+第二段在 $\theta_j \le \bar\theta$ 的候选中取最大 $\alpha_j$（同值取小列号）；
+taboo 候选被跳过并计入 \texttt{taboo\_rejections}，全部 taboo 时置
+\texttt{all\_harris\_candidates\_taboo} 由调用方把出基行加入 taboo 表。
+胜出者给出
+\begin{equation}
+  q = \mathrm{col},\quad
+  \texttt{entering.pivot} = s_r\, d^{m}_q\, \alpha_q,\quad
+  \theta = \theta_q .
+  \label{eq:lpkernel:harris2}
+\end{equation}
+对应源码为 \srcpath{src/engine/kernel/lp\_kernel/native\_dual/pricing.cpp:choose\_entering\_bfrt}；
+Bland 模式下改为取最小断点（同值取小列号）、无翻转、忽略 taboo，见同函数内
+\texttt{bland\_active} 分支。
+
+\paragraph{翻转/平移与对偶步区间.}
+终扫把每个``更新后带号既约成本仍超差''的非基列
+$d^{m}_j d_j + \alpha_j \theta > \varepsilon_{\text{opt}}$ 分两路处理：
+有限正 range 者追加进翻转集，单边列（range 无限）追加工作成本平移
+$\Delta c_j = -\bigl(d_j + s_r \theta \hat a_j\bigr)$（更新后既约成本精确归零，
+由终止清理移除）。同一遍扫描累积可接受对偶步区间
+\begin{equation}
+  \theta \in \Bigl[\max_{j\ \text{翻转}}
+  \frac{-\varepsilon_{\text{opt}} - d^{m}_j d_j}{\alpha_j},\;
+  \min_{j\ \text{未翻转}}
+  \frac{\varepsilon_{\text{opt}} - d^{m}_j d_j}{\alpha_j}\Bigr],
+  \qquad \alpha_j > 0,
+  \label{eq:lpkernel:step-interval}
+\end{equation}
+$\theta$ 越界即数值失败（事务自相矛盾）。对应源码为
+\srcpath{src/engine/kernel/lp\_kernel/native\_dual/pricing.cpp:choose\_entering\_bfrt}。
+
+\paragraph{BFRT 右端与覆盖截断.}
+翻转集物化右端
+\begin{equation}
+  r_{\text{flip}} = \sum_{j \in \text{flips}}
+  \operatorname{sign}(m_j^{\text{old}})\, \mathrm{range}_j\, A_{\cdot j},
+  \label{eq:lpkernel:bfrt-rhs}
+\end{equation}
+按行号排序后同行累加。覆盖量
+$\mathrm{cov} = s_r \cdot \rho^{\top} r_{\text{flip}}$ 与存储的 $v_p$ 求和次序不同，
+故接受域带舍入包络
+\begin{equation}
+  -S \le \mathrm{cov} \le v_p + S,\qquad
+  S = (\mathrm{nnz}(r_{\text{flip}}) + 256)\,\varepsilon
+      \max\bigl(1, |\rho^{\top} r_{\text{flip}}|_{\text{abs}}, v_p\bigr),
+  \label{eq:lpkernel:coverage}
+\end{equation}
+然后 \texttt{covered\_violation} $= \min(\max(\mathrm{cov}, 0), v_p)$。
+对应源码为 \srcpath{src/engine/kernel/lp\_kernel/native\_dual/pricing.cpp:choose\_entering\_bfrt}。
+
+% ─────────────────────────────────────────────────────────────────────────────
+\subsection{DSE / Devex 权重更新}
+\label{subsec:engine-lp-dse}
+
+\paragraph{Goldfarb--Reid 递推.}
+SteepestEdge 模式下 \texttt{compute\_dse\_weights} 先以捕获模式的辅助 FTRAN 计算
+$\tau = B^{-1}\rho$（仅定义在入基方向 $d$ 的支撑上，并要求两者支撑等长），
+然后对 $d$ 支撑上每个非出基行
+\begin{equation}
+  w_i' = w_i - 2\,\frac{d_i}{d_p}\,\tau_i
+         + \Bigl(\frac{d_i}{d_p}\Bigr)^{2} w_p,\qquad
+  w_i \leftarrow \max\bigl(w_i',\; R_i\bigr),
+  \label{eq:lpkernel:dse-recurrence}
+\end{equation}
+舍入地板 $R_i = 1024\,\varepsilon \max(1, |w_i|, |2 d_i \tau_i / d_p|,
+|(d_i/d_p)^2 w_p|)$；出基行取 $w_p' = w_p / d_p^{2}$。
+默认在 \texttt{sizeof(long double)==sizeof(double)} 的平台（MSVC、arm64）上
+以双精度按同一次序求值；\texttt{MIPSOLVERS\_DS\_LEAN\_DSE} 启用单term地板
+$1024\varepsilon\max(1, |w_i|)$；\texttt{MIPSOLVERS\_DS\_REPEATED\_DSE\_TERMS}
+强制四term长双精度参考实现。对应源码为
+\srcpath{src/engine/kernel/lp\_kernel/native\_dual/pricing.cpp:compute\_dse\_weights}。
+
+\paragraph{Devex 框架.}
+Devex 模式下精确权重只在参考框架内求和：出基行的
+$\hat w = \max(1, \sum_{j \in \text{ref}} \hat a_j^2)$，若缓存值与其比值超过
+$9$ 倍则重启框架（\texttt{initialize\_devex\_framework}：权重全 $1$、参考集重置为
+当前基、\texttt{devex\_restarts} 计数）；非出基行取
+$w_i \leftarrow \max\bigl(w_i, \hat w_p / d_p^2 \cdot d_i^2\bigr)$，出基行取
+$\max(1, \hat w_p / d_p^2)$。对应源码为
+\srcpath{src/engine/kernel/lp\_kernel/native\_dual/pricing.cpp:compute\_dse\_weights}、
+\srcpath{src/engine/kernel/lp\_kernel/native\_dual/state.cpp:initialize\_devex\_framework}。
+
+\paragraph{初始化.}
+\texttt{initialize\_uncached\_edge\_weights} 按
+\texttt{DualEdgeWeightInitialization} 选项分派：\texttt{FullExact}/
+\texttt{CertifiedExact} 对每行做检查型 BTRAN 求 $\|B^{-\top} e_i\|_2^2$
+（\texttt{compute\_exact\_edge\_weights}，批量，累计精化次数）；
+\texttt{StructuralExact} 先尝试结构精确初始化——当每个基列都是单非零列时
+$w_i = 1/A_{\texttt{basis}[i], i}^{2}$，否则退回 Devex 框架；\texttt{Production}
+默认即 StructuralExact（除非 \texttt{exact\_dse\_initialization}）。
+对应源码为 \srcpath{src/engine/kernel/lp\_kernel/native\_dual/state.cpp:initialize\_uncached\_edge\_weights}、
+\srcpath{src/engine/kernel/lp\_kernel/native\_dual/state.cpp:initialize\_structural\_exact\_edge\_weights}、
+\srcpath{src/engine/kernel/lp\_kernel/native\_dual/factor.cpp:BasisFactor::compute\_exact\_edge\_weights}。
+
+% ─────────────────────────────────────────────────────────────────────────────
+\subsection{major 重建与 INVERT 频率控制}
+\label{subsec:engine-lp-rebuild}
+
+\paragraph{频率.}
+minor 循环在三种情形下跳出到 major 重建：
+(i) 因子报告 \texttt{needs\_rebuild}（HFactor 更新提示，记
+\texttt{RebuildReason::SyntheticWork}）；
+(ii) 更新计数达到
+\begin{equation}
+  L_{\text{update}} = \max\bigl(50,\; \min\bigl(200,\; \max(1, m/4)\bigr)\bigr),
+  \label{eq:lpkernel:update-limit}
+\end{equation}
+（\texttt{RebuildReason::UpdateLimit}）；
+(iii) 出基/入基失败或数值故障，且当前不是全新重建（先重建一次再下结论）。
+\texttt{reinvert\_after\_pivot}（上支 \texttt{update\_indexed} 时因子自报）也
+强制 NumericalTrouble 重建。对应源码为
+\srcpath{src/engine/kernel/lp\_kernel/native\_dual/solver.cpp:run\_phase}。
+
+\paragraph{major\_rebuild 序列.}
+\begin{enumerate}
+  \item 需要时 \texttt{factor->rebuild}（INVERT，含秩修复），\texttt{reconstruct}
+        全量重构（见下）；
+  \item 记录漂移统计：$\|x_B^{\text{old}} - x_B\|_{\infty}$、
+        $\|d^{\text{old}} - d\|_{\infty}$、目标差；
+  \item 非基侧标全量重分类：$d_j > \varepsilon_{\text{opt}}$ 且上界有限
+        $\Rightarrow$ Down，否则 Up（boxed 列借此恢复对偶可行侧，不改工作成本）；
+        随后以精确残差再做一次原始重构（\texttt{exact\_residual=true}）；
+  \item 剩余单边非基的对偶不可行以工作成本平移 $\Delta c_j = -d_j$ 精确归零
+        （记入 \texttt{cost\_shift}，boxed 列到此仍不可行则失败）；
+        有平移时再做一次对偶重构；
+  \item \texttt{audit} 门检；重置更新计数；全量重算循环签名。
+\end{enumerate}
+对应源码为 \srcpath{src/engine/kernel/lp\_kernel/native\_dual/state.cpp:major\_rebuild}。
+
+\paragraph{reconstruct 与缺陷校正.}
+原始重构：$\hat b = b - A_N x_N(s)$（dual Phase I 锚定坐标下改从
+$z = x - x^0$ 组装零右端），$x_B = B^{-1}\hat b$ 走检查型 FTRAN；
+随后按周期（首两次重建或每 \texttt{intermediate\_audit\_interval} 代，或调用方
+要求精确时）做 canonical 缺陷校正：当
+$\|b - Ax\|_{\infty} > \varepsilon_{\text{feas}} \max(1, \|b\|_{\infty})$ 时反复
+$x_B \mathrel{+}= B^{-1} r$，每轮要求无穷范数严格下降，最多
+\texttt{digits}（双精度 53）轮，耗尽即失败。
+对偶重构：$y = B^{-\top} c_B$（检查型 BTRAN），$d = \tilde c - A^{\top} y$，
+基列既约成本置 $0$；目标按
+$\tilde c^{\top}\ell + \sum_{j:\,\mathrm{Down}} \tilde c_j (u_j - \ell_j)
++ \sum_p \tilde c_{\texttt{basis}[p]} (x_{B,p} - \ell_{\texttt{basis}[p]})$ 重组。
+对应源码为 \srcpath{src/engine/kernel/lp\_kernel/native\_dual/state.cpp:reconstruct}、
+\srcpath{src/engine/kernel/lp\_kernel/native\_dual/state.cpp:correct\_canonical\_primal\_residual}、
+\srcpath{src/engine/kernel/lp\_kernel/native\_dual/state.cpp:reconstruct\_objective}
+（同文件静态函数 \texttt{reconstruct\_reduced\_costs}）。
+
+% ─────────────────────────────────────────────────────────────────────────────
+\subsection{退化处理：扰动、taboo 与 Bland}
+\label{subsec:engine-lp-degen}
+
+\paragraph{启动稳定化扰动.}
+\texttt{initialize\_stabilized\_cost} 仅在 Phase II 且初始最大原始不可行
+$> \varepsilon_{\text{feas}}$ 时扰动工作成本。逐列伪随机分数
+$\phi_j \in [0,1)$ 由 splitmix64 型混合（列号加黄金比例常数，三次 xorshift-乘，
+取高 53 位乘 $2^{-53}$）确定：
+\begin{equation}
+  \delta_j =
+  \begin{cases}
+    \operatorname{sign}(c_j)\,(1+\phi_j)(|c_j|+1)\, b_s, & j < n_{\text{orig}},\
+      u_j\ \text{有限},\\[2pt]
+    -(1+\phi_j)(|c_j|+1)\, b_s, & j < n_{\text{orig}},\ u_j = +\infty,\\[2pt]
+    (0.5 - \phi_j)\, 10^{-12}, & j\ \text{为逻辑列},
+  \end{cases}
+  \label{eq:lpkernel:perturb}
+\end{equation}
+$b_s = 5\times 10^{-7} \max(1, \max_j |c_j|)$，且 $\max|c_j| > 100$ 时先取其
+四次方根压缩尺度。扰动符号约定保持对偶可行（向有限侧推）。
+对应源码为 \srcpath{src/engine/kernel/lp\_kernel/native\_dual/state.cpp:initialize\_stabilized\_cost}、
+\srcpath{src/engine/kernel/lp\_kernel/native\_dual/state.cpp:deterministic\_fraction}（匿名命名空间）。
+
+\paragraph{再扰动.}
+Bland 计数器饱和（$\ge 2\max(50, m/2)$）而循环仍在时，
+\texttt{reperturb\_stabilized\_cost} 换种子重播 \eqref{eq:lpkernel:perturb}，
+幅度按 $2^{\min(6, k)}$ 几何升级（$k$ 为第几次再扰动；上限
+$64 \times 5\times10^{-7} = 3.2\times10^{-5}$），次数上限
+\texttt{kMaxReperturbations}${}=12$。对应源码为
+\srcpath{src/engine/kernel/lp\_kernel/native\_dual/state.cpp:reperturb\_stabilized\_cost}、
+\srcpath{src/engine/kernel/lp\_kernel/native\_dual/solver.cpp:run\_phase}。
+
+\paragraph{循环签名与 taboo 表.}
+循环签名是（基指派， 非基侧标）集合的 Zobrist 式双 64 位 XOR 散列：
+基元素令牌 $(p, j)$、侧标令牌 $(j, \operatorname{sign}(m_j))$ 分别与盐
+\texttt{kCycleBasisSaltA/B}、\texttt{kCycleMoveSaltA/B} 混合后 XOR 进两个累加器；
+提交时以 $O(1)$ 令牌增量维护（一次基交换 + 每个翻转列两次 toggle），
+major 重建后全量重同步。\texttt{record\_cycle\_arrival} 检出签名重复即计
+\texttt{cycles\_detected} 并把该次离开的（出基列， 入基列）写入 taboo 变更表；
+taboo 任期 $\min(2m+1, 4096)$，表容量 $65536$（FIFO + 票序压实）。
+对应源码为 \srcpath{src/engine/kernel/lp\_kernel/native\_dual/state.cpp:record\_cycle\_arrival}、
+\srcpath{src/engine/kernel/lp\_kernel/native\_dual/state.cpp:compute\_cycle\_signature}（匿名命名空间）、
+\srcpath{src/engine/kernel/lp\_kernel/native\_dual/state.cpp:add\_taboo\_row}、
+\srcpath{src/engine/kernel/lp\_kernel/native\_dual/model.hpp:State}。
+
+\paragraph{Bland 触发与耗尽.}
+\texttt{record\_cycle\_arrival} 报告精确基重复（或一次 CycleBlocked 空转迭代）
+使停滞计数器加一（上限 $2T$，$T = \max(50, m/2)$），新鲜基使其减一；
+计数 $\ge T$ 时 \texttt{bland\_active=true}，回到 $0$ 时退出。
+Bland 激活、再扰动配额耗尽、计数器封顶三者同时成立时，一次 CycleBlocked
+直接以 \texttt{IterationLimit} 终止并附 \texttt{certify\_interrupted\_dual\_bound}
+的中断界——这是防 livelock 的耗尽守卫（代码注释记录了 blend2 上
+$9.8\times10^{6}$ 次空转对 21 次主元的实测动机）。退化步统计：
+$|\theta| < 10^{-9}$ 计 \texttt{degenerate\_dual\_steps}，
+$|\Delta_{\text{primal}}| < 10^{-9}$ 计 \texttt{degenerate\_primal\_steps}。
+对应源码为 \srcpath{src/engine/kernel/lp\_kernel/native\_dual/solver.cpp:run\_phase}、
+\srcpath{src/engine/kernel/lp\_kernel/native\_dual/solver.cpp:minor\_iteration}。
+
+% ─────────────────────────────────────────────────────────────────────────────
+\subsection{证书生成}
+\label{subsec:engine-lp-cert}
+
+\paragraph{区间 Farkas 证书.}
+给定乘子 $\pi \in \mathbb{R}^m$，\texttt{certificate\_from\_multiplier} 计算
+\begin{equation}
+  \rho = \pi^{\top} b,\qquad
+  \kappa_j = \pi^{\top} A_{\cdot j},\qquad
+  [\underline{A}, \overline{A}] =
+  \sum_{j:\,\kappa_j \ge 0} \kappa_j [\ell_j, u_j] +
+  \sum_{j:\,\kappa_j < 0} \kappa_j [u_j, \ell_j],
+  \label{eq:lpkernel:farkas-interval}
+\end{equation}
+（无界端按 $\pm\infty$ 传播），误差界
+$E = 1024\,\varepsilon \max\bigl(1, |\rho| + \sum_{j:\,u_j\,\text{有限}}
+|\kappa_j u_j|\bigr)$；分离裕量取
+$\max(\underline{A} - \rho,\; \rho - \overline{A})$，较大者在异侧时整体反号。
+证书有效当且仅当乘子与 $\rho$ 有限且 $\mathrm{margin} > E$。
+对应源码为 \srcpath{src/engine/kernel/lp\_kernel/native\_dual/certificate.cpp:certificate\_from\_multiplier}
+（匿名命名空间）。
+
+\paragraph{两个来源.}
+(i) dual Phase II 终端（CHUZC 无入基列）：乘子取已物化的 pivotal 行
+$\rho = B^{-\top} e_p$（factor-resident 行在此稀有出口被打包）；
+(ii) 原始 Phase I 人工目标最优且人工变量和 $> \varepsilon_{\text{feas}}$：
+乘子取 $B^{-\top} c_B$（人工成本向量）的检查型 BTRAN。
+对应源码为 \srcpath{src/engine/kernel/lp\_kernel/native\_dual/certificate.cpp:primal\_infeasibility\_certificate}、
+\srcpath{src/engine/kernel/lp\_kernel/native\_dual/certificate.cpp:phase\_one\_farkas\_certificate}；
+组装到结果为 \srcpath{src/engine/kernel/lp\_kernel/native\_dual/solver.cpp:attach\_farkas\_certificate}
+（匿名命名空间）。包装层把乘子按行符号还原并按 不等式/等式 拆分为
+\texttt{farkas\_ray}/\texttt{farkas\_ray\_eq}。
+对应源码为 \srcpath{src/engine/kernel/lp\_kernel/dual\_simplex.cpp:solve\_lp\_from\_sf\_impl}。
+
+\paragraph{无界射线证书.}
+原始单纯形比率测试找不到有限限制界时，
+\texttt{certify\_primal\_unbounded\_ray} 组装
+\begin{equation}
+  r_q = m_q,\qquad r_{\texttt{basis}[p]} = -m_q\, d_p
+  \ \ (p \in \operatorname{supp} d),
+\end{equation}
+按无穷范数归一，然后三重校验：每个有限界方向的衰退锥分量不越
+$\varepsilon_{\text{feas}}$；$\|A r\|_{\infty} \le \varepsilon_{\text{feas}}
+\max(1, \max_i \sum_j |A_{ij} r_j|)$（绝对活动度用 \texttt{long double} 累加）；
+目标增益 $c^{\top} r > \varepsilon_{\text{opt}} \max(1,
+\|c\|_{\infty} \|r\|_{\infty})$。仅在原成本 Phase II 下出具。
+对应源码为 \srcpath{src/engine/kernel/lp\_kernel/native\_dual/primal.cpp:certify\_primal\_unbounded\_ray}
+（匿名命名空间）。
+
+% ─────────────────────────────────────────────────────────────────────────────
+\subsection{求解编排：冷/热启动与清理}
+\label{subsec:engine-lp-driver}
+
+\paragraph{冷启动.}
+无基提示时：\texttt{build\_logical\_basis} 取每行 slack/artificial 逻辑列；
+\texttt{apply\_certified\_singleton\_crash} 把``列单非零且
+$b_i/a_{ij} \in [0, u_j]$''的原变量列换入基（同行取最小列号），换入后重建因子、
+重构并初始化权重。然后依次尝试：
+\begin{enumerate}
+  \item \texttt{normalize\_nonbasic\_moves}：按 $d_j > \varepsilon_{\text{opt}}$
+        且上界有限分派 Down，否则 Up；单边正既约成本列无法分派时失败；
+        成功则审计并直接进入 dual Phase II；
+  \item \texttt{decide\_cost\_shifted\_dual\_start} 自适应门：需要的平移数
+        （单边非基、$d_j > \varepsilon_{\text{opt}}$、上界无限的列数）
+        低于 $\max(\texttt{dual\_shift\_start\_max\_count},
+        \lceil f \cdot n \rceil)$（$f$ =
+        \texttt{dual\_shift\_start\_max\_fraction}）时，
+        \texttt{initialize\_cost\_shifted\_dual\_start} 把这些列的工作成本
+        平移 $\Delta c_j = -d_j$、既约成本归零并置 Up，直接进 Phase II；
+        环境变量 \texttt{MIPSOLVERS\_DUAL\_SHIFT\_START}=on/off 可强制；
+  \item 否则进入真 dual Phase I：锚点 $x^0$ 由逻辑列独子结构
+        $x^0_{\texttt{logical}[i]} = b_i / a_{i,\texttt{logical}[i]}$ 构造并校验
+        $\|A x^0 - b\|_{\infty} \le \varepsilon_{\text{feas}} \max(1,
+        \|b\|_{\infty})$；在齐次坐标 $z = x - x^0$ 上，无有限上界的可入基列
+        取区间 $[x^0_j, x^0_j + 1]$，boxed/fixed 列固定于 $x^0_j$；Phase I 目标为
+        $\sum_{j\ \text{非基}} (v_j - x^0_j)\, d_j$（\texttt{long double} 累加）。
+        Phase I 结束后 \texttt{transition\_dual\_phase\_one\_to\_two} 要求原始界
+        对偶缺陷计数为零，恢复 Phase II 界并重构；
+        dual Phase I 失败（无法给出原界对偶可行基，或 Phase II 数值失败）时
+        恢复 Phase I 前的基，改走原始人工 Phase I。
+\end{enumerate}
+对应源码为 \srcpath{src/engine/kernel/lp\_kernel/native\_dual/solver.cpp:solve\_impl}、
+\srcpath{src/engine/kernel/lp\_kernel/native\_dual/state.cpp:decide\_cost\_shifted\_dual\_start}、
+\srcpath{src/engine/kernel/lp\_kernel/native\_dual/state.cpp:initialize\_cost\_shifted\_dual\_start}、
+\srcpath{src/engine/kernel/lp\_kernel/native\_dual/state.cpp:initialize\_dual\_phase\_one}、
+\srcpath{src/engine/kernel/lp\_kernel/native\_dual/state.cpp:dual\_phase\_one\_objective}、
+\srcpath{src/engine/kernel/lp\_kernel/native\_dual/state.cpp:transition\_dual\_phase\_one\_to\_two}、
+\srcpath{src/engine/kernel/lp\_kernel/native\_dual/state.cpp:make\_dual\_phase\_one\_anchor}。
+
+\paragraph{热启动.}
+有基提示时：因子复用判定见 \ref{subsec:engine-lp-factor} 节；
+\texttt{normalize\_nonbasic\_moves} 失败则尝试平移启动；
+\texttt{allow\_phase\_one=false}（\texttt{solve\_phase2} 入口）直接以
+\texttt{DualInfeasibleStart} 返回；否则视
+\texttt{allow\_warm\_primal\_phase\_one} 走人工 Phase I 或报错。
+对应源码为 \srcpath{src/engine/kernel/lp\_kernel/native\_dual/solver.cpp:solve\_impl}、
+\srcpath{src/engine/kernel/lp\_kernel/native\_dual/solver.cpp:solve\_phase2}。
+
+\paragraph{原始 Phase I 回退与 primal 内核.}
+\texttt{run\_primal\_phase}（\srcpath{src/engine/kernel/lp\_kernel/native\_dual/primal.cpp:run\_primal\_phase}）
+是同一个因子上的原始单纯形：入基取堆顶（度量
+$\mathrm{gain}^2 / w$ 或纯 gain，\texttt{MIPSOLVERS\_PRIMAL\_DEVEX}
+控制 Devex/PSE/shadow/off），比率测试 \texttt{choose\_leaving\_harris} 用
+放宽步 $\max(0, \mathrm{dist} + \varepsilon_{\text{feas}})/|\mathrm{change}|$
+加最小主元 $\sqrt{\varepsilon}\max(1, \|d\|_{\infty})$ 过滤，第二段取满足
+放宽界的最大主元；有限 $q$ 范围小于步长时做界翻转不换基；
+提交前以 \texttt{primal\_pivot\_identity\_acceptable} 校验行/列主元一致性
+$|\alpha_{\text{col}} - \alpha_{\text{row}}| \le \sqrt{\varepsilon}
+\max(|\alpha_{\text{col}}|, |\alpha_{\text{row}}|)$。
+原始 INVERT 间隔硬编码 \texttt{kPrimalRebuildInterval}${}=256$；
+Devex 坏权重比 $>3$ 累计 $>3$ 次重启框架；PSE 模式限 $n \le 50000$。
+任何新鲜失败且在更新链中段（\texttt{updates\_since\_rebuild}$>0$）都先
+\texttt{rebuild\_primal\_state} 再重试；\texttt{allow\_strong\_rebuild}
+（仅原成本清理调用）允许把 Markowitz 主元阈值升到 $0.5$
+（\texttt{strengthen\_pivot\_threshold}）后再重建一次。
+对应源码为 \srcpath{src/engine/kernel/lp\_kernel/native\_dual/primal.cpp:run\_primal\_phase}、
+\srcpath{src/engine/kernel/lp\_kernel/native\_dual/primal.cpp:choose\_leaving\_harris}（匿名命名空间）、
+\srcpath{src/engine/kernel/lp\_kernel/native\_dual/primal.cpp:rebuild\_primal\_state}（匿名命名空间）、
+\srcpath{src/engine/kernel/lp\_kernel/native\_dual/primal\_pricing.hpp:primal\_pivot\_identity\_acceptable}、
+\srcpath{src/engine/kernel/lp\_kernel/native\_dual/primal\_pricing.hpp:prepare\_primal\_devex\_update}、
+\srcpath{src/engine/kernel/lp\_kernel/native\_dual/primal\_pricing.hpp:prepare\_primal\_pse\_update}。
+
+\paragraph{终止清理.}
+Phase II 终端（新鲜重建后 CHUZR 无出基行）时，若工作成本被扰动/平移过
+（\texttt{working\_cost\_is\_original} 为假），先
+\texttt{restore\_original\_cost} 丢弃全部稳定化增量并重构；清理审计不过但
+原始可行性仍在时，以 \texttt{run\_primal\_phase(allow\_strong\_rebuild=true)}
+做无扰动原始清理；最终 \texttt{audit(require\_primal, require\_dual,
+exact\_residual=true)} 通过才发布 \texttt{Optimal}。
+对应源码为 \srcpath{src/engine/kernel/lp\_kernel/native\_dual/solver.cpp:run\_phase}、
+\srcpath{src/engine/kernel/lp\_kernel/native\_dual/state.cpp:restore\_original\_cost}、
+\srcpath{src/engine/kernel/lp\_kernel/native\_dual/state.cpp:working\_cost\_is\_original}。
+
+% ─────────────────────────────────────────────────────────────────────────────
+\subsection{portfolio 竞速与 abort 语义}
+\label{subsec:engine-lp-portfolio}
+
+\texttt{NativeAutoLPAdapter::solve\_with\_context} 把单次 LP 调用组织为
+双工作者竞速：
+\begin{itemize}
+  \item \textbf{工作者}：线程 A 跑原生对偶单纯形
+        （\texttt{NativeDualSimplexLPAdapter}：\texttt{FullExact} DSE 初始化 +
+        HiGHS presolve 开启），线程 B 跑直连 IPM
+        （\texttt{NativeIPMLPAdapter}，\texttt{presolve=false}）；
+        两者共享同一个 \texttt{PortfolioSlot} 的 \texttt{cancel} 原子标志与
+        调用级截止时刻；
+  \item \textbf{胜出规则}（\texttt{publish}）：锁内 \texttt{finished} 加一；
+        尚无胜者且（本结果 \texttt{success} 或已两人完成）时，本结果成为胜者，
+        并置 \texttt{cancel}——即``首个成功即胜；双败时后到者胜''；
+  \item \textbf{abort 语义}：取消是协作式的——\texttt{cancel} 经
+        \texttt{SimplexOptions::cancel\_flag}/\texttt{IPMLPOptions::cancel\_flag}
+        传入，内核在迭代与阶段边界轮询；进行中的库分解调用必须跑完。
+        主线程在条件变量上等到胜者或截止；超时/取消时返回
+        \texttt{Time limit}/\texttt{Cancelled}，置 \texttt{cancel} 后
+        \textbf{总是 join 两个工作者再返回}（两者借用本调用的模型与截止期）；
+  \item \textbf{降级}：\texttt{PortfolioMode::Throughput} 或线程预算为 1 时
+        不竞速，直接跑 IPM；线程创建抛 \texttt{std::system\_error} 时置取消、
+        join 已建线程、回退直连 IPM；截止期耗尽按 \texttt{Time limit} 短路。
+\end{itemize}
+对应源码为 \srcpath{src/engine/solver/native/native\_lp\_selector.cpp:NativeAutoLPAdapter::solve\_with\_context}、
+\srcpath{src/engine/solver/native/native\_lp\_selector.cpp:publish}（匿名命名空间）、
+\srcpath{src/engine/solver/native/native\_lp\_selector.cpp:NativeDualSimplexLPAdapter::solve\_lp}。
+
+\begin{boundarynote}
+\texttt{NativeDualSimplexLPAdapter::solve\_lp} 在成功时把公开目标改写为用户
+方向的 $c^{\top}x$（内部统计里的 \texttt{objective} 是最小化方向
+$\mathrm{obj}_{\text{const}} - \max$）。竞速两分支的 \texttt{time\_limit}
+都是同一截止期的剩余量；环境变量 \texttt{MIPSOLVERS\_LP\_SELECTOR\_DEBUG}
+只打印胜者名，不影响选择。
+\end{boundarynote}

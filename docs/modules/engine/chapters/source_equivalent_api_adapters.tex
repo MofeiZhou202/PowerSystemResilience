@@ -1,0 +1,502 @@
+% source_equivalent_api_adapters.tex —— engine 实现转写：求解器门面与适配器调度
+% 本文件为实现转写章，遵循 docs/modules/README.md 的数学模型规范。
+% 所有规则只转写当前源码实际执行的逻辑；锚点禁止行号。
+
+\section{求解器门面、适配器注册与分派}\label{sec:impl-api-adapters}
+
+\subsection{转写范围与口径}\label{subsec:api-scope}
+
+本章转写引擎对外 API 与适配器层的当前实现，核验日期 2026-09-13。覆盖文件：
+\begin{itemize}
+  \item 门面 \srcpath{src/engine/api/solver.cpp}（\texttt{SolverEngine} 全部成员）；
+  \item 适配器基类与注册表
+        \srcpath{src/engine/solver/solver\_adapter.cpp}、
+        \srcpath{src/engine/solver/adapter\_registry.cpp} 及对应头文件
+        \srcpath{include/mipsolvers/engine/solver/solver\_adapter.hpp}、
+        \srcpath{include/mipsolvers/engine/api/result.hpp}、
+        \srcpath{include/mipsolvers/engine/api/options.hpp}、
+        \srcpath{include/mipsolvers/engine/solve\_context.hpp}；
+  \item 分派器 \srcpath{src/engine/strategy/dispatcher.cpp}；
+  \item 原生适配器
+        \srcpath{src/engine/solver/native/native\_adapters.cpp}（LP 选择器
+        \texttt{native\_lp\_selector.cpp}、PDLP \texttt{lp/pdlp\_solver.cpp}、IPM 系
+        适配器仅述其注册名，实现转写见本手册 LP/IPM 章节）；
+  \item 外部适配器 \srcpath{src/engine/solver/external/adapters.cpp}
+        （HiGHS/Ipopt/SCIP/Gurobi/CPLEX）；
+  \item 策略辅助件 \srcpath{src/engine/strategy/presolve\_manager.cpp}、
+        \srcpath{src/engine/strategy/postsolve\_manager.cpp}、
+        \srcpath{src/engine/strategy/warmstart.cpp}；
+  \item 输入校验 \srcpath{src/engine/util/problem\_validation.cpp}。
+\end{itemize}
+
+\begin{boundarynote}
+口径约定：（i）本章只描述``数据如何流动与何时回退''，各求解器内部的算法转写
+属于各自章节（MILP B\&C 见 \ref{sec:impl-milpbc} 章）。（ii）与用户手册
+\texttt{docs/manual/05-solvers-engines.md} \S 5.4 的两处行文差异在
+\ref{subsec:api-docdiff} 集中声明；以代码为准。（iii）匿名命名空间内的自由函数
+以 \texttt{文件名:函数名} 锚定（不出现 \texttt{::} 前缀），与仓库锚点约定一致。
+\end{boundarynote}
+
+\subsection{门面 \texttt{SolverEngine}：规范化、校验与结果映射}\label{subsec:api-facade}
+
+公共求解入口的事务链固定为四步：
+\begin{enumerate}
+  \item \textbf{矩阵规范化}：对按值传入的 \texttt{ProblemVariant} 原地补齐零行
+        矩阵的列数——\texttt{A}/\texttt{Aeq} 行数为 0 但列数不等于 $n$ 时
+        resize 成 $0\times n$；QP 的空 Hessian resize 成 $n\times n$；MILP 作用于
+        \texttt{linear\_part}。原因是 Eigen 稀疏矩阵默认构造为 $0\times0$，逐列
+        迭代的适配器在 \texttt{cols()<n} 时会越界。
+        对应源码为
+        \srcpath{src/engine/api/solver.cpp:normalize\_lp\_matrices}、
+        \srcpath{src/engine/api/solver.cpp:normalize\_problem}；
+  \item \textbf{校验}：对规范化后的模型调用 \texttt{validate}（按 variant 分派到
+        各模型重载），任一错误即以 \texttt{std::invalid\_argument} 抛出，
+        消息为 \texttt{problem\_class\_name} 加分号连接的全部错误。
+        对应源码为 \srcpath{src/engine/api/solver.cpp:throw\_if\_invalid}、
+        \srcpath{src/engine/util/problem\_validation.cpp:validate}；
+  \item \textbf{分派}：构造 \texttt{SolveContext} 并调用
+        \texttt{StrategyDispatcher::solve}（见 \ref{subsec:api-dispatch}）；
+  \item \textbf{结果映射}：\texttt{SolveResult}$\to$\texttt{api::Result} 为逐字段
+        拷贝/移动，无任何重算；\texttt{x}、三组对偶向量与全部统计字段原样透传。
+        对应源码为 \srcpath{src/engine/api/solver.cpp:to\_api\_result}、
+        \srcpath{src/engine/api/solver.cpp:SolverEngine::solve\_normalized}。
+\end{enumerate}
+类型化便捷入口（\texttt{solve\_lp}/\texttt{solve\_milp}/\texttt{solve\_qp}/%
+\texttt{solve\_conic} 等）只做对应的矩阵规范化后转入统一 \texttt{solve}。
+对应源码为 \srcpath{src/engine/api/solver.cpp:SolverEngine::solve\_lp}、
+\srcpath{src/engine/api/solver.cpp:SolverEngine::solve}。
+
+输入校验的实现规则（\texttt{problem\_validation.cpp}）：通用变量元数据要求
+界有限且 $l_j\le u_j+10^{-12}$（\texttt{kBoundEps}，硬编码）；binary 变量界超出
+$[0,1]$ 只产生 warning。LP 要求 $c$ 非空、$\texttt{A.cols}=n$、
+\texttt{row\_lhs} 为空或长度等于 \texttt{A.rows} 且每个有限两端行满足
+$\mathrm{lhs}_i\le b_i+10^{-12}$；MILP/MINLP 额外要求整数/二进制指标集在界内、
+无重复且两集合不交（排序后相邻判等）；Conic 要求
+$\texttt{G.rows}=\texttt{h.size}=\texttt{dims.total()}$ 且锥维数非负。
+对应源码为
+\srcpath{src/engine/util/problem\_validation.cpp:validate\_variable\_meta}、
+\srcpath{src/engine/util/problem\_validation.cpp:validate}。
+
+\subsection{资源契约 \texttt{SolveContext}}\label{subsec:api-context}
+
+\texttt{SolveContext} 在构造时固化一次调用级资源合约：时钟从构造点开始；
+\texttt{time\_limit\_sec}$>0$ 时记录绝对 deadline。构造期即拒绝非法输入
+（时限非有限或为负、线程数为负均抛 \texttt{std::invalid\_argument}）。
+\begin{equation}
+  \texttt{remaining\_time\_sec}=
+  \max\bigl(0,\ \mathrm{deadline}-\mathrm{now}()\bigr),\qquad
+  \texttt{stop\_requested}=
+  \texttt{stop\_token.stop\_requested()}\ \lor\ \texttt{deadline\_expired()}.
+\end{equation}
+设计意图（头文件注释）：绝对 deadline 使 $N$ 次回退共享同一份时限，而不是各
+拿一份相对时限。对应源码为
+\srcpath{include/mipsolvers/engine/solve\_context.hpp:SolveContext}；
+其 R1 条款出处为
+\srcpath{docs/archive/general\_solver\_performance\_program\_2026-09-13.md}。
+
+\subsection{适配器接口与注册表}\label{subsec:api-registry}
+
+\texttt{SolverAdapter} 对每个问题类提供两个虚函数层：无 context 的
+\texttt{solve\_*} 与带 \texttt{SolveContext} 的重载；基类默认实现全部返回
+\texttt{unsupported\_result}（\texttt{success=false}、状态为
+``Unsupported problem class for adapter <name>: <CLS>''），带 context 的默认实现
+委托给无 context 版本（即不感知 deadline 的适配器仍能编译入注册表）。
+对应源码为
+\srcpath{src/engine/solver/solver\_adapter.cpp:SolverAdapter::unsupported\_result}、
+\srcpath{src/engine/solver/solver\_adapter.cpp:SolverAdapter::solve\_lp}。
+
+\texttt{AdapterRegistry} 是一个保序向量：\texttt{register\_adapter} 只追加
+（空指针被静默忽略——显式的宽容路径）；\texttt{adapters\_for(cls)} 按注册序返回
+全部 \texttt{supports(cls)} 为真的适配器；\texttt{find\_by\_name} 返回首个同名
+适配器。对应源码为
+\srcpath{src/engine/solver/adapter\_registry.cpp:AdapterRegistry::register\_adapter}、
+\srcpath{src/engine/solver/adapter\_registry.cpp:AdapterRegistry::adapters\_for}、
+\srcpath{src/engine/solver/adapter\_registry.cpp:AdapterRegistry::find\_by\_name}。
+
+\paragraph{默认注册顺序。}
+\texttt{register\_default\_adapters} 通过 \texttt{register\_if\_missing}（按名
+幂等，重名跳过）依次注册：
+
+\begin{center}
+\small
+\begin{tabular}{ll}
+\toprule
+顺序 & 适配器（注册名）\\
+\midrule
+1--12 & \texttt{NativeLinear}, \texttt{NativeNewton}, \texttt{NativeAutoLP},
+        \texttt{NativeDualSimplex}, \texttt{NativeIPMLP}, \texttt{NativePDLP},
+        \texttt{NativeLCQP}, \texttt{NativeIPM}, \texttt{NativeNLP},
+        \texttt{NativeConicIPM}, \texttt{StrictHiGHS}, \texttt{NativeBranchAndCut}\\
+13--17 & \texttt{Gurobi}, \texttt{CPLEX}, \texttt{HiGHS}, \texttt{Ipopt},
+        \texttt{SCIP}\quad（仅当各自 \texttt{available()} 为真）\\
+\bottomrule
+\end{tabular}
+\end{center}
+
+原生 12 个无条件注册；外部 5 个先构造再探测 \texttt{available()}，不可用则不
+入表。该顺序即注册表内序，影响 \texttt{adapters\_for} 的尾部枚举序（见
+\ref{subsec:api-dispatch}）。注册名均不带 \texttt{Adapter} 后缀。
+对应源码为
+\srcpath{src/engine/api/solver.cpp:SolverEngine::register\_default\_adapters}、
+\srcpath{src/engine/solver/native/native\_lp\_selector.cpp:NativeDualSimplexLPAdapter}。
+
+\texttt{available()} 的探测语义分两类：编译期内嵌库宏
+（\texttt{HACDCPF\_HAVE\_HIGHS\_LIB}/\texttt{HACDCPF\_HAVE\_IPOPT}/%
+\texttt{HACDCPF\_HAVE\_SCIP\_LIB}）为真时恒可；否则 HiGHS/Ipopt/SCIP 退化为
+``可执行文件路径非空''；Gurobi/CPLEX 无子进程路径，仅在对应编译宏且运行时
+环境/许可初始化成功（\texttt{env\_ != nullptr}）时可用。注意
+\texttt{GurobiAdapter::supports} 把 \texttt{available()} 并入判定，与其他适配器
+``支持关系与可用性分离''的写法不同——属实现现状。
+对应源码为
+\srcpath{src/engine/solver/external/adapters.cpp:HighsAdapter::available}、
+\srcpath{src/engine/solver/external/adapters.cpp:IpoptAdapter::available}、
+\srcpath{src/engine/solver/external/adapters.cpp:ScipAdapter::available}、
+\srcpath{src/engine/solver/external/adapters.cpp:GurobiAdapter::available}、
+\srcpath{src/engine/solver/external/adapters.cpp:CplexAdapter::available}、
+\srcpath{src/engine/solver/external/adapters.cpp:GurobiAdapter::supports}。
+
+\subsection{候选排序与回退：\texttt{StrategyDispatcher}}\label{subsec:api-dispatch}
+
+\paragraph{默认优先级表。}
+每个问题类的内建候选名序列（\texttt{default\_priority\_for}）：
+\begin{center}
+\small
+\begin{tabular}{ll}
+\toprule
+问题类 & 默认候选序（名前先）\\
+\midrule
+LE & \texttt{NativeLinear}\\
+NLE & \texttt{NativeNewton}\\
+LP & \texttt{NativeAutoLP}, \texttt{NativeIPMLP}, \texttt{NativePDLP},
+     \texttt{NativeLCQP}, \texttt{HiGHS}\\
+QP & \texttt{NativeLCQP}\\
+NLP & \texttt{Ipopt}, \texttt{NativeIPM}, \texttt{NativeNLP}\\
+MILP & \texttt{StrictHiGHS}, \texttt{HiGHS}, \texttt{NativeBranchAndCut}\\
+MINLP & \texttt{Scip}, \texttt{NativeBranchAndCut}\\
+CONIC & \texttt{NativeConicIPM}\\
+\bottomrule
+\end{tabular}
+\end{center}
+对应源码为
+\srcpath{src/engine/strategy/dispatcher.cpp:default\_priority\_for}。
+
+\paragraph{策略排序。}
+\texttt{StrategyPolicy::ExternalFirst} 把名字属于
+$\{\texttt{HiGHS},\texttt{Ipopt},\texttt{Scip},\texttt{Gurobi},\texttt{CPLEX}\}$
+者排前（rank 0）、\texttt{StrictHiGHS} 或以 \texttt{Native} 前缀开头者次之
+（rank 1），其余殿后（rank 2）；\texttt{NativeFirst} 对称交换；\texttt{Auto}
+不动序。排序为 \texttt{stable\_sort}。按类覆盖
+（\texttt{class\_strategy\_policy}）优先于全局策略。
+对应源码为
+\srcpath{src/engine/strategy/dispatcher.cpp:apply\_policy\_ordering}、
+\srcpath{src/engine/strategy/dispatcher.cpp:effective\_policy}。
+
+\paragraph{候选拼装。}
+\texttt{candidate\_adapters} 依次并入（\texttt{seen} 集合去重）：
+（1）\texttt{preferred\_solver}；（2）按类偏好
+（\texttt{set\_solver\_preference} 登记）；（3）策略排序后的默认表；
+（4）注册表中其余支持该类的适配器（注册序）。每一步都要求按名找到且
+\texttt{supports(cls)} 为真。
+对应源码为
+\srcpath{src/engine/strategy/dispatcher.cpp:StrategyDispatcher::candidate\_adapters}、
+\srcpath{src/engine/strategy/dispatcher.cpp:StrategyDispatcher::set\_solver\_preference}。
+
+\paragraph{回退事务。}
+\texttt{StrategyDispatcher::solve} 对候选依次：每次尝试\textbf{之前}检查绝对
+deadline 与 stop token（命中则分别返回 \texttt{"Time limit reached before
+fallback"}/\texttt{"Cancelled before fallback"}，\texttt{success=false}）；
+随后经 \texttt{solve\_with\_adapter} 按 variant 取载荷并调用对应虚函数（载荷
+类型不符返回 \texttt{"Problem payload mismatch ..."}）；结果
+\texttt{stats.success=true} 即返回；否则记录为最近失败，且
+\texttt{allow\_fallback=false} 时立即返回该失败。全部候选失败时返回
+\textbf{最后一次}失败的结果（而非第一个）。候选为空返回
+\texttt{"No adapter registered for class ..."}。
+对应源码为
+\srcpath{src/engine/strategy/dispatcher.cpp:StrategyDispatcher::solve}、
+\srcpath{src/engine/strategy/dispatcher.cpp:solve\_with\_adapter}。
+
+\begin{boundarynote}
+回退的两个实现现状，引用时不得读成更强合约：
+（i）回退只在 \texttt{success=false} 上触发；\texttt{success=true} 但
+\texttt{status} 表明次优/截断的结果不会触发下一个候选。（ii）注册表尾部枚举
+会把\textbf{所有}注册且支持该类的适配器追加为末位候选，包括 Gurobi/CPLEX
+（只要 \texttt{available()} 使它们入了注册表）；它们只是不在
+\texttt{default\_priority\_for} 的内建优先级表内。用户手册 \S 5.4.2
+``Gurobi 与 CPLEX 不参与普通自动回退''一句与该尾部路径不符，见
+\ref{subsec:api-docdiff}。
+对应源码为
+\srcpath{src/engine/strategy/dispatcher.cpp:StrategyDispatcher::solve}、
+\srcpath{src/engine/strategy/dispatcher.cpp:StrategyDispatcher::candidate\_adapters}。
+\end{boundarynote}
+
+\subsection{原生适配器的适配层}\label{subsec:api-native}
+
+\paragraph{LE/NLE/NLP 轻量适配器。}
+\texttt{NativeLinear}（LE）直接稀疏 LU：分析-分解-求解后以原系统残差
+$\|Ax-b\|_\infty$ 复核，状态 \texttt{"Optimal"}。
+\texttt{NativeNewton}（NLE）是阻尼 Newton：正则化阶梯
+$\lambda: \texttt{regularization0}\to 10^{-10}\to \times 10$（至多 4 次尝试，
+硬编码）解 $(J+\lambda I)\,\Delta x=-f$，回溯线搜索要求
+$\|f(x+\alpha\Delta x)\|_\infty\le\|f(x)\|_\infty$，步长回退因子
+\texttt{step\_backoff}。
+\texttt{NativeNLP} 是固定罚参数的二次罚 Newton（非 IPM）：罚梯度
+$\nabla\phi=\nabla f+\rho J_g^{T}g+\rho J_h^{T}h^{+}$，罚 Hessian
+$H=\nabla^2 f+\rho J_g^{T}J_g+\rho (J_h^{\mathrm{act}})^{T}J_h^{\mathrm{act}}$
+再加对角正则 \texttt{regularization0}；收敛要求
+$\|\nabla\phi\|_\infty$、$\|g\|_\infty$、$\|h^{+}\|_\infty$ 同时
+$\le\texttt{tol\_grad}$，或 $\|\Delta x\|_\infty\le\texttt{tol\_step}$；
+接受判据为罚函数不增。头文件级注释明确它不是 \texttt{NativeIPM}。
+对应源码为
+\srcpath{src/engine/solver/native/native\_adapters.cpp:NativeLinearAdapter::solve\_le}、
+\srcpath{src/engine/solver/native/native\_adapters.cpp:NativeNewtonAdapter::solve\_nle}、
+\srcpath{src/engine/solver/native/native\_adapters.cpp:NativeNLPAdapter::solve\_nlp}。
+
+\paragraph{B\&C 适配器与 LP 快路径。}
+\texttt{NativeBranchAndCut} 支持 MILP 与 MINLP。MILP 入口先走 LP 快路径：当
+\texttt{binary\_idx} 与 \texttt{integer\_idx} 皆空时直接以单纯形求解
+（迭代上限 $\max(\texttt{max\_lp\_iter},20000)$，容差
+$\max(10^{-8},0.1\,\texttt{lp\_tol})$），并从最优基提取约束对偶：标准形空间
+\begin{equation}
+  y = B^{-T}c_B,\qquad
+  d_i = s_{\mathrm{sense}}\cdot\mathrm{row\_sign}_i\cdot y_i,\quad
+  s_{\mathrm{sense}}=\begin{cases}-1,&\text{Minimize}\\+1,&\text{Maximize}\end{cases}
+\end{equation}
+（标准形内部为最大化，故最小化要再翻一次符号）；优先用稠密基逆，缺省时用
+稀疏 BTRAN，再缺省则对偶置零——显式回退链。布局统一为
+$[\,\text{不等式行对偶}\;|\;\text{等式行对偶}\,]$。
+带整数的模型转入 \texttt{solve\_milp\_bc}（见 \ref{sec:impl-milpbc} 章）。
+context 版入口把绝对 deadline 的剩余时间与线程预算写进 \texttt{BCOptions}
+副本（\texttt{time\_limit\_sec}/\texttt{num\_threads}）。
+对应源码为
+\srcpath{src/engine/solver/native/native\_adapters.cpp:NativeBranchAndCutAdapter::solve\_milp}、
+\srcpath{src/engine/solver/native/milp/bc/api.cpp:solve\_milp\_bc}。
+
+\paragraph{StrictHiGHS 选项改造。}
+\texttt{StrictHiGHS} 是同名 B\&C 内核的选项变体（委托给
+\texttt{NativeBranchAndCutAdapter} 执行）：\texttt{make\_strict\_highs\_production\_%
+options} 固定 \texttt{lp\_kernel\_backend=HiGHS}、\texttt{strict\_highs\_mip\_%
+contract=true}、\texttt{auto\_highs\_root\_pipeline=true}，开启
+\texttt{highs\_mip\_run\_zi\_round}/\texttt{highs\_mip\_run\_shifting}，强制
+presolve on 并把 \texttt{highs\_presolve\_substitution\_maxfillin} 提到 30，
+\texttt{highs\_mip\_lp\_age\_limit=30}、\texttt{highs\_mip\_detect\_symmetry=true}。
+\texttt{make\_strict\_highs\_problem\_options} 再按模型规模决定是否把根 LP
+切成 IPM：当列数/行数进入
+$[\texttt{min\_cols},\texttt{max\_cols})\times[\texttt{min\_rows},\texttt{max\_rows})$
+窗口、全局开关
+\texttt{highs\_strict\_auto\_ipm\_root\_for\_large\_models} 开启、且时限满足
+最小预算
+\begin{equation}
+  T_{\min}=\max\Bigl(\texttt{min\_time\_sec},\
+  \frac{n_{\mathrm{cols}}\cdot\texttt{secs\_per\_kcol}}{1000}\Bigr)
+\end{equation}
+（默认 \texttt{secs\_per\_kcol}$=2.0$ 时 6360 列对应 $30$\,s、26400 列对应
+$52.8$\,s——代码注释中的两个参考点）时，置 \texttt{highs\_mip\_lp\_solver="ipm"}
+并把 crossover 默认开。显式调用者设置不被该规模门覆盖。
+对应源码为
+\srcpath{src/engine/solver/native/native\_adapters.cpp:make\_strict\_highs\_production\_options}、
+\srcpath{src/engine/solver/native/native\_adapters.cpp:make\_strict\_highs\_problem\_options}、
+\srcpath{src/engine/solver/native/native\_adapters.cpp:StrictHighsBranchAndCutAdapter::solve\_milp}。
+
+\subsection{外部适配器的模型映射与结果解析}\label{subsec:api-external}
+
+五个外部适配器共享同一骨架：校验 $\to$ \texttt{available()} 门 $\to$
+等价模型映射 $\to$ 内嵌库调用（编译期启用时优先）或子进程回退 $\to$
+结果解析 $\to$ 统一 \texttt{SolveResult}。不可用/失败时返回
+\texttt{unavailable\_result}（\texttt{success=false}、状态以
+\texttt{"Unavailable:"} 等前缀说明原因）。
+对应源码为
+\srcpath{src/engine/solver/external/adapters.cpp:unavailable\_result}。
+
+\paragraph{HiGHS。}
+支持 LP/MILP。MILP 映射：把 \texttt{integer\_idx}/\texttt{binary\_idx} 提升为
+\texttt{linear\_part} 上的变量类型，binary 界夹取到 $[0,1]$；
+\texttt{initial\_solution} 尺寸匹配时作为 MIP start 传入。内嵌路径经
+\texttt{solve\_lp\_with\_embedded\_highs}，调用前先
+\texttt{Highs::resetGlobalScheduler(true)} 以消除先前 MILP 求解遗留的全局线程
+调度器配置（注释说明原因）。子进程回退：写临时 MPS（列名 \texttt{X1..Xn}，
+1-indexed）+ 选项文件（LP 写 \texttt{time\_limit}/\texttt{threads}/%
+\texttt{random\_seed}；MILP 另写死 \texttt{mip\_rel\_gap = 1e-4}——硬编码），
+调 \texttt{--model\_file/--solution\_file/--options\_file}，解析 .sol 的
+\texttt{Model status} 与日志；\texttt{success}$\iff$状态为
+\texttt{Optimal} 或 \texttt{Feasible}，解值按 \texttt{X<i+1>} 名回映射，缺失列
+补 0。临时文件求解后删除。
+对应源码为
+\srcpath{src/engine/solver/external/adapters.cpp:HighsAdapter::solve\_lp\_impl}、
+\srcpath{src/engine/solver/external/adapters.cpp:HighsAdapter::solve\_milp\_impl}。
+另有确定性定价入口 \texttt{solve\_pricing\_lp}：只走内嵌库，参数非法直接抛
+\texttt{std::invalid\_argument}。
+对应源码为
+\srcpath{src/engine/solver/external/adapters.cpp:HighsAdapter::solve\_pricing\_lp}。
+
+\paragraph{SCIP。}
+支持 MILP/MINLP。MILP 走 MPS 交换（同样的整数提升与 binary 夹取）；内嵌路径
+\texttt{SCIPreadProb} 读入后求解，固定参数 \texttt{limits/gap=1e-3}、
+\texttt{limits/time=300.0}（硬编码，注释说明与原生 UC 容差对齐）、
+\texttt{display/verblevel=0}；有解即 \texttt{success=true}，
+\texttt{status} 依 \texttt{SCIPgetStatus} 区分 \texttt{"Solved"}/%
+\texttt{"Feasible (limit)"}/\texttt{"Infeasible"}，gap 取
+\texttt{SCIPgetGap}；解值经 \texttt{SCIPgetOrigVars}（原始空间，而非 presolve
+后的变换变量——注释说明后者名字对不上 MPS 导出）按名回映射。子进程回退用
+\texttt{-c "set limits gap 0.001" -c read -c optimize -c "write solution"} 脚本。
+MINLP：无符号目标时走 NLP 松弛 + 舍入回退（整数取整、binary 按 $0.5$ 阈值、
+再夹回界内，$\|g\|_\infty$/$h^+$ 复核 $\le 10^{-4}$ 才算成功——硬编码阈值，
+且这只是启发式，不是全局证明）；有符号目标时写 PIP 文件交给 SCIP。
+对应源码为
+\srcpath{src/engine/solver/external/adapters.cpp:ScipAdapter::solve\_milp}、
+\srcpath{src/engine/solver/external/adapters.cpp:ScipAdapter::solve\_minlp}。
+
+\paragraph{Ipopt。}
+仅 NLP，且\textbf{只有内嵌库路径真正求解}：无内嵌时即使有可执行文件也返回
+\texttt{"Unavailable: external Ipopt executable adapter is disabled by default"}
+（显式禁用路径）。求解前：\texttt{x0} 尺寸不符时重构为界内中点/端点的默认
+点；缺 \texttt{f}/\texttt{grad} 或有 \texttt{g} 无 \texttt{jac\_g}、有
+\texttt{h} 无 \texttt{jac\_h} 直接 Unavailable；primal-dual warm start 需维度
+匹配、全部有限且界对偶非负，否则报错。选项映射：
+\texttt{hessian\_approximation} 按有无 Lagrangian Hessian 回调取
+\texttt{exact}/\texttt{limited-memory}；\texttt{bound\_relax\_factor=0.0}
+（注释：默认界松弛会在大乘子下破坏原模型互补性）；warm start 统一推送量
+默认 $10^{-8}$。容差经 \texttt{positive\_finite\_or} 兜底（非有限或非正回退
+默认），并强制 Ipopt 的不变量
+$\texttt{acceptable\_tol}\ge\texttt{tol}$（对偶/约束/互补四组同法）。
+结果由 \texttt{CallbackTNLP::build\_result} 从 \texttt{OptimizeTNLP} 状态装配。
+对应源码为
+\srcpath{src/engine/solver/external/adapters.cpp:IpoptAdapter::solve\_nlp}。
+
+\paragraph{CPLEX。}
+仅 MILP，Callable Library 内嵌（无子进程路径）。构造期打开环境并固定
+\texttt{ScreenOutput=off}、\texttt{TimeLimit}、\texttt{MIPGap}、\texttt{Threads}、
+\texttt{RandomSeed} 五个参数，任一失败即记 \texttt{initialization\_error\_} 且
+环境置空。模型映射的两处精确转写：（i）双端行展开——每个不等式行按其有限端
+拆成至多两行（上端 \texttt{'L'}、下端 \texttt{'G'}），等式行为 \texttt{'E'}，
+列主序打包时同一列元素向所属各展开行各写一份；行数或非零元数超
+\texttt{int} 上限时失败返回。（ii）列类型 \texttt{'I'}/\texttt{'B'}，binary
+界夹取到 $[0,1]$，非有限界映射为 $\pm$\texttt{CPX\_INFBOUND}。结果解析：
+\texttt{success} 以是否取到解为准（\texttt{CPXgetx} 失败会把 success 翻回
+false），状态字符串原样取 \texttt{CPXgetstatstring}，gap 取
+\texttt{CPXgetmiprelgap}；\texttt{cplex\_status\_proven}/\texttt{optimal}/%
+\texttt{timed\_out} 三个谓词把 \texttt{CPXMIP\_*} 状态码分类进
+\texttt{thread\_local} 诊断 \texttt{cplex\_solve\_info}。
+对应源码为
+\srcpath{src/engine/solver/external/adapters.cpp:CplexAdapter::solve\_milp}、
+\srcpath{src/engine/solver/external/adapters.cpp:CplexAdapter::CplexAdapter}；
+双端行展开的正确性论证见
+\srcpath{docs/archive/cplex\_callable\_library\_integration\_2026-09-12.md}。
+
+\paragraph{Gurobi。}
+支持 LP/QP/MILP（\texttt{supports} 依赖 \texttt{available()}，见
+\ref{subsec:api-registry}）。LP 映射：最大化经目标取负统一为
+\texttt{GRB\_MINIMIZE}（$\texttt{obj\_sign}=-1$）；不等式行按下标
+$|a_{ij}|>10^{-15}$ 过滤后逐行 \texttt{GRBaddconstr}（双端行拆成
+\texttt{GRB\_LESS\_EQUAL} 与 \texttt{GRB\_GREATER\_EQUAL} 两条，$10^{-15}$
+为硬编码）；行按\textbf{稠密提取}构造（代码保留了稀疏列主序迭代的空循环
+与注释，说明为何不用它——已知的历史写法残留，不影响结果）。两个特化入口：
+\texttt{solve\_pricing\_lp} 按规模固定方法（$n\ge10^{6}$ 用
+\texttt{method=2}/\texttt{threads=8}/\texttt{crossover=0}，否则
+\texttt{method=1}/单线程，硬编码阈值），并把 \texttt{OptimalityTol=1e-8} 写进
+环境；\texttt{solve\_relaxation\_lp} 是不精确 barrier 入口
+（\texttt{BarConvTol} 取参，合法域 $[10^{-8},10^{-2}]$，之外抛异常；注释明确
+禁止用它认证价格或原始可行性）。
+对应源码为
+\srcpath{src/engine/solver/external/adapters.cpp:GurobiAdapter::solve\_lp}、
+\srcpath{src/engine/solver/external/adapters.cpp:GurobiAdapter::solve\_pricing\_lp}、
+\srcpath{src/engine/solver/external/adapters.cpp:GurobiAdapter::solve\_relaxation\_lp}。
+
+\subsection{策略辅助件：presolve/postsolve/warmstart 管理器}\label{subsec:api-strategy-aux}
+
+\begin{boundarynote}
+接线现状（必须在引用处保持可见）：\texttt{PresolveManager}/%
+\texttt{PostsolveManager}/\texttt{WarmStartManager} 是\textbf{独立工具类}，
+当前未被 \texttt{StrategyDispatcher::solve} 调用——分派器直接调用适配器，主流程
+的 presolve 发生在各求解器内部（MILP 的 presolve 见 \ref{sec:impl-milpbc} 章）。
+\texttt{PresolveManager::should\_presolve} 恒返回 \texttt{false}，
+\texttt{PresolveManager::presolve} 退化为恒等映射 \texttt{native\_presolve}
+（只统计行列数，不做约简）；\texttt{PresolveManager::scale} 对
+\texttt{"none"}/\texttt{"identity"} 之外的 scaling 直接抛
+\texttt{std::logic\_error}（无通用缩放后端）。这些类的完整实现仅在测试中被
+消费。对应源码为
+\srcpath{src/engine/strategy/presolve\_manager.cpp:PresolveManager::should\_presolve}、
+\srcpath{src/engine/strategy/presolve\_manager.cpp:PresolveManager::native\_presolve}、
+\srcpath{src/engine/strategy/presolve\_manager.cpp:PresolveManager::scale}、
+\srcpath{src/engine/strategy/dispatcher.cpp:StrategyDispatcher::solve}。
+\end{boundarynote}
+
+\texttt{PostsolveManager} 实现的三步还原（给定 \texttt{PresolveMapping}）：
+\begin{enumerate}
+  \item 固定变量还原：按 \texttt{col\_mapping} 把约简解散布回原列，再写入
+        \texttt{fixed\_variables}；映射重复、固定列与活跃列重叠、或还原后存在
+        非有限分量（未覆盖列）均抛 \texttt{std::invalid\_argument}；
+  \item 平移还原：$x_{\mathrm{orig}} \mathrel{+}= \mathrm{shift}$（逐条
+        \texttt{variable\_shifts}）；
+  \item 反缩放：$x_j \mathrel{*}= s^{\mathrm{col}}_j$、
+        $y_i \mathrel{/}= s^{\mathrm{row}}_i$，尺度必须有限且为正。
+\end{enumerate}
+一致性校验 \texttt{validate} 比较两结果的 \texttt{success}、解维数与有限性，
+目标差容差为 $\texttt{feasibility\_tol}\cdot\max\{1,|f_1|,|f_2|\}$。
+对应源码为
+\srcpath{src/engine/strategy/postsolve\_manager.cpp:PostsolveManager::postsolve}、
+\srcpath{src/engine/strategy/postsolve\_manager.cpp:PostsolveManager::restore\_fixed\_variables}、
+\srcpath{src/engine/strategy/postsolve\_manager.cpp:PostsolveManager::unscale}、
+\srcpath{src/engine/strategy/postsolve\_manager.cpp:PostsolveManager::validate}。
+
+\texttt{WarmStartManager} 的规则：\texttt{is\_compatible} 逐槽检查 primal/约束
+对偶/界对偶向量的维数；\texttt{extract\_from\_result} 只在尺寸匹配时搬运各槽；
+\texttt{merge} 取各槽首个非空候选，\texttt{reuse\_root\_factorization} 取或；
+\texttt{scale} 的坐标规则为 $x'=x/s_x$、$y'=y\odot s_c$、界对偶 $\odot\, s_x$；
+\texttt{validate} 拒绝非有限 hint。
+对应源码为
+\srcpath{src/engine/strategy/warmstart.cpp:WarmStartManager::is\_compatible}、
+\srcpath{src/engine/strategy/warmstart.cpp:WarmStartManager::extract\_from\_result}、
+\srcpath{src/engine/strategy/warmstart.cpp:WarmStartManager::merge}、
+\srcpath{src/engine/strategy/warmstart.cpp:WarmStartManager::scale}。
+
+\subsection{结果契约}\label{subsec:api-result}
+
+内部 \texttt{SolveResult}/\texttt{SolveStats} 与公共 \texttt{api::Result}/%
+\texttt{api::Stats} 的字段一一对应（\texttt{to\_api\_result} 不透传的内部字段
+仅有 \texttt{primal\_ray} 与稀疏代数/原生单纯形遥测等实现侧计数——未被公共
+API 消费的字段在此声明）。契约要点：
+\begin{itemize}
+  \item \texttt{success} 只表示``该适配器成功终止''：B\&C 在有时限可行
+        incumbent 时亦为 true（状态 \texttt{kFeasibleIncumbentFound} 系），
+        与``已证最优''无关；验收必须同时看 \texttt{status}、可行度、
+        \texttt{mip\_gap}；
+  \item \texttt{status} 为人类可读字符串，无枚举约束；同义词集合以
+        \texttt{bc\_status} 常量与各适配器字面量为准；
+  \item LP 对偶布局跨适配器统一为 $[\,\text{不等式行}\;|\;\text{等式行}\,]$，
+        界对偶 \texttt{box\_dual\_lb}/\texttt{box\_dual\_ub} 每列一个；
+        MILP 等无证书路径置空；
+  \item 不可行证书 \texttt{farkas\_ray}/\texttt{farkas\_ray\_eq}（配合
+        \texttt{has\_farkas\_certificate}）：对
+        $\min c^Tx\ \mathrm{s.t.}\ Ax\le b,\ A_{\mathrm{eq}}x=b_{\mathrm{eq}},\
+        l\le x\le u$ 的不可行 LP，满足 $y\ge0$、$A^Ty+A_{\mathrm{eq}}^Ty_{eq}=0$、
+        $b^Ty+b_{\mathrm{eq}}^Ty_{eq}<0$；
+  \item \texttt{certified\_dual\_bound} 仅由原生对偶单纯形内核在中断时发布；
+        中断结果的 \texttt{objective} 仍是未认证的工作值（头文件注释明确）。
+\end{itemize}
+对应源码为
+\srcpath{include/mipsolvers/engine/solver/solver\_adapter.hpp}、
+\srcpath{include/mipsolvers/engine/api/result.hpp:Stats}、
+\srcpath{src/engine/api/solver.cpp:to\_api\_result}。
+
+\subsection{与用户手册行文的两处差异}\label{subsec:api-docdiff}
+
+以下差异按``以代码为准''声明，供手册维护侧对照：
+
+\begin{enumerate}
+  \item \texttt{docs/manual/05-solvers-engines.md} \S 5.4.2 把调度流程写成
+        ``预处理 $\to$ 适配器调用 $\to$ 回退 $\to$ 后处理''六步；当前
+        \texttt{StrategyDispatcher::solve} 不含门面级 presolve/postsolve 阶段
+        （\texttt{PresolveManager} 未被接线，见
+        \ref{subsec:api-strategy-aux}），实际为
+        ``候选构造 $\to$ 逐个适配器调用（带绝对 deadline 门）$\to$ 成功即返回
+        或回退''。模型规范化与校验在 \texttt{SolverEngine::solve} 一侧完成。
+        对应源码为
+        \srcpath{src/engine/strategy/dispatcher.cpp:StrategyDispatcher::solve}、
+        \srcpath{src/engine/api/solver.cpp:SolverEngine::solve}；
+  \item 同节称``Gurobi 与 CPLEX 不参与普通自动回退''；它们确实不在
+        \texttt{default\_priority\_for} 内建表内，但一旦注册（可用性门通过），
+        \texttt{candidate\_adapters} 的注册表尾部枚举会把它们追加为末位回退
+        候选。对应源码为
+        \srcpath{src/engine/strategy/dispatcher.cpp:StrategyDispatcher::candidate\_adapters}、
+        \srcpath{src/engine/strategy/dispatcher.cpp:default\_priority\_for}。
+\end{enumerate}

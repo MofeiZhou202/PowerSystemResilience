@@ -4,15 +4,19 @@
 #include <catch2/catch_approx.hpp>
 
 #include <algorithm>
+#include <chrono>
 #include <cmath>
 #include <memory>
+#include <limits>
 #include <stdexcept>
+#include <thread>
 #include <utility>
 
 #include "mipsolvers/engine/api/solver.hpp"
 #include "mipsolvers/engine/api/problem.hpp"
 #include "mipsolvers/engine/api/result.hpp"
 #include "mipsolvers/engine/api/options.hpp"
+#include "mipsolvers/engine/api/session.hpp"
 #include "mipsolvers/engine/problem_types.hpp"
 #include "mipsolvers/engine/kernel/linear_algebra/linear_solver.hpp"
 #include "mipsolvers/engine/kernel/kkt/kkt_system.hpp"
@@ -50,6 +54,43 @@ class RecordingLPAdapter final : public SolverAdapter {
   std::string adapter_name_;
   bool succeed_{false};
   std::shared_ptr<int> calls_;
+};
+
+class ContextLPAdapter final : public SolverAdapter {
+ public:
+  ContextLPAdapter(std::string adapter_name, bool succeed,
+                   std::chrono::milliseconds delay,
+                   std::shared_ptr<int> calls,
+                   std::shared_ptr<double> remaining)
+      : adapter_name_(std::move(adapter_name)),
+        succeed_(succeed),
+        delay_(delay),
+        calls_(std::move(calls)),
+        remaining_(std::move(remaining)) {}
+
+  std::string name() const override { return adapter_name_; }
+  bool supports(ProblemClass cls) const override { return cls == ProblemClass::LP; }
+  SolveResult solve_lp(const LPModel&) const override {
+    throw std::logic_error("context-aware dispatcher called legacy overload");
+  }
+  SolveResult solve_lp(const LPModel&, const SolveContext& context) const override {
+    ++*calls_;
+    *remaining_ = context.remaining_time_sec();
+    std::this_thread::sleep_for(delay_);
+    SolveResult out;
+    out.stats.success = succeed_;
+    out.stats.solver_name = adapter_name_;
+    out.stats.status = succeed_ ? "Optimal" : "Synthetic failure";
+    out.x = Eigen::VectorXd::Zero(1);
+    return out;
+  }
+
+ private:
+  std::string adapter_name_;
+  bool succeed_{false};
+  std::chrono::milliseconds delay_;
+  std::shared_ptr<int> calls_;
+  std::shared_ptr<double> remaining_;
 };
 
 LPModel make_dispatch_lp() {
@@ -223,6 +264,51 @@ TEST_CASE("Auto dispatch excludes Gurobi while explicit fallback remains availab
   CHECK(result.stats.solver_name == "NativeIPMLP");
   CHECK(*gurobi_calls == 1);
   CHECK(*native_calls == 1);
+}
+
+TEST_CASE("Call-wide deadline prevents cumulative fallback budgets",
+          "[engine][api][dispatch][deadline]") {
+  auto first_calls = std::make_shared<int>(0);
+  auto second_calls = std::make_shared<int>(0);
+  auto first_remaining = std::make_shared<double>(0.0);
+  auto second_remaining = std::make_shared<double>(0.0);
+  SolverEngine eng(false);
+  eng.register_adapter(std::make_shared<ContextLPAdapter>(
+      "NativeAutoLP", false, std::chrono::milliseconds(30), first_calls,
+      first_remaining));
+  eng.register_adapter(std::make_shared<ContextLPAdapter>(
+      "NativeIPMLP", true, std::chrono::milliseconds(0), second_calls,
+      second_remaining));
+
+  SolveOptions options;
+  options.time_limit_sec = 0.010;
+  const auto result = eng.solve_lp(make_dispatch_lp(), options);
+
+  CHECK_FALSE(result.stats.success);
+  CHECK(result.stats.solver_name == "StrategyDispatcher");
+  CHECK(result.stats.status == "Time limit reached before fallback");
+  CHECK(*first_calls == 1);
+  CHECK(*second_calls == 0);
+  CHECK(*first_remaining > 0.0);
+  CHECK(*first_remaining <= options.time_limit_sec);
+}
+
+TEST_CASE("Caller cancellation prevents adapter start",
+          "[engine][api][dispatch][cancel]") {
+  auto calls = std::make_shared<int>(0);
+  auto remaining = std::make_shared<double>(0.0);
+  SolverEngine eng(false);
+  eng.register_adapter(std::make_shared<ContextLPAdapter>(
+      "NativeAutoLP", true, std::chrono::milliseconds(0), calls, remaining));
+  std::stop_source source;
+  source.request_stop();
+  SolveOptions options;
+  options.stop_token = source.get_token();
+
+  const auto result = eng.solve_lp(make_dispatch_lp(), options);
+  CHECK_FALSE(result.stats.success);
+  CHECK(result.stats.status == "Cancelled before fallback");
+  CHECK(*calls == 0);
 }
 
 #ifdef HACDCPF_HAVE_IPOPT
@@ -528,6 +614,178 @@ TEST_CASE("SolveOptions defaults are sane", "[engine][api]") {
   CHECK(opts.allow_fallback);
   CHECK(opts.preferred_solver.empty());
   CHECK(opts.strategy_policy == StrategyPolicy::Auto);
+  CHECK(opts.time_limit_sec == 0.0);
+  CHECK(opts.threads == 0);
+  CHECK(opts.random_seed == 0);
+  CHECK(opts.memory_limit_bytes == 0);
+  CHECK(opts.portfolio_mode == PortfolioMode::Latency);
+  CHECK_FALSE(opts.stop_token.stop_requested());
+}
+
+TEST_CASE("SolveOptions reject invalid resource budgets", "[engine][api]") {
+  SolverEngine eng(false);
+  SolveOptions options;
+  options.time_limit_sec = -1.0;
+  CHECK_THROWS_AS(eng.solve_lp(make_dispatch_lp(), options), std::invalid_argument);
+  options.time_limit_sec = std::numeric_limits<double>::max();
+  options.threads = 0;
+  CHECK_THROWS_AS(eng.solve_lp(make_dispatch_lp(), options), std::invalid_argument);
+  options.time_limit_sec = 0.0;
+  options.threads = -1;
+  CHECK_THROWS_AS(eng.solve_lp(make_dispatch_lp(), options), std::invalid_argument);
+}
+
+TEST_CASE("SolveContext resolves automatic threads and preserves an expired limit",
+          "[engine][api][deadline][threads]") {
+  SolveOptions automatic;
+  SolveContext automatic_context(automatic);
+  CHECK(automatic_context.thread_budget() >= 1);
+
+  SolveOptions limited;
+  limited.time_limit_sec = 0.001;
+  limited.threads = 3;
+  SolveContext limited_context(limited);
+  std::this_thread::sleep_for(std::chrono::milliseconds(5));
+  CHECK(limited_context.deadline_expired());
+  CHECK(limited_context.backend_time_limit_sec(0.0) ==
+        std::numeric_limits<double>::min());
+  CHECK(limited_context.thread_budget() == 3);
+}
+
+TEST_CASE("Solve results disclose unenforced hard and memory limits",
+          "[engine][api][resources]") {
+  SolverEngine eng(false);
+  auto calls = std::make_shared<int>(0);
+  auto remaining = std::make_shared<double>(0.0);
+  eng.register_adapter(std::make_shared<ContextLPAdapter>(
+      "NativeAutoLP", true, std::chrono::milliseconds(0), calls, remaining));
+  SolveOptions options;
+  options.threads = 2;
+  options.memory_limit_bytes = 4096;
+  const auto result = eng.solve_lp(make_dispatch_lp(), options);
+  REQUIRE(result.stats.success);
+  CHECK(result.stats.thread_budget == 2);
+  CHECK(result.stats.memory_limit_bytes == 4096);
+  CHECK_FALSE(result.stats.memory_limit_enforced);
+  CHECK_FALSE(result.stats.hard_deadline_enforced);
+  CHECK(result.stats.deadline_overrun_sec == 0.0);
+}
+
+TEST_CASE("Native LP portfolio reports strategy and divided worker budget",
+          "[engine][api][portfolio][threads]") {
+  SolverEngine engine;
+  SolveOptions options;
+  options.preferred_solver = "NativeAutoLP";
+  options.allow_fallback = false;
+
+  options.portfolio_mode = PortfolioMode::Throughput;
+  options.threads = 4;
+  const auto throughput = engine.solve_lp(make_dispatch_lp(), options);
+  REQUIRE(throughput.stats.success);
+  CHECK(throughput.stats.solver_name == "NativeIPMLP");
+  CHECK(throughput.stats.thread_budget == 4);
+  CHECK(throughput.stats.portfolio_workers == 1);
+  CHECK(throughput.stats.worker_thread_limit == 4);
+
+  options.portfolio_mode = PortfolioMode::Latency;
+  options.threads = 2;
+  const auto latency = engine.solve_lp(make_dispatch_lp(), options);
+  REQUIRE(latency.stats.success);
+  CHECK(latency.stats.thread_budget == 2);
+  CHECK(latency.stats.portfolio_workers == 2);
+  CHECK(latency.stats.worker_thread_limit == 1);
+}
+
+TEST_CASE("LPModelSession applies incremental updates without replacing sparse storage",
+          "[engine][api][session]") {
+  LPModel lp;
+  lp.sense = Sense::Minimize;
+  lp.c = Eigen::VectorXd::Ones(1);
+  lp.A.resize(1, 1);
+  lp.A.insert(0, 0) = 1.0;
+  lp.A.makeCompressed();
+  lp.row_lhs = Eigen::VectorXd::Constant(1, -kVariableNoBound);
+  lp.b = Eigen::VectorXd::Constant(1, 10.0);
+  lp.Aeq.resize(0, 1);
+  lp.beq.resize(0);
+  lp.vars = {VariableMeta{VarType::Continuous, 0.0, 10.0}};
+
+  LPModelSession session(std::move(lp));
+  const double* sparse_values = session.model().A.valuePtr();
+  SolveOptions options;
+  options.preferred_solver = "HiGHS";
+  options.allow_fallback = false;
+  options.threads = 1;
+  options.time_limit_sec = 5.0;
+
+  const auto first = session.solve(options);
+  REQUIRE(first.stats.success);
+  CHECK(first.stats.objective == Approx(0.0).margin(1e-8));
+  CHECK_FALSE(first.stats.persistent_backend_reused);
+  CHECK(first.stats.incremental_update_count == 0);
+
+  session.update_variable_bounds(Eigen::VectorXd::Constant(1, 2.0),
+                                 Eigen::VectorXd::Constant(1, 10.0));
+  session.update_objective(Eigen::VectorXd::Constant(1, 3.0));
+  session.update_inequality_rhs(Eigen::VectorXd::Constant(1, -kVariableNoBound),
+                                Eigen::VectorXd::Constant(1, 9.0));
+  const auto second = session.solve(options);
+  REQUIRE(second.stats.success);
+  CHECK(second.stats.objective == Approx(6.0).margin(1e-8));
+  CHECK(second.stats.persistent_backend_reused);
+  CHECK(second.stats.incremental_update_count == 3);
+  CHECK(session.model().A.valuePtr() == sparse_values);
+
+  SolverEngine cold;
+  const auto cold_result = cold.solve_lp(session.model(), options);
+  REQUIRE(cold_result.stats.success);
+  CHECK(second.stats.objective == Approx(cold_result.stats.objective).margin(1e-8));
+  REQUIRE(second.x.size() == cold_result.x.size());
+  CHECK((second.x - cold_result.x).lpNorm<Eigen::Infinity>() <= 1e-8);
+
+  CHECK_THROWS_AS(
+      session.update_variable_bounds(Eigen::VectorXd::Constant(1, 11.0),
+                                     Eigen::VectorXd::Constant(1, 10.0)),
+      std::invalid_argument);
+  CHECK(session.model().vars[0].lb == Approx(2.0));
+}
+
+TEST_CASE("LPModelSession preserves automatic threads across budget changes",
+          "[engine][api][session][threads]") {
+  LPModel lp;
+  lp.sense = Sense::Minimize;
+  lp.c = Eigen::VectorXd::Ones(1);
+  lp.A.resize(0, 1);
+  lp.b.resize(0);
+  lp.Aeq.resize(0, 1);
+  lp.beq.resize(0);
+  lp.vars = {VariableMeta{VarType::Continuous, 1.0, 2.0}};
+
+  LPModelSession session(std::move(lp));
+  SolveOptions options;
+  options.preferred_solver = "HiGHS";
+  options.allow_fallback = false;
+  options.time_limit_sec = 5.0;
+
+  const auto automatic = session.solve(options);
+  REQUIRE(automatic.stats.success);
+  CHECK_FALSE(automatic.stats.persistent_backend_reused);
+
+  options.threads = 1;
+  const auto explicit_budget = session.solve(options);
+  REQUIRE(explicit_budget.stats.success);
+  CHECK_FALSE(explicit_budget.stats.persistent_backend_reused);
+  const auto repeated_explicit = session.solve(options);
+  REQUIRE(repeated_explicit.stats.success);
+  CHECK(repeated_explicit.stats.persistent_backend_reused);
+
+  options.threads = 0;
+  const auto restored_automatic = session.solve(options);
+  REQUIRE(restored_automatic.stats.success);
+  CHECK_FALSE(restored_automatic.stats.persistent_backend_reused);
+  const auto repeated_automatic = session.solve(options);
+  REQUIRE(repeated_automatic.stats.success);
+  CHECK(repeated_automatic.stats.persistent_backend_reused);
 }
 
 TEST_CASE("EigenSparseLU handles empty square systems", "[engine][api][linear-solver]") {

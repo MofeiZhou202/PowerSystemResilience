@@ -16,6 +16,20 @@ namespace mipsolvers::engine {
 int mkl_max_threads();
 void set_mkl_num_threads(int threads);
 
+/// Thread-local oneMKL worker limit for one solver call. Unlike
+/// set_mkl_num_threads(), this does not mutate the process-global default.
+class ScopedMklThreadLimit {
+ public:
+  explicit ScopedMklThreadLimit(int threads);
+  ~ScopedMklThreadLimit();
+  ScopedMklThreadLimit(const ScopedMklThreadLimit&) = delete;
+  ScopedMklThreadLimit& operator=(const ScopedMklThreadLimit&) = delete;
+
+ private:
+  int previous_{0};
+  bool active_{false};
+};
+
 /// Abstract sparse linear solver interface (self-contained in solver module).
 class SparseLinearSolver {
  public:

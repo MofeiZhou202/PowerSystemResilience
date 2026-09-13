@@ -1,0 +1,861 @@
+% source_equivalent_ipm_kkt.tex —— engine 模块实现转写章：IPM 主循环、KKT 装配与稀疏后端
+% 本文件为实现转写章（非理论章），遵循 docs/modules/README.md 数学模型规范第 1/2/4 条。
+
+\section{内点法、KKT 系统与稀疏线性代数：源码等价转写}
+\label{sec:engine-source-ipm-kkt}
+
+\subsection{转写范围与口径}
+\label{subsec:engine-ipm-scope}
+
+本章转写以下工作树文件在 2026-09-13 版本实际执行的计算：
+
+\begin{itemize}
+  \item NLP 内点主循环（filter 全局化）：\srcpath{src/engine/kernel/ipm/ipm\_solver.cpp}；
+  \item LP 内点（Mehrotra/Gondzio）：\srcpath{src/engine/kernel/ipm/ipm\_lp\_solver.cpp}、
+        \srcpath{src/engine/kernel/ipm/ipm\_lp\_solver\_cached.cpp}、
+        \srcpath{src/engine/kernel/ipm/ipm\_lp\_solver\_internal.hpp}；
+  \item 缩放、filter 数据结构、恢复阶段：\srcpath{src/engine/kernel/ipm/ipm\_scaling.cpp}、
+        \srcpath{src/engine/kernel/ipm/ipm\_filter.cpp}、
+        \srcpath{src/engine/kernel/ipm/ipm\_restoration.cpp}；
+  \item KKT 装配与求解：\srcpath{src/engine/kernel/kkt/kkt\_system.cpp}；
+  \item 稀疏后端：\srcpath{src/engine/kernel/linear\_algebra/linear\_solver.cpp}、
+        \srcpath{src/engine/kernel/linear\_algebra/sparse\_lu\_factor.cpp}、
+        \srcpath{src/engine/kernel/linear\_algebra/cholmod\_ldlt.cpp}、
+        \srcpath{src/engine/kernel/linear\_algebra/hfactor\_backend.cpp}
+        （vendored HFactor 位于
+        \srcpath{src/engine/kernel/linear\_algebra/highs\_factor/}）。
+\end{itemize}
+
+素材文档 \texttt{docs/manual/06-numerical-methods.md} 的符号级描述已逐条回源码核验；
+与代码不一致处在 \ref{subsec:engine-ipm-mismatch} 节集中声明。锚点规则同上一章。
+编译期宏 \texttt{HACDCPF\_HAVE\_MUMPS} / \texttt{HACDCPF\_HAVE\_MKL\_PARDISO} /
+\texttt{MIPSOLVERS\_HAVE\_CHOLMOD} / \texttt{MIPSOLVERS\_USE\_ACCELERATE} 控制的路径
+按源码条件分支转写，并注明其编译开关。
+
+\begin{boundarynote}
+锥 IPM（\texttt{conic\_ipm\_solver.cpp}、\texttt{cones.cpp}）、
+LCQP（\texttt{lcqp\_solver.cpp}）与 chordal 分解不在本章范围。
+\texttt{MIPSOLVERS\_IPM\_VERBOSE} 等日志通道只读不写，不改变数值；
+\texttt{lp\_timing} 计时插桩同理不转写。
+\end{boundarynote}
+
+% ─────────────────────────────────────────────────────────────────────────────
+\subsection{NLP 内点主循环（filter 驱动）}
+\label{subsec:engine-ipm-nlp}
+
+\paragraph{问题与残差.}
+\compmeta{NLPState}{src/engine/kernel/ipm/ipm\_solver.cpp}
+求解器消费带回调的 \texttt{NLPModel}：$\min f(x)$ s.t. $g(x)=0$、$h(x)\le 0$、
+变量界。不等式含非线性行与由变量界生成的行（\texttt{lb\_cols}/\texttt{ub\_cols}），
+松弛 $s>0$ 满足 $h(x)+s=0$，乘子 $\mu>0$。KKT 残差的代码定义：
+\begin{equation}
+  r_d = \nabla f + J_g^{\top}\lambda + J_h^{\top}\mu,\qquad
+  r_{eq} = g,\qquad
+  r_{ineq} = h + s,\qquad
+  r_{comp} = s \circ \mu - \bar\mu\,\mathbf{1},
+  \label{eq:ipm:nlp-residuals}
+\end{equation}
+汇总为 $\theta_p = \max(\|r_{eq}\|_{\infty}, \|r_{ineq}\|_{\infty})$、
+$\theta_d = \|r_d\|_{\infty}$、$\theta_c = \|s \circ \mu\|_{\infty}$；全局化用
+缩放 merit $\max\{\theta_p/(1+\|x,s\|_{\infty}),\ \theta_d/(1+\|\lambda,\mu\|_{\infty},\
+\theta_c/(1+\|\mu\|_{\infty})\}$，而终止判定用绝对量。
+对应源码为 \srcpath{src/engine/kernel/ipm/ipm\_solver.cpp:summarize\_residuals}、
+\srcpath{src/engine/kernel/ipm/ipm\_solver.cpp:evaluate\_nlp\_state}。
+
+\paragraph{终止判据.}
+\texttt{evaluate\_ipm\_termination} 计算乘子尺度
+$s_d = \max(T, \bar m)/T$（$T$ = \texttt{multiplier\_scale\_threshold}，缺省
+$\max(1, \|\nabla f\|_{\infty})$，$\bar m$ 为全部乘子绝对值均值）与
+$s_c = \max(T, \bar\mu_{\mathrm{abs}})/T$；总体误差
+$E = \max\{\theta_p,\ \theta_d / s_d,\ \theta_c / s_c\}$。
+严格收敛（\texttt{strict}）要求
+\begin{equation}
+  E \le \texttt{tol\_overall}\ (\text{若启用}),\quad
+  \theta_p \le \texttt{tol\_primal},\quad
+  \theta_d^{*} \le \texttt{tol\_dual},\quad
+  \theta_d \le \texttt{raw\_dual\_guard}\ (\text{若}>0),\quad
+  \theta_c \le \texttt{tol\_complementarity},
+  \label{eq:ipm:strict-term}
+\end{equation}
+其中 $\theta_d^{*} = \theta_d / s_d$ 当 \texttt{multiplier\_relative\_stationarity}
+为真，否则 $\theta_d$。可接受收敛另用 \texttt{tol\_accept*} 门槛并要求
+连续 \texttt{acceptable\_iter} 次满足。对应源码为
+\srcpath{src/engine/kernel/ipm/ipm\_solver.cpp:evaluate\_ipm\_termination}、
+\srcpath{src/engine/kernel/ipm/ipm\_solver.cpp:strict\_termination}、
+\srcpath{src/engine/kernel/ipm/ipm\_solver.cpp:acceptable\_termination}。
+
+\paragraph{双层结构.}
+外层按障碍参数推进，内层在当前 $\bar\mu$ 上做 Newton/filter 迭代。
+内层容差 $\tau_{\text{inner}} = \kappa_\varepsilon \bar\mu$
+（\texttt{kappa\_epsilon} 缺省按 $1.0$ 处理）；处于最小障碍时再把
+$\tau_{\text{inner}}$ 收紧到 $\min(\texttt{tol\_primal}, \texttt{tol\_dual},
+\texttt{tol\_complementarity})$ 以留出最后一次 Newton 精化空间。内层收敛判据
+\begin{equation}
+  E_{\mu} = \max\bigl\{\|r_d\|_{\infty}, \|r_{eq}\|_{\infty},
+  \|r_{ineq}\|_{\infty}, \|s \circ \mu - \bar\mu\|_{\infty}\bigr\}
+  \le \tau_{\text{inner}},
+  \label{eq:ipm:inner-conv}
+\end{equation}
+另有一条调度捷径：调用者坐标原始违反 $\le$ 调用者容差、$\theta_d^{*} \le$
+\texttt{tol\_dual}、但 $\theta_c >$ \texttt{tol\_complementarity} 且
+$\bar\mu >$ \texttt{tol\_complementarity} 时直接视为内层收敛、转入 $\mu$ 更新。
+对应源码为 \srcpath{src/engine/kernel/ipm/ipm\_solver.cpp:solve\_nlp\_filter\_impl}。
+
+\paragraph{$\mu$ 更新.}
+显式策略（\texttt{kappa\_mu}<1 且 \texttt{theta\_mu}>1 均被设置时）：
+\begin{equation}
+  \bar\mu^{+} = \max\bigl(\mu_{\min},\;
+  \min(\kappa_\mu \bar\mu,\; \bar\mu^{\theta_\mu})\bigr);
+  \label{eq:ipm:mu-explicit}
+\end{equation}
+缺省策略取 $\max\bigl(\mu_{\min}, \min(\texttt{tol\_complementarity},
+\min_i s_i \mu_i)\bigr)$；若该值不小于当前 $\bar\mu$（目标已到调用者门槛），
+改为从当前中心残差推导最小可用降幅：
+$\bar\mu^{+} = \max(\mu_{\min}, \bar\mu -
+(\|s \circ \mu - \bar\mu\|_{\infty} + \sqrt{\varepsilon}\bar\mu))$；
+无法再降时以``最小障碍未达 KKT 收敛''终止。$\mu$ 变化后 filter 清空
+（旧 $(\theta, \varphi)$ 对属于另一障碍目标）。$\mu_{\min}$ 缺省
+$\sqrt{\text{最小正规格化双精度}}$（\texttt{kMinPositive}）。
+对应源码为 \srcpath{src/engine/kernel/ipm/ipm\_solver.cpp:solve\_nlp\_filter\_impl}、
+\srcpath{src/engine/kernel/ipm/ipm\_solver.cpp:minimum\_safe\_positive}（匿名命名空间）。
+
+\paragraph{初始点.}
+\texttt{interiorize\_initial\_point} 把每个有界变量推入内部：
+双边界取
+$\ell' = \max(\mathrm{nextafter}(\ell,u), \ell + \min(0.01\max(1,|\ell|),
+0.01(u-\ell)))$ 与对称的 $u'$（常量 \texttt{bound\_push=bound\_fraction=0.01}），
+退化时取中点；单边界按 $0.01\max(1,|\cdot|)$ 推。
+\texttt{primal\_feasible\_start}/\texttt{preserve\_initial\_point} 经
+\texttt{solve\_nlp\_detail} 的原始违反审计（$\le$ \texttt{tol\_primal}）采纳后
+跳过该内点化。松弛初值取线性化分辨率下界
+（\texttt{initialize\_slacks\_from\_linearization\_resolution}），冷启动且行违反
+超过调用者容差时把松弛抬到 $\max(s_i, \max(h_i, 0))$。
+对应源码为 \srcpath{src/engine/kernel/ipm/ipm\_solver.cpp:interiorize\_initial\_point}、
+\srcpath{src/engine/kernel/ipm/ipm\_solver.cpp:solve\_nlp\_filter\_impl}、
+\srcpath{src/engine/kernel/ipm/ipm\_solver.cpp:NativeIPMAdapter::solve\_nlp\_detail}。
+
+\paragraph{Newton 系统：凝聚形.}
+凝聚路径组装 $W = H + J_h^{\top} \operatorname{diag}(\mu/s) J_h$
+（$s$ 逐分量下截于 \texttt{kMinPositive}），右端与回代：
+\begin{align}
+  \mathrm{rhs}_x &= -r_d - J_h^{\top} v,\quad
+  v_i = \frac{\mu_i r_{ineq,i} + \bar\mu - s_i \mu_i}{s_i},\qquad
+  \mathrm{rhs}_{eq} = -r_{eq},
+  \label{eq:ipm:condensed-rhs}\\
+  d_s &= -r_{ineq} - J_h d_x,\qquad
+  d\mu_i = \frac{\bar\mu - s_i \mu_i - \mu_i\, d s_i}{s_i}.
+  \label{eq:ipm:condensed-back}
+\end{align}
+对应源码为 \srcpath{src/engine/kernel/ipm/ipm\_solver.cpp:solve\_nlp\_filter\_impl}
+（lambda \texttt{build\_condensed\_w} 与同函数内联回代）。
+
+\paragraph{Newton 系统：增广形.}
+增广路径组装对称不定系统
+\begin{equation}
+  \begin{bmatrix}
+    H + \delta_W I & J_g^{\top} & \tilde J_h^{\top}\\
+    J_g & -\delta_C I & 0\\
+    \tilde J_h & 0 & -I
+  \end{bmatrix}
+  \begin{bmatrix} d_x \\ d_\lambda \\ \tilde d_\mu \end{bmatrix}
+  =
+  \begin{bmatrix} -r_d \\ -r_{eq} \\
+    t \circ \bigl(-r_{ineq} - (\bar\mu\mathbf{1} - s\circ\mu)/\mu\bigr)
+  \end{bmatrix},
+  \qquad t_i = \sqrt{\mu_i / s_i},
+  \label{eq:ipm:augmented}
+\end{equation}
+其中 $\tilde J_h = \operatorname{diag}(t) J_h$：这是对未缩放增广形
+$[H+\delta_W I, J_g^{\top}, J_h^{\top}; J_g, -\delta_C I, 0;
+J_h, 0, -S M^{-1}]$ 施加合同变换 $T = \operatorname{diag}(I, I, t)$ 的结果；
+解出后 $d_\mu = t \circ \tilde d_\mu$、$d_s = -r_{ineq} - J_h d_x$。
+组装经 scatter map 直写缓存 CSC 值数组（结构逐问题不变），
+$s_i, \mu_i$ 截断于 \texttt{kMinPositive}。
+对应源码为 \srcpath{src/engine/kernel/ipm/ipm\_solver.cpp:assemble\_augmented\_newton}、
+\srcpath{src/engine/kernel/ipm/ipm\_solver.cpp:solve\_augmented\_newton}、
+\srcpath{src/engine/kernel/ipm/ipm\_solver.cpp:build\_augmented\_newton\_scatter}。
+
+\paragraph{形态选择.}
+首次组装时若 \texttt{use\_augmented\_newton} 或
+\texttt{NewtonFormulation::Augmented} 强制则走增广；\texttt{Auto} 且有惯性后端
+（MUMPS/PARDISO 宏）时以符号代价裁决：对两种形态各做一次 CHOLMOD 符号分析，
+增广形当选当且仅当其符号 flops 与因子非零数\textbf{都}严格更小。
+运行期回退：凝聚形证书失败（或凝聚全残差超过其块方程舍入限，见下）时
+切到增广形重来；增广形失败且 \texttt{Auto} 时也允许切回凝聚。
+对应源码为 \srcpath{src/engine/kernel/ipm/ipm\_solver.cpp:select\_augmented\_by\_symbolic\_cost}、
+\srcpath{src/engine/kernel/ipm/ipm\_solver.cpp:solve\_nlp\_filter\_impl}
+（lambda \texttt{solve\_augmented\_candidate}）。
+
+\paragraph{凝聚残差审计.}
+\texttt{Auto} 下凝聚解回收 $d_s, d\mu$ 后，重组四个块方程残差
+（含 $\delta_W d_x$ 与 $-\delta_C d_\lambda$ 正则项）并取
+$r_{\text{full}} = \max\{\|r_d + H d_x + J_g^{\top} d\lambda +
+J_h^{\top} d\mu + \delta_W d_x\|_{\infty}, \ldots\}$；
+限值为 $\sqrt{\varepsilon}\max(1, S)$，$S$ 为全部参与项的无穷范数最大值
+（\texttt{comparison\_roundoff}）。超限即``凝聚精度耗尽''，转入增广形。
+对应源码为 \srcpath{src/engine/kernel/ipm/ipm\_solver.cpp:solve\_nlp\_filter\_impl}、
+\srcpath{src/engine/kernel/ipm/ipm\_solver.cpp:comparison\_roundoff}（匿名命名空间）。
+
+% ─────────────────────────────────────────────────────────────────────────────
+\subsection{正则化与惯性校正}
+\label{subsec:engine-ipm-inertia}
+
+\paragraph{盲正则化阶梯.}
+\texttt{factor\_kkt\_with\_regularization}（无惯性后端时的默认路径）：
+尺度 $S = \max(1, \|W\|_{\max}, \|J_g\|_{\max})$；先试 $\delta = 0$，然后
+$\delta$ 从 $\sqrt{\varepsilon}\, S$ 起每次乘 $2$，上限 $S/\sqrt{\varepsilon}$；
+全部失败则置 \texttt{factored=false} 并失败。
+对应源码为 \srcpath{src/engine/kernel/ipm/ipm\_solver.cpp:factor\_kkt\_with\_regularization}。
+
+\paragraph{惯性设置解析.}
+\texttt{resolve\_inertia\_settings} 填充缺省值
+\begin{equation}
+  \delta_W^{0} = \sqrt{\varepsilon}\, S_W,\qquad
+  \delta_W^{\max} = S_W / \sqrt{\varepsilon},\qquad
+  \delta_C = \sqrt{\varepsilon}\, S_K,
+  \label{eq:ipm:inertia-settings}
+\end{equation}
+$S_W = \max(1, \|W\|_{\max})$、$S_K = \max(S_W, \|J_g\|_{\max})$；
+升级步进精确取 2 的幂：首次从 $0$ 踢到 $\delta_W^{0}$，其后
+$\delta \leftarrow \max(2\delta, \delta_W^{0})$。
+对应源码为 \srcpath{src/engine/kernel/kkt/kkt\_system.cpp:resolve\_inertia\_settings}、
+\srcpath{src/engine/kernel/kkt/kkt\_system.cpp:increased\_primal\_regularization}（匿名命名空间）。
+
+\paragraph{惯性校正分解.}
+\texttt{factor\_kkt\_inertia\_corrected\_sparse} 的判定序列：
+\begin{enumerate}
+  \item 有惯性后端（MUMPS/PARDISO 宏）且未强制最小 $\delta_W$、未设
+        \texttt{max\_tangent\_dimension} 时先试精确未正则化分解；后端报告
+        负特征值数 $= m_{eq}$ 且亏秩 $=0$ 则直接接受
+        （\texttt{factor\_unregularized\_with\_direct\_inertia}）；
+  \item 否则构造简约空间证书：选切空间划分（自然/偏好/QR/结构四种策略），
+        以切基求解构造 $Z$（$J_g Z = 0$ 按
+        $\sqrt{\varepsilon}\max(1, \|J_g\|_{\infty}\|Z\|_{\infty})$ 审计），
+        对 $(Z^{\top} W Z, Z^{\top} Z)$ 做对称化广义特征分解，得最小曲率
+        $\lambda_{\min}$ 与裕量
+        $M = \max(\texttt{reduced\_curvature\_tolerance},\;
+        \gamma_{d}\, \lambda_{\max}^{|\cdot|})$，其中
+        $\gamma_d = d\varepsilon/(1 - d\varepsilon)$（$d$ 为切维数）；
+        所需平移 $\delta_W = \max(0, M - \lambda_{\min})$，需要平移时再加
+        因子侧裕量 $\sqrt{\varepsilon}\max(1, |\lambda_{\min}|)$；
+        然后以 $\delta_W$ 起步、2 幂升级到 $\delta_W^{\max}$，
+        接受条件为``分解成功且简约惯性被认证''
+        （$\lambda_{\min} + \delta_W \ge M$）；直接后端报告的枢轴计数此时
+        只是诊断，不作否决；
+  \item 证书构造失败（含超 \texttt{max\_tangent\_dimension} 上限）时退回
+        直接惯性环：每个 $\delta_W$ 先试 $\delta_C = 0$ 再试
+        $\delta_C = \delta_C^{\text{stripe}}$，接受条件为后端报告
+        负特征值数 $= m_{eq}$ 且亏秩 $=0$；
+  \item 无惯性后端时退回 \texttt{certify\_primal\_positive\_definite}
+        （对 $W + \delta I$ 做 Eigen SimplicialLDLᵀ 并检查 \texttt{vectorD}
+        全正），其后按块合同惯性 $(n, m_{eq}, 0)$ 分解，必要时加
+        $\delta_C$ 条纹修复秩亏。
+\end{enumerate}
+对应源码为 \srcpath{src/engine/kernel/kkt/kkt\_system.cpp:factor\_kkt\_inertia\_corrected\_sparse}、
+\srcpath{src/engine/kernel/kkt/kkt\_system.cpp:build\_reduced\_space\_certificate}（匿名命名空间）、
+\srcpath{src/engine/kernel/kkt/kkt\_system.cpp:rounding\_gamma}（匿名命名空间）、
+\srcpath{src/engine/kernel/kkt/kkt\_system.cpp:factor\_with\_direct\_inertia}（匿名命名空间）、
+\srcpath{src/engine/kernel/kkt/kkt\_system.cpp:factor\_unregularized\_with\_direct\_inertia}（匿名命名空间）、
+\srcpath{src/engine/kernel/kkt/kkt\_system.cpp:certify\_primal\_positive\_definite}（匿名命名空间）。
+
+\paragraph{增广 Newton 的 $\delta_W$ 网格.}
+\texttt{factor\_solve\_augmented\_newton} 对 \eqref{eq:ipm:augmented} 用
+二分网格搜索最小可用指数：候选 $\delta_W = \mathrm{ldexp}(\delta_W^{0}, e)$，
+成功指数与失败指数相邻时收敛；每个 $\delta_W$ 先试 $\delta_C=0$ 再试
+$\delta_C$ 条纹（保持零对偶块非奇异时的精确等式 Newton 方程）。
+接受要求分解成功、惯性 $(n, m_{eq} + m_{ineq}, 0)$（由
+\texttt{augmented\_factor\_has\_correct\_inertia} 经后端
+\texttt{negative\_eigenvalues}/\texttt{estimated\_deficiency} 读取）、
+且求解通过共同的后向误差门。\texttt{primal\_feasible\_start}
+（\texttt{require\_descent\_inertia=false}）时跳过惯性要求、先试完全
+未正则化的系统。对应源码为
+\srcpath{src/engine/kernel/ipm/ipm\_solver.cpp:factor\_solve\_augmented\_newton}、
+\srcpath{src/engine/kernel/ipm/ipm\_solver.cpp:augmented\_factor\_has\_correct\_inertia}、
+\srcpath{src/engine/kernel/ipm/ipm\_solver.cpp:exact\_condensed\_factor\_inertia\_ok}。
+
+\paragraph{方向局部性强制.}
+凝聚路径在原始残差已达容差（$\theta_p \le \texttt{tol\_primal} +
+\sqrt{\varepsilon}\max(1,\texttt{tol\_primal})$）时，若归一化方向
+$\max_j |d_{x,j}| / \max(1, |x_j|) > 1$，则以
+$\delta_W \leftarrow \max(\delta_W^{\text{used}}, \sqrt{\varepsilon}\,
+\|W\|_{\max})$ 起步、每次乘 $2$ 强制重分解，直到方向归一化无穷范数
+$\le 1$。精确凝聚快速通道（\texttt{primal\_feasible\_start} 或原始残差
+仍超差时先试的未正则化分解 + 惯性证书）同样受此门控，越线即弃用。
+对应源码为 \srcpath{src/engine/kernel/ipm/ipm\_solver.cpp:solve\_nlp\_filter\_impl}。
+
+% ─────────────────────────────────────────────────────────────────────────────
+\subsection{filter 线搜索与步长规则}
+\label{subsec:engine-ipm-filter}
+
+\paragraph{量与斜率.}
+\begin{equation}
+  \theta(x, s) = \|g(x)\|_1 + \|h(x) + s\|_1,\qquad
+  \varphi_{\bar\mu}(x, s) = f(x) - \bar\mu \sum_i \log s_i,
+  \qquad \nabla\varphi \cdot d = \nabla f^{\top} d_x -
+  \bar\mu \sum_i \frac{d s_i}{s_i},
+  \label{eq:ipm:theta-phi}
+\end{equation}
+$\log$ 与除法中的 $s_i$ 下截于 \texttt{kMinPositive}。对应源码为
+\srcpath{src/engine/kernel/ipm/ipm\_solver.cpp:compute\_theta}、
+\srcpath{src/engine/kernel/ipm/ipm\_solver.cpp:compute\_barrier\_phi}、
+\srcpath{src/engine/kernel/ipm/ipm\_solver.cpp:barrier\_descent\_slope}。
+
+\paragraph{边界步长.}
+分数边界规则 $\tau = \texttt{alpha\_max}$（合法时）否则
+$1 - \sqrt{\varepsilon}$；最大正向步
+\begin{equation}
+  \alpha_{\max}^{p} = \min\Bigl(1, \min_{i:\, d s_i < 0}
+  \frac{-\tau s_i}{d s_i}\Bigr),\qquad
+  \alpha_{\max}^{d} = \min\Bigl(1, \min_{i:\, d\mu_i < 0}
+  \frac{-\tau \mu_i}{d\mu_i}\Bigr),
+  \label{eq:ipm:frac-boundary}
+\end{equation}
+$\alpha \leftarrow \min(1, \alpha_{\max}^{p})$。
+\texttt{primal\_feasible\_start} 下原始步恒取 $1$ 且对偶步独立于 $\alpha$
+（\texttt{trial\_alpha\_dual} $= \alpha_{\max}^{d}$ 而非
+$\min(\alpha_{\max}^{d}, \alpha)$）。回溯每次乘 $0.5$，下限
+\texttt{filter\_alpha\_min}，缺省为可表示性极限
+$\varepsilon \cdot \mathrm{iterate\_scale} / \max(\mathrm{direction\_scale},
+\texttt{kMinPositive})$（方向/迭代尺度取四组向量无穷范数的最大）。
+对应源码为 \srcpath{src/engine/kernel/ipm/ipm\_solver.cpp:max\_positive\_step}、
+\srcpath{src/engine/kernel/ipm/ipm\_solver.cpp:effective\_fraction\_to\_boundary}（匿名命名空间）、
+\srcpath{src/engine/kernel/ipm/ipm\_solver.cpp:solve\_nlp\_filter\_impl}。
+
+\paragraph{filter 数据结构.}
+\texttt{Filter::is\_acceptable} 拒绝当（i）$\theta_t \ge$
+\texttt{theta\_upper\_bound}，或（ii）存在已有条目 $(\theta_k, \varphi_k)$
+使 $\theta_t \ge (1-\gamma_\theta)\theta_k$ 且
+$\varphi_t \ge \varphi_k - \gamma_\varphi \theta_k$；
+\texttt{add\_entry} 插入时剪去被新条目按同一裕量支配的旧条目；
+\texttt{reset\_with\_theta\_upper\_bound} 设定 $\theta$ 上界。
+$\gamma_\theta, \gamma_\varphi$ 缺省均取 $\varepsilon$（机器精度）。
+主循环把上界置为
+$\mathrm{nextafter}(\max(\theta_{\text{init}}, N_{\text{rows}} \cdot
+\max(\|g\|_{\infty}, \|h+s\|_{\infty}, \texttt{tol\_primal})), +\infty)$。
+对应源码为 \srcpath{src/engine/kernel/ipm/ipm\_filter.cpp:Filter::is\_acceptable}、
+\srcpath{src/engine/kernel/ipm/ipm\_filter.cpp:Filter::add\_entry}、
+\srcpath{src/engine/kernel/ipm/ipm\_filter.cpp:Filter::reset\_with\_theta\_upper\_bound}、
+\srcpath{src/engine/kernel/ipm/ipm\_solver.cpp:solve\_nlp\_filter\_impl}。
+
+\paragraph{切换条件与接受测试.}
+切换条件（仅 \texttt{filter\_s\_theta}/\texttt{filter\_s\_phi}/
+\texttt{filter\_delta}/\texttt{filter\_eta\_phi}/
+\texttt{filter\_theta\_min\_scale} 全部为正时启用）：
+\begin{equation}
+  \mathrm{slope} < 0,\quad
+  \alpha (-\mathrm{slope})^{s_\varphi} >
+  \delta\, \theta_k^{s_\theta},\quad
+  \theta_k \le \theta_{\min};
+  \label{eq:ipm:switching}
+\end{equation}
+成立时按 Armijo 接受 $\varphi_t \le \varphi_k +
+\eta_\varphi \alpha\, \mathrm{slope} + \sqrt{\varepsilon}\max(1,|\varphi_k|)$
+（f 型步，不向 filter 加条目）；否则 h 型接受为
+``$\theta_t \le (1-\gamma_\theta)\theta_k$ 或
+$\varphi_t \le \varphi_k - \gamma_\varphi \theta_k$''（参数化形式），
+缺省形式为``$\theta_t$ 或 $\varphi_t$ 以 $\varepsilon\max(1,|\cdot|)$ 裕量
+严格下降''（\texttt{arithmetic\_roundoff}）。h 型接受后把
+$(\theta_k, \varphi_k)$ 加入 filter。对应源码为
+\srcpath{src/engine/kernel/ipm/ipm\_solver.cpp:solve\_nlp\_filter\_impl}。
+
+\paragraph{中心性特例与 Phase-I 门.}
+原始位移在 $\sqrt{\varepsilon}$ 相对尺度内时，filter 坐标可能不变；
+此时仅当分量不恶化（原始/对偶残差各以 $\varepsilon\max(1,|\cdot|)$ 裕量
+不增）、满足 $\theta$ 上界、merit 严格下降，且互补或对偶残差严格下降，
+才接受该切向/中心性步。\texttt{primal\_feasible\_start} 的 Phase-I 门
+另行要求调用者坐标原始违反严格小于 \texttt{phase1\_primal\_upper\_bound}、
+对偶与互补不增（\texttt{comparison\_roundoff} 裕量）且二者之一严格下降
+（\texttt{relative\_roundoff} 裕量）。对应源码为
+\srcpath{src/engine/kernel/ipm/ipm\_solver.cpp:solve\_nlp\_filter\_impl}、
+\srcpath{src/engine/kernel/ipm/ipm\_solver.cpp:arithmetic\_roundoff}（匿名命名空间）、
+\srcpath{src/engine/kernel/ipm/ipm\_solver.cpp:relative\_roundoff}（匿名命名空间）。
+
+\paragraph{二阶校正（SOC）.}
+\texttt{use\_second\_order\_correction} 且（Phase-I 邻域被违反，或冷启动
+全步使 $\theta$ 上升）时，以修正右端
+\begin{equation}
+  c_{\text{soc}} = g(x + \alpha d_x) - (1-\alpha)\, g(x)
+  \label{eq:ipm:soc}
+\end{equation}
+替换等式块（增广布局取中段，凝聚布局取尾部；不再重复原始 Newton 强迫项），
+复用当前分解求解；复合试验点 $x + \alpha d_x + d_x^{\text{soc}}$、
+$s + \alpha d_s - J_h d_x^{\text{soc}}$，乘子叠加
+$d\lambda^{\text{soc}}$、$d\mu^{\text{soc}}$（凝聚路径上
+$d\mu^{\text{soc}} = -\mu \circ d s^{\text{soc}} / s$）。然后按同一套
+filter/切换/Phase-I 门判定。对应源码为
+\srcpath{src/engine/kernel/ipm/ipm\_solver.cpp:solve\_nlp\_filter\_impl}。
+
+\paragraph{停滞与最优迭代点.}
+接受的步若原始相对位移与对偶相对位移都不超过 $\sqrt{\varepsilon}$，
+按停滞处理：原始停滞且原始与互补已达标的端点允许一次终端对偶投影
+（\texttt{initialize\_primal\_feasible\_floor\_projection} +
+\texttt{fit\_primal\_feasible\_duals\_active\_projection}），投影结果仍需通过
+同一 \texttt{strict\_termination}；否则以停滞状态退出。线搜索崩溃
+（$\alpha$ 跌破下限）或预算耗尽时回退到 merit 最优的历史迭代点。
+严格收敛后可选 \texttt{try\_active\_kkt\_polish}：只有 polish 结果也满足
+严格终止才替换当前解。对应源码为
+\srcpath{src/engine/kernel/ipm/ipm\_solver.cpp:solve\_nlp\_filter\_impl}、
+\srcpath{src/engine/kernel/ipm/ipm\_solver.cpp:try\_active\_set\_kkt\_polish}。
+
+% ─────────────────────────────────────────────────────────────────────────────
+\subsection{缩放与恢复阶段}
+\label{subsec:engine-ipm-scaling-restoration}
+
+\paragraph{目标/约束缩放.}
+\texttt{compute\_scaling\_factors} 在内点化的 $x_0$ 处采样：
+$s_f = g_{\max}/\|\nabla f\|_{\infty}$（范数非有限或 $\le g_{\max}$ 时取 $1$），
+$s_g, s_h$ 逐行同理（$g_{\max}$ 缺省 $1.0$，来自
+\texttt{scaling\_g\_max}）。\texttt{build\_scaled\_nlp\_model} 以 lambda 包装
+全部回调：目标/梯度/Hessian 乘 $s_f$，约束值与 Jacobian 行乘 $s_{g,i}$/$s_{h,i}$；
+Lagrangian Hessian 回调内先把乘子还原到原坐标
+$\lambda^{\text{orig}}_i = (s_{g,i}/s_f)\lambda_i$、
+$\mu^{\text{orig}}_i = (s_{h,i}/s_f)\mu_i$，结果再乘 $s_f$。
+\texttt{solve\_nlp\_detail} 在 filter 求解前后分别用
+\texttt{transform\_filter\_options\_to\_scaled\_coordinates} 与
+\texttt{audit\_filter\_outcome\_in\_original\_coordinates} 做选项换算与
+原坐标审计。对应源码为
+\srcpath{src/engine/kernel/ipm/ipm\_scaling.cpp:compute\_scaling\_factors}、
+\srcpath{src/engine/kernel/ipm/ipm\_scaling.cpp:build\_scaled\_nlp\_model}、
+\srcpath{src/engine/kernel/ipm/ipm\_scaling.cpp:scale\_from\_norm}（匿名命名空间）、
+\srcpath{src/engine/kernel/ipm/ipm\_solver.cpp:NativeIPMAdapter::solve\_nlp\_detail}。
+
+\paragraph{恢复 NLP.}
+filter 失败且状态属于可触发集合（线搜索步过小 / 接受步崩溃 / 迭代停滞 /
+惯性校正超限 / 达到最大迭代）且模型有等式时，以当前（或输入）点 $x_R$
+构造恢复问题
+\begin{equation}
+  \min_{x, p, n}\ \sum_i (p_i + n_i) + \frac{\zeta}{2}
+  \|D_R (x - x_R)\|^{2}
+  \quad \text{s.t.}\quad g(x) + p - n = 0,\ h(x) \le 0,\ p, n \ge 0,
+  \label{eq:ipm:restoration}
+\end{equation}
+其中 $D_R = \operatorname{diag}(d_j)$、$d_j = \min(1, 1/\max(1, |x_{R,j}|))$；
+$\zeta$ 缺省 $\sqrt{\varepsilon}$（\texttt{restoration\_zeta}）。
+初始点 $p_i = \rho_i + \max(-g_i, 0)$、$n_i = \rho_i + \max(g_i, 0)$，
+分辨率
+\begin{equation}
+  \rho_i = \max\Bigl(\sqrt{\nu_{\min}},\; \sqrt{\varepsilon}
+  \max\bigl(|g_i(x_R)|,\; r_i\bigr)\Bigr),\qquad
+  r_i = \Bigl(\sum_j (J_{g,ij} s^{\text{var}}_j)^2\Bigr)^{1/2},
+  \label{eq:ipm:restoration-resolution}
+\end{equation}
+$\nu_{\min}$ 为最小正双精度，$s^{\text{var}}_j$ 取
+$\max(1, |x_{R,j}|, \text{界宽}, |\ell_j|, |u_j|)$。
+对应源码为 \srcpath{src/engine/kernel/ipm/ipm\_restoration.cpp:build\_restoration\_nlp}、
+\srcpath{src/engine/kernel/ipm/ipm\_restoration.cpp:make\_dr}（匿名命名空间）、
+\srcpath{src/engine/kernel/ipm/ipm\_restoration.cpp:restoration\_variable\_scale}（匿名命名空间）。
+
+\paragraph{恢复接受准则.}
+恢复子问题以求解同一 filter 驱动（禁缩放、禁 SOC、禁嵌套恢复，
+预算 $\min(\texttt{max\_iter}, \max(1, \texttt{restoration\_max\_iter}))$）。
+只有原模型法向残差（\texttt{raw\_primal\_violation}）严格下降——
+$\mathrm{after} + \sqrt{\varepsilon}\max(1, \mathrm{before}) <
+\mathrm{before}$——才接受恢复点并以其为 $x_0$ 重试原问题；
+\texttt{recover\_restoration\_warm\_start} 在维度/正性检查齐全时把恢复
+乘子与松弛映射回原模型作为暖启动（不等式对偶与松弛必须逐分量为正，
+否则整套放弃）。重试仅一次（\texttt{use\_restoration\_phase=false}）。
+对应源码为 \srcpath{src/engine/kernel/ipm/ipm\_solver.cpp:NativeIPMAdapter::solve\_nlp\_detail}、
+\srcpath{src/engine/kernel/ipm/ipm\_restoration.cpp:recover\_restoration\_warm\_start}、
+\srcpath{src/engine/kernel/ipm/ipm\_restoration.cpp:extract\_x\_from\_restoration}。
+
+\paragraph{固定变量消元与暖启动审计.}
+\texttt{solve\_nlp\_detail} 在进入 filter 前：
+\texttt{build\_fixed\_nlp\_reduction} 把 $\ell_j = u_j$ 的变量消元，
+求解后在 \texttt{restore\_fixed\_nlp\_certificate} 中映射回并做原模型证书；
+\texttt{central\_warm\_start} 经 \texttt{audit\_central\_warm\_start} 全有或
+全无审计（拒绝时把全部暖启动向量清空，观测上等同冷启动）；
+\texttt{primal\_feasible\_start}/\texttt{preserve\_initial\_point} 仅当输入点的
+原始违反 $\le$ \texttt{tol\_primal} 时采纳。对应源码为
+\srcpath{src/engine/kernel/ipm/ipm\_solver.cpp:NativeIPMAdapter::solve\_nlp\_detail}、
+\srcpath{src/engine/kernel/ipm/ipm\_solver.cpp:build\_fixed\_nlp\_reduction}、
+\srcpath{src/engine/kernel/ipm/ipm\_solver.cpp:restore\_fixed\_nlp\_certificate}、
+\srcpath{src/engine/kernel/ipm/ipm\_solver.cpp:audit\_central\_warm\_start}。
+
+% ─────────────────────────────────────────────────────────────────────────────
+\subsection{LP 内点（Mehrotra + Gondzio）}
+\label{subsec:engine-ipm-lp}
+
+\paragraph{有界变量标准形.}
+\texttt{NativeIPMLPAdapter::solve\_lp\_impl} 求解
+$\min \hat c^{\top} \hat x$ s.t. $\hat A \hat x = \hat b$、
+$\ell \le \hat x \le u$ 的原始-对偶内点形式，其中 $\hat x = (x; s)$ 含
+不等式松弛（$nn = n + m_i$）。G 行（$b = +\infty$ 而 lhs 有限）在输入边
+翻号为 L 行；界哨兵 $\pm 10^{20}$（\texttt{kBig}）归一；
+$|\ell| > 10^{8} \max_i |b_i|$ 级别的远界被停用（视为无界，
+由最终原空间审计兜底）。$u_j - \ell_j < 10^{-9}$ 的固定变量移出障碍公式
+（\texttt{flb=fub=0}，$\theta_j = 0$，增广对角钉 $10^{12}$，目标值锁定 $\ell_j$）。
+对应源码为 \srcpath{src/engine/kernel/ipm/ipm\_lp\_solver.cpp:NativeIPMLPAdapter::solve\_lp\_impl}；
+常量为 \srcpath{src/engine/kernel/ipm/ipm\_lp\_solver\_internal.hpp} 的
+\texttt{kBig}/\texttt{kTau}/\texttt{kMinVal}（路径锚点）。
+
+\paragraph{Ruiz 均衡.}
+\texttt{ruiz\_equilibrate} 对 $[A; A_{eq}]$ 做固定轮数（\texttt{ruiz\_rounds}，
+包装层缺省见 \texttt{IPMLPOptions}）的交替均衡：每轮
+$D_r \mathrel{*}= \operatorname{diag}(1/\sqrt{\mathrm{rowmax}})$、
+$D_c \mathrel{*}= \operatorname{diag}(1/\sqrt{\mathrm{colmax}})$（零行列跳过），
+每行/列每轮只乘一次。还原关系 $x = D_c \hat x$、$y = D_r \hat y$、
+$z = \hat z / D_c$。对应源码为
+\srcpath{src/engine/kernel/ipm/ipm\_lp\_solver\_internal.hpp:ruiz\_equilibrate}。
+
+\paragraph{初始点.}
+冷启动以 $\Theta = I$ 的法矩阵 $N = A_e A_e^{\top} + 10^{-10} I$ 解
+最小二乘点 $x = A_e^{\top} N^{-1} b$、$y = N^{-1} A_e c$（增广形态改用
+等价的准定 KKT $[I, -A_e^{\top}; -A_e, -\delta I]$ 同一分解两次求解）；
+分量非有限或模 $\ge 10^{10}$ 时退回 $x = 0.5\mathbf{1}$、$y = 0$。
+然后把变量钳入界内（冷启动双边界留 $\min(0.01\,\mathrm{range}, 1)$、
+单边界留 $1.0$；暖启动留 $10^{-6}$），重算松弛
+$s_i = \mathrm{clamp}(b_i - a_i x, 10^{-4}, \max(10^{-4}, u^{s}_i - 10^{-4}))$，
+间隙 $g_l = \max(x - \ell, 10^{-4})$、$g_u = \max(u - x, 10^{-4})$。
+对偶初值为 Mehrotra 式：令 $r_c = c - A_e^{\top} y$，双边列
+$z_l^{0} = \max(r_c, 0)$、$z_u^{0} = \max(-r_c, 0)$（单边列只取对应侧），
+然后整体上移 $d_z = \max(-1.5 \min z^{0}, 0) + 0.5\, \overline{g z}/\bar g$
+（$\overline{gz}/\bar g$ 为间隙加权均值比，分母 $\le 10^{-30}$ 时取 $1$），
+最终逐分量下截于 $10^{-6}$。对应源码为
+\srcpath{src/engine/kernel/ipm/ipm\_lp\_solver.cpp:NativeIPMLPAdapter::solve\_lp\_impl}。
+
+\paragraph{每迭代残差与互补.}
+记 $\mathrm{fl}_j, \mathrm{fu}_j \in \{0, 1\}$ 为界存在标志（分支自由算术）。
+每迭代计算
+\begin{equation}
+  r_p = b - A_e \hat x,\qquad
+  r_{d,j} = c_j - (A_e^{\top} y)_j - \mathrm{fl}_j z_{l,j}
+  + \mathrm{fu}_j z_{u,j},
+  \label{eq:ipmlp:residuals}
+\end{equation}
+互补均值 $\mu = \bigl(\sum_j \mathrm{fl}_j g_{l,j} z_{l,j} +
+\mathrm{fu}_j g_{u,j} z_{u,j}\bigr) / n_{\text{compl}}$，
+$\theta_j = 1 / (z_{l,j}/g_{l,j} + z_{u,j}/g_{u,j} + \mathrm{reg})$。
+对应源码为 \srcpath{src/engine/kernel/ipm/ipm\_lp\_solver.cpp:NativeIPMLPAdapter::solve\_lp\_impl}
+（lambda \texttt{compute\_residuals} 与 $\theta$ 装配段）。
+
+\paragraph{正则化预算.}
+$\mathrm{reg}$ 的下限 $\mathrm{reg}_{\text{floor}}$ 在 Auto-增广主动路径取
+$\sqrt{\varepsilon}$，其余取 $\varepsilon$；每迭代
+\begin{equation}
+  \mathrm{reg} = \mathrm{clamp}\Bigl(
+  \min\bigl(10^{-6} \mu,\;
+  \tfrac{0.1 \max(\mathrm{pf}, \mathrm{df}, \mu)}{1 + \|(x,y)\|_{\infty}}
+  \bigr),\; \mathrm{reg}_{\text{floor}},\; 10^{-2}\Bigr),
+  \label{eq:ipmlp:reg}
+\end{equation}
+（PARDISO 枢轴探针未决或已证稳定时直接取下限）。
+方向非有限时把 \texttt{reg\_direction\_boost} 乘 $100$（上限 $10^{8}$）、
+PARDISO 路径同时把枢轴扰动指数提到 $10$（boost $\ge 10^{4}$ 时 $8$）并
+重新分解；有限迭代令 boost 除以 $10$ 回充。
+对应源码为 \srcpath{src/engine/kernel/ipm/ipm\_lp\_solver.cpp:NativeIPMLPAdapter::solve\_lp\_impl}。
+
+\paragraph{分解路径与动态重试.}
+Newton 系统按形态分派：带宽 $\le 128$（\texttt{kBandedThreshold}）走带状
+Cholesky；散布表超过 $4\times 10^{6}$ 项（\texttt{kDenseScatterThreshold}，
+另受 $256\,$MB \texttt{kDenseMaxBytes} 与 $10^{8}$ 项
+\texttt{kMaxScatterEntries} 门控）走稠密 $LL^{\top}$（$N = A_e \Theta
+A_e^{\top}$ 以 syrk 成形）；否则走稀疏法方程（CHOLMOD/PARDISO/Accelerate/
+Eigen LDLᵀ，按编译宏与符号分析结果选择）；\texttt{ForceAugmented} 或
+Auto 判定法方程过稠时走准定增广系统
+\begin{equation}
+  \begin{bmatrix} \operatorname{diag}(d) + \mathrm{reg}\, I & -A_e^{\top}\\
+  -A_e & -\mathrm{reg}\, I \end{bmatrix}
+  \begin{bmatrix} d_x \\ d_y \end{bmatrix} =
+  \begin{bmatrix} \xi \\ -r_p \end{bmatrix},
+  \qquad d_j = z_{l,j}/g_{l,j} + z_{u,j}/g_{u,j},
+  \label{eq:ipmlp:augmented}
+\end{equation}
+由 \texttt{factor\_kkt\_sparse}/\texttt{solve\_kkt\_sparse} 或 CHOLMOD
+simplicial LDLᵀ 分解。分解失败的重试阶梯统一为
+$\mathrm{reg} \times 100^{k}$（$k = 1..4$），带状路径重试前先把工作缓冲
+恢复为未分解的填充。对应源码为
+\srcpath{src/engine/kernel/ipm/ipm\_lp\_solver.cpp:NativeIPMLPAdapter::solve\_lp\_impl}
+（lambda \texttt{fill\_and\_factor\_banded} 与同函数分解段）、
+\srcpath{src/engine/kernel/ipm/ipm\_lp\_solver\_internal.hpp:banded\_chol\_factor}、
+\srcpath{src/engine/kernel/ipm/ipm\_lp\_solver\_internal.hpp}（常量的路径锚点）。
+
+\paragraph{预测子（仿射）.}
+仿射右端 $\xi^{\text{aff}}_j = -r_{d,j} - \mathrm{fl}_j z_{l,j} +
+\mathrm{fu}_j z_{u,j}$，解出 $(d_x^{\text{aff}}, d_y^{\text{aff}})$ 后
+\begin{equation}
+  d z_l^{\text{aff}} = \mathrm{fl}\bigl(-z_l - z_l g_l^{-1} d x^{\text{aff}}\bigr),
+  \qquad
+  d z_u^{\text{aff}} = \mathrm{fu}\bigl(-z_u + z_u g_u^{-1} d x^{\text{aff}}\bigr),
+  \label{eq:ipmlp:affine-dz}
+\end{equation}
+以最大正向步 $(\alpha_p^{\text{aff}}, \alpha_d^{\text{aff}})$
+（分数取 $1-\varepsilon$，legacy 对照开关取 \texttt{kTau}${}=0.9995$；
+结果下截于 \texttt{kMinVal}${}=10^{-14}$）得
+\begin{equation}
+  \mu_{\text{aff}} = \frac{1}{n_{\text{compl}}} \sum_j
+  \Bigl[\mathrm{fl}_j (g_{l,j} + \alpha_p^{\text{aff}} d x^{\text{aff}}_j)
+  (z_{l,j} + \alpha_d^{\text{aff}} d z^{\text{aff}}_{l,j}) +
+  \mathrm{fu}_j (g_{u,j} - \alpha_p^{\text{aff}} d x^{\text{aff}}_j)
+  (z_{u,j} + \alpha_d^{\text{aff}} d z^{\text{aff}}_{u,j})\Bigr],
+  \label{eq:ipmlp:mu-aff}
+\end{equation}
+\begin{equation}
+  \sigma = \mathrm{clamp}\Bigl(\bigl(\max(0, \mu_{\text{aff}}/\mu)\bigr)^{3},
+  0, 1\Bigr)
+  \quad(\text{legacy 开关下}\ \min(\cdot, 0.5)),
+  \qquad \mu = 0 \Rightarrow \sigma = 0.
+  \label{eq:ipmlp:sigma}
+\end{equation}
+对应源码为 \srcpath{src/engine/kernel/ipm/ipm\_lp\_solver.cpp:NativeIPMLPAdapter::solve\_lp\_impl}、
+\srcpath{src/engine/kernel/ipm/ipm\_lp\_solver\_internal.hpp:ipm\_maximum\_step\_lengths}。
+
+\paragraph{校正子.}
+当 $\alpha_p^{\text{aff}} > 0.9$、$\alpha_d^{\text{aff}} > 0.9$ 且
+$\sigma < 0.02$ 时跳过校正直接用仿射方向（硬编码阈值）；否则以
+\begin{equation}
+  \xi_j = -r_{d,j} + \mathrm{fl}_j\bigl(\sigma\mu\, g_{l,j}^{-1} - z_{l,j}
+  - d z^{\text{aff}}_{l,j} d x^{\text{aff}}_j g_{l,j}^{-1}\bigr)
+  - \mathrm{fu}_j\bigl(\sigma\mu\, g_{u,j}^{-1} - z_{u,j}
+  + d z^{\text{aff}}_{u,j} d x^{\text{aff}}_j g_{u,j}^{-1}\bigr)
+  \label{eq:ipmlp:corrector}
+\end{equation}
+再解同一分解，并按
+$d z_l = \mathrm{fl}((\sigma\mu - d z^{\text{aff}} d x^{\text{aff}}) g_l^{-1}
+- z_l - z_l g_l^{-1} d x)$、
+$d z_u = \mathrm{fu}((\sigma\mu + d z^{\text{aff}} d x^{\text{aff}}) g_u^{-1}
+- z_u + z_u g_u^{-1} d x)$ 回收乘子方向。对应源码为
+\srcpath{src/engine/kernel/ipm/ipm\_lp\_solver.cpp:NativeIPMLPAdapter::solve\_lp\_impl}。
+
+\paragraph{Gondzio 多中心校正.}
+仅当 $\min(\alpha_p, \alpha_d) < 0.9$ 且 $\mu > 0$ 时启用，最多
+\texttt{max\_correctors} 轮（缺省自动值 $3$；当所选因子的值数组达到
+$4\times10^{6}$ 字节（\texttt{kAutoCorrectorFactorBytes}，不再缓存驻留）时
+自动降为 $0$，\texttt{max\_correctors}${}\ge 0$ 的显式设置覆盖自动值）。
+每轮试探步 $\alpha^{t} = \min(\alpha + 0.1, 1)$
+（\texttt{kDeltaAlpha}${}=0.1$），把试探互补积
+$v = (g_l + \alpha_p^t d x)(z_l + \alpha_d^t d z_l)$ 等对
+$[0.1\mu, 10\mu]$（\texttt{kBetaMin}/\texttt{kBetaMax}）截断得残差
+$r_{gl} = \mathrm{clamp}(v) - v$，以零原始右端解
+$\xi^{gc}_j = \mathrm{fl}_j r_{gl,j} g_{l,j}^{-1} -
+\mathrm{fu}_j r_{gu,j} g_{u,j}^{-1}$，
+合成新方向后仅当总步长增益
+$\alpha_p^{\text{new}} + \alpha_d^{\text{new}} > \alpha_p + \alpha_d + 0.01$
+（\texttt{kGammaAccept}${}\times{}$\texttt{kDeltaAlpha}）才保留，否则回滚并
+终止本轮循环。对应源码为
+\srcpath{src/engine/kernel/ipm/ipm\_lp\_solver.cpp:NativeIPMLPAdapter::solve\_lp\_impl}。
+
+\paragraph{步长规则.}
+\texttt{compute\_step\_lengths} 调用 \texttt{ipm\_centrality\_step\_lengths}：
+\texttt{centrality\_step\_control} 关闭时退化为 \texttt{kTau} 的
+\texttt{ipm\_maximum\_step\_lengths}；开启时先取严格分数 $1-\varepsilon$ 的
+最大步 $(\bar\alpha_p, \bar\alpha_d)$，计算满步互补均值 $\mu_{\text{full}}$，
+在阻塞分量上为其配对互补积保留 $0.1 \mu_{\text{full}}$ 缓冲
+（\texttt{kGamma}${}=0.9$），例如原始阻塞于下界侧时
+\begin{equation}
+  \alpha_p = \mathrm{clamp}\Bigl(
+  \frac{g_{l,j^*} - (1 - 0.9)\mu_{\text{full}}/
+  (z_{l,j^*} + \bar\alpha_d d z_{l,j^*})}{-d x_{j^*}},\;
+  0.9\,\bar\alpha_p,\; 1\Bigr),
+  \label{eq:ipmlp:centrality-step}
+\end{equation}
+最终两侧都封顶 $1 - 10^{-6}$。迭代更新
+$x \mathrel{+}= \alpha_p d_x$、$y \mathrel{+}= \alpha_d d_y$、
+$z \leftarrow \max(z + \alpha_d d_z, 10^{-14})$、
+$g_l \leftarrow \max(x - \ell, 10^{-14})$、$g_u \leftarrow \max(u - x, 10^{-14})$；
+固定变量随后重新锁定。对应源码为
+\srcpath{src/engine/kernel/ipm/ipm\_lp\_solver\_internal.hpp:ipm\_centrality\_step\_lengths}、
+\srcpath{src/engine/kernel/ipm/ipm\_lp\_solver.cpp:NativeIPMLPAdapter::solve\_lp\_impl}
+（lambda \texttt{compute\_step\_lengths} 与更新段）。
+
+\paragraph{Newton 方向的迭代改进.}
+\texttt{solve\_step} 对未正则化 KKT 残差
+$r_1 = \xi - \operatorname{diag}(d) d_x + A_e^{\top} d_y$、
+$r_2 = -r_p + A_e d_x$ 取合并无穷范数，目标为 Dembo--Eisenstat--Steihaug
+强制项 $\eta = 0.1$（\texttt{kNewtonRefinementEta}）乘右端尺度
+$\max(1, \|r_p\|_{\infty}, \|\xi\|_{\infty})$；超目标时以同一分解回代校正，
+最多 $5$ 轮，\textbf{仅当合并残差严格下降才提交校正}，否则回滚该校正并停止。
+法方程路径另有至多 $2$ 轮的 $N$ 残差精化，门限
+$10^{-12}\max(1, \|\mathrm{rhs}\|_{\infty})$。
+方向相对残差 \texttt{iteration\_kkt\_relative} 非有限（求解链失败）时
+按``Inaccurate Newton direction''/``Normal equations rejected''中断。
+对应源码为 \srcpath{src/engine/kernel/ipm/ipm\_lp\_solver.cpp:NativeIPMLPAdapter::solve\_lp\_impl}
+（lambda \texttt{solve\_step}、\texttt{raw\_kkt\_solve}、\texttt{solve\_normal}）。
+
+\paragraph{终止与发布.}
+候选门（廉价触发）：绝对候选 $\mathrm{pf} < \tau_p$、$\mathrm{df} < \tau_d$、
+$\mu < \tau_g$，或相对候选
+$\mathrm{pf}/(1+\|b\|_{\max}) < 100 \tau_p$ 等三条同时成立，其中
+$\tau = \max(\texttt{tol}, \texttt{publication\_tol})$、
+$\texttt{publication\_tol} = \max(10^{-10}, 10\,\texttt{tol}) \times
+\texttt{publication\_tol\_scale}$；触发后以原模型审计
+\texttt{audit\_ipm\_lp\_optimality} 裁决。该审计在原坐标重组原始违反、
+对偶违反（含行乘子符号条件与固定列的最小范数乘子重建
+$z_l = \max(0, s_j)$、$z_u = \max(0, -s_j)$）与原始/对偶目标，接受条件
+\begin{equation}
+  \frac{\mathrm{viol}_p}{\max(1, \mathrm{primal\_scale})} \le \tau_p,\quad
+  \frac{\mathrm{viol}_d}{\max(1, \|c\|_{\infty})} \le \tau_d,\quad
+  \frac{|\mathrm{obj}_p - \mathrm{obj}_d|}
+  {1 + |\mathrm{obj}_p| + |\mathrm{obj}_d|} \le \tau_g .
+  \label{eq:ipmlp:audit}
+\end{equation}
+发布是 fail-closed 的：循环内自称收敛但终审不过者改判
+``Optimality audit rejected''；未收敛但终审通过者补判
+``Optimal (final original KKT audit)''。法方程停滞守卫：
+$\min(\alpha_p, \alpha_d) \le \sqrt{\varepsilon}$ 连续两次即以
+``Normal equations stalled'' 中断（外层再决定是否以增广形重启）。
+对应源码为 \srcpath{src/engine/kernel/ipm/ipm\_lp\_solver.cpp:audit\_ipm\_lp\_optimality}、
+\srcpath{src/engine/kernel/ipm/ipm\_lp\_solver.cpp:IPMLPOptimalityAudit::acceptable}、
+\srcpath{src/engine/kernel/ipm/ipm\_lp\_solver.cpp:NativeIPMLPAdapter::solve\_lp\_impl}。
+
+\paragraph{外层回退阶梯.}
+\texttt{solve\_lp\_with\_presolve\_snapshot} 的 \texttt{direct\_solve}
+按序执行：配置轮数求解 $\to$（迭代 $0$ 即被拒且 Auto 时）无缩放法方程
+$\to$ 增广形升级（停滞/分解失败时保留有限原始迭代点作恢复起点，
+停滞用 \texttt{StructurePreserving} 后端策略，其余用
+\texttt{PivotingPortfolio}）$\to$ 无缩放重试 $\to$
+$\max(4\,\texttt{ruiz\_rounds}, 40)$ 轮的极端缩放重试；
+\texttt{keep\_better} 以``成功优先，否则
+$\max(\mathrm{pf}, \mathrm{df}, \mu)$ 小者''裁决。speculative
+（presolve 减缩模型）求解在 $\le 8$ 迭代失败时直接放弃升级阶梯。
+对应源码为 \srcpath{src/engine/kernel/ipm/ipm\_lp\_solver.cpp:NativeIPMLPAdapter::solve\_lp\_with\_presolve\_snapshot}
+（lambda \texttt{direct\_solve}、\texttt{run\_variant}、\texttt{keep\_better}）。
+
+\paragraph{缓存节点路径.}
+\texttt{prepare\_for\_node\_solves} 缓存基 LP 副本、G 行翻号、Ruiz 缩放、
+CSR/散布表与符号分解；\texttt{solve\_cached\_node\_lp} 每节点只重建界
+（缩放坐标下除以 $D_c$）并复用全部结构，暖启动取上一节点的
+\texttt{last\_dual}（否则 $y = 0$）与 \texttt{last\_zl}/\texttt{last\_zu}
+（逐分量钳到 $[10^{-6}, 10^{4}]$，否则取 $1$），冷启动原始点取
+界中点。其迭代循环与 \texttt{solve\_lp\_impl} 相同（无增广形态：
+带状或稀疏法方程）。\texttt{solve\_structure\_aware\_node\_lp} 在
+``非带状且 $m > 256$ 且带宽 $> m/4$''时改走
+\texttt{ForceAugmented} + \texttt{StructurePreserving} 的完整
+\texttt{solve\_lp\_impl}。\texttt{update\_cached\_cost} 只更新缩放成本
+（松弛成本保持 $0$）。对应源码为
+\srcpath{src/engine/kernel/ipm/ipm\_lp\_solver\_cached.cpp:NativeIPMLPAdapter::prepare\_for\_node\_solves}、
+\srcpath{src/engine/kernel/ipm/ipm\_lp\_solver\_cached.cpp:NativeIPMLPAdapter::solve\_cached\_node\_lp}、
+\srcpath{src/engine/kernel/ipm/ipm\_lp\_solver\_cached.cpp:NativeIPMLPAdapter::solve\_structure\_aware\_node\_lp}、
+\srcpath{src/engine/kernel/ipm/ipm\_lp\_solver\_cached.cpp:NativeIPMLPAdapter::update\_cached\_cost}。
+
+% ─────────────────────────────────────────────────────────────────────────────
+\subsection{KKT 装配契约与求解闸门}
+\label{subsec:engine-kkt-contract}
+
+\paragraph{analyze-once / factorize-many.}
+\texttt{assemble\_augmented\_kkt\_cached} 组装
+$[W + \delta_W I, J_g^{\top}; J_g, -\delta_C I]$：结构变化（以
+\texttt{memcmp} 比较外层/内层索引指纹判定）时三元组组装一次并建立
+scatter map——每个 $W$/$J_g$ 源条目在 KKT CSC 值数组中的位置（含上/下
+三角两个拷贝与两组对角槽）；之后每次装配把值数组清零再按 scatter 位置
+累加，$O(\mathrm{nnz})$ 零分配。\texttt{factor\_current\_kkt} 同样以模式
+指纹决定是否重做 \texttt{analyze\_pattern}；维度或非零数超 int32 时
+响亮失败（后端为 int32 索引）。对应源码为
+\srcpath{src/engine/kernel/kkt/kkt\_system.cpp:assemble\_augmented\_kkt\_cached}、
+\srcpath{src/engine/kernel/kkt/kkt\_system.cpp:build\_augmented\_scatter}（匿名命名空间）、
+\srcpath{src/engine/kernel/kkt/kkt\_system.cpp:factor\_current\_kkt}、
+\srcpath{src/engine/kernel/kkt/kkt\_system.cpp:factor\_kkt\_sparse}。
+
+\paragraph{求解闸门（迭代改进的接受准则）.}
+\texttt{solve\_kkt\_sparse} 是全部 KKT 数值解的最终闸门。残差限
+$L = \tau \max(1, \|b\|_{\infty})$，$\tau$ =
+\texttt{refinement\_tolerance}（$>0$ 时）否则 $\sqrt{\varepsilon}$；
+首次求解后循环：$\|b - K x\|_{\infty} \le L$ 即停；否则解校正
+$K \delta = r$，候选 $x + \delta$ \textbf{仅当其残差严格小于当前残差才提交}，
+否则停止精化；循环结束后再做一次认证残差检查，仍超 $L$ 则整体返回失败
+（由上层正则化/恢复策略处理，绝不返回未认证方向）。
+对应源码为 \srcpath{src/engine/kernel/kkt/kkt\_system.cpp:solve\_kkt\_sparse}；
+Schur 简化求解（切空间证书等小规模用途）为
+\srcpath{src/engine/kernel/kkt/kkt\_system.cpp:solve\_kkt\_reduced\_sparse}。
+
+% ─────────────────────────────────────────────────────────────────────────────
+\subsection{稀疏后端}
+\label{subsec:engine-la-backends}
+
+\paragraph{默认后端选择.}
+\texttt{make\_default\_sparse\_solver} 的编译期优先级为
+KLU $>$ UMFPACK $>$ PARDISO（非对称 LU 版）$>$ SuperLU $>$ Eigen SparseLU；
+\texttt{MIPSOLVERS\_LINEAR\_BACKEND} 环境变量可强制单后端（调试用）。
+MUMPS 被刻意排除在通用默认之外：它吸收零/小主元而不报奇异，会使
+$\delta_W$/$\delta_C$ 升级机制失去触发信号；MUMPS/PARDISO LDLᵀ 只在
+需要惯性的 KKT 路径上由 \texttt{ensure\_mumps\_augmented\_solver}/
+\texttt{ensure\_pardiso\_augmented\_solver} 显式选用。
+对应源码为 \srcpath{src/engine/kernel/linear\_algebra/linear\_solver.cpp:make\_default\_sparse\_solver}、
+\srcpath{src/engine/kernel/kkt/kkt\_system.cpp:ensure\_mumps\_augmented\_solver}（匿名命名空间，宏内）、
+\srcpath{src/engine/kernel/kkt/kkt\_system.cpp:ensure\_pardiso\_augmented\_solver}（匿名命名空间，宏内）。
+
+\paragraph{CHOLMOD 包装.}
+\texttt{CholmodLDLT} 实现 analyze-once：\texttt{analyze} 把 int32 模式
+一次性加宽到 int64 并以按值包装结构体别名调用方的值缓冲；
+\texttt{factorize} 只重挂值指针并做数值分解（\texttt{cholmod\_l\_factorize}），
+\texttt{solve} 走 \texttt{cholmod\_l\_solve2} 并复用预分配的解与工作缓冲；
+\texttt{set\_simplicial(true)} 强制 simplicial LDLᵀ（准定/不定 KKT 用，
+接受负 $D$ 主元）。无 CHOLMOD 编译宏时全部操作返回 false（能力探针语义）。
+对应源码为 \srcpath{src/engine/kernel/linear\_algebra/cholmod\_ldlt.cpp:CholmodLDLT::analyze}、
+\srcpath{src/engine/kernel/linear\_algebra/cholmod\_ldlt.cpp:CholmodLDLT::factorize}、
+\srcpath{src/engine/kernel/linear\_algebra/cholmod\_ldlt.cpp:CholmodLDLT::solve}、
+\srcpath{src/engine/kernel/linear\_algebra/cholmod\_ldlt.cpp:CholmodLDLT::set\_simplicial}。
+
+\paragraph{HFactor 后端（vendored Forrest--Tomlin）.}
+\texttt{HFactorBackend} 包装
+\srcpath{src/engine/kernel/linear\_algebra/highs\_factor/} 的 HFactor 移植：
+\texttt{factorize\_impl} 以 \texttt{setupGeneral} + \texttt{build} 分解基矩阵，
+Markowitz 主元阈值缺省 $0.1$（\texttt{pivot\_threshold\_}），
+秩判定最小绝对主元 $10^{-10}$（\texttt{kDefaultPivotTolerance}，
+\texttt{MIPSOLVERS\_HFACTOR\_PIVOT\_TOL} 可覆盖）；阈值上下界为
+\srcpath{src/engine/kernel/linear\_algebra/highs\_factor/util/HFactorConst.h}
+的 \texttt{kMinPivotThreshold}${}=8\times10^{-4}$ /
+\texttt{kMaxPivotThreshold}${}=0.5$。
+\texttt{strengthen\_pivot\_threshold} 把阈值一次性升到 $0.5$
+（仅原始清理路径在新鲜分解验证失败后使用）。
+\texttt{update\_captured} 要求 AQ/EP 捕获与因子代数一致，主元
+$a_q[p]$ 为 $0$ 或倒数非有限即拒绝；更新后透传 HFactor 的
+\texttt{hint} 到 \texttt{refactor\_hint\_}（\texttt{needs\_refactorise}）。
+对应源码为 \srcpath{src/engine/kernel/linear\_algebra/hfactor\_backend.cpp:HFactorBackend::factorize\_impl}、
+\srcpath{src/engine/kernel/linear\_algebra/hfactor\_backend.cpp:HFactorBackend::update\_captured}、
+\srcpath{src/engine/kernel/linear\_algebra/hfactor\_backend.cpp:HFactorBackend::strengthen\_pivot\_threshold}、
+\srcpath{include/mipsolvers/engine/kernel/linear\_algebra/hfactor\_backend.hpp:HFactorBackend}。
+
+\paragraph{SparseLUFactor（UMFPACK 基上的 FT 更新）.}
+\texttt{SparseLUFactor} 在 UMFPACK 分解 $B = P^{\top} L U Q^{\top}$
+（带行尺度 $R_s$）上维护 Forrest--Tomlin 链：
+\texttt{ftran} 依次执行``置换+尺度播种种子 $\to$ L 图 DFS 可达性与拓扑序
+前代 $\to$ FT 项按序回放（先行交换 $S_i$ 再消元 $E_i$）$\to$ U 回代
+$\to$ 逆置换写出''，消元丢弃 $|v| \le 10^{-20}$ 的项；
+\texttt{btran} 为对偶序（$Q^{\top}$ 播种、$U^{\top}$ 前代、逆序回放、
+$L^{\top}$ 回代）。\texttt{update\_ft} 执行列循环移位把 spike 移到末列
+得上 Hessenberg 矩阵，再做相邻行消元：次对角 $|h_{\text{sub}}| > 10^{-20}$
+且对角 $|h_{\text{diag}}| < 10^{-14}$ 时交换相邻行并记录交换标志；
+全部新对角以 $10^{-14}$ 检查，任一不过则拒绝更新（返回 false 由调用方
+重建）；同时跟踪主元增长比 \texttt{max\_growth}。
+\texttt{compute\_spike} 对入基列执行同一播种/DFS/前代/回放序列。
+对应源码为 \srcpath{src/engine/kernel/linear\_algebra/sparse\_lu\_factor.cpp:SparseLUFactor::ftran}、
+\srcpath{src/engine/kernel/linear\_algebra/sparse\_lu\_factor.cpp:SparseLUFactor::btran}、
+\srcpath{src/engine/kernel/linear\_algebra/sparse\_lu\_factor.cpp:SparseLUFactor::update\_ft}、
+\srcpath{src/engine/kernel/linear\_algebra/sparse\_lu\_factor.cpp:SparseLUFactor::compute\_spike}。
+
+% ─────────────────────────────────────────────────────────────────────────────
+\subsection{与既有文档素材的核对结论}
+\label{subsec:engine-ipm-mismatch}
+
+素材 \texttt{docs/manual/06-numerical-methods.md} 与本章转写按``以代码为准''
+核对，发现以下不一致（仅声明，不改代码）：
+
+\begin{enumerate}
+  \item 素材 §6.5.2 称 $\delta_W$``起步踢量 $10^{-8}\|L_{xx}\|$、每次重试
+        $\times 8$、上限 $10^{-2}\|L_{xx}\|$''。代码实际为：缺省起步
+        $\sqrt{\varepsilon}\, S_W \approx 1.49\times10^{-8} S_W$、
+        精确 2 幂升级（$\times 2$）、上限 $S_W/\sqrt{\varepsilon}
+        \approx 6.7\times10^{7} S_W$；
+        盲阶梯 \texttt{factor\_kkt\_with\_regularization} 同为 $\times 2$。
+        对应源码为 \srcpath{src/engine/kernel/kkt/kkt\_system.cpp:resolve\_inertia\_settings}、
+        \srcpath{src/engine/kernel/kkt/kkt\_system.cpp:increased\_primal\_regularization}（匿名命名空间）、
+        \srcpath{src/engine/kernel/ipm/ipm\_solver.cpp:factor\_kkt\_with\_regularization}。
+  \item 素材 §6.3 称 \texttt{make\_default\_sparse\_solver}``保持
+        UMFPACK $>$ KLU $>$ \ldots''。代码实际的编译期优先级是
+        KLU $>$ UMFPACK $>$ PARDISO $>$ SuperLU $>$ Eigen。
+        对应源码为 \srcpath{src/engine/kernel/linear\_algebra/linear\_solver.cpp:make\_default\_sparse\_solver}。
+  \item 素材 §6.4 称残差门控``$\tau \approx 10^{-12}$''。该数值只适用于
+        LP-IPM 法方程路径的至多 2 轮精化
+        （$10^{-12}\max(1, \|\mathrm{rhs}\|_{\infty})$）；
+        KKT 闸门 \texttt{solve\_kkt\_sparse} 的缺省 $\tau = \sqrt{\varepsilon}
+        \approx 1.49\times10^{-8}$，LP 的 Newton 方向精化则以
+        $\eta = 0.1$ 的相对强制项为目标。对应源码为
+        \srcpath{src/engine/kernel/kkt/kkt\_system.cpp:solve\_kkt\_sparse}、
+        \srcpath{src/engine/kernel/ipm/ipm\_lp\_solver.cpp:NativeIPMLPAdapter::solve\_lp\_impl}。
+  \item 素材 §6.5.1 的增广形写法 $[H+\delta_W I, J_g^{\top}, J_h^{\top};
+        J_g, -\delta_C I, 0; J_h, 0, -S M^{-1}]$ 是未缩放形式；
+        代码实际组装的是经 $T = \operatorname{diag}(I, I, \sqrt{\mu/s})$
+        合同变换后的 \eqref{eq:ipm:augmented}（(3,3) 块为 $-I$）。
+        两者惯性相同，数值行为不同。对应源码为
+        \srcpath{src/engine/kernel/ipm/ipm\_solver.cpp:assemble\_augmented\_newton}。
+\end{enumerate}

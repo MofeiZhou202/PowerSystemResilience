@@ -6,6 +6,7 @@
 #include <vector>
 
 #include "mipsolvers/engine/problem_types.hpp"
+#include "mipsolvers/engine/solve_context.hpp"
 
 namespace mipsolvers::engine {
 
@@ -39,6 +40,17 @@ struct SolveStats {
   double dual_objective{std::numeric_limits<double>::quiet_NaN()};
   double mip_gap{0.0};
   double runtime_sec{0.0};
+  /// Resource-contract telemetry. In-process adapters use a cooperative soft
+  /// deadline; hard enforcement is owned by an external process supervisor.
+  int thread_budget{0};
+  int portfolio_workers{0};
+  int worker_thread_limit{0};
+  std::size_t memory_limit_bytes{0};
+  bool memory_limit_enforced{false};
+  bool hard_deadline_enforced{false};
+  double deadline_overrun_sec{0.0};
+  bool persistent_backend_reused{false};
+  std::size_t incremental_update_count{0};
   // Native dual-simplex benchmark telemetry. These remain zero for other
   // solvers and do not participate in termination or correctness decisions.
   int dual_phase_one_iterations{0};
@@ -129,6 +141,26 @@ class SolverAdapter {
   virtual SolveResult solve_milp(const MIPModel& prob) const;
   virtual SolveResult solve_minlp(const MINLPModel& prob) const;
   virtual SolveResult solve_conic(const ConicModel& prob) const;
+
+  // Context-aware overloads preserve source compatibility for third-party
+  // adapters: the defaults delegate to the legacy virtual methods. Adapters
+  // with cooperative limits override the relevant overload.
+  virtual SolveResult solve_le(const SparseLinSys& prob,
+                               const SolveContext& context) const;
+  virtual SolveResult solve_nle(const NonlinearSystem& prob,
+                                const SolveContext& context) const;
+  virtual SolveResult solve_lp(const LPModel& prob,
+                               const SolveContext& context) const;
+  virtual SolveResult solve_qp(const QPModel& prob,
+                               const SolveContext& context) const;
+  virtual SolveResult solve_nlp(const NLPModel& prob,
+                                const SolveContext& context) const;
+  virtual SolveResult solve_milp(const MIPModel& prob,
+                                 const SolveContext& context) const;
+  virtual SolveResult solve_minlp(const MINLPModel& prob,
+                                  const SolveContext& context) const;
+  virtual SolveResult solve_conic(const ConicModel& prob,
+                                  const SolveContext& context) const;
 
  protected:
   SolveResult unsupported_result(ProblemClass cls) const;

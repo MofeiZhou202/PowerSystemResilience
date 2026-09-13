@@ -139,6 +139,8 @@ class NativeIPMLPAdapter final : public SolverAdapter {
   bool supports(ProblemClass cls) const override;
 
   SolveResult solve_lp(const LPModel& prob) const override;
+  SolveResult solve_lp(const LPModel& prob,
+                       const SolveContext& context) const override;
 
   /// Auto entry point carrying the estimator's original-box row activities
   /// directly into native presolve (design Section 8.30).

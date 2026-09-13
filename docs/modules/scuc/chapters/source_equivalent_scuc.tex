@@ -1,0 +1,653 @@
+% source_equivalent_scuc.tex —— scuc 实现转写：JSON → MILP → 三阶段求解
+% 本文件为实现转写章节，遵循 docs/modules/README.md 数学模型规范：
+% 公式只转写当前源码实际执行的内容；每组公式给出 文件:函数名 锚点；禁止行号。
+
+\section{实现转写：JSON 到 MILP 的完整装配}
+
+\subsection{数据流总览}
+
+模块数据流（括号内为实现函数）：
+
+\begin{enumerate}
+  \item JSON 文本 $\to$ \texttt{SCUCInput}
+        （\srcpath{src/scuc/scuc.cpp:scuc\_from\_json}）；
+  \item \texttt{SCUCInput} $\to$ 变量布局 \texttt{VarIndex}
+        （\srcpath{src/scuc/scuc.cpp:setup\_var\_index}）与 PTDF
+        （\srcpath{src/scuc/scuc.cpp:compute\_ptdf}）；
+  \item 装配 \texttt{engine::MIPModel}
+        （\srcpath{src/scuc/scuc.cpp:build\_formulation}），同时生成原始修复
+        种子（\srcpath{src/scuc/scuc.cpp:build\_scuc\_primal\_repair\_seed}）、
+        UC 提示与分支优先级；
+  \item MILP 求解（\srcpath{src/scuc/scuc.cpp:run\_milp}）与结果提取
+        （\srcpath{src/scuc/scuc.cpp:extract\_result}），得 SCUC 阶段结果；
+  \item 可选 SCED（\srcpath{src/scuc/scuc.cpp:solve\_sced\_stage}）与 LMP
+        （\srcpath{src/scuc/scuc.cpp:solve\_lmp\_stage}）；
+  \item \texttt{SCUCOutput} $\to$ JSON
+        （\srcpath{src/scuc/scuc.cpp:scuc\_output\_to\_json}）。
+\end{enumerate}
+
+以下转写中，"$\le$ 行"对应 \texttt{build\_formulation} 内 lambda
+\texttt{add\_le}（写入 \texttt{lp.A}/\texttt{lp.b}），"$=$ 行"对应
+\texttt{add\_eq}（写入 \texttt{lp.Aeq}/\texttt{lp.beq}）；两个 lambda 均过滤
+非有限或零系数项，右端非有限时置 0
+（\srcpath{src/scuc/scuc.cpp:build\_formulation}）。全局数值零阈值
+\texttt{kEps}$=10^{-9}$。
+
+\subsection{JSON 解析}
+\label{sec:impl-json}
+
+\srcpath{src/scuc/scuc.cpp:scuc\_from\_json} 用 nlohmann::json 解析。逐字段
+\texttt{contains} 判在，缺失字段保留结构体默认值（第 6 章"默认值"列）；
+数组类顶层键（\fld{generators}、\fld{branches} 等）缺失即为空数组。
+\fld{num\_buses} 缺省时取所有元件 \texttt{bus}/\texttt{from}/\texttt{to}
+最大值加 1（下限 1）。异常口径：JSON 语法错误抛
+\texttt{nlohmann::json::parse\_error}，字段类型不匹配抛
+\texttt{nlohmann::json::type\_error}，解析层\textbf{不做}物理合法性校验
+（如 $\underline P\le\bar P$、母线索引越界等在装配期静默跳过或截断，见各节）。
+
+\subsection{变量布局与索引空间}
+\label{sec:impl-varindex}
+
+\texttt{VarIndex} 把 MILP 变量排成单一平坦向量，块内按
+$\mathrm{col}=\mathrm{base}+u\times T+t$（启停类用 $T_c$）编址。装配顺序与
+块大小（\srcpath{src/scuc/scuc.cpp:setup\_var\_index}）：
+
+\begin{center}
+\begin{footnotesize}
+\begin{longtable}{@{}llll@{}}
+\toprule
+\textbf{块} & \textbf{符号} & \textbf{大小} & \textbf{类型/说明}\\
+\midrule
+\endhead
+\texttt{SU}/\texttt{SD}/\texttt{IG} & $y,z,u$ & $3\times n_g T_c$ & 二进制 $\{0,1\}$\\
+\texttt{SEG}$_k$ & $p_{g,k,t}$ & $K\times n_g T$ & 连续，$\ge 0$；上界逐段设定\\
+\texttt{PG} & $P_{g,t}$ & $n_g T$ & 连续，$\ge 0$\\
+\texttt{RG\_spin}/\texttt{RG\_reg\_up}/\texttt{RG\_reg\_down} & $R$ & $3\times n_g T$ & 连续，$\ge 0$\\
+\texttt{PF} & — & $n_l T$ & \textbf{已分配未使用}：无任何约束或目标引用该块\\
+\texttt{PW}/\texttt{PPV} & $P_{w,t},P_{s,t}$ & $n_w T+n_{pv}T$ & 连续；上界见可再生节\\
+\texttt{WIND\_CURT}/\texttt{SOL\_CURT} & $P^{wc},P^{sc}$ & $n_w T+n_{pv}T$ & 仅当 $M_2>10^{-9}$ 分配，否则块长 0\\
+\texttt{PSTO\_IN}/\texttt{PSTO\_OUT}/\texttt{SOC} & $P^{ch},P^{dis},E$ & $3\times n_s T$ & 连续，$\ge 0$\\
+\texttt{XI\_CH}/\texttt{XI\_DIS} & $\xi^+,\xi^-$ & $2\times n_s T$ & 二进制；仅当任一储能 \fld{use\_binary\_indicators}=true 分配\\
+\texttt{PDC} & $P^{dc}_{d,t}$ & $n_{dc}T$ & 连续，上下界逐线设定（可为负）\\
+\texttt{LOAD\_SHED}/\texttt{GEN\_CURT} & $P^{shed}_t,P^{curt}_t$ & $2T$ & 连续，$\ge 0$（\texttt{n\_areas=1} 硬编码）\\
+\texttt{SL\_LINE\_POS}/\texttt{NEG} & $\sigma^+,\sigma^-$ & $2\times n_l T$ & 线路松弛，上界 $10^6$\\
+\texttt{SL\_SEC\_POS}/\texttt{NEG} & — & $2\times n_{sec}T$ & 断面松弛，上界 $10^6$\\
+\bottomrule
+\end{longtable}
+\end{footnotesize}
+\end{center}
+
+所有连续变量默认 $\mathrm{lb}=0$、$\mathrm{ub}=10^{20}$，再按约束族覆盖上界；
+二进制块同时登记到 \texttt{mip.binary\_idx}
+（\srcpath{src/scuc/scuc.cpp:build\_formulation}）。时间结构：
+$\mathrm{iph}=\max(1,\mathrm{round}(1/\Delta t))$，$T_c=\max(1,T/\mathrm{iph})$，
+耦合映射 $h(t)=\lfloor t/\mathrm{iph}\rfloor$。
+
+\subsection{PTDF 计算}
+
+对应源码为 \srcpath{src/scuc/scuc.cpp:compute\_ptdf}。步骤：
+\begin{enumerate}
+  \item 对在运支路（\texttt{in\_service} 且端点在 $[0,n_b)$）累加
+        $B$ 矩阵：$b_l=1/x_l$（$|x_l|\le 10^{-6}$ 时按 $x_l=10^{-3}$ 兜底），
+        $B_{ff}\mathrel{+}=b_l$，$B_{tt}\mathrel{+}=b_l$，$B_{ft},B_{tf}\mathrel{-}=b_l$；
+  \item 平衡母线硬编码为 0 号；删其行列得 $B_{red}$，用
+        \texttt{Eigen::FullPivLU} 判可逆并求逆；不可逆时 $B^{-1}_{red}$ 取零矩阵
+        （\textbf{回退}：等价于全部 PTDF 为 0，网络约束退化为
+        $-\sigma^-\le \mathrm{load\_ptdf}$ 形式的无约束行，见下节）；
+  \item $\mathrm{PTDF}_{l,n}=b_l\big(\tilde B^{-1}_{f_l n}-\tilde B^{-1}_{t_l n}\big)$，
+        涉及平衡母线的项按 0 计。
+\end{enumerate}
+$n_l=0$ 或 $n_b\le 1$ 时返回空矩阵，网络约束整块跳过。PTDF 为稠密
+$n_l\times n_b$ 矩阵。
+
+\subsection{目标函数装配}
+
+对应源码为 \srcpath{src/scuc/scuc.cpp:build\_formulation}。目标向量
+\texttt{lp.c} 各分块系数（$\Delta t$ = \fld{period\_length\_hr}，
+$\mathrm{iph}$ 如上）：
+
+\begin{align}
+\texttt{SEG}_k(g,t)&:\ c_{g,k}\,\Delta t &&\text{（缺段取 }0\text{）}\nonumber\\
+\texttt{PG}(g,t)&:\ \mathrel{+}= c^{wf}\Delta t &&\text{仅当 }c^{wf}>10^{-9}\nonumber\\
+\texttt{RG}_{\cdot}(g,t)&:\ c^{\cdot}_g\,\Delta t &&\text{三类备用报价}\nonumber\\
+\texttt{SU}(g,h)&:\ \mathrel{+}= C^U_g &&\text{恒用 \fld{startup\_cost}（热态值）}\label{eq:impl-su-cost}\\
+\texttt{IG}(g,h)&:\ \mathrel{+}= C^{NL}_g/\mathrm{iph} &&\label{eq:impl-nl-cost}\\
+\texttt{LOAD\_SHED}(t)&:\ c^{shed}\Delta t,\ \mathrm{ub}=10^6 &\quad
+\texttt{GEN\_CURT}(t)&:\ c^{curt}\Delta t,\ \mathrm{ub}=10^6\nonumber\\
+\texttt{SL}_{\cdot}&:\ M_1,\ \mathrm{ub}=10^6 &&\text{线路与断面四块同}\nonumber\\
+\texttt{WIND\_CURT},\texttt{SOL\_CURT}&:\ M_2\Delta t,\ \mathrm{ub}=10^6 &&\text{仅当 }M_2>10^{-9}\nonumber\\
+\texttt{PSTO\_OUT}(s,t)&:\ \mathrel{+}=\lambda^{dis}_s\Delta t;\quad
+\texttt{PSTO\_IN}(s,t)\ \mathrel{+}=\lambda^{ch}_s\Delta t &&\text{仅当 }|\lambda|>10^{-9}\nonumber
+\end{align}
+
+\textbf{口径声明}：
+\begin{itemize}
+  \item \eqref{eq:impl-su-cost}：\fld{startup\_cost\_warm}/\fld{startup\_cost\_cold}
+        与 \fld{hot\_start\_threshold\_hr}/\fld{warm\_start\_threshold\_hr}
+        已解析但\textbf{未进入}目标或约束；所有启动均按 \fld{startup\_cost} 计费；
+  \item \eqref{eq:impl-nl-cost}：空载成本系数为 $C^{NL}_g/\mathrm{iph}$。因
+        $\mathrm{iph}\approx 1/\Delta t$，这等价于"每组合时段收
+        $C^{NL}_g\cdot\Delta t$"；当 $\Delta t=1$ 时与 \$/h 口径一致，
+        $\Delta t<1$ 时全时界空载成本合计为 $C^{NL}_g\Delta t\, T_c$，
+        即按时界小时数的 $\Delta t$ 倍计收（如实转写，非 \$/h 严格积分）；
+  \item 输电费 $c^{wf}$ 加在\textbf{全部}机组出力上，不按省间/断面区分。
+\end{itemize}
+
+\subsection{约束族：机组出力与分段}
+\label{sec:impl-gen}
+
+对应源码为 \srcpath{src/scuc/scuc.cpp:build\_formulation}。对每台机组 $g$、
+每调度时段 $t$（$h=h(t)$）：
+\begin{align}
+P_{g,t}-\underline P_g u_{g,h}-\textstyle\sum_k p_{g,k,t}&=0
+  &&\text{（}\underline P_g\le 10^{-9}\text{ 时省略 }u\text{ 项）}\label{eq:impl-pgdef}\\
+P_{g,t}-\bar P_g u_{g,h}&\le 0 \label{eq:impl-pgub}\\
+-P_{g,t}+\underline P_g u_{g,h}&\le 0
+  &&\text{（仅当 }\underline P_g>10^{-9}\text{）}\label{eq:impl-pglb}\\
+p_{g,k,t}&\le q_{g,k} &&\text{（变量上界；缺段 }q=0\text{）}\label{eq:impl-segub}\\
+p_{g,k,t}-q_{g,k}u_{g,h}&\le 0
+  &&\text{（仅当 }q_{g,k}>10^{-9}\text{）}\label{eq:impl-segcoupling}
+\end{align}
+$q_{g,k}$ 装配时取 $\max(0,\cdot)$ 截断。注意 \eqref{eq:impl-pgdef} 与
+\eqref{eq:impl-segub} 联立使离网机组（$u=0$）出力恒为
+$P=0+\sum p_k$，而 \eqref{eq:impl-segcoupling} 把各段压到 0。
+
+\subsection{约束族：启停逻辑、最小启停与次数上限}
+
+对应源码为 \srcpath{src/scuc/scuc.cpp:build\_formulation}。对每台机组 $g$、
+每组合时段 $h$：
+\begin{align}
+u_{g,0}-y_{g,0}+z_{g,0}&=u_{g,0^-}
+  &&\text{（}u_{g,0^-}=\mathrm{clamp}(\fld{initial\_status.commitment},0,1)\text{，缺省 }0\text{）}\label{eq:impl-trans0}\\
+u_{g,h}-u_{g,h-1}-y_{g,h}+z_{g,h}&=0,\quad h\ge 1 \label{eq:impl-trans}\\
+y_{g,h}+z_{g,h}&\le 1 \label{eq:impl-excl}\\
+\sum_{\tau=\max(0,h-TU_g+1)}^{h} y_{g,\tau}-u_{g,h}&\le 0
+  &&\text{（仅当 }TU_g=\lceil T^U_g\rceil>0\text{）}\label{eq:impl-minup}\\
+\sum_{\tau=\max(0,h-TD_g+1)}^{h} z_{g,\tau}+u_{g,h}&\le 1
+  &&\text{（仅当 }TD_g>0\text{）}\label{eq:impl-mindn}\\
+\textstyle\sum_h y_{g,h}&\le \fld{max\_startups}
+  &&\text{（仅当 }>0\text{）}\label{eq:impl-maxsu}\\
+\textstyle\sum_h z_{g,h}&\le \fld{max\_shutdowns}
+  &&\text{（仅当 }>0\text{）}\label{eq:impl-maxsd}
+\end{align}
+\fld{must\_run}=true 的机组固定 $u_{g,h}\equiv 1$（变量上下界同取 1）。
+\textbf{边界声明}：\eqref{eq:impl-minup}/\eqref{eq:impl-mindn} 的求和在时界
+起点截断于 $\tau=0$，初始在/离网已持续时间（\fld{time\_in\_state}）
+\textbf{不进入} MILP 约束，仅被原始修复启发式消费（见
+\ref{sec:impl-repair} 节）。
+
+\subsection{约束族：爬坡}
+
+对应源码为 \srcpath{src/scuc/scuc.cpp:build\_formulation}。记
+$R^+=\fld{ramp\_up\_mw\_min}\cdot 60\Delta t$、$R^-=\fld{ramp\_dn\_mw\_min}\cdot
+60\Delta t$（MW/时段）：
+\begin{align}
+P_{g,0}-\bar P_g y_{g,0}&\le P_{g,0^-}+R^+, &
+-P_{g,0}-\bar P_g z_{g,0}&\le -P_{g,0^-}+R^-, \label{eq:impl-ramp0}\\
+P_{g,t}-P_{g,t-1}-\bar P_g y_{g,h}&\le R^+, &
+P_{g,t-1}-P_{g,t}-\bar P_g z_{g,h}&\le R^-,\quad t\ge 1, \label{eq:impl-ramp}
+\end{align}
+其中 $P_{g,0^-}=\max(0,\fld{initial\_status.dispatch})$（缺省 0）。启动/停机
+项的 big-M 系数为 $\bar P_g$；更紧的 $\min(\underline P_g+R^\pm,\bar P_g)$
+系数形式以割平面族 R 另行加入（\ref{sec:impl-cuts} 节），不替换本族。
+
+\subsection{约束族：可再生出力}
+
+对应源码为 \srcpath{src/scuc/scuc.cpp:build\_formulation}；预测值由
+\srcpath{src/scuc/scuc.cpp:wind\_at}/\srcpath{src/scuc/scuc.cpp:solar\_at}
+给出（曲线为绝对 MW；缺行/缺列回退 \fld{pmax}）。记
+$F_{w,t}=\fld{profiles.wind}[w][t]$，$\alpha_n=$ \fld{renewable\_min\_output\_coeff}：
+\begin{itemize}
+  \item $M_2>10^{-9}$（弃电变量启用）：
+        \begin{equation}
+        P_{w,t}+P^{wc}_{w,t}=\max(0,F_{w,t}),\quad
+        P_{w,t}\ge\max(0,\alpha_n F_{w,t}),\quad
+        0\le P^{wc}_{w,t}\le\max(0,F_{w,t}),
+        \label{eq:impl-renew-curt}
+        \end{equation}
+        此时 $P_{w,t}$ 上界放开为 $10^{20}$，由等式约束封闭；光伏同构；
+  \item $M_2\le 10^{-9}$：无弃电变量，直接夹界
+        $\max(0,\alpha_n F_{w,t})\le P_{w,t}\le\max(0,F_{w,t})$；输出层的弃电量
+        由 $\max(0,F-P)$ 事后重算（\srcpath{src/scuc/scuc.cpp:extract\_result}）。
+\end{itemize}
+
+\subsection{约束族：储能}
+
+对应源码为 \srcpath{src/scuc/scuc.cpp:build\_formulation}。每台储能 $s$ 的
+装配期常量：
+\begin{align*}
+\eta^{ch}&=\begin{cases}\mathrm{clamp}(\fld{eta\_charge},0.01,1),&\fld{eta\_charge}>0\\
+\sqrt{\mathrm{clamp}(\fld{efficiency},0.1,1)},&\text{否则}\end{cases}
+&&\eta^{dis}\text{ 同构}\\
+\underline E&=\big(\fld{soc\_min}\ge 0\;?\;\mathrm{clamp}(\fld{soc\_min},0,1):0.10\big)\cdot\bar E
+&&\bar E=\max(0,\fld{energy\_capacity\_mwh})\\
+E_0&=\mathrm{clamp}\big(\fld{initial\_status.storage\_soc}\ (\le 1+10^{-8}\text{ 按 pu，否则按 MWh})\ \text{或}\ \fld{soc\_init}\cdot\bar E,\ 0,\bar E\big)\\
+E^{fin}&=\big(\fld{soc\_final}\ge 0\;?\;\mathrm{clamp}(\fld{soc\_final},0,1)\cdot\bar E:E_0\big)
+\end{align*}
+每时段约束：
+\begin{align}
+\underline E\le E_{s,t}&\le \bar E &&\text{（变量界）}\label{eq:impl-socbnd}\\
+E_{s,0}-\eta^{ch}\Delta t\,P^{ch}_{s,0}+\frac{\Delta t}{\eta^{dis}}P^{dis}_{s,0}&=E_0 \label{eq:impl-soc0}\\
+E_{s,t}-E_{s,t-1}-\eta^{ch}\Delta t\,P^{ch}_{s,t}+\frac{\Delta t}{\eta^{dis}}P^{dis}_{s,t}&=0,\quad t\ge 1 \label{eq:impl-socdyn}\\
+-E_{s,T-1}&\le -E^{fin} \label{eq:impl-socfin}\\
+\sum_{t}\Big(\frac{\Delta t}{\eta^{dis}}P^{dis}_{s,t}+\eta^{ch}\Delta t P^{ch}_{s,t}\Big)&\le 2N^{cycle}_s\bar E
+&&\text{（仅当 }\fld{cycle\_limit}>0\text{ 且 }\bar E>0\text{）}\label{eq:impl-cycle}
+\end{align}
+充放互斥两条路径：
+\begin{itemize}
+  \item 二进制模式（本机 \fld{use\_binary\_indicators}=true 且全局块已分配）：
+        \begin{align}
+        -P^{ch}_{s,t}+\underline P^{ch}\xi^+_{s,t}&\le 0\ (\text{仅当 }\underline P^{ch}>0),&
+        P^{ch}_{s,t}-\bar P^{ch}\xi^+_{s,t}&\le 0,\nonumber\\
+        -P^{dis}_{s,t}+\underline P^{dis}\xi^-_{s,t}&\le 0\ (\text{仅当 }\underline P^{dis}>0),&
+        P^{dis}_{s,t}-\bar P^{dis}\xi^-_{s,t}&\le 0,\nonumber\\
+        \xi^+_{s,t}+\xi^-_{s,t}&\le 1; &&\label{eq:impl-xi}
+        \end{align}
+  \item 否则（\textbf{LP 松弛口径}）：仅变量上界
+        $P^{ch}\le\bar P^{ch}$、$P^{dis}\le\bar P^{dis}$ 加软互斥行
+        \begin{equation}
+        P^{ch}_{s,t}+P^{dis}_{s,t}\le\max(\bar P^{ch},\bar P^{dis}),
+        \label{eq:impl-softmutex}
+        \end{equation}
+        该口径不保证严格互斥（同时充放在 LP 意义下可行），已在第 3 章注记
+        声明；部分机组开二进制、部分不开时两类约束按机组各自生效。
+\end{itemize}
+
+\subsection{约束族：直流线路}
+
+对应源码为 \srcpath{src/scuc/scuc.cpp:build\_formulation}：
+\begin{align}
+\fld{pmin}\le P^{dc}_{d,t}&\le\fld{pmax} &&\text{（变量界）}\nonumber\\
+P^{dc}_{d,0}\le\fld{ramp\_up},\quad -P^{dc}_{d,0}&\le\fld{ramp\_dn}
+&&\text{（首时段相对 }0\text{）}\label{eq:impl-dc0}\\
+P^{dc}_{d,t}-P^{dc}_{d,t-1}\le\fld{ramp\_up},\quad
+P^{dc}_{d,t-1}-P^{dc}_{d,t}&\le\fld{ramp\_dn},\quad t\ge 1. \label{eq:impl-dcramp}
+\end{align}
+
+\subsection{约束族：系统功率平衡}
+
+对应源码为 \srcpath{src/scuc/scuc.cpp:build\_formulation}，每时段一条等式
+（起始行号记入 \texttt{power\_balance\_eq\_start}，供 LMP 阶段定位对偶）：
+\begin{equation}
+\sum_g P_{g,t}+\sum_w P_{w,t}+\sum_s P_{s,t}
++\sum_{s'}\big(P^{dis}_{s',t}-P^{ch}_{s',t}\big)+\sum_d P^{dc}_{d,t}
++P^{shed}_t-P^{curt}_t=\sum_{d'}\fld{load\_at}(d',t),
+\label{eq:impl-balance}
+\end{equation}
+其中 \srcpath{src/scuc/scuc.cpp:load\_at} 实现"基准 MW × 曲线 pu"，曲线
+缺行/缺列回退基准值。
+
+\subsection{约束族：线路潮流（PTDF）}
+
+对应源码为 \srcpath{src/scuc/scuc.cpp:build\_formulation}。\textbf{跳过条件}
+（硬编码）：支路 \fld{in\_service}=false，或限额
+$\bar F_l=\max(0,\fld{rating\_mw})>10^5$ MW（视为不阻塞，不生成约束行）。
+对其余支路、每时段 $t$：
+\begin{align}
+\sum_b \mathrm{PTDF}_{l,b}\,\mathcal P_{b,t}-\sigma^+_{l,t}&\le
+\bar F_l+\Lambda_{l,t} \label{eq:impl-line-fwd}\\
+-\sum_b \mathrm{PTDF}_{l,b}\,\mathcal P_{b,t}-\sigma^-_{l,t}&\le
+\bar F_l-\Lambda_{l,t} \label{eq:impl-line-rev}
+\end{align}
+其中 $\mathcal P_{b,t}$ 为母线 $b$ 处可调注入（机组 $P_{g,t}$、风电 $P_{w,t}$、
+光伏 $P_{s,t}$、储能 $P^{dis}-P^{ch}$；$|\mathrm{PTDF}|\le 10^{-12}$ 的母线
+跳过），直流线以系数 $\mathrm{PTDF}_{l,to}-\mathrm{PTDF}_{l,from}$ 计入，
+负荷项移入右端
+$\Lambda_{l,t}=\sum_b \mathrm{PTDF}_{l,b}\sum_{d'\in b}\fld{load\_at}(d',t)$。
+松弛变量 $\sigma^\pm\ge 0$、上界 $10^6$、目标罚系数 $M_1$。每条行同时被
+\texttt{record\_network\_flow\_row}（\srcpath{src/scuc/scuc.cpp:build\_formulation}
+内 lambda）登记到 UC 提示的 network\_flow\_* 数组（不含松弛列），供原生 B\&C
+的网络承诺割使用。
+
+\subsection{约束族：监视断面}
+
+对应源码为 \srcpath{src/scuc/scuc.cpp:build\_formulation}。断面灵敏度
+\begin{equation}
+\mathrm{SECPTDF}_{s,:}=\sum_{(l,w_l)\in\fld{line\_weights}} w_l\,\mathrm{PTDF}_{l,:}
+\quad(\text{越界线路索引跳过}),
+\label{eq:impl-secptdf}
+\end{equation}
+约束结构同 \eqref{eq:impl-line-fwd}/\eqref{eq:impl-line-rev}，限额分别取
+\fld{rating\_fwd\_mw}/\fld{rating\_rev\_mw}（取 $\max(0,\cdot)$），松弛
+\texttt{SL\_SEC\_POS/NEG}、罚 $M_1$。仅当 $n_{sec}>0$ 且 PTDF 非空时生成。
+
+\subsection{约束族：备用需求与耦合}
+
+对应源码为 \srcpath{src/scuc/scuc.cpp:build\_formulation}。记
+$D_t=\sum_{d'}\fld{load\_at}(d',t)$。每时段系统需求行（$>0$ 才生成）：
+\begin{align}
+-\textstyle\sum_g R^{spin}_{g,t}&\le -r^{spin}D_t, &
+-\textstyle\sum_g R^{up}_{g,t}&\le -r^{up}D_t, &
+-\textstyle\sum_g R^{dn}_{g,t}&\le -r^{dn}D_t, \label{eq:impl-resreq}
+\end{align}
+单机耦合（每 $g,t$ 恒生成，$h=h(t)$）：
+\begin{align}
+P_{g,t}+R^{spin}_{g,t}+R^{up}_{g,t}-\bar P_g u_{g,h}&\le 0 \label{eq:impl-headroom}\\
+R^{dn}_{g,t}-P_{g,t}+\underline P_g u_{g,h}&\le 0 \label{eq:impl-regdn}\\
+R^{spin}_{g,t}-(\bar P_g-\underline P_g)u_{g,h}&\le 0 \label{eq:impl-spincap}\\
+R^{up}_{g,t}-10\,\fld{ramp\_up\_mw\_min}\,u_{g,h}&\le 0
+&&\text{（仅当 }10R^+_{min}>10^{-9}\text{）}\label{eq:impl-rupcap}\\
+R^{dn}_{g,t}-10\,\fld{ramp\_dn\_mw\_min}\,u_{g,h}&\le 0
+&&\text{（仅当 }10R^-_{min}>10^{-9}\text{）}\label{eq:impl-rdncap}
+\end{align}
+\textbf{口径声明}：\eqref{eq:impl-rupcap}/\eqref{eq:impl-rdncap} 的系数是
+$10\times$ MW/min 爬坡率（即 10 分钟可调容量，单位 MW），
+\textbf{不乘} $\Delta t$；当 $\Delta t\ne 1/6$ h 时该口径仍按 10 分钟计。
+
+负备用与一次调频（仅当对应需求 $>0$）：
+\begin{align}
+\sum_g\big(P_{g,t}-\underline P_g u_{g,h}\big)&\le D_t-r^{neg}D_t
+&&\text{（§2.6.3.3 口径）}\label{eq:impl-negres}\\
+-\sum_g \alpha^{pfr}_g\bar P_g u_{g,h}&\le -R^{pfr}
+&&\text{（§2.6.3.4 容量形式）}\label{eq:impl-pfr}
+\end{align}
+
+\subsection{约束族：机组群}
+
+对应源码为 \srcpath{src/scuc/scuc.cpp:build\_formulation}。对每个非空群：
+\begin{align}
+\textstyle\sum_{g\in grp}P_{g,t}&\le \fld{pmax\_t}[t^\ast], &
+-\textstyle\sum_{g\in grp}P_{g,t}&\le -\fld{pmin\_t}[t^\ast], \label{eq:impl-grpout}\\
+\sum_{g\in grp}\sum_t \Delta t\,P_{g,t}&\le \fld{emax}, &
+-\sum_{g\in grp}\sum_t \Delta t\,P_{g,t}&\le -\fld{emin}, \label{eq:impl-grpeng}
+\end{align}
+其中 $t^\ast=t$（向量长度 $>1$，越界取末元素）或 $0$（长度 1 全时段共用）；
+\fld{pmin\_t}/\fld{pmax\_t} 为空则对应侧不生成；\fld{emin}/\fld{emax} 为 0
+侧不生成。\fld{generators[].group\_id} 字段与本族无联动（已解析未消费）。
+
+\subsection{预构型市场割平面}
+\label{sec:impl-cuts}
+
+\fld{enable\_market\_cuts}=true 时（默认），在装配期一次性加入下列 LP-valid
+割平面族（均不改变整数可行域；计数记入结果的 \fld{n\_cuts\_added}）。
+对应源码均为 \srcpath{src/scuc/scuc.cpp:build\_formulation}。规模阈值
+（硬编码）：$\mathrm{large\_uc}\Leftrightarrow n_g\times T_c>800$，
+成立时关闭 T、H、R、P、Q 五族。
+
+\begin{itemize}
+  \item \textbf{Family 6（对称破缺）}：按
+        $(\mathrm{round}(\bar P),\mathrm{round}(\underline P),\mathrm{round}(T^U),
+        \mathrm{round}(T^D))$ 分组，组内按编号序
+        $u_{g_{j+1},h}-u_{g_j,h}\le 0$；
+  \item \textbf{Family A（累计段耦合）}：对段前缀 $m\ge 1$，
+        $\sum_{k\le m}p_{g,k,t}-\big(\sum_{k\le m}q_{g,k}\big)u_{g,h}\le 0$
+        （仅当累计量 $>10^{-9}$）；
+  \item \textbf{Family T（转移壳，}large\_uc \textbf{时关）}：每 $g,h$ 四行
+        $y\le u$、$z\le 1-u$、$y_h\le 1-u_{h-1}$、$z_h\le u_{h-1}$
+        （$h=0$ 时以初值 $u_{0^-}$ 代 $u_{-1}$）；
+  \item \textbf{Family G（启动团）}：窗口 $W=TU_g+TD_g\ge 2$ 时
+        $\sum_{\tau=h}^{h+W-1}y_{g,\tau}\le 1$（$h+W-1<T_c$）；
+  \item \textbf{Family H（转移冲突覆盖，}large\_uc \textbf{时关）}：
+        $TU_g>1$ 时 $y_{g,s}+z_{g,s'}\le 1$（$s<s'\le s+TU_g-1$）；
+        $TD_g>1$ 时对称；
+  \item \textbf{Family R（紧爬坡透视，}large\_uc \textbf{时关）}：
+        记 $\tilde R^\pm=\min(\bar P_g,60\Delta t R^\pm_g)$、
+        $S^+=\min(\bar P_g,\underline P_g+\tilde R^+)$、
+        $S^-=\min(\bar P_g,\underline P_g+\tilde R^-)$，对 $t\ge 1$：
+        \begin{align}
+        P_{g,t}-P_{g,t-1}-\tilde R^+ u_{g,h(t-1)}-S^+ y_{g,h(t)}&\le 0,
+        \label{eq:impl-famr}\\
+        P_{g,t-1}-P_{g,t}-\tilde R^- u_{g,h(t)}-S^- z_{g,h(t)}&\le 0;
+        \nonumber
+        \end{align}
+  \item \textbf{Family P（启动爬坡多步上界，}large\_uc \textbf{或}
+        $T\ne T_c$ \textbf{时关）}：$k=1,\dots,\min(TU_g-1,8)$，
+        $\mathrm{excess}=\bar P_g-\underline P_g-k\tilde R^+>10^{-9}$ 时
+        \begin{equation}
+        P_{g,h}+\mathrm{excess}\cdot y_{g,h-k+1}-\bar P_g u_{g,h}\le 0,
+        \quad h\ge k-1;
+        \label{eq:impl-famp}
+        \end{equation}
+  \item \textbf{Family Q（停机爬坡多步上界}，同条件\textbf{）}：
+        $P_{g,h}+\mathrm{excess}^-\cdot z_{g,h+k}-\bar P_g u_{g,h}\le 0$
+        （$h+k<T_c$）；
+  \item \textbf{Family C（系统备用覆盖聚合）}：上方向
+        \begin{equation}
+        -\sum_g \bar P_g u_{g,h}-\sum_w P_{w,t}-\sum_s P_{s,t}
+        -\sum_{s'}(P^{dis}_{s',t}-P^{ch}_{s',t})-\sum_d P^{dc}_{d,t}
+        -P^{shed}_t+P^{curt}_t\le -(D_t+r^{up,tot}D_t),
+        \label{eq:impl-famc}
+        \end{equation}
+        其中 $r^{up,tot}=r^{spin}+r^{up}$；下方向对偶地把系数反号、
+        以 $\underline P_g$ 代 $\bar P_g$、右端取 $D_t-r^{dn}D_t$；
+  \item \textbf{Family V（备用可交付覆盖）}：对四组（需求， 单机能力）
+        ——$(r^{spin}+r^{up},\ \bar P-\underline P)$、$(r^{spin},\ \bar P-\underline P)$、
+        $(r^{up},\ \min(\bar P-\underline P,10R^+_{min}))$、
+        $(r^{dn},\ \min(\bar P-\underline P,10R^-_{min}))$——分别生成
+        $-\sum_g \kappa_g u_{g,h}\le -r\,D_t$（能力 $>10^{-9}$ 才入行）；
+  \item \textbf{Family 11（储能循环 SOC 界）}：$\bar E>0$ 且右端 $>10^{-9}$ 时
+        \begin{equation}
+        \sum_t \frac{\Delta t}{\eta^{dis}}P^{dis}_{s,t}\ \le\
+        \eta^{ch}\bar P^{ch} T\Delta t+\mathrm{clamp}(\fld{soc\_init},0,1)\bar E-E^{fin}.
+        \label{eq:impl-fam11}
+        \end{equation}
+\end{itemize}
+
+\subsection{UC 提示与分支优先级}
+
+装配末尾填充 \texttt{engine::MIPModel::UCGenHint} 并挂到
+\texttt{mip.uc\_hint}（\srcpath{src/scuc/scuc.cpp:build\_formulation}）：
+机组数与组合时段数、各二进制/出力块的列索引（$h\times n_g+g$ 排列）、
+$\underline P/\bar P$、爬坡（$\max(R^+,R^-)\cdot 60\Delta t$）、四类备用能力、
+最小启停取整值、初始状态、逐时段负荷与四类备用需求、分段列与段容量
+（仅 $T=T_c$ 时填）、按 $(\underline P,\bar P,R,TU,TD)$ 千分桶聚类的同型机组
+分组（含 \texttt{group\_is\_s\_class}：$\underline P=20,\bar P=100,TU=TD=2$
+的硬编码识别）、以及 network\_flow\_* 行记录。各
+\texttt{certifies\_*\_rows} 标志置真（储能循环行仅当 $n_s>0$）。
+
+分支优先级（\srcpath{src/scuc/scuc.cpp:build\_formulation}）：步长
+$S=T_c+1$，$u$ 类优先级 $3S+\rho_g S+(T_c-h)$，$y/z$ 类 $2S+(T_c-h)$；
+机组档位 $\rho_g$ 按 $\bar P_g$ 分档（$>600\Rightarrow 6$；$>500\Rightarrow 5$；
+$>400\Rightarrow 4$；$>250\Rightarrow 3$；$>150\Rightarrow 2$；
+$>100\Rightarrow 1$；否则 0），早时段优先。
+
+\subsection{原始修复种子}
+\label{sec:impl-repair}
+
+\fld{enable\_primal\_repair}=true 且环境变量
+\texttt{MIPSOLVERS\_DISABLE\_SCUC\_PRIMAL\_REPAIR} 未设置时
+（\srcpath{src/scuc/scuc.cpp:scuc\_primal\_repair\_enabled}），
+\srcpath{src/scuc/scuc.cpp:build\_scuc\_primal\_repair\_seed} 生成
+\texttt{mip.initial\_solution}：
+
+\begin{enumerate}
+  \item \textbf{承诺启发式}：按 score 升序排 merit 序，
+        $\mathrm{score}=(\fld{must\_run}\,?\,-10^{12}:0)+\mathrm{marginal}
+        +(C^{NL}+C^U/\max(1,\lceil T^U\rceil))/\max(1,\bar P)$，
+        marginal 取首个正容量段的报价；逐组合时段先满足
+        \fld{must\_run} 与锁定期（lock\_on/lock\_off，由
+        \fld{time\_in\_state} 折算剩余最小启停期），容量/备用能力不足时按
+        merit 序开机（先不越 lock\_off，不足再越），再按逆 merit 序试停
+        昂贵机组；启停后重置锁定期；
+  \item \textbf{连续恢复}：
+        \srcpath{src/scuc/scuc.cpp:recover\_scuc\_continuous\_seed}
+        按承诺填充 $u,y,z$、可再生预测、储能回充电量（仅充不放，
+        目标为末时段 $\max(\underline E,E^{fin})$）、按 score 序的
+        经济出力（含爬坡与备用分配），并调用
+        \srcpath{src/scuc/scuc.cpp:scuc\_repair\_network\_slacks}
+        两遍扫描把越限行的网络松弛变量顶起；
+  \item \textbf{验收与回退}：
+        \srcpath{src/scuc/scuc.cpp:scuc\_seed\_satisfies} 以容差 $10^{-5}$
+        检查变量界与 $A/Aeq$ 行违反；不可行则回退"全员在线"密种子再验；
+        仍不可行时取违反较小者返回（此时种子不保证可行，仅作暖启动参考）。
+        设环境变量 \texttt{MIPSOLVERS\_SCUC\_PRIMAL\_REPAIR\_LOG} 可在
+        stderr 打印两种种子的最大违反。
+\end{enumerate}
+
+\textbf{边界声明}：该种子只是传给 B\&C 后端的初始 incumbent 提示；最终解的
+可行性/最优性完全由后端保证，种子不可行不会导致错误结果。
+
+\subsection{三阶段求解流水线}
+
+\begin{itemize}
+  \item \textbf{SCUC}：\srcpath{src/scuc/scuc.cpp:solve\_scuc\_stage} 装配后调
+        \srcpath{src/scuc/scuc.cpp:run\_milp}。后者注册
+        \texttt{StrictHighsBranchAndCutAdapter} 与
+        \texttt{NativeBranchAndCutAdapter}（两者均以
+        \srcpath{src/scuc/scuc.cpp:make\_scuc\_bc\_options} 构造：映射
+        \fld{time\_limit\_sec}/\fld{mip\_gap}/\fld{verbose} 后经
+        \srcpath{include/mipsolvers/engine/solver/native/native\_adapters.hpp:make\_strict\_highs\_production\_options}
+        补齐生产默认），再注册全部默认适配器；\fld{solver}$\ne$Auto 时设
+        \texttt{preferred\_solver}，\fld{allow\_fallback} 控制回退。
+  \item \textbf{SCED}：\srcpath{src/scuc/scuc.cpp:solve\_sced\_stage}
+        重新装配同一公式，把 $u,y,z$ 四舍五入后固定（lb=ub=取整值，
+        类型改连续），清空整数索引，经 \srcpath{src/scuc/scuc.cpp:run\_lp}
+        解 LP。
+  \item \textbf{LMP}：\srcpath{src/scuc/scuc.cpp:solve\_lmp\_stage} 同样固定
+        二进制（参考阶段为 SCED 结果，未运行则为 SCUC 结果），并对在线机组
+        出力加 $\delta$ 邻域界
+        \begin{equation}
+        \max\big(\underline P_g,(1-\delta)P^{sced}_{g,t}\big)\le P_{g,t}\le
+        \min\big(\bar P_g,(1+\delta)P^{sced}_{g,t}\big),
+        \label{eq:impl-delta}
+        \end{equation}
+        下界 $>$ 上界 $+10^{-6}$ 时回退 $[\underline P_g,\bar P_g]$；离网机组
+        出力固定为 0。LP 经
+        \srcpath{src/scuc/scuc.cpp:run\_lp\_with\_duals} 求解——优先
+        \texttt{NativeBranchAndCut}（LP 路径）与 \texttt{NativeIPMLP}，因为
+        它们返回约束对偶，HiGHS 文件式适配器不返回对偶。
+        对偶提取（\srcpath{src/scuc/scuc.cpp:solve\_lmp\_stage}）：
+        \begin{equation}
+        \lambda_t=\pi\big(n_{ineq}+\texttt{power\_balance\_eq\_start}+t\big),\qquad
+        \mathrm{cong}_{b,t}=\sum_l\big(\mu^-_{l,t}-\mu^+_{l,t}\big)\mathrm{PTDF}_{l,b},
+        \label{eq:impl-lmp}
+        \end{equation}
+        其中 $\pi$ 为 \texttt{constraint\_duals} 向量（不等式行在前、等式行
+        在后），$\mu^\pm_{l,t}=-\pi(\texttt{line\_\{fwd,rev\}\_row}[lT+t])$；
+        $\mathrm{LMP}_{b,t}=\lambda_t+\mathrm{cong}_{b,t}$。
+        \textbf{口径声明}：被跳过的线路（退出运行或限额 $>10^5$）行号为 $-1$，
+        对阻塞分量贡献 0。
+\end{itemize}
+
+\subsection{结果提取与成本分解}
+
+对应源码为 \srcpath{src/scuc/scuc.cpp:extract\_result}。按变量布局回读各矩阵；
+线路潮流不由变量回读，而是按 \eqref{eq:ptdf} 以 PTDF $\times$ 节点注入重算
+（含负荷与直流项），断面潮流同理由 SEC\_PTDF 重算；弃电量在弃电变量未分配时
+按 $\max(0,F-P)$ 重算。成本分解：
+\begin{align}
+\texttt{energy}&=\textstyle\sum_{g,k,t}c_{g,k}p_{g,k,t}\Delta t, &
+\texttt{startup}&=\textstyle\sum_{g,h}C^U_g y_{g,h},\nonumber\\
+\texttt{no\_load}&=\textstyle\sum_{g,h}C^{NL}_g u_{g,h}/\mathrm{iph}, &
+\texttt{reserve}&=\textstyle\sum_{g,t}(\cdots)\Delta t,\nonumber\\
+\texttt{penalty}&=\textstyle\sum_t\big(c^{shed}P^{shed}_t+c^{curt}P^{curt}_t\big)\Delta t,
+&&\texttt{total}=\text{前五项之和}.\label{eq:impl-cost}
+\end{align}
+\textbf{口径声明}：\texttt{total} \textbf{不含}线路/断面松弛罚（$M_1$ 项）、
+弃电罚（$M_2$ 项）、储能充放报价与输电费，而求解器返回的
+\fld{scuc.objective} 含全部项；存在松弛或这些可选项时
+\texttt{objective} $>$ \texttt{cost.total}，二者差异即未分解项之和。
+\fld{n\_cuts\_added} 为装配期割平面行数。
+
+\subsection{JSON 序列化}
+
+\begin{itemize}
+  \item 输出：\srcpath{src/scuc/scuc.cpp:scuc\_output\_to\_json} 组装
+        \texttt{meta}/\texttt{scuc}/\texttt{sced}/\texttt{lmp} 四块
+        （\texttt{sced}、\texttt{lmp} 仅在对应开关开启时写出，\textbf{不检查}
+        收敛标志）；单阶段块由匿名命名空间
+        \srcpath{src/scuc/scuc.cpp:solve\_result\_to\_json} 写出，二维矩阵经
+        \srcpath{src/scuc/scuc.cpp:matrix2d\_to\_json} 逐行展开。
+        未写入 JSON 的 C++ 字段：\texttt{segment\_dispatch}、
+        \texttt{wind\_curtailment}、\texttt{solar\_curtailment}、
+        \texttt{section\_flows}；
+  \item 输入回写：\srcpath{src/scuc/case\_builder.cpp:scuc\_input\_to\_json}
+        把 \texttt{SCUCInput} 全字段导出为可被
+        \srcpath{src/scuc/scuc.cpp:scuc\_from\_json} 重新解析的 JSON
+        （golden-file 用途）；\fld{time\_in\_state} 仅非空时写出。
+\end{itemize}
+
+\subsection{算例构造器（case\_builder）}
+
+对应源码为 \srcpath{src/scuc/case\_builder.cpp}。
+
+\paragraph{时序曲线。}三个静态函数生成曲线（$h_t=(t+0.5)\Delta t$，
+$H=T\Delta t$）：
+\begin{align}
+\fld{make\_load\_profile}&:\ pu_t=f_{min}+(1-f_{min})\max(g_1,g_2),&
+g_i&=\exp\Big(-\tfrac12\big(\tfrac{h_t-p_i}{\sigma}\big)^2\Big),\nonumber\\
+&&p_1&=\tfrac{10}{24}H,\ p_2=\tfrac{19}{24}H,\ \sigma=\tfrac{2}{24}H,\ f_{min}=0.65;
+\label{eq:impl-loadprof}\\
+\fld{make\_wind\_profile}&:\ pu_t=\max\big(0.1,\ 1-0.6\,d_t\big),&
+d_t&=\exp\Big(-\tfrac12\big(\tfrac{h_t-\frac{13}{24}H}{\frac{4}{24}H}\big)^2\Big);
+\label{eq:impl-windprof}\\
+\fld{make\_solar\_profile}&:\ pu_t=\begin{cases}
+\exp\big(-\tfrac12(\tfrac{h_t-\frac12 H}{\frac18 H})^2\big),&>0.01\\0,&\text{否则}\end{cases}
+\label{eq:impl-solarprof}
+\end{align}
+对应 \srcpath{src/scuc/case\_builder.cpp:make\_load\_profile}、
+\srcpath{src/scuc/case\_builder.cpp:make\_wind\_profile}、
+\srcpath{src/scuc/case\_builder.cpp:make\_solar\_profile}。负荷曲线为 pu 倍率
+（乘 \fld{loads[].p\_mw}），风/光曲线构造后即乘装机容量转为绝对 MW
+（构造器侧），并开启 $M_2$（6bus 取 50，其余取 80 \$/MWh）。
+
+\paragraph{算例。}
+\begin{itemize}
+  \item \srcpath{src/scuc/case\_builder.cpp:build\_3bus\_case}：3 母线 2 机组
+        （G1: 30--200 MW，G2: 20--120 MW）、2 支路（限额 150 MW）、单负荷
+        180 MW；$K=2$ 段报价；$r^{spin}=0.05$、$r^{up}=0.02$；VOLL=5000、
+        VOCC=100、$M_1=10^4$；
+  \item \srcpath{src/scuc/case\_builder.cpp:build\_6bus\_case}：Garver 6 母线，
+        3 机组（煤 400 MW/气 200 MW/峰 80 MW）、7 支路、4 负荷共 500 MW；
+        可选风电（母线 3，100 MW）与储能（母线 5，60 MW/240 MWh，$\eta=0.85$，
+        SOC$_{min}$=0.10，循环上限 1，充电报价 $-5$、放电 $+8$ \$/MWh）；
+  \item \srcpath{src/scuc/case\_builder.cpp:build\_ieee39\_case}：IEEE 39 母线
+        新英格兰系统，10 机组（三段报价、\fld{pfr\_alpha} 0.03--0.06，
+        $R^{pfr}=300$ MW）、\textbf{51} 条支路（44 条线路 + G9 升压变
+        + 2 条 G10 联络线 + 7 台升压变；注释称 46/51 两种口径，以数组实际
+        51 条为准）、17 个非零负荷（26 个条目中 $<1$ MW 的被跳过，
+        注释称 21 个），峰值约 6 GW；可选 3 风电（400/300/350 MW）、
+        2 光伏（250/200 MW）；
+  \item \srcpath{src/scuc/case\_builder.cpp:build\_ieee118\_case}：MATPOWER
+        case118 拓扑，54 机组、186 支路（\texttt{static\_assert} 保证）、
+        \textbf{98} 个负荷（头文件注释称 99，以数组实际 98 条为准）、
+        峰值约 4242 MW；报价由二次成本 $aP^2+bP$ 经
+        \texttt{make\_segments} lambda 三段等宽线性化
+        （$c_k=b+2a(\underline P+(2k-1)w/2)$，$w=(\bar P-\underline P)/3$）；
+        \fld{mip\_gap}=0.003、\fld{time\_limit\_sec}=600、$M_1=10^6$；
+        可选 4 风电（500/400/600/350 MW）、3 光伏（300/250/200 MW）。
+\end{itemize}
+
+\paragraph{CLI。}\srcpath{src/scuc/case\_builder\_main.cpp:main} 校验
+$T\in[1,8760]$、$\Delta t\in(0,24]$，未知算例名报错退出；\fld{--storage}
+仅对 6bus 生效（其余算例忽略该开关，无告警）。
+
+\subsection{未消费字段、回退与硬编码阈值清单}
+
+\begin{center}
+\begin{footnotesize}
+\begin{longtable}{@{}L{4.6cm}L{9.6cm}@{}}
+\toprule
+\textbf{条目} & \textbf{口径}\\
+\midrule
+\endhead
+\fld{startup\_cost\_warm}/\fld{startup\_cost\_cold}、\fld{hot/warm\_start\_threshold\_hr} &
+已解析（\srcpath{src/scuc/scuc.cpp:scuc\_from\_json}），目标与约束均不消费；
+启动一律按 \fld{startup\_cost} 计费\\
+\fld{ud\_periods}/\fld{dd\_periods} & 已解析，启停过程出力曲线未建模\\
+\fld{generators[].group\_id} & 已解析，不参与群约束（群约束只看
+\fld{generator\_groups[].gen\_indices}）\\
+\fld{initial\_status.time\_in\_state} & 仅原始修复启发式消费
+（\srcpath{src/scuc/scuc.cpp:build\_scuc\_primal\_repair\_seed}），
+不进 MILP 约束\\
+\texttt{PF} 变量块 & 分配 $n_lT$ 个连续变量但无任何约束/目标引用
+（\srcpath{src/scuc/scuc.cpp:setup\_var\_index}）\\
+负荷/风/光曲线缺行缺列 & 回退基准值/装机容量
+（\srcpath{src/scuc/scuc.cpp:load\_at}、\srcpath{src/scuc/scuc.cpp:wind\_at}、
+\srcpath{src/scuc/scuc.cpp:solar\_at}）\\
+$B_{red}$ 不可逆 & \srcpath{src/scuc/scuc.cpp:compute\_ptdf} 取零逆矩阵，
+PTDF 全 0，线路约束退化为无界行\\
+母线/元件索引越界 & 装配期静默跳过（PTDF、潮流行、断面权重等）\\
+硬编码：平衡母线 0 & \srcpath{src/scuc/scuc.cpp:compute\_ptdf}\\
+硬编码：线路限额 $>10^5$ MW 不加约束 & \srcpath{src/scuc/scuc.cpp:build\_formulation}\\
+硬编码：松弛变量上界 $10^6$、切负荷/过剩上界 $10^6$ & 同左\\
+硬编码：$\mathrm{large\_uc}$ 阈值 $n_gT_c>800$ & 同左（关闭割平面族 T/H/R/P/Q）\\
+硬编码：调节备用 10 分钟口径（$10\times$ MW/min） & 同左\\
+硬编码：种子可行性容差 $10^{-5}$、数值零阈值 $10^{-9}$ & 同左、
+\srcpath{src/scuc/scuc.cpp:scuc\_seed\_satisfies}\\
+\fld{SOC}/\fld{soc\_init} $>1+10^{-8}$ 按 MWh 解释 & 同左
+（初始 SOC 单位双口径）\\
+\bottomrule
+\end{longtable}
+\end{footnotesize}
+\end{center}

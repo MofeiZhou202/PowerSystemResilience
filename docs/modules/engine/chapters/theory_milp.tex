@@ -1,0 +1,764 @@
+% theory_milp.tex —— engine 通用理论：混合整数线性规划（MILP）
+% 本文件为理论层章节，遵循 docs/modules/THEORY_WRITING_GUIDE.md。
+
+\section{混合整数线性规划通用理论}
+
+\begin{theorynote}
+本章为通用数学理论，按 MILP 领域的标准模型与文献体系（专著级）撰写，覆盖
+分支定界框架与界定理、LP 松弛与对偶界、强分支与伪成本、可靠性分支
+（reliability branching）推导、割平面理论（Chv\'atal--Gomory 割、Gomory
+分数割、MIR、CGLP）、domain propagation、clique/cover 不等式、原始启发式
+思想与 presolve 约简。本章公式不要求逐式对应代码；与平台实现
+（\texttt{src/engine/solver/native/milp/bc/}）的对应关系见本章末
+"与实现的对应"表，超出实现的内容以"未实现扩展说明"框就地标记。
+平台侧的推导/实验记录见 \srcpath{docs/archive/} 下
+\texttt{native\_milp\_*\_2026-08-13.md} 系列，本章引用处均已对照当前代码核验。
+\end{theorynote}
+
+\subsection{记号与约定}
+
+\begin{itemize}
+  \item MILP 标准型：$\min\{c^\top x : Ax \le b,\; l \le x \le u,\;
+        x_j \in \mathbb{Z}\ \forall j \in I\}$，其中
+        $A \in \mathbb{R}^{m \times n}$，$I \subseteq \{1,\ldots,n\}$ 为整数
+        变量下标集；$B \subseteq I$ 为 0-1 变量下标集。
+  \item $X = \{x \in \mathbb{R}^n : Ax \le b,\ l \le x \le u\}$：LP 松弛可行域；
+        $X_I = \{x \in X : x_j \in \mathbb{Z}\ \forall j \in I\}$：MILP 可行集；
+        $z^* = \min\{c^\top x : x \in X_I\}$（不可行时 $z^* = +\infty$）。
+  \item 对节点 $k$ 施加的局部界记 $[l^k, u^k]$，其 LP 松弛最优值记
+        $z_{LP}^k$；$\lfloor t \rfloor$、$\lceil t \rceil$ 为下/上取整，
+        $\operatorname{frac}(t) = t - \lfloor t \rfloor$ 为小数部。
+  \item 行 $i$ 的活动度（activity）：$a_i x$ 在 $[l,u]$ 上的最小/最大可达值
+        记 $\alpha_i^{\min}, \alpha_i^{\max}$（\ref{subsec:domain-propagation} 小节定义）。
+  \item 对任意实数 $r$ 与整数标量情形，$(r)^+ = \max\{r, 0\}$。
+\end{itemize}
+
+\subsection{MILP 模型、LP 松弛与对偶界}
+
+\begin{definition}[LP 松弛]
+去掉整数约束 $x_j \in \mathbb{Z}$（$j \in I$）得到的线性规划称为 MILP 的
+\textbf{LP 松弛}（LP relaxation）。
+\end{definition}
+
+\begin{proposition}[松弛界]
+\label{prop:milp-relaxation-bound}
+若 $X_I \neq \emptyset$ 且 LP 松弛有有限最优值 $z_{LP}$，则
+$z_{LP} \le z^*$；且若 LP 松弛最优解 $\hat x$ 恰满足全部整数约束，
+则 $\hat x$ 即 MILP 最优解。
+\end{proposition}
+\begin{proof}
+$X_I \subseteq X$，在更大集合上取最小只会更小：$z_{LP} = \min_{X} c^\top x
+\le \min_{X_I} c^\top x = z^*$。若 $\hat x \in X_I$ 则
+$c^\top \hat x \ge z^*$，与 $c^\top \hat x = z_{LP} \le z^*$ 合并得等号。
+\end{proof}
+
+更一般地，任何对偶可行解都给出合法下界：
+
+\begin{proposition}[对偶界]
+\label{prop:milp-dual-bound}
+设 $\pi \ge 0$ 满足 $\pi^\top A \le c^\top$ 的分量条件
+（对 $Ax \le b$ 型约束的 LP 对偶可行），则
+$z^* \ge \pi^\top b + \sum_j \min_{l_j \le x_j \le u_j}
+(c_j - \pi^\top A_{\cdot j}) x_j$。特别地 LP 弱对偶给出
+$z_{LP} = \max_\pi \{\ldots\} \ge$ 任何对偶可行点的值，故任何对偶可行点的
+目标值都是 $z^*$ 的有效下界。
+\end{proposition}
+\begin{proof}
+对任意 $x \in X_I \subseteq X$，
+$c^\top x \ge \pi^\top A x + \sum_j (c_j - \pi^\top A_{\cdot j}) x_j
+\ge \pi^\top b + \sum_j \min_{[l_j,u_j]}(c_j - \pi^\top A_{\cdot j}) x_j$，
+第一步用 $\pi \ge 0$、$Ax \le b$ 与对偶可行性逐项放缩，
+第二步把每个分量放缩到其界上的最小值。对 $x$ 取最小即得结论。
+\end{proof}
+
+\begin{remark}
+命题 \ref{prop:milp-relaxation-bound} 与 \ref{prop:milp-dual-bound} 是
+全部"界"的来源：分支定界维护的全局下界、割平面增强的松弛界、以及节点
+剪枝（pruning by bound）都归结到"某松弛/对偶可行对象给出的下界不超过
+当前 incumbent 值则可丢弃子树"。实现锚点
+\srcpath{src/engine/solver/native/milp/bc/legacy/bc\_relaxation.cpp:solve\_lp\_relaxation}。
+\end{remark}
+
+\subsection{分支定界框架与界定理}
+\label{subsec:bnb}
+
+分支定界（branch and bound, Land--Doig \cite{landdoig1960}）把 MILP 递归分解为
+子问题构成的搜索树：每个节点对应附加了局部变量界 $[l^k, u^k]$ 的子问题。
+
+\begin{definition}[节点处理与剪枝]
+对节点 $k$ 求解其 LP 松弛。记 incumbent 值（当前最好可行解目标）为
+$\bar z$。节点被\textbf{剪枝}（fathomed），若出现以下三者之一：
+\begin{enumerate}
+  \item LP 松弛不可行（infeasibility）；
+  \item $z_{LP}^k \ge \bar z$（by bound：该子树不可能产生更优解）；
+  \item LP 松弛最优解满足全部整数约束（by integrality，并可能更新
+        $\bar z$）。
+\end{enumerate}
+否则选取某个分数整数变量 $x_j$（$j \in I$，
+$\operatorname{frac}(\hat x_j) \in (0,1)$）\textbf{分支}：生成两个子节点，
+分别附加 $x_j \le \lfloor \hat x_j \rfloor$ 与
+$x_j \ge \lceil \hat x_j \rceil$。
+\end{definition}
+
+\begin{lemma}[分支完备性]
+\label{lem:branching-completeness}
+设节点 $k$ 的可行集为 $X_I^k$。对分支变量 $x_j$ 生成的两个子节点可行集
+$X_I^{k,-}$、$X_I^{k,+}$ 满足
+$X_I^k = X_I^{k,-} \cup X_I^{k,+}$（对 $x_j \in \mathbb{Z}$ 的 $x$，
+$x_j \le \lfloor\hat x_j\rfloor$ 与 $x_j \ge \lceil\hat x_j\rceil$ 穷尽一切
+整数值，且当前 LP 最优解 $\hat x$ 同被两侧排除）。
+\end{lemma}
+\begin{proof}
+$x_j$ 取整数值时必满足 $x_j \le \lfloor\hat x_j\rfloor$ 或
+$x_j \ge \lfloor\hat x_j\rfloor + 1 = \lceil\hat x_j\rceil$ 之一
+（$\hat x_j$ 分数，故 $\lfloor\hat x_j\rfloor < \hat x_j < \lceil\hat x_j\rfloor$），
+故并集等于 $X_I^k$；$\hat x$ 两侧皆不满足故被排除。
+\end{proof}
+
+\begin{theorem}[界定理]
+\label{thm:bnb-bound}
+设 $\mathcal{L}$ 为某时刻全部未剪枝且未展开的开放节点集，
+$\bar z$ 为当前 incumbent 值（无 incumbent 时 $\bar z = +\infty$）。则
+\[
+\underline z := \min_{k \in \mathcal{L}} z_{LP}^k \;\le\; z^* \;\le\; \bar z,
+\]
+即\textbf{全局对偶界}等于开放节点松弛界的最小值。
+\end{theorem}
+\begin{proof}
+上界：任何 incumbent 都是可行解，故 $z^* \le \bar z$。下界：由引理
+\ref{lem:branching-completeness} 的归纳，任何未被搜索树排除的可行解必落在
+某个开放节点（或已剪枝节点）的子树内；被 by bound 剪枝的节点子树中
+可行解目标值 $\ge z_{LP} \ge \bar z \ge z^*$，故若其中存在最优解则
+$\bar z = z^*$ 已成立，结论平凡。否则每个含优于 $\bar z$ 之可行解的子树
+必经过某个开放节点 $k$，且 $z^* \ge z_{LP}^k \ge \min_{k' \in \mathcal{L}}
+z_{LP}^{k'} = \underline z$，末步因该 $k$ 在 $\mathcal{L}$ 中
+（命题 \ref{prop:milp-relaxation-bound} 应用于节点子问题给出第一步）。
+\end{proof}
+
+\begin{theorem}[分支定界的有限终止性，条件性结论]
+\label{thm:bnb-termination}
+若所有整数变量有有限界（$l_j, u_j$ 有限，$j \in I$），且每个节点的 LP
+松弛被求到最优，则分支定界在有限步内终止，返回最优解或证明不可行。
+\end{theorem}
+\begin{proof}
+每个节点的深度由整数变量界的收缩严格限制：沿从根到叶的任何路径，
+每次分支把分支变量的可行整数区间至少缩小一个整数值（由
+$\lfloor\hat x_j\rfloor < \hat x_j < \lceil\hat x_j\rceil$），
+故路径长度不超过 $\sum_{j \in I}(u_j - l_j) + |I| < \infty$。
+在有限深度处变量全部被固定，LP 松弛要么不可行要么给出整点，
+节点必被剪枝。搜索树为有限分支度的有限深度树，故节点总数有限；
+每次迭代至少展开一个节点，故算法有限步终止。终止时 $\mathcal{L} = \emptyset$，
+由定理 \ref{thm:bnb-bound}，$\bar z = z^*$（或无可行解）。
+\end{proof}
+
+\begin{remark}
+有限终止是\textbf{存在性}结论，不含任何多项式保证——MILP 为 NP-hard，
+树的规模可对输入指数增长。工程效率几乎全部来自：更强的松弛界（割）、
+更少的节点（好的分支决策与传播）与更早的 incumbent（启发式）。
+定理 \ref{thm:bnb-bound} 同时解释了 best-bound 节点选择的流行原因：
+取 $\arg\min_{k \in \mathcal{L}} z_{LP}^k$ 展开，是贪心提升全局下界
+$\underline z$ 的策略。实现锚点：主循环
+\srcpath{src/engine/solver/native/milp/bc/legacy/branch\_and\_cut.cpp:BCSolveState::run}，
+入口 \srcpath{src/engine/solver/native/milp/bc/api.cpp:solve\_milp\_bc}。
+\end{remark}
+
+\subsection{强分支、伪成本与可靠性分支}
+\label{subsec:branching}
+
+分支变量的选取对树大小有决定性影响（计算证据见
+\cite{linderoth1999,achterberg2005}）。以下记父节点 LP 值 $z_{LP}$，
+候选分数变量 $j$ 的向下/向上子节点 LP 值为 $z_j^-, z_j^+$，
+增益 $\Delta_j^- = z_j^- - z_{LP}$、$\Delta_j^+ = z_j^+ - z_{LP}$
+（剪枝的子节点按约定记为充分大的增益）。
+
+\begin{definition}[强分支]
+\label{def:strong-branching}
+\textbf{强分支}（strong branching）：对候选集 $\mathcal{C}$ 中每个 $j$
+实际求解两个子 LP，按组合评分选变量，常用乘积评分
+\begin{equation}
+\label{eq:product-score}
+\operatorname{score}(j) =
+\big(\max\{\Delta_j^-, \varepsilon\}\big)^{1-\mu}
+\big(\max\{\Delta_j^+, \varepsilon\}\big)^{\mu},
+\end{equation}
+$\mu \in [0,1]$（常取 $\mu = 1/6$ 的加权几何形式，$\varepsilon > 0$ 为
+防零下限）。强分支信息准确但每个候选两次 LP 求解，代价高。
+\end{definition}
+
+\begin{definition}[伪成本]
+\label{def:pseudocost}
+对每个整数变量 $j$ 维护\textbf{伪成本}（pseudocost）历史：
+\begin{equation}
+\label{eq:pseudocost}
+\psi_j^- = \frac{1}{|O_j^-|}\sum_{o \in O_j^-}
+\frac{\Delta_o^-}{f_o}, \qquad
+\psi_j^+ = \frac{1}{|O_j^+|}\sum_{o \in O_j^+}
+\frac{\Delta_o^+}{1 - f_o},
+\end{equation}
+其中 $O_j^-, O_j^+$ 为历史上对 $j$ 向下/向上分支的观测集，
+$f_o = \operatorname{frac}(\hat x_j^{(o)})$ 为当时的分数部。
+\textbf{估计增益} $\widehat\Delta_j^- = \psi_j^- f_j$、
+$\widehat\Delta_j^+ = \psi_j^+ (1 - f_j)$ 代入式 \eqref{eq:product-score}
+得伪成本分支。
+\end{definition}
+
+伪成本的统计依据是如下简化模型：对固定的 $j$，"单位分数距离的对偶界增益"
+近似为与节点无关的常数，故历史均值是可用估计量。该假设不严格成立
+（增益依赖于节点的局部界与 LP 基），这是可靠性分支的动机。
+
+\begin{definition}[可靠性分支]
+\label{def:reliability-branching}
+给定可靠性阈值 $\eta_{rel} \ge 1$。称变量 $j$ 的方向
+$d \in \{-, +\}$ \textbf{可靠}（reliable），若该方向已积累至少
+$\eta_{rel}$ 次观测（$|O_j^d| \ge \eta_{rel}$）。\textbf{可靠性分支}
+（reliability branching，Achterberg--Koch--Martin \cite{achterberg2005}）：
+\begin{enumerate}
+  \item 取候选集 $\mathcal{C}$（如按伪成本评分排序的前若干名）；
+  \item 对存在不可靠方向的候选 $j$，用强分支\textbf{实测}其不可靠方向的
+        增益，并把观测并入伪成本历史；
+  \item 全部方向可靠后用伪成本估计评分，选评分最高者。
+\end{enumerate}
+\end{definition}
+
+\begin{proposition}[可靠性分支的估计结构]
+\label{prop:reliability}
+设候选 $j$ 两方向均可靠，则其评分由历史伪成本给出
+$\widehat{\operatorname{score}}(j)$；若方向 $d$ 不可靠，实测值
+$\Delta_j^d$ 既是本次评分依据，又使 $|O_j^d|$ 加一。于是对每个变量，
+强分支求解次数以 $2\eta_{rel}$ 为界（每方向至多 $\eta_{rel}$ 次实测），
+之后退化为 $O(1)$ 的查表评分。
+\end{proposition}
+\begin{proof}
+由定义 \ref{def:reliability-branching} 的步骤 2--3 直接成立：方向可靠后
+不再触发该方向的实测；每方向计数单调增加到阈值后停止。
+故每个变量的总实测次数 $\le 2\eta_{rel}$，后续评分只查表。
+\end{proof}
+
+\begin{remark}[内部实验结论：局部增益不等于全局界进展]
+\label{rem:reliability-mismatch}
+可靠性分支的理论保证是\textbf{局部}的（命题 \ref{prop:reliability}：
+有限实测后评分成本退化），它不含"固定节点数下全局下界更快上升"的断言。
+平台实验记录
+\srcpath{docs/archive/native\_milp\_reliability\_branching\_2026-08-13.md}
+确认了这一区分：在 proof-tail（best-bound 队列）模式下移除对可靠性分支的
+绕行后，探测 LP 求解数按成本模型预测出现（实现忠实、成本模型准确），
+但 500 节点处的相对间隙反而略微变差——因为 best-bound 队列的全局下界
+由\textbf{整个前沿的最小值}（定理 \ref{thm:bnb-bound}）决定，局部更强的
+分裂改变了后代的分布却不必提高固定预算下的前沿最小值。
+该失配归因于假设违背而非实现缺陷，已写回上述记录。
+实现锚点
+\srcpath{src/engine/solver/native/milp/bc/legacy/bc\_branching.cpp:choose\_branch\_var\_reliability\_impl}
+（含深度上限与探测预算按深度折减的工程化策略）。
+\end{remark}
+
+对应实现还包括乘积评分
+\srcpath{src/engine/solver/native/milp/bc/legacy/bc\_branching.cpp:compute\_branch\_product\_score}、
+伪成本更新
+\srcpath{src/engine/solver/native/milp/bc/legacy/bc\_branching.cpp:update\_pseudocost\_from\_branch\_evidence}
+与 most-infeasible 基线
+\srcpath{src/engine/solver/native/milp/bc/legacy/bc\_branching.cpp:most\_infeasible\_score}。
+
+\subsection{割平面理论}
+\label{subsec:cuts}
+
+\begin{definition}[有效不等式]
+不等式 $\alpha^\top x \le \beta$ 称为对 $X_I$ \textbf{有效}（valid），
+若 $X_I \subseteq \{x : \alpha^\top x \le \beta\}$。若它切除当前 LP 松弛
+最优解 $\hat x$（$\alpha^\top \hat x > \beta$），则称之为\textbf{割}
+（cut / cutting plane）；把割加入松弛得更强对偶界
+（命题 \ref{prop:milp-relaxation-bound} 应用于收紧后的 $X$）。
+\end{definition}
+
+\subsubsection{Chv\'atal--Gomory 割}
+
+\begin{lemma}[CG 舍入]
+\label{lem:cg-rounding}
+设 $x \ge 0$ 全部分量为整数变量，$\sum_j a_j x_j \le b$ 有效，则对任意
+$\lambda > 0$ 有\textbf{Chv\'atal--Gomory 割}
+\begin{equation}
+\label{eq:cg-cut}
+\sum_j \big\lfloor \lambda a_j \big\rfloor\, x_j \;\le\; \lfloor \lambda b \rfloor.
+\end{equation}
+\end{lemma}
+\begin{proof}
+由 $\sum_j a_j x_j \le b$ 与 $\lambda > 0$ 得
+$\sum_j \lambda a_j x_j \le \lambda b$。因 $x_j \ge 0$，
+$\sum_j \lfloor\lambda a_j\rfloor x_j \le \sum_j \lambda a_j x_j \le \lambda b$。
+左端为整数（整数变量之整系数组合），整数 $\le \lambda b$ 蕴含
+$\le \lfloor\lambda b\rfloor$。
+\end{proof}
+
+取 $\lambda$ 遍历对偶乘子向量并对多行取非负组合，即得一般 CG 割
+$u^\top A$ 系数的舍入形式。对有理数据的多面体 $X$，反复施加 CG 闭包在
+有限秩内收敛到 $\operatorname{conv}(X_I)$（Chv\'atal 定理，条件性结论；
+证明见 \cite{cornuejols2008} 或 \cite{nemhauser1988}）。
+
+\subsubsection{Gomory 分数割}
+
+\begin{theorem}[Gomory 分数割的推导与正确性]
+\label{thm:gfc}
+设 LP 松弛（标准等式型 $Ax = b$，$x \ge 0$，全部变量整数）的某最优基
+对应单纯形表行
+\begin{equation}
+\label{eq:tableau-row}
+x_{B_i} + \sum_{j \in N} \bar a_{ij} x_j = \bar b_i,
+\end{equation}
+其中 $N$ 为非基变量集，当前基解 $\hat x$ 中
+$\hat x_{B_i} = \bar b_i \notin \mathbb{Z}$、$\hat x_j = 0$（$j \in N$）。记
+$f_{ij} = \operatorname{frac}(\bar a_{ij})$、$f_{i0} = \operatorname{frac}(\bar b_i)$。
+则 \textbf{Gomory 分数割}（Gomory fractional cut, GFC）
+\begin{equation}
+\label{eq:gfc}
+\sum_{j \in N} f_{ij}\, x_j \;\ge\; f_{i0}
+\end{equation}
+对 $X_I$ 有效，且被 $\hat x$ 违反（左端 $0 < f_{i0}$）。
+\end{theorem}
+\begin{proof}
+违反性直接：$\hat x_j = 0$（$j \in N$），左端为 0，而
+$f_{i0} > 0$（$\bar b_i$ 非整数）。
+
+有效性：由式 \eqref{eq:tableau-row}，
+$x_{B_i} = \bar b_i - \sum_{j \in N}\bar a_{ij} x_j$。把系数拆分为整数与
+分数部 $\bar a_{ij} = \lfloor\bar a_{ij}\rfloor + f_{ij}$、
+$\bar b_i = \lfloor\bar b_i\rfloor + f_{i0}$，整理得
+\begin{equation}
+\label{eq:gfc-key}
+x_{B_i} + \sum_{j \in N}\lfloor\bar a_{ij}\rfloor x_j - \lfloor\bar b_i\rfloor
+= f_{i0} - \sum_{j \in N} f_{ij} x_j .
+\end{equation}
+对任何 $x \in X_I$（全整数、$x \ge 0$ 且满足式 \eqref{eq:tableau-row}），
+式 \eqref{eq:gfc-key} 左端为整数，故右端亦为整数。而右端
+$\le f_{i0} < 1$（因 $f_{ij} \ge 0$、$x_j \ge 0$），整数且 $< 1$ 故
+$\le 0$，即 $f_{i0} - \sum_j f_{ij} x_j \le 0$，移项即式 \eqref{eq:gfc}。
+\end{proof}
+
+对混合整数情形（连续变量存在、基变量整数），同样的表行导出更强的
+\textbf{Gomory 混合整数割}（GMI）：对表行 \eqref{eq:tableau-row} 按
+系数与 $f_{i0}$ 的相对大小分配合适的斜率，得到对每个非基变量分段线性
+的割系数。GMI 的标准推导见 \cite{cornuejols2008} 第 2 节；其形态是
+下节 MIR 函数的特例。
+
+\subsubsection{MIR 不等式}
+
+\begin{definition}[MIR 函数]
+对标量 $b \notin \mathbb{Z}$，记 $f_0 = \operatorname{frac}(b)$。定义
+\textbf{MIR 函数}（mixed-integer rounding function）
+\[
+F_{f_0}(r) = \lfloor r \rfloor + \frac{\big(\operatorname{frac}(r) - f_0\big)^+}{1 - f_0}.
+\]
+\end{definition}
+
+\begin{theorem}[两行 MIR 不等式]
+\label{thm:mir}
+考虑混合整数集
+$Q = \{(x, y, s) : x + y \le b + s,\ x \in \mathbb{Z},\ y \ge 0,\ s \ge 0\}$
+的弱化形式
+$\{(v, y) : v \le b + y,\ v \in \mathbb{Z},\ y \ge 0\}$。则不等式
+\begin{equation}
+\label{eq:mir-basic}
+v \;\le\; \lfloor b \rfloor + \frac{y}{1 - f_0}
+\end{equation}
+对该集合有效。
+\end{theorem}
+\begin{proof}
+分两种情形。若 $v \le \lfloor b \rfloor$，因 $y/(1-f_0) \ge 0$，式
+\eqref{eq:mir-basic} 成立。若 $v \ge \lfloor b \rfloor + 1 = \lceil b\rceil$，
+则 $y \ge v - b \ge \lceil b \rceil - b = 1 - f_0$，故
+$\lfloor b\rfloor + y/(1-f_0) \ge \lfloor b\rfloor + 1 \ge v$。
+两情形穷尽（$v$ 整数），证毕。
+\end{proof}
+
+对一般的单行（或聚集行）$\sum_j a_j x_j \le b$（$x_j \ge 0$，
+部分变量整数），通过\textbf{补余}（complementation：把 $x_j$ 换为
+$u_j - x_j$ 以选择有利的符号）与系数缩放把行变换为定理 \ref{thm:mir}
+的两行形式，回代即得\textbf{补余 MIR 割}（complemented MIR,
+c-MIR \cite{marchand2001}）。c-MIR 严格强于朴素 CG 割，且可从单纯形表行
+系统化生成；实现锚点
+\srcpath{src/engine/solver/native/milp/bc/legacy/bc\_cuts.cpp:add\_row\_mir\_cuts}、
+\srcpath{src/engine/solver/native/milp/bc/legacy/bc\_cuts.cpp:build\_sparse\_complemented\_mir}、
+\srcpath{src/engine/solver/native/milp/bc/legacy/bc\_cuts.cpp:add\_basis\_mir\_cuts}
+（GMI 锚点
+\srcpath{src/engine/solver/native/milp/bc/legacy/bc\_cuts.cpp:add\_basis\_gomory\_cuts}）。
+
+\subsubsection{CGLP：析取割与 lift-and-project}
+
+\begin{definition}[析取与 CGLP]
+对 0-1 变量 $x_j$，析取
+$\big(X \cap \{x_j = 0\}\big) \cup \big(X \cap \{x_j = 1\}\big)$ 的凸包
+是对 $X_I$ 的有效收紧。给定当前点 $\hat x$（$0 < \hat x_j < 1$），
+\textbf{割生成 LP}（cut generation LP, CGLP；Balas--Ceria--Cornu\'ejols
+\cite{balas1993}）在割系数空间求解：变量为 $(\alpha, \beta)$ 与两分支
+的 Farkas 乘子 $(u^0, v^0)$、$(u^1, v^1)$，约束
+\[
+\alpha \le u^{0\top} A^{0},\quad \alpha \le u^{1\top} A^{1},\quad
+\beta \ge u^{0\top} b^{0},\quad \beta \ge u^{1\top} b^{1},
+\]
+（$A^{0} x \le b^{0}$、$A^{1} x \le b^{1}$ 为两分支系统）加正规化约束，
+目标为最大化违反度 $\alpha^\top \hat x - \beta$。
+\end{definition}
+
+\begin{proposition}[CGLP 割的有效性]
+\label{prop:cglp}
+CGLP 的任何可行点 $(\alpha, \beta)$ 给出的不等式
+$\alpha^\top x \le \beta$ 对
+$\operatorname{conv}\big((X\cap\{x_j=0\}) \cup (X\cap\{x_j=1\})\big)$ 有效；
+最优 CGLP 解给出在最大化违反意义下的最强析取割。
+\end{proposition}
+\begin{proof}
+有效性是 Farkas 引理的直接推论：$\alpha \le u^{d\top} A^{d}$、
+$\beta \ge u^{d\top} b^{d}$（$u^d \ge 0$）表明
+$\alpha^\top x \le \beta$ 是分支 $d$ 系统 $A^{d} x \le b^{d}$ 的
+非负组合的推论，故在两分支上都有效，从而对其并的凸包有效。
+最优性：CGLP 的可行域经正规化后等价于析取多面体极割的系数锥截面，
+最大化违反即选出分离 $\hat x$ 的最深割；严格陈述与证明见
+\cite{balas1993,cornuejols2008}。
+\end{proof}
+
+\begin{remark}
+CGLP 的求解成本为一次规模约 $2m + n$ 的 LP，通常只在根节点对少数
+候选变量运行。实现
+\srcpath{src/engine/solver/native/milp/bc/legacy/bc\_cglp\_model.cpp:build\_cglp\_lp}、
+\srcpath{src/engine/solver/native/milp/bc/legacy/bc\_cglp.cpp:generate\_cglp\_cut}、
+\srcpath{src/engine/solver/native/milp/bc/legacy/bc\_cglp.cpp:add\_cglp\_cuts\_root}
+包含候选选择、效力过滤与\textbf{逐分支有效性校验}的保守准入
+（\srcpath{src/engine/solver/native/milp/bc/legacy/bc\_cglp.cpp:validate\_cut\_on\_branch}），
+以及插值回退
+（\srcpath{src/engine/solver/native/milp/bc/legacy/bc\_cglp.cpp:fallback\_interpolation\_cut}）。
+\end{remark}
+
+\subsubsection{割平面循环的不动点语义}
+
+\begin{remark}[退化 LP 上的割平面不动点]
+在退化（degenerate）LP 上，一张被采纳的割可以不改变目标值却切去当前
+最优面的一部分，使后续分离面对新的最优面。因此"一批被采纳的割未立即
+提升目标值"\textbf{不是}分离循环的不动点判据；正确的不动点是分离器/割池
+生命周期在配置的不动预算内\textbf{不再产生任何进展}。该语义结论的平台化
+实验记录见
+\srcpath{docs/archive/native\_milp\_degenerate\_cutpool\_fixed\_point\_2026-08-13.md}：
+保留零提升割确实给出预测的更强根界（对偶侧断言成立），但改变了退化根
+点/基，使下游原始启发式消耗了整个预算——端到端契约失败，该改动按
+失配协议回滚。理论教训：对偶界增强与端到端运行时间由同一退化面耦合，
+不能分别建模。相关的割归属语义（生成 $\to$ 割池候选 $\to$ LP 采纳且
+单调重优化成功后才成为全局有效证据行）记录于
+\srcpath{docs/archive/native\_milp\_cutpool\_proof\_ownership\_2026-08-13.md}。
+\end{remark}
+
+\subsection{Domain propagation}
+\label{subsec:domain-propagation}
+
+\begin{definition}[行活动度与蕴含界]
+对行 $i$：$a_i^\top x \le b_i$（$\le$ 型不失一般），其在 $[l,u]$ 上的
+\textbf{活动度}为区间算术
+\[
+\alpha_i^{\min} = \sum_{j: a_{ij} > 0} a_{ij} l_j + \sum_{j: a_{ij} < 0} a_{ij} u_j,
+\qquad
+\alpha_i^{\max} = \sum_{j: a_{ij} > 0} a_{ij} u_j + \sum_{j: a_{ij} < 0} a_{ij} l_j .
+\]
+\textbf{界收紧}（bound tightening）：对每个 $j$，由
+$a_{ij} x_j \le b_i - \big(\alpha_i^{\min} - \min\{0, a_{ij}l_j, a_{ij}u_j\}\big)$
+解出 $x_j$ 的\textbf{蕴含界}（implied bound），若强于当前界则收紧。
+\end{definition}
+
+\begin{proposition}[蕴含界的有效性]
+\label{prop:implied-bounds}
+按上述规则收紧后的界不切除 $X_I$ 的任何点。
+\end{proposition}
+\begin{proof}
+设 $a_{ij} > 0$。对任何满足行 $i$ 与界的 $x$，
+$a_{ij} x_j = a_i^\top x - \sum_{k \ne j} a_{ik} x_k
+\le b_i - \alpha_{i,\neg j}^{\min}$，其中
+$\alpha_{i,\neg j}^{\min} = \alpha_i^{\min} - a_{ij} l_j$
+是除 $j$ 外各项之和的下界，故
+$x_j \le \big(b_i - \alpha_{i,\neg j}^{\min}\big)/a_{ij}$，
+即该上界为行与界的逻辑推论，对所有可行点成立。$a_{ij} < 0$ 与下界情形
+对称。整数变量再把上界下取整、下界上取整，仍有效（整点满足更强条件）。
+\end{proof}
+
+\textbf{探测}（probing，Savelsbergh \cite{savelsbergh1994}）：对 0-1 变量
+$x_j$ 分别暂设 $x_j = 0$ 与 $x_j = 1$ 运行界收紧。若某侧不可行则
+$x_j$ 可固定；若两侧都可行，则两侧收紧结果的并给出其他变量的隐含界
+（如 $x_j = 0 \Rightarrow x_k \ge \alpha$ 且
+$x_j = 1 \Rightarrow x_k \ge \beta$ 蕴含 $x_k \ge \min\{\alpha, \beta\}$），
+并可抽取蕴含关系 $x_j = 1 \Rightarrow x_k \ge \alpha$ 供 clique 表与
+割生成使用。传播以不动点迭代执行：界收紧触发活动度更新，再触发新的收紧，
+直至无进展或不可行。实现锚点
+\srcpath{src/engine/solver/native/milp/bc/legacy/bc\_domain\_probe.cpp:BCDomainProbeWorkspace::propagate}、
+\srcpath{src/engine/solver/native/milp/bc/legacy/bc\_domain\_probe.cpp:BCDomainProbeWorkspace::probe}、
+\srcpath{src/engine/solver/native/milp/bc/legacy/bc\_implied\_bounds.cpp:compute\_implied\_column\_bounds\_from\_rows}。
+
+\subsection{Clique 与 cover 不等式}
+\label{subsec:clique-cover}
+
+\begin{definition}[冲突图与 clique 不等式]
+对 0-1 变量，若任意可行点至多使文字（literal，$x_j$ 或 $1 - x_j$）集合
+$C$ 中的一个取真，则
+\begin{equation}
+\label{eq:clique}
+\sum_{j \in C^+} x_j + \sum_{j \in C^-} (1 - x_j) \;\le\; 1
+\end{equation}
+为 \textbf{clique 不等式}。文字间的两两冲突（"至多一个为真"）构成
+\textbf{冲突图}（conflict graph）的边，clique 不等式对应其团。
+\end{definition}
+
+\begin{proposition}[clique 不等式的有效性]
+式 \eqref{eq:clique} 对 $X_I$ 有效；且当 $C$ 在冲突图中为极大团时，
+该不等式不被同形式的更强不等式支配。
+\end{proposition}
+\begin{proof}
+有效性即定义：任意 $x \in X_I$ 至多为 $C$ 中一个文字赋值真，
+左端计数取真文字数，故 $\le 1$。极大性：若 $C$ 非极大，存在文字
+$\ell \notin C$ 与 $C$ 全部冲突，则 $C \cup \{\ell\}$ 的不等式逐项
+$\ge$ 原不等式且严格多一项，支配原式；反之极大团无此支配者。
+\end{proof}
+
+\begin{definition}[knapsack cover]
+对单行 knapsack 约束 $\sum_j a_j x_j \le b$（$a_j > 0$，$x_j \in \{0,1\}$），
+集合 $C$ 称为\textbf{覆盖}（cover），若 $\sum_{j \in C} a_j > b$；
+称\textbf{最小覆盖}（minimal cover），若去掉任一元素即非覆盖。
+\textbf{覆盖不等式}
+\begin{equation}
+\label{eq:cover}
+\sum_{j \in C} x_j \;\le\; |C| - 1
+\end{equation}
+对 knapsack 可行集有效。
+\end{definition}
+
+\begin{proposition}[覆盖不等式的有效性]
+\label{prop:cover-validity}
+式 \eqref{eq:cover} 对 $\{x \in \{0,1\}^n : \sum_j a_j x_j \le b\}$ 有效。
+\end{proposition}
+\begin{proof}
+若式 \eqref{eq:cover} 被违反，则 $C$ 中全部 $|C|$ 个变量取 1，
+左端 $\sum_{j \in C} a_j x_j = \sum_{j \in C} a_j > b$，与约束矛盾。
+\end{proof}
+
+\begin{remark}[lift 与强度]
+最小覆盖不等式一般不是面（facet）；通过\textbf{提升}（lifting）——把
+$C$ 外变量按 knapsack 子问题算出的系数序贯加入——可得（在条件下）面的
+加强形式。序贯提升系数由求解 $|C|$ 个 knapsack 子问题确定；标准处理见
+\cite{cornuejols2008} 第 5 节与 \cite{crowder1983}。实现的 cover/clique
+分离锚点
+\srcpath{src/engine/solver/native/milp/bc/legacy/bc\_cuts.cpp:add\_cover\_cuts}、
+\srcpath{src/engine/solver/native/milp/bc/legacy/bc\_cuts.cpp:add\_clique\_cuts}，
+冲突图维护与传播
+\srcpath{src/engine/solver/native/milp/bc/legacy/bc\_clique\_table.cpp:CliqueTable::build}、
+\srcpath{src/engine/solver/native/milp/bc/legacy/bc\_clique\_table.cpp:CliqueTable::propagate}、
+\srcpath{src/engine/solver/native/milp/bc/legacy/bc\_clique\_table.cpp:CliqueTable::find\_violated\_cliques}。
+\end{remark}
+
+\subsection{原始启发式思想}
+\label{subsec:primal-heuristics}
+
+对偶侧（界）只能证明最优性，\textbf{ incumbent} 须由原始侧提供。
+主要思想类别：
+
+\begin{enumerate}
+  \item \textbf{舍入启发式}（rounding）：把 LP 松弛解的分数整数变量逐个
+        舍入并沿行传播修复；成本低、成功率依问题而定。实现锚点
+        \srcpath{src/engine/solver/native/milp/bc/legacy/bc\_relaxation.cpp:try\_rounding\_heuristic}。
+  \item \textbf{潜水}（diving）：从当前 LP 解出发，反复把一个分数变量
+        固定到舍入值并重优化 LP（热启动），直到整可行或不可行回溯。
+  \item \textbf{可行性泵}（feasibility pump，Fischetti--Glover--Lodi
+        \cite{fischetti2005}）：交替执行"把当前 LP 解舍入到最近整点"与
+        "重优化 LP 使目标为到该整点的 $\ell_1$ 距离"，直至收敛或
+        循环检测触发扰动/重启。
+  \item \textbf{邻域搜索}（LNS / RINS / local branching）：给定 incumbent
+        $\bar x$，RINS \cite{danna2005} 固定 LP 解与 $\bar x$ 一致的整数
+        变量，对剩余子 MILP 限时求解；local branching 以
+        $\sum_{j: \bar x_j = 0} x_j + \sum_{j: \bar x_j = 1}(1-x_j) \le k$
+        定义 Hamming 邻域并在其中搜索改进。
+  \item \textbf{交叉}（crossover）与目标驱动潜水等组合变体。
+\end{enumerate}
+
+这些启发式都不改变任何界或证书的合法性：采纳的 incumbent 仍须通过
+原始模型的独立可行性审计。实现的根节点启发式管线内联于
+\srcpath{src/engine/solver/native/milp/bc/legacy/branch\_and\_cut.cpp:BCSolveState::run}
+（可行性泵、潜水、LNS、探测等按选项与进展门控）。
+
+\subsection{Presolve 对 MILP 的约简}
+\label{subsec:milp-presolve}
+
+Presolve 在求解前对模型做\textbf{保持最优解集等价}的约简；每条规则都附带
+postsolve 逆映射以恢复原空间解。标准规则及其有效性：
+
+\begin{enumerate}
+  \item \textbf{固定变量与空行/空列删除}：$l_j = u_j$ 的变量代入消去；
+        恒可行（$\alpha_i^{\max} \le b_i$）或恒紧的行删除。
+  \item \textbf{单子行}（singleton row）：行 $i$ 只含 $x_j$ 时直接给出
+        $x_j$ 的最强蕴含界（命题 \ref{prop:implied-bounds} 的退化情形），
+        行随后删除。
+  \item \textbf{单子列}（singleton column）：$x_j$ 只出现于行 $i$ 时，
+        依目标系数符号把 $x_j$ 压到使行最松的界，行删除、变量由
+        postsolve 重构。
+  \item \textbf{强制行}（forcing row）：$\alpha_i^{\max} = b_i$（$\le$ 型）
+        时，行等号迫使每个变量取其贡献达到最大的界；全部固定后行删除。
+  \item \textbf{支配列}（dominated column）：若 $x_j$ 的各约束系数与目标
+        被 $x_k$ 逐项支配，则存在不含 $x_j$（在其界上）的最优解，可固定。
+  \item \textbf{双元等式}（doubleton equation）：$a x_j + b x_k = c$ 用于
+        聚合消去一个变量（保持整数性需系数整除性检查）。
+  \item \textbf{系数加强与整数右端取整}：全整数行右端下取整
+        （引理 \ref{lem:cg-rounding} 的特例）；由活动度反推过大的系数。
+  \item \textbf{探测}：见 \ref{subsec:domain-propagation} 小节。
+\end{enumerate}
+
+\begin{proposition}[单子行收紧的完备性]
+对只含 $x_j$ 的行 $a_{ij} x_j \le b_i$：若 $a_{ij} > 0$ 则
+$x_j \le b_i / a_{ij}$ 与当前上界取小为该行蕴含的\textbf{最强}上界；
+$a_{ij} < 0$ 对称。收紧后删除行不损失任何可行点。
+\end{proposition}
+\begin{proof}
+行约束在 $x_j$ 上单独起作用（无其他项），故 $x_j \le b_i/a_{ij}$
+（$a_{ij} > 0$ 时）是该行的重述，凡满足行的点必满足新界；反之在
+$[l_j, u_j]$ 收紧后的任何点代回仍满足原行。故可行集不变。
+\end{proof}
+
+\begin{remark}[presolved 坐标中的仿射搬运]
+presolve 建立原空间与约简空间之间的逐变量仿射映射
+$x = s \odot y + c$（scale/shift）。任何原空间的证据结构——例如
+variable-bound 蕴含 $x_t \le a x_z + b$——要用于约简空间，必须经同一映射
+\textbf{精确搬运}：
+\[
+y_t \;\le\; \frac{a\, s_z}{s_t}\, y_z \;+\; \frac{a\, c_z + b - c_t}{s_t},
+\qquad s_t < 0 \text{ 时不等号反向},
+\]
+任一端点被消去、映射缺失或 $s_t = 0$ 时拒绝该条记录。直接以原列号充当
+约简列号是无效坐标回放，会产生错误蕴含并抬高松弛界越过真最优值——
+该缺陷的完整推导、代价模型与修正验证记录于
+\srcpath{docs/archive/native\_milp\_presolve\_varbound\_coordinates\_2026-08-13.md}
+（结论：仿射搬运是\textbf{正确性}前提，但不单独复现已知求解器的全部
+根切割强度）。有效性证明：把 $x_t = s_t y_t + c_t$、$x_z = s_z y_z + c_z$
+代入原不等式并除以 $s_t$（负号反向）即得，逐点保持可行集。
+实现锚点
+\srcpath{src/engine/solver/native/milp/bc/legacy/bc\_implied\_bounds.cpp:build\_variable\_bound\_table\_from\_rows}，
+postsolve 映射
+\srcpath{src/engine/solver/native/milp/bc/milp\_presolve.cpp:MILPPresolve::postsolve}、
+\srcpath{src/engine/solver/native/milp/bc/milp\_presolve.cpp:MILPPresolve::forward\_map}。
+\end{remark}
+
+实现锚点汇总：入口
+\srcpath{src/engine/solver/native/milp/bc/milp\_presolve.cpp:presolve\_mip} 与
+\srcpath{src/engine/solver/native/milp/bc/milp\_presolve.cpp:MILPPresolve::run}；
+各规则对应
+\srcpath{src/engine/solver/native/milp/bc/milp\_presolve.cpp:MILPPresolve::process\_singleton\_rows}、
+\srcpath{src/engine/solver/native/milp/bc/milp\_presolve.cpp:MILPPresolve::process\_singleton\_columns}、
+\srcpath{src/engine/solver/native/milp/bc/milp\_presolve.cpp:MILPPresolve::process\_doubleton\_equations}、
+\srcpath{src/engine/solver/native/milp/bc/milp\_presolve.cpp:MILPPresolve::detect\_forcing\_rows}、
+\srcpath{src/engine/solver/native/milp/bc/milp\_presolve.cpp:MILPPresolve::detect\_dominated\_columns}、
+\srcpath{src/engine/solver/native/milp/bc/milp\_presolve.cpp:MILPPresolve::tighten\_bounds}、
+\srcpath{src/engine/solver/native/milp/bc/milp\_presolve.cpp:MILPPresolve::run\_probing}。
+
+\subsection{与实现的对应}
+
+\begin{longtable}{p{0.42\textwidth} p{0.50\textwidth}}
+\toprule
+理论条目 & 实现状态与锚点 \\
+\midrule
+\endhead
+分支定界主框架（\ref{subsec:bnb} 小节，定理
+\ref{thm:bnb-bound}/\ref{thm:bnb-termination}）&
+\implfull{src/engine/solver/native/milp/bc/api.cpp:solve\_milp\_bc}、
+\srcpath{src/engine/solver/native/milp/bc/legacy/branch\_and\_cut.cpp:BCSolveState::run} \\
+LP 松弛与对偶界（命题 \ref{prop:milp-relaxation-bound}、
+\ref{prop:milp-dual-bound}）&
+\implfull{src/engine/solver/native/milp/bc/legacy/bc\_relaxation.cpp:solve\_lp\_relaxation}
+（vendored HiGHS / 原生内核双后端） \\
+伪成本（定义 \ref{def:pseudocost}）与乘积评分
+\eqref{eq:product-score} &
+\implfull{src/engine/solver/native/milp/bc/legacy/bc\_branching.cpp:compute\_branch\_product\_score}、
+\srcpath{src/engine/solver/native/milp/bc/legacy/bc\_branching.cpp:update\_pseudocost\_from\_branch\_evidence} \\
+可靠性分支（定义 \ref{def:reliability-branching}、命题
+\ref{prop:reliability}）&
+\implpart{实现了可靠性阈值、双向实测与历史伪成本切换，但带工程化限制：
+深度上限 6、探测预算按深度折减、持久 LP 热启动复用；锚点
+\srcpath{src/engine/solver/native/milp/bc/legacy/bc\_branching.cpp:choose\_branch\_var\_reliability\_impl}} \\
+most-infeasible 分支 & \implfull{src/engine/solver/native/milp/bc/legacy/bc\_branching.cpp:most\_infeasible\_score} \\
+Gomory 分数/混合整数割（定理 \ref{thm:gfc} 及 GMI）&
+\implfull{src/engine/solver/native/milp/bc/legacy/bc\_cuts.cpp:add\_basis\_gomory\_cuts}；
+另有 zero-half 变体
+\srcpath{src/engine/solver/native/milp/bc/legacy/bc\_cuts.cpp:add\_zero\_half\_cuts} \\
+补余 MIR 割（定理 \ref{thm:mir} 及 c-MIR）&
+\implfull{src/engine/solver/native/milp/bc/legacy/bc\_cuts.cpp:add\_row\_mir\_cuts}、
+\srcpath{src/engine/solver/native/milp/bc/legacy/bc\_cuts.cpp:build\_sparse\_complemented\_mir}、
+\srcpath{src/engine/solver/native/milp/bc/legacy/bc\_cuts.cpp:add\_basis\_mir\_cuts}、
+\srcpath{src/engine/solver/native/milp/bc/legacy/bc\_cuts.cpp:add\_mir\_like\_cuts} \\
+CGLP 析取割（命题 \ref{prop:cglp}）&
+\implpart{根节点 lift-and-project 主 LP + 候选选择 + 效力过滤 +
+逐分支保守有效性校验 + 插值回退；锚点
+\srcpath{src/engine/solver/native/milp/bc/legacy/bc\_cglp\_model.cpp:build\_cglp\_lp}、
+\srcpath{src/engine/solver/native/milp/bc/legacy/bc\_cglp.cpp:generate\_cglp\_cut}、
+\srcpath{src/engine/solver/native/milp/bc/legacy/bc\_cglp.cpp:add\_cglp\_cuts\_root}} \\
+domain propagation 与探测（命题 \ref{prop:implied-bounds}）&
+\implfull{src/engine/solver/native/milp/bc/legacy/bc\_domain\_probe.cpp:BCDomainProbeWorkspace::propagate}、
+\srcpath{src/engine/solver/native/milp/bc/legacy/bc\_domain\_probe.cpp:BCDomainProbeWorkspace::probe}、
+\srcpath{src/engine/solver/native/milp/bc/legacy/bc\_implied\_bounds.cpp:compute\_implied\_column\_bounds\_from\_rows} \\
+clique 不等式与冲突图 \eqref{eq:clique} &
+\implfull{src/engine/solver/native/milp/bc/legacy/bc\_clique\_table.cpp:CliqueTable::build}、
+\srcpath{src/engine/solver/native/milp/bc/legacy/bc\_clique\_table.cpp:CliqueTable::propagate}、
+\srcpath{src/engine/solver/native/milp/bc/legacy/bc\_cuts.cpp:add\_clique\_cuts} \\
+cover 不等式 \eqref{eq:cover}（命题 \ref{prop:cover-validity}）&
+\implpart{实现了 cover 分离与投影容量变体，未实现系统的序贯提升；锚点
+\srcpath{src/engine/solver/native/milp/bc/legacy/bc\_cuts.cpp:add\_cover\_cuts}、
+\srcpath{src/engine/solver/native/milp/bc/legacy/bc\_cuts.cpp:add\_projected\_capacity\_cover\_cuts}} \\
+舍入启发式 & \implfull{src/engine/solver/native/milp/bc/legacy/bc\_relaxation.cpp:try\_rounding\_heuristic} \\
+可行性泵 / 潜水 / LNS / RINS 等根与树内启发式 &
+\implpart{以 \texttt{BCSolveState::run} 内联段实现并按选项门控
+（可行性泵、LP 潜水、LNS、RINS 频率触发等）；锚点
+\srcpath{src/engine/solver/native/milp/bc/legacy/branch\_and\_cut.cpp:BCSolveState::run}} \\
+MILP presolve 全套规则（\ref{subsec:milp-presolve} 小节）&
+\implfull{src/engine/solver/native/milp/bc/milp\_presolve.cpp:presolve\_mip}、
+\srcpath{src/engine/solver/native/milp/bc/milp\_presolve.cpp:MILPPresolve::run} \\
+variable-bound 蕴含的坐标仿射搬运 &
+\implfull{src/engine/solver/native/milp/bc/legacy/bc\_implied\_bounds.cpp:build\_variable\_bound\_table\_from\_rows}；
+postsolve 映射
+\srcpath{src/engine/solver/native/milp/bc/milp\_presolve.cpp:MILPPresolve::postsolve} \\
+割池两阶段归属与退化不动点语义（\ref{subsec:cuts} 小节末 remark）&
+\implpart{割生成、选择、采纳与生命周期在
+\srcpath{src/engine/solver/native/milp/bc/legacy/bc\_cuts.cpp:add\_cuts}
+统一调度；两阶段归属语义已实现，退化不动点保留策略按记录回滚，见对应
+archive 记录} \\
+约简空间割生成（transformed cuts）&
+\implfull{src/engine/solver/native/milp/bc/legacy/bc\_cuts\_transformed.cpp:add\_transformed\_tableau\_cuts} \\
+树搜索的并行化 & \implpart{并行路径存在于
+\srcpath{src/engine/solver/native/milp/bc/legacy/bc\_parallel.cpp}，
+本章理论为串行框架；并行不改变界定理 \ref{thm:bnb-bound} 的语义} \\
+\bottomrule
+\end{longtable}
+
+\subsection{参考文献}
+
+\begin{thebibliography}{9}\small
+\bibitem{landdoig1960} A. H. Land, A. G. Doig,
+An automatic method of solving discrete programming problems,
+\emph{Econometrica} 28(3):497--520, 1960.
+\bibitem{achterberg2007} T. Achterberg,
+\emph{Constraint Integer Programming}, 博士论文, TU Berlin, 2007.
+\bibitem{achterberg2005} T. Achterberg, T. Koch, A. Martin,
+Branching rules revisited,
+\emph{Operations Research Letters} 33(1):42--54, 2005.
+\bibitem{linderoth1999} J. T. Linderoth, M. W. P. Savelsbergh,
+A computational study of search strategies for mixed integer programming,
+\emph{INFORMS Journal on Computing} 11(2):173--187, 1999.
+\bibitem{marchand2001} H. Marchand, L. A. Wolsey,
+Aggregation and mixed integer rounding to solve MIPs,
+\emph{Operations Research} 49(3):363--371, 2001.
+\bibitem{cornuejols2008} G. Cornu\'ejols,
+Valid inequalities for mixed integer linear programs,
+\emph{Mathematical Programming} 112(1):3--44, 2008.
+\bibitem{nemhauser1988} G. L. Nemhauser, L. A. Wolsey,
+\emph{Integer and Combinatorial Optimization}, Wiley, 1988.
+\bibitem{balas1993} E. Balas, S. Ceria, G. Cornu\'ejols,
+A lift-and-project cutting plane algorithm for mixed 0-1 programs,
+\emph{Mathematical Programming} 58(1--3):295--324, 1993.
+\bibitem{crowder1983} H. Crowder, E. L. Johnson, M. Padberg,
+Solving large-scale zero-one linear programming problems,
+\emph{Operations Research} 31(5):803--834, 1983.
+\bibitem{savelsbergh1994} M. W. P. Savelsbergh,
+Preprocessing and probing techniques for mixed integer programming problems,
+\emph{ORSA Journal on Computing} 6(4):445--454, 1994.
+\bibitem{fischetti2005} M. Fischetti, F. Glover, A. Lodi,
+The feasibility pump,
+\emph{Mathematical Programming} 104(1):91--104, 2005.
+\bibitem{danna2005} E. Danna, E. Rothberg, C. Le Pape,
+Exploring relaxation induced neighborhoods to improve MIP solutions,
+\emph{Mathematical Programming} 102(1):71--90, 2005.
+\end{thebibliography}

@@ -42,7 +42,7 @@ References:
   4.1-4.2, for branch-and-bound incumbent, dual-bound and proof semantics.
 - Gleixner et al., "MIPLIB 2017", Mathematical Programming Computation 13
   (2021), Section 3 and Appendix A.
-- `docs/miplib2017_benchmark_protocol_2026-08-25.md` for the repository's
+- `docs/archive/miplib2017_benchmark_protocol_2026-08-25.md` for the repository's
   fixed audit, PAR-10 and shifted-geometric-mean definitions.
 
 ## Fixed validation protocol

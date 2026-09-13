@@ -20,8 +20,10 @@
 | `engine.hpp` | 总头文件（含所有 api/ 头） |
 | `problem_types.hpp` | 全部模型结构体 |
 | `api/solver.hpp` | `SolverEngine` 类 |
+| `api/session.hpp` | `LPModelSession` persistent/incremental LP API |
 | `api/result.hpp` | `api::Result`, `api::Stats` |
 | `api/options.hpp` | `SolveOptions`, `StrategyPolicy` |
+| `solve_context.hpp` | 一次调用共享的 deadline、取消和资源契约 |
 | `solver/solver_adapter.hpp` | `SolverAdapter` 基类 |
 | `solver/external/adapters.hpp` | `HighsAdapter`, `IpoptAdapter`, `ScipAdapter`, `GurobiAdapter` |
 | `solver/native/native_adapters.hpp` | 原生适配器 |
@@ -109,15 +111,18 @@ public:
 |---|---|
 | `NativeLinear` | LE |
 | `NativeNewton` | NLE |
-| `NativeIPMLPAdapter` | LP |
-| `NativePDLPAdapter` | LP |
-| `NativeLCQPAdapter` | QP |
-| `NativeIPMAdapter` | NLP |
-| `NativeNLPAdapter` | NLP |
+| `NativeAutoLP` | LP |
+| `NativeDualSimplex` | LP |
+| `NativeIPMLP` | LP |
+| `NativePDLP` | LP |
+| `NativeLCQP` | QP |
+| `NativeIPM` | NLP |
+| `NativeNLP` | NLP |
 | `NativeConicIPM` | CONIC |
 | `StrictHiGHS` | MILP |
 | `NativeBranchAndCut` | MILP, MINLP |
 | `Gurobi`（若可用） | LP, QP, MILP |
+| `CPLEX`（若可用） | MILP |
 | `HiGHS` | LP, MILP |
 | `Ipopt` | NLP |
 | `SCIP` | MINLP |
@@ -131,27 +136,53 @@ enum class StrategyPolicy {
   ExternalFirst, // prefer external (Gurobi, HiGHS, …) first
 };
 
+enum class PortfolioMode {
+  Latency,    // race independent native LP kernels when threads >= 2
+  Throughput, // run one direct IPM worker
+};
+
 struct SolveOptions {
   std::string   preferred_solver;        // exact adapter name, or "" for auto
   bool          allow_fallback{true};    // try next adapter if primary fails
   StrategyPolicy strategy_policy{StrategyPolicy::Auto};
   // Per-class overrides (takes precedence over strategy_policy)
   std::map<ProblemClass, StrategyPolicy> class_strategy_policy;
+  double        time_limit_sec{0.0};     // call-wide soft deadline; 0 = unlimited
+  int           threads{0};              // global worker budget; 0 = hardware concurrency
+  std::uint32_t random_seed{0};
+  std::size_t   memory_limit_bytes{0};    // advisory until reported enforced
+  PortfolioMode portfolio_mode{PortfolioMode::Latency};
+  std::stop_token stop_token{};           // cooperative caller cancellation
 };
 ```
 
+`time_limit_sec` 属于整个调用，而不是每个 adapter：所有 fallback 共享一个
+`steady_clock` 绝对截止点，截止后不会再启动下一个 adapter。进程内 API 只能保证
+cooperative soft deadline；需要不可逾越的 hard deadline 时，必须把求解放在独立
+进程中并由 supervisor 终止进程树。`threads` 是全局预算，latency portfolio 在预算
+不少于 2 时运行两个 worker，并把每个 worker 的嵌套线程限制为
+`floor(threads/2)`；throughput 模式只运行 direct IPM。`memory_limit_bytes` 当前是
+请求与遥测字段，必须检查结果中的 `memory_limit_enforced`，不得假设它已执行。
+
+第三方 `SolverAdapter` 若只实现旧的无 `SolveContext` 虚函数，兼容性默认实现会回调
+旧接口；这类 adapter 不会自动获得 soft deadline、线程预算或随机种子传播。通用求解器
+的生产注册门禁必须要求其覆盖对应的 context overload，或把它放入带进程级 hard
+deadline 的隔离 worker。内置适配器均已覆盖本模块实际使用的 context 路径。
+
 `preferred_solver` 接受大小写敏感的适配器名字符串：`"Gurobi"`、`"HiGHS"`、
-`"StrictHiGHS"`、`"SCIP"`、`"Ipopt"`、`"NativeBranchAndCut"`、`"NativeIPMLPAdapter"`、
-`"NativePDLPAdapter"`、`"NativeLCQPAdapter"`、`"NativeLinear"`、`"NativeNewton"`、
-`"NativeIPMAdapter"`、`"NativeNLPAdapter"`、`"NativeConicIPM"`。
+`"StrictHiGHS"`、`"SCIP"`、`"Ipopt"`、`"CPLEX"`、`"NativeBranchAndCut"`、`"NativeAutoLP"`、
+`"NativeDualSimplex"`、`"NativeIPMLP"`、`"NativePDLP"`、`"NativeLCQP"`、
+`"NativeLinear"`、`"NativeNewton"`、
+`"NativeIPM"`、`"NativeNLP"`、`"NativeConicIPM"`。
 
-`preferred_solver` 为空（Auto）时的选择顺序：
-
-1. 若用户通过 `set_solver_preference` 设置了按类别的偏好，先尝试该适配器；
-2. 否则由 `StrategyPolicy` 决定顺序：`Auto` 下 LP/QP/MILP 优先已安装/已授权的
-   Gurobi，MILP 其后回退到 `StrictHiGHS` → `HiGHS` → `NativeBranchAndCut`；
-   `NativeFirst` 原生适配器在前；`ExternalFirst` 外部适配器在前；
-3. 若首选失败且 `allow_fallback = true`，按序尝试下一个候选。
+`preferred_solver` 为空（Auto）时的候选构造顺序（`dispatcher.cpp:candidate_adapters`）：
+`preferred_solver` → `set_solver_preference` 按类偏好 → 按问题类的内建偏好表
+`default_priority_for`（LP：`NativeAutoLP`、`NativeIPMLP`、`NativePDLP`、
+`NativeLCQP`、`HiGHS`；MILP：`StrictHiGHS`、`HiGHS`、`NativeBranchAndCut`；
+NLP：`Ipopt`、`NativeIPM`、`NativeNLP`）→ 注册表中其余支持该类的适配器
+（兜底级，已注册的 Gurobi/CPLEX 在此参与回退）。`NativeFirst`/`ExternalFirst`
+对内建偏好表做稳定排序。若首选失败且 `allow_fallback = true`，按序尝试下一个候选。
+详见 [求解器与引擎 §5.2.5](05-solvers-engines.md)。
 
 示例 —— MILP 强制使用 Gurobi：
 
@@ -177,6 +208,15 @@ struct Stats {
   double      complementarity{0.0};
   double      mip_gap{0.0};         // relative gap (MILP only)
   double      runtime_sec{0.0};
+  int         thread_budget{0};
+  int         portfolio_workers{0};
+  int         worker_thread_limit{0};
+  std::size_t memory_limit_bytes{0};
+  bool        memory_limit_enforced{false};
+  bool        hard_deadline_enforced{false};
+  double      deadline_overrun_sec{0.0};
+  bool        persistent_backend_reused{false};
+  std::size_t incremental_update_count{0};
   std::string status;               // human-readable status string
   std::string solver_name;          // adapter that produced the result
   int         cglp_cuts_added{0};   // native B&C only
@@ -198,15 +238,49 @@ struct Result {
 } // namespace mipsolvers::engine::api
 ```
 
+资源遥测描述的是本次实际契约。当前进程内入口总是报告
+`hard_deadline_enforced=false`；`deadline_overrun_sec` 记录 cooperative backend
+在非中断操作中的超时量。使用 `LPModelSession` 时，
+`persistent_backend_reused` 表示本次是否保留了已有 HiGHS 求解状态，
+`incremental_update_count` 是 session 创建后的成功更新次数。
+`portfolio_workers` 与 `worker_thread_limit` 分别给出 NativeAutoLP 本次实际启动的
+worker 数和每个 worker 的嵌套线程上限；其他 adapter 保持为 0。
+
 **对偶变量布局**：`constraint_duals` 前 `m_ineq` 个分量对应 `A*x <= b` 行，后
 `m_eq` 个分量对应 `Aeq*x = beq` 行，所有返回对偶的适配器排序一致。
 
 **对偶可用性**：`constraint_duals` 由 Gurobi、NativeBranchAndCut（LP 路径）、
-NativeIPMLPAdapter 填充；MILP 结果为空。HiGHS 文件式适配器只解析原始解文件，
+NativeIPMLP 填充；MILP 结果为空。HiGHS 文件式适配器只解析原始解文件，
 **不返回约束对偶** —— 若需要对偶（如 LMP 计算），请选用 `"Gurobi"`、
-`"NativeBranchAndCut"` 或 `"NativeIPMLPAdapter"`。
+`"NativeBranchAndCut"` 或 `"NativeIPMLP"`。
 
-### 7.1.6 SolverAdapter 接口
+### 7.1.6 Persistent/incremental LP
+
+固定稀疏结构、反复修改目标/界/RHS 的滚动优化应使用 `LPModelSession`：
+
+```cpp
+LPModelSession session(std::move(lp));
+
+SolveOptions options;
+options.preferred_solver = "HiGHS";
+options.allow_fallback = false;
+options.threads = 2;
+
+auto first = session.solve(options);
+session.update_objective(new_cost);
+session.update_variable_bounds(new_lb, new_ub);
+session.update_inequality_rhs(new_row_lb, new_row_ub);
+session.update_equality_rhs(new_eq_rhs);
+auto next = session.solve(options);
+```
+
+在 `preferred_solver="HiGHS"` 且关闭 fallback 时，模型只装载一次，更新通过
+HiGHS 的列成本、列界和行界增量接口执行，并保留兼容 basis。其他策略仍复用
+session 内公共模型，但通过标准 dispatcher 求解。矩阵结构和维度不可变；尺寸错误、
+无效上下界或后端拒绝会抛出异常，公共模型保持在更新前状态。一个 session 不支持
+并发 mutation/solve；需要并发时为每个执行流创建独立 session。
+
+### 7.1.7 SolverAdapter 接口
 
 自定义或扩展求解器需实现 `SolverAdapter` 基类，并通过
 `SolverEngine::register_adapter()` 注册：
@@ -225,8 +299,18 @@ public:
   virtual SolveResult solve_milp (const MIPModel& prob) const;
   virtual SolveResult solve_minlp(const MINLPModel& prob) const;
   virtual SolveResult solve_conic(const ConicModel& prob) const;
+
+  // Override context overloads to consume call-wide resources cooperatively.
+  virtual SolveResult solve_lp(const LPModel& prob,
+                               const SolveContext& context) const;
+  virtual SolveResult solve_milp(const MIPModel& prob,
+                                 const SolveContext& context) const;
 };
 ```
+
+旧的无 context virtual 保留源兼容性；默认 context overload 会转调旧接口。通用
+adapter 应覆盖其支持的问题类型，把剩余时限、线程预算和随机种子映射到后端，并在
+开始工作前检查 `stop_requested()`。
 
 内置适配器一览：
 
@@ -236,13 +320,16 @@ public:
 | `IpoptAdapter`（外部，NL 文件） | `"Ipopt"` | NLP | 否 |
 | `ScipAdapter`（外部，文件 I/O） | `"SCIP"` | MINLP | 否 |
 | `GurobiAdapter`（外部，进程内 C API，需许可证） | `"Gurobi"` | LP, QP, MILP | 是（LP） |
+| `CplexAdapter`（外部，Callable Library，需许可证） | `"CPLEX"` | MILP | 否 |
 | `NativeLinearAdapter` | `"NativeLinear"` | LE | N/A |
 | `NativeNewtonAdapter` | `"NativeNewton"` | NLE | 否 |
-| `NativeIPMLPAdapter` | `"NativeIPMLPAdapter"` | LP | 是（Mehrotra 预测-校正 IPM） |
-| `NativePDLPAdapter` | `"NativePDLPAdapter"` | LP | —（一阶方法，面向大规模稀疏 LP） |
-| `NativeLCQPAdapter` | `"NativeLCQPAdapter"` | QP | —（线性约束凸 QP） |
-| `NativeIPMAdapter` | `"NativeIPMAdapter"` | NLP | 否 |
-| `NativeNLPAdapter` | `"NativeNLPAdapter"` | NLP | 否 |
+| `NativeAutoLPAdapter` | `"NativeAutoLP"` | LP | 是（组合内核取先到者） |
+| `NativeDualSimplexLPAdapter` | `"NativeDualSimplex"` | LP | 是 |
+| `NativeIPMLPAdapter` | `"NativeIPMLP"` | LP | 是（Mehrotra 预测-校正 IPM） |
+| `NativePDLPAdapter` | `"NativePDLP"` | LP | —（一阶方法，面向大规模稀疏 LP） |
+| `NativeLCQPAdapter` | `"NativeLCQP"` | QP | —（线性约束凸 QP） |
+| `NativeIPMAdapter` | `"NativeIPM"` | NLP | 否 |
+| `NativeNLPAdapter` | `"NativeNLP"` | NLP | 否 |
 | `NativeBranchAndCutAdapter` | `"NativeBranchAndCut"` | MILP, MINLP | 是（LP 路径） |
 | `NativeConicIPMAdapter` | `"NativeConicIPM"` | CONIC | 是（`constraint_duals = [z | y]`） |
 
@@ -367,9 +454,9 @@ Python 层求解器名字符串与适用问题：
 | `NativeBranchAndCut` | MILP | 内置分支定界 |
 | `Ipopt` | NLP / MINLP | 内置非线性求解器 |
 
-> 注意 Python 层名字与 C++ 层名字并非完全一致（如 Python `"NativeIPMLP"` 对应
-> C++ `"NativeIPMLPAdapter"`）；跨语言迁移配置时请以 `list_solvers()` 返回的
-> 名字为准。
+> Python 层把 `solver` 参数直接写入 `SolveOptions::preferred_solver`（见
+> `src/python/mipsolvers_py.cpp`），因此与 C++ 层注册名完全一致；跨语言迁移配置时
+> 如有疑问，以 `list_solvers()` 返回的名字为准。
 
 ### 7.2.2 结果判读（返回字典）
 

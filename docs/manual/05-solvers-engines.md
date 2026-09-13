@@ -3,10 +3,10 @@
 > 本章整合自: docs/archive/solvers.md, docs/archive/engine.md, docs/archive/native_ipm_design.md, docs/archive/lp_kernel_selector_2026-08-11.md
 
 本章回答一个工程问题：**我的问题该用哪个求解器、哪些参数必须动**。
-先给选择结论（§1–§3），再讲统一调用接口（§4），随后是各求解器的
-数学原理要点（§5）、关键选项与终止判据（§6）和数值保护设计（§7）。
+先给选择结论（§5.1–§5.3），再讲统一调用接口（§5.4），随后是各求解器的
+数学原理要点（§5.5）、关键选项与终止判据（§5.6）和数值保护设计（§5.7）。
 
-## 1. 求解器能力总览
+## 5.1 求解器能力总览
 
 MIPSolvers 用统一模型变体和适配器注册表承载八类问题：LE（线性方程）、
 NLE（非线性方程）、LP、QP、NLP、MILP、MINLP、CONIC。实现分三层：
@@ -34,12 +34,12 @@ SolverEngine -> StrategyDispatcher -> PresolveManager
 |---|---|---|---|
 | `NativeLinear` | LE | 稀疏直接法 | N/A |
 | `NativeNewton` | NLE | 正则化 Newton + 回溯 | 否 |
-| `NativeIPMLPAdapter` | LP | Mehrotra 预测-校正 IPM | 是 |
-| `NativePDLPAdapter` | LP | 一阶原始-对偶混合梯度（PDLP） | 否 |
-| 原生 dual simplex | LP | 对偶单纯形（经 `NativeAutoLPAdapter`/B&C 节点调用） | 是 |
-| `NativeLCQPAdapter` | QP | 凸 QP 原始-对偶内点法 | 是 |
-| `NativeIPMAdapter` | NLP | 滤子/优值函数原始-对偶 IPM | 否 |
-| `NativeNLPAdapter` | NLP | 二次罚函数 Newton（轻量） | 否 |
+| `NativeIPMLP` | LP | Mehrotra 预测-校正 IPM | 是 |
+| `NativePDLP` | LP | 一阶原始-对偶混合梯度（PDLP） | 否 |
+| `NativeDualSimplex` | LP | 对偶单纯形（经 `NativeAutoLP`/B&C 节点调用） | 是 |
+| `NativeLCQP` | QP | 凸 QP 原始-对偶内点法 | 是 |
+| `NativeIPM` | NLP | 滤子/优值函数原始-对偶 IPM | 否 |
+| `NativeNLP` | NLP | 二次罚函数 Newton（轻量） | 否 |
 | `NativeConicIPM` | CONIC | Mehrotra + Nesterov-Todd 缩放 | 是（`[z | y]`） |
 | `NativeBranchAndCut` | MILP/MINLP | 分支定界、割、启发式 | 是（LP 路径） |
 | `StrictHiGHS` | MILP | 嵌入式 HiGHS MIP 状态机（生产合约） | — |
@@ -55,26 +55,26 @@ SolverEngine -> StrategyDispatcher -> PresolveManager
   `make_strict_highs_production_options` 强制执行 HiGHS MIP 合约的适配器；
   `NativeBranchAndCut` 才进入项目自研的树搜索框架。
 - 文件型 HiGHS 适配器只解析原始解，**不返回对偶**。算 LMP 等需要对偶时，
-  选 `Gurobi`、`NativeBranchAndCut`（LP 路径）或 `NativeIPMLPAdapter`。
+  选 `Gurobi`、`NativeBranchAndCut`（LP 路径）或 `NativeIPMLP`。
 
-## 2. 按问题类型选求解器
+## 5.2 按问题类型选求解器
 
-### 2.1 LP
+### 5.2.1 LP
 
 | 场景 | 推荐 | 理由 |
 |---|---|---|
-| 一般生产 LP，拿不准 | 默认路径（`NativeAutoLPAdapter` 组合，见 §3） | 原生 dual simplex 与 IPM 并发竞速，取先到者 |
+| 一般生产 LP，拿不准 | 默认路径（`NativeAutoLP` 组合，见 §5.3） | 原生 dual simplex 与 IPM 并发竞速，取先到者 |
 | 依赖外部成熟实现兜底 | `HiGHS` | 进程内库；部分配置保留 MPS/solution 临时文件路径 |
-| 超大稀疏、可接受中等精度 | `NativePDLPAdapter` | 一阶法，不分解 KKT/基矩阵，内存友好 |
+| 超大稀疏、可接受中等精度 | `NativePDLP` | 一阶法，不分解 KKT/基矩阵，内存友好 |
 | B&C 节点 LP / 改界重优化 | dual simplex（经 `BasisState` 热启动） | 基热启动 + 精确约化成本，PDLP 不产生基 |
-| 需要 LP 对偶/盒约束乘子 | `NativeIPMLPAdapter` 或 `Gurobi` | 填充 `constraint_duals`、`box_dual_lb/ub` |
+| 需要 LP 对偶/盒约束乘子 | `NativeIPMLP` 或 `Gurobi` | 填充 `constraint_duals`、`box_dual_lb/ub` |
 
 注意：
 
-- `NativePDLPAdapter` 是中等精度一阶法，**不提供 basis**，不能用于要求
+- `NativePDLP` 是中等精度一阶法，**不提供 basis**，不能用于要求
   严格节点证明的 B&C 场景。
 - 原生 IPM LP 当前**没有 HSD 状态机**，普通迭代失败不能推出不可行或无界
-  （HSD 路线见 §5.4）。若必须拿到 infeasible/unbounded 证书，用 HiGHS
+  （HSD 路线见 §5.5.4）。若必须拿到 infeasible/unbounded 证书，用 HiGHS
   或 Gurobi。
 - `IPMLPOptions::centrality_step_control=false` 只为复现旧的固定步长
   A/B 保留，不建议生产使用。
@@ -93,7 +93,7 @@ SolverEngine -> StrategyDispatcher -> PresolveManager
   IPM 默认采用 P1/P3-first 的 staged 路径：小模型直接求解，
   大模型只在结构缩减或 singleton 等式密度足以摊销成本时运行 P2 并发布 reduced
   solve；`MIPSOLVERS_NATIVE_PRESOLVE_ADAPTIVE_STAGING=0` 可强制恢复 eager P2
-  控制臂。Auto 选择器（§3）的 IPM 臂先运行只读 Jacobi row-activity 投影：只有
+  控制臂。Auto 选择器（§5.3）的 IPM 臂先运行只读 Jacobi row-activity 投影：只有
   预计 P3 固定/初始结构缩减达到 5%，或 singleton 等式密度落在已验证区间时才进入
   staged presolve；否则保持 direct。该机会门不修改模型，显式环境变量仍有最终覆盖权。
   设计与分阶段验收见
@@ -113,12 +113,12 @@ SolverEngine -> StrategyDispatcher -> PresolveManager
   仍须通过原模型残差审计，失败则回退 direct。
   `MIPSOLVERS_PRESOLVE_VERBOSE` 输出约简、reduced solve 与恢复审计诊断。
 
-### 2.2 MILP
+### 5.2.2 MILP
 
 | 场景 | 推荐 | 理由 |
 |---|---|---|
 | 默认生产 | `StrictHiGHS` 或默认 Auto 策略 | 强制 HiGHS MIP 合约；大根节点自动用 IPM + crossover |
-| 需要自研树控制（回调、ML 分支先验、SCUC 启发式、自定义割） | `NativeBranchAndCut` | 暴露 `BCOptions`/`BCCallbacks` 全套钩子，见 §6.2 |
+| 需要自研树控制（回调、ML 分支先验、SCUC 启发式、自定义割） | `NativeBranchAndCut` | 暴露 `BCOptions`/`BCCallbacks` 全套钩子，见 §5.6.2 |
 | 有 Gurobi 许可证 | `Gurobi` | 直接 C API，支持 LP/QP/MILP；许可证不可用时不会注册为候选 |
 | 仅需快速可用解、无进程内库 | `HiGHS` | 外部二进制兜底 |
 | MINLP | `SCIP` 或 `NativeBranchAndCut`（实验性） | 见下面的警告 |
@@ -128,22 +128,22 @@ SolverEngine -> StrategyDispatcher -> PresolveManager
 MINLP 复用 B&C 外框、在连续松弛处调 NLP 路径；一般非凸 MINLP **没有全局
 下界保证**，除非连续松弛可证明为凸，否则应视为实验性局部求解能力。
 
-### 2.3 NLP
+### 5.2.3 NLP
 
 | 场景 | 推荐 | 理由 |
 |---|---|---|
-| 一般约束 NLP 默认 | `NativeIPMAdapter` | Wachter–Biegler 型滤子全局化，精确 Hessian 或拟 Newton |
+| 一般约束 NLP 默认 | `NativeIPM` | Wachter–Biegler 型滤子全局化，精确 Hessian 或拟 Newton |
 | 需要成熟外部实现 / 导出 NL 文件 | `Ipopt` | `CallbackTNLP` 映射，返回后计算项目 KKT 诊断 |
-| 轻量、近似即可 | `NativeNLPAdapter` | 二次罚函数 Newton；固定罚参数不构成强收敛保证 |
+| 轻量、近似即可 | `NativeNLP` | 二次罚函数 Newton；固定罚参数不构成强收敛保证 |
 
-### 2.4 锥规划与 QP
+### 5.2.4 锥规划与 QP
 
 - CONIC（LP/SOCP/SDP，CVXOPT 标准型）只有一条原生路径
   `NativeConicIPM`：Mehrotra 预测-校正 + NT 缩放，返回对偶。
-- 凸 QP 用 `NativeLCQPAdapter`；`Q` 非凸时没有全局最优保证。
+- 凸 QP 用 `NativeLCQP`；`Q` 非凸时没有全局最优保证。
   Gurobi 可用时 `Gurobi` 也覆盖 QP。
 
-### 2.5 选择策略选项
+### 5.2.5 选择策略选项
 
 不显式指定求解器时，`StrategyPolicy` 控制候选排序：
 
@@ -154,23 +154,40 @@ enum class StrategyPolicy {
   ExternalFirst, // 外部适配器（Gurobi、CPLEX、HiGHS…）优先
 };
 
+enum class PortfolioMode { Latency, Throughput };
+
 struct SolveOptions {
   std::string   preferred_solver;        // 精确适配器名，"" 为自动
   bool          allow_fallback{true};    // 首选失败时尝试下一个候选
   StrategyPolicy strategy_policy{StrategyPolicy::Auto};
   // 按问题类的覆盖（优先于 strategy_policy）
   std::map<ProblemClass, StrategyPolicy> class_strategy_policy;
+  double        time_limit_sec{0.0};     // 整次调用的 soft deadline；0=无限
+  int           threads{0};              // 全局线程预算；0=硬件并发数
+  std::uint32_t random_seed{0};
+  std::size_t   memory_limit_bytes{0};   // advisory；当前后端不强制执行
+  PortfolioMode portfolio_mode{PortfolioMode::Latency};
+  std::stop_token stop_token{};
 };
 ```
 
-Auto 模式下的选择顺序：
+Auto 模式下的候选构造顺序（`src/engine/strategy/dispatcher.cpp:candidate_adapters`）：
 
-1. 若用 `set_solver_preference` 设过按类偏好，该适配器最先尝试；
-2. 否则按策略排序——`Auto` 下 LP/QP/MILP 优先已安装/已授权的
-   `Gurobi`，MILP 随后回退 `StrictHiGHS`、`HiGHS`、`NativeBranchAndCut`；
-3. 选中适配器失败且 `allow_fallback = true` 时按序尝试下一候选。
-   **显式指定后端时不会静默冒充另一个后端**；最终 `stats.solver_name`
-   揭示实际路径。
+1. `preferred_solver` 非空则最先尝试；
+2. 其次是用 `set_solver_preference` 设过的按类偏好；
+3. 然后是按问题类的内建偏好表（`default_priority_for`；`Auto` 不重排，
+   `NativeFirst`/`ExternalFirst` 对表内候选做稳定排序）：
+   LP 为 `NativeAutoLP`、`NativeIPMLP`、`NativePDLP`、`NativeLCQP`、`HiGHS`；
+   MILP 为 `StrictHiGHS`、`HiGHS`、`NativeBranchAndCut`；
+   NLP 为 `Ipopt`、`NativeIPM`、`NativeNLP`；QP 为 `NativeLCQP`；
+   CONIC 为 `NativeConicIPM`；LE/NLE 各为对应原生适配器；
+4. 最后是注册表中其余支持该问题类的适配器（按注册顺序兜底）——已注册的
+   `Gurobi`/`CPLEX` 通过这一级参与回退，但不在内建偏好表内。
+
+选中适配器失败且 `allow_fallback = true` 时按序尝试下一候选。
+**显式指定后端时不会静默冒充另一个后端**；最终 `stats.solver_name`
+揭示实际路径。整个回退事务共用一个绝对 deadline，超时/取消分别返回
+"Time limit reached before fallback" / "Cancelled before fallback"。
 
 示例——LP 与 MILP 都强制外部优先，并锁定 Gurobi：
 
@@ -182,13 +199,13 @@ opts.preferred_solver = "Gurobi";
 auto result = eng.solve_milp(mip, opts);
 ```
 
-## 3. LP 内核选择器：为什么默认路径是并发组合
+## 5.3 LP 内核选择器：为什么默认路径是并发组合
 
-> 本节依据 `docs/lp_kernel_selector_2026-08-11.md`（2026-08-11），
-> 其结论比 `docs/engine.md` 的注册表描述更新：LP 默认顶层路径已切换为
-> `NativeAutoLPAdapter` 并发组合。
+> 本节依据 `docs/archive/lp_kernel_selector_2026-08-11.md`（2026-08-11），
+> 其结论比 `docs/archive/engine.md` 的注册表描述更新：LP 默认顶层路径已切换为
+> `NativeAutoLP`（实现类 `NativeAutoLPAdapter`）并发组合。
 
-### 3.1 没有单一赢家（实测动机）
+### 5.3.1 没有单一赢家（实测动机）
 
 24 个 NETLIB 实例上（macOS M4，Release，2026-08-11）没有任何单一原生
 LP 内核能压倒 HiGHS simplex：
@@ -199,7 +216,7 @@ LP 内核能压倒 HiGHS simplex：
   （`scsd8` 8.6x、`25fv47` 4.2x、`d2q06c` 3.8x），但输掉小实例；
 - 逐实例 oracle（两者取快）可达对 HiGHS-simplex 的几何平均 **1.60x**。
 
-### 3.2 成本模型：结构决定倾向
+### 5.3.2 成本模型：结构决定倾向
 
 设 LP 有 `m` 行、`n` 列、`nnz` 非零元，normal equations
 `M = A_a Θ A_aᵀ` 的符号分解给出因子 flops `F` 与填充 `nnz(L)`：
@@ -218,7 +235,7 @@ g := F / ( m · (2·nnz(L) + nnz) )  >  κ/K₀ =: c
 
 按 NETLIB 区间 `κ ≈ 2`、`K₀ ≈ 50` 得 `c ≈ 0.04`。
 
-### 3.3 为什么结构估计器没有上线
+### 5.3.3 为什么结构估计器没有上线
 
 该规则实现后实测（2026-08-11，repeat 3）：离线标定几何平均约 1.10x，
 但进程内实际选择器只得 0.92x——个别实例（`agg` 0.09x、`sc205` 0.08x、
@@ -226,10 +243,11 @@ g := F / ( m · (2·nnz(L) + nnz) )  >  κ/K₀ =: c
 预测，每次误路由代价 3–16x。**廉价先验结构信号存在根本性上限**，结构
 估计器被移除。
 
-### 3.4 上线设计：并发组合（portfolio）
+### 5.3.4 上线设计：并发组合（portfolio）
 
-`NativeAutoLPAdapter`（`src/engine/solver/native/native_lp_selector.cpp`）
-在两个线程上同时跑 dual-simplex-DSE 与 IPM（只读 presolve 机会门后选择
+`NativeAutoLPAdapter`（`src/engine/solver/native/native_lp_selector.cpp`）在
+`PortfolioMode::Latency` 且全局线程预算至少为 2 时，同时跑
+dual-simplex-DSE 与 IPM（只读 presolve 机会门后选择
 `adaptive-presolve` 或 direct），返回第一个成功结果——直接实现逐实例
 `min(T_DSE, T_IPM)` 而不是预测内核赢家：
 
@@ -238,6 +256,18 @@ g := F / ( m · (2·nnz(L) + nnz) )  >  κ/K₀ =: c
   `IPMLPOptions::cancel_flag`，在各内核墙钟检查点轮询）及时停掉输家；
 - dual simplex 路径上重新计算用户目标 `c·x`（该内核报告内部
   minimize-sense 值）。
+
+两个 worker 各获得 `max(1, floor(threads/2))`，因此嵌套 MKL worker 总数不
+超过调用级预算。`PortfolioMode::Throughput` 或预算为 1 时只运行 direct IPM，
+避免两个内核争用同一批核心。此策略与绝对 deadline、取消 token 一起由
+`SolveContext` 在所有 fallback 间共享；依据和验收合同见
+[通用求解器性能计划 R1/R2](../archive/general_solver_performance_program_2026-09-13.md)。
+
+进程内 deadline 是协作式 soft deadline，可能被一个不可中断的后端操作超出；
+需要 hard deadline 时必须用 `tools/run_with_hard_deadline.py` 或 MIPLIB runner
+的 worker supervisor 隔离并终止整个进程树。结果中的
+`hard_deadline_enforced`、`deadline_overrun_sec`、`memory_limit_enforced` 明确
+报告实际能力，不能从请求参数推断已强制执行。
 
 实测（24 例 NETLIB，repeat 3，对 HiGHS-simplex 的中位数几何平均）：
 
@@ -259,9 +289,9 @@ g := F / ( m · (2·nnz(L) + nnz) )  >  κ/K₀ =: c
 - MILP/SCUC/B&C 不受影响——它们直接调 `solve_lp_with_basis` /
   `solve_lp_from_sf`，不经过默认 LP 优先级链。
 
-## 4. Engine 统一求解接口与适配器注册
+## 5.4 Engine 统一求解接口与适配器注册
 
-### 4.1 最小调用
+### 5.4.1 最小调用
 
 ```cpp
 #include "mipsolvers/engine/engine.hpp"
@@ -304,7 +334,7 @@ auto result = eng.solve_milp(mip);
 等）的完整字段见 [API 参考](07-api-reference.md)；用 AML 从高层描述
 生成这些模型见 [建模 API（AML）](04-modeling-aml.md)。
 
-### 4.2 `SolverEngine` API
+### 5.4.2 `SolverEngine` API
 
 ```cpp
 class SolverEngine {
@@ -325,23 +355,35 @@ public:
 };
 ```
 
-`register_default_adapters()` 的注册顺序（即候选偏好序）：`NativeLinear`、
-`NativeNewton`、`NativeIPMLPAdapter`、`NativePDLPAdapter`、
-`NativeLCQPAdapter`、`NativeIPMAdapter`、`NativeNLPAdapter`、
+`register_default_adapters()` 的注册顺序（即候选偏好序，与
+`src/engine/api/solver.cpp:register_default_adapters` 一致）：`NativeLinear`、
+`NativeNewton`、`NativeAutoLP`、`NativeDualSimplex`、`NativeIPMLP`、`NativePDLP`、
+`NativeLCQP`、`NativeIPM`、`NativeNLP`、
 `NativeConicIPM`、`StrictHiGHS`、`NativeBranchAndCut`、`Gurobi`（若可用）、
-`CPLEX`（若可用）、`HiGHS`、`Ipopt`、`SCIP`。可选外部库只有
-`available()` 为真时才进入注册表；**Gurobi 与 CPLEX 不参与普通自动回退**，
-但可通过 `preferred_solver` 或 `set_solver_preference` 精确选择。
+`CPLEX`（若可用）、`HiGHS`（若可用）、`Ipopt`（若可用）、`SCIP`（若可用）。
+可选外部库只有
+`available()` 为真时才进入注册表。Gurobi 与 CPLEX 不在
+`default_priority_for` 内建偏好表内，但只要注册成功，就会被
+`candidate_adapters` 的注册表尾部枚举追加为末位回退候选（即参与普通自动
+回退的兜底级）；也可用 `preferred_solver` 或 `set_solver_preference`
+精确选择。
 
-调度流程（`src/engine/api/solver.cpp::SolverEngine::solve`）：
+调度流程（`src/engine/api/solver.cpp:SolverEngine::solve` →
+`src/engine/strategy/dispatcher.cpp:StrategyDispatcher::solve`）：
 
-1. 规范化公共模型并做结构/有限值校验；
-2. `StrategyDispatcher::candidate_adapters` 按问题类型和 `solver_name`
-   构造候选；
-3. 对允许的模型执行预处理，保留恢复原变量的映射；
-4. 调适配器的类型专用虚函数；
-5. 按策略决定是否尝试下一个后端；
-6. 后处理恢复变量、目标和状态，返回统一结果。
+1. 规范化公共模型（`normalize_problem`）并做结构/有限值校验
+   （`throw_if_invalid`，实现在 `src/engine/util/problem_validation.cpp`）；
+2. `StrategyDispatcher::candidate_adapters` 按问题类、
+   `preferred_solver` 与策略构造候选（见 §5.2.5）；
+3. 在共享绝对 deadline 下依次调适配器的类型专用虚函数；成功即返回，
+   失败且 `allow_fallback` 时保留最后一次失败结果并尝试下一候选；
+4. 返回统一 `api::Result`。
+
+注意：**分派器层面没有独立的 presolve/postsolve 阶段**——
+`PresolveManager`/`PostsolveManager`/`WarmStartManager` 未接入
+`StrategyDispatcher`（其 `should_presolve` 恒为假、presolve 为恒等映射，
+目前只被测试消费）。实际的预求解发生在各内核/适配器内部（如
+`native_lp_selector.cpp` 的只读 presolve、B&C 的 MILP presolve）。
 
 排查求解器选择时可用 `list_solvers` 自省：
 
@@ -350,7 +392,7 @@ for (const auto& name : eng.list_solvers(ProblemClass::MILP))
     std::cout << name << "\n";
 ```
 
-### 4.3 结果契约：不要只看 `success`
+### 5.4.3 结果契约：不要只看 `success`
 
 `api::Stats` 关键字段：
 
@@ -372,12 +414,12 @@ bool            has_farkas_certificate{false};
 同时检查 `status`、原始/对偶可行度、互补度、目标界和 gap。LP 求解的对偶
 布局统一为 `[不等式行对偶 | 等式行对偶]`，跨适配器一致。
 
-## 5. 各求解器数学原理要点
+## 5.5 各求解器数学原理要点
 
 本节只讲影响使用判断的要点；完整推导见 [数值方法](06-numerical-methods.md)
 与 [理论参考](11-theory-references.md)。
 
-### 5.1 原生 dual simplex
+### 5.5.1 原生 dual simplex
 
 对标准型最大化问题，基矩阵 `B`，基本值 `x_B = B⁻¹b`，对偶乘子
 `pi = B⁻ᵀc_B`，约化成本 `d = c − A'pi`。对偶单纯形保持约化成本满足边界
@@ -400,7 +442,7 @@ LP、改界重优化和加割后的热启动——这是 B&C 节点内核选单�
 的根本原因。所有增量改界/加行操作使用提交或回滚语义，失败不污染持久
 基状态。
 
-### 5.2 Branch-and-cut（`NativeBranchAndCut`）
+### 5.5.2 Branch-and-cut（`NativeBranchAndCut`）
 
 主流程按 14 个编号阶段执行（`BCSolveState::run` 拆成 14 个 `.inc`
 文件），可概括为：
@@ -438,7 +480,7 @@ the launch requires at least two threads and 25% of the original time limit
 remaining. This allows tree proof to overlap with later root heuristics while
 keeping root LP/cut state single-writer.
 
-### 5.3 原始-对偶 IPM / Mehrotra（`NativeIPMLPAdapter`）
+### 5.5.3 原始-对偶 IPM / Mehrotra（`NativeIPMLP`）
 
 对一般 LP `min cᵀx, Ax ≤ b, A_ex = b_e, l ≤ x ≤ u`，fresh 路径增加不等式
 松弛 `s = b − Ax` 组成等式系统；每个有穷界维护正间隙与正对偶
@@ -474,7 +516,7 @@ keeping root LP/cut state single-writer.
 B&C 重复节点走 `ipm_lp_solver_cached.cpp`：只有上下界/目标改变时复用
 结构与分解，事务签名不匹配则退回完整求解。
 
-### 5.4 HSD 路线（不可行/无界证书，当前状态）
+### 5.5.4 HSD 路线（不可行/无界证书，当前状态）
 
 原生 IPM 目前只在找到最优 KKT 点时可靠；普通路径不能证明 infeasible
 或 unbounded。设计路线（P2，待实现）是齐次自对偶嵌入：引入
@@ -495,7 +537,7 @@ DualInfeasible / NoProgress`；presolve/postsolve 必须能恢复证书，否则
 到 HiGHS 或 Gurobi，或检查 `farkas_ray` 是否由其他路径填充**；原生 IPM
 返回的 `unknown` 必须被上层保留，不能改标为 infeasible。
 
-### 5.5 锥 IPM（`NativeConicIPM`）
+### 5.5.5 锥 IPM（`NativeConicIPM`）
 
 锥模型为 CVXOPT 标准型：
 
@@ -511,19 +553,23 @@ Nesterov–Todd 缩放；分解约化 KKT 后解仿射预测方向，`σ=(μ_aff
 原系统迭代改进，取阻尼锥内步长。**同时满足可行度和绝对/相对 gap 才返回
 `optimal`**，否则区分原始不可行、对偶不可行或 `unknown`；弦分解路径恢复
 原 SDP 变量后重新计算原问题残差，不合格结果降级为 `unknown`。SDP 块使用
-保持 Frobenius 内积的 `svec/smat` 打包。完整推导见 `docs/conic_sdp.md`。
+保持 Frobenius 内积的 `svec/smat` 打包。完整推导见 `docs/archive/conic_sdp.md`。
 
-## 6. 关键选项与终止判据
+## 5.6 关键选项与终止判据
 
-### 6.1 `SolveOptions`（所有问题类）
+### 5.6.1 `SolveOptions`（所有问题类）
 
-见 §2.5。三个最常用的动作：
+见 §5.2.5。三个最常用的动作：
 
-- `preferred_solver = "<适配器名>"`：锁定后端（名表见 §1）；
+- `preferred_solver = "<适配器名>"`：锁定后端（名表见 §5.1）；
 - `allow_fallback = false`：禁止静默回退，适合验收/审计场景；
 - `class_strategy_policy[cls]`：按问题类覆盖策略。
+- `time_limit_sec`：整次 dispatcher/fallback 事务共用一个绝对 soft deadline；
+- `threads`：整次调用的线程预算，portfolio 和嵌套数值库从中分配；
+- `portfolio_mode`：`Latency` 取并发内核先到者，`Throughput` 只跑一个内核；
+- `stop_token`：调用者协作式取消。
 
-### 6.2 `BCOptions`（MILP）
+### 5.6.2 `BCOptions`（MILP）
 
 原生 B&C 可绕过 `SolverEngine` 直接使用：
 
@@ -626,9 +672,9 @@ BCResult result = solve_milp_bc(mip, opt, ws, cbs);
 
 每个 primal hint 都经过正常可行性检查后才被接受为 incumbent。动态节点割
 钩子 `cbs.dynamic_node_cut` 可在整数可行节点注入 lazy-constraint 风格的
-用户割，每条割标注 `ValidityScope`（语义见 §5.2）；回调返回 0 表示无违反。
+用户割，每条割标注 `ValidityScope`（语义见 §5.5.2）；回调返回 0 表示无违反。
 
-### 6.3 IPM 终止判据
+### 5.6.3 IPM 终止判据
 
 LP IPM 的发布门槛（P2a，已实现）：缩放空间的绝对/相对残差只产生候选；
 候选点必须在**原模型**上同时满足
@@ -649,11 +695,11 @@ API 暴露
 `dual_objective` 供上层审核。锥 IPM 同理：可行度与绝对/相对 gap 同时
 满足才返回 `optimal`。
 
-MILP 的终止由 §6.2 的 `gap_tol` / `max_nodes` / `time_limit_sec` 控制；
+MILP 的终止由 §5.6.2 的 `gap_tol` / `max_nodes` / `time_limit_sec` 控制；
 设 `require_tree_exhaustion_certificate = true` 可忽略 `gap_tol` 换取
 精确树枚举证书。
 
-## 7. 数值保护设计
+## 5.7 数值保护设计
 
 以下保护贯穿各内核，理解它们有助于正确解读结果状态：
 
@@ -686,15 +732,19 @@ MILP 的终止由 §6.2 的 `gap_tol` / `max_nodes` / `time_limit_sec` 控制；
   使用结构保持的准定 LDLT；只有完整求解或原模型审计失败，才从同一初始
   点重启带主元的完整 barrier 轨迹，禁止中途更换后端。
 
-## 8. 已知限制速查
+## 5.8 已知限制速查
 
 - 默认 LP kernel 在部分平台可能是 HiGHS；原生 dual simplex 的冷启动、
   极端退化与大型 NETLIB 覆盖需逐平台验证。
 - PDLP 不提供 basis，不能替代依赖基热启动和精确约化成本的 B&C 节点内核。
-- `NativeIPMLPAdapter` 无 HSD 状态机，不能从普通迭代失败推出不可行/无界。
-- `NativeNLPAdapter` 的固定罚参数不构成一般 NLP 的强收敛保证；“步长很小”
+- `NativeIPMLP` 无 HSD 状态机，不能从普通迭代失败推出不可行/无界。
+- `NativeNLP` 的固定罚参数不构成一般 NLP 的强收敛保证；“步长很小”
   状态必须结合可行度审核。
 - 原生 B&C 的主要实现依赖 HiGHS 库编译；非凸 MINLP 没有全局性保证。
+- MINLP 内建偏好表写作 `"Scip"`（`dispatcher.cpp:default_priority_for`），
+  与注册名 `"SCIP"` 大小写不一致；`find_by_name` 为精确匹配，默认路径不会
+  选中 SCIP——只能经注册表兜底枚举或显式 `preferred_solver="SCIP"` 进入
+  （2026-09-13 工作树核对，疑为代码缺陷，见 modules/engine 手册转写章）。
 - 性能结论强依赖编译器、BLAS、稀疏后端、线程与数据集；可复现数据见
   [测试与基准](09-testing-benchmarks.md)（源码用例数不等于通过数）。
 

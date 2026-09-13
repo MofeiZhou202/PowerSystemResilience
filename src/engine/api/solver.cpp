@@ -17,12 +17,12 @@
 namespace mipsolvers::engine {
 namespace {
 
-api::Result to_api_result(const SolveResult& in) {
+api::Result to_api_result(SolveResult in) {
   api::Result out;
-  out.x = in.x;
-  out.constraint_duals = in.constraint_duals;
-  out.box_dual_lb = in.box_dual_lb;
-  out.box_dual_ub = in.box_dual_ub;
+  out.x = std::move(in.x);
+  out.constraint_duals = std::move(in.constraint_duals);
+  out.box_dual_lb = std::move(in.box_dual_lb);
+  out.box_dual_ub = std::move(in.box_dual_ub);
 
   out.stats.success = in.stats.success;
   out.stats.strict_convergence = in.stats.strict_convergence;
@@ -45,11 +45,20 @@ api::Result to_api_result(const SolveResult& in) {
   out.stats.dual_objective = in.stats.dual_objective;
   out.stats.mip_gap = in.stats.mip_gap;
   out.stats.runtime_sec = in.stats.runtime_sec;
+  out.stats.thread_budget = in.stats.thread_budget;
+  out.stats.portfolio_workers = in.stats.portfolio_workers;
+  out.stats.worker_thread_limit = in.stats.worker_thread_limit;
+  out.stats.memory_limit_bytes = in.stats.memory_limit_bytes;
+  out.stats.memory_limit_enforced = in.stats.memory_limit_enforced;
+  out.stats.hard_deadline_enforced = in.stats.hard_deadline_enforced;
+  out.stats.deadline_overrun_sec = in.stats.deadline_overrun_sec;
+  out.stats.persistent_backend_reused = in.stats.persistent_backend_reused;
+  out.stats.incremental_update_count = in.stats.incremental_update_count;
   out.stats.status = in.stats.status;
   out.stats.solver_name = in.stats.solver_name;
   out.stats.cglp_cuts_added = in.stats.cglp_cuts_added;
-  out.stats.farkas_ray = in.stats.farkas_ray;
-  out.stats.farkas_ray_eq = in.stats.farkas_ray_eq;
+  out.stats.farkas_ray = std::move(in.stats.farkas_ray);
+  out.stats.farkas_ray_eq = std::move(in.stats.farkas_ray_eq);
   out.stats.has_farkas_certificate = in.stats.has_farkas_certificate;
   return out;
 }
@@ -220,19 +229,42 @@ std::vector<std::string> SolverEngine::list_solvers(ProblemClass cls) const {
 
 api::Result SolverEngine::solve(api::ProblemVariant problem,
                                 const SolveOptions& options) const {
+  // The transaction clock starts before normalization and validation. The
+  // by-value public boundary is intentionally outside the measurable region;
+  // callers can use an rvalue or LPModelSession to avoid that copy. See R1/R4
+  // in general_solver_performance_program_2026-09-13.md.
+  const SolveContext context(options);
   // problem arrives by value (moved in by rvalue callers); normalize_problem
   // takes it by value too, so the chain below is copy-free after the single
   // unavoidable copy at the public boundary for lvalue callers.
   const api::ProblemVariant normalized = normalize_problem(std::move(problem));
   throw_if_invalid(normalized);
-  const SolveResult internal = dispatcher_.solve(
+  return solve_normalized(normalized, options, context);
+}
+
+api::Result SolverEngine::solve_normalized(
+    const api::ProblemVariant& normalized, const SolveOptions& options,
+    const SolveContext& context) const {
+  SolveResult internal = dispatcher_.solve(
       registry_,
       normalized,
       options.preferred_solver,
       options.allow_fallback,
       options.strategy_policy,
-      options.class_strategy_policy);
-  return to_api_result(internal);
+      options.class_strategy_policy,
+      context);
+  internal.stats.thread_budget = context.thread_budget();
+  internal.stats.memory_limit_bytes = context.memory_limit_bytes();
+  // R1: an in-process backend can only cooperate. Hard deadlines require the
+  // process supervisor, and no current adapter enforces a process-wide memory
+  // cap (docs/archive/general_solver_performance_program_2026-09-13.md).
+  internal.stats.memory_limit_enforced = false;
+  internal.stats.hard_deadline_enforced = false;
+  if (context.has_deadline()) {
+    internal.stats.deadline_overrun_sec = std::max(
+        0.0, context.elapsed_sec() - context.requested_time_limit_sec());
+  }
+  return to_api_result(std::move(internal));
 }
 
 api::Result SolverEngine::solve_le(const SparseLinSys& problem,
@@ -247,16 +279,17 @@ api::Result SolverEngine::solve_nle(const NonlinearSystem& problem,
 
 api::Result SolverEngine::solve_lp(const LPModel& problem,
                                    const SolveOptions& options) const {
-  LPModel normalized = problem;
-  normalize_lp_matrices(normalized);
-  return solve(api::ProblemVariant{std::move(normalized)}, options);
+  return solve(api::ProblemVariant{problem}, options);
+}
+
+api::Result SolverEngine::solve_lp(LPModel&& problem,
+                                   const SolveOptions& options) const {
+  return solve(api::ProblemVariant{std::move(problem)}, options);
 }
 
 api::Result SolverEngine::solve_qp(const QPModel& problem,
                                    const SolveOptions& options) const {
-  QPModel normalized = problem;
-  normalize_qp_matrices(normalized);
-  return solve(api::ProblemVariant{std::move(normalized)}, options);
+  return solve(api::ProblemVariant{problem}, options);
 }
 
 api::Result SolverEngine::solve_nlp(const NLPModel& problem,
@@ -266,9 +299,12 @@ api::Result SolverEngine::solve_nlp(const NLPModel& problem,
 
 api::Result SolverEngine::solve_milp(const MIPModel& problem,
                                      const SolveOptions& options) const {
-  MIPModel normalized = problem;
-  normalize_lp_matrices(normalized.linear_part);
-  return solve(api::ProblemVariant{std::move(normalized)}, options);
+  return solve(api::ProblemVariant{problem}, options);
+}
+
+api::Result SolverEngine::solve_milp(MIPModel&& problem,
+                                     const SolveOptions& options) const {
+  return solve(api::ProblemVariant{std::move(problem)}, options);
 }
 
 api::Result SolverEngine::solve_minlp(const MINLPModel& problem,
@@ -278,9 +314,7 @@ api::Result SolverEngine::solve_minlp(const MINLPModel& problem,
 
 api::Result SolverEngine::solve_conic(const ConicModel& problem,
                                       const SolveOptions& options) const {
-  ConicModel normalized = problem;
-  normalize_conic_matrices(normalized);
-  return solve(api::ProblemVariant{std::move(normalized)}, options);
+  return solve(api::ProblemVariant{problem}, options);
 }
 
 }  // namespace mipsolvers::engine

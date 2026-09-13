@@ -42,6 +42,15 @@ follow it for all algorithmic/numerical work.
 - `docs/manual/` is the maintained user-facing documentation (industrial
   application manual, 11 chapters); user-visible behavior changes must be
   reflected there.
+- `docs/modules/` holds the per-module technical manuals (LaTeX, XeLaTeX),
+  mapped 1:1 to `src/` top-level modules. Each module manual separates a
+  theory layer (`chapters/theory_*.tex`, general mathematics with proofs)
+  from implementation-transcription chapters (formulas transcribe only what
+  the code executes). Source anchors use `file:symbol` form — line numbers
+  are forbidden. Conventions are defined in `docs/modules/README.md` and
+  `docs/modules/THEORY_WRITING_GUIDE.md`; shared style lives in
+  `docs/_manual_common/`. After touching documented code, run
+  `python tools/doc_anchor_check.py` to catch anchor drift.
 - `docs/archive/` holds the frozen pre-manual originals and the dated
   derivation/design records. The derivation documents referenced by the
   rules above live there (see `docs/manual/11-theory-references.md` for the

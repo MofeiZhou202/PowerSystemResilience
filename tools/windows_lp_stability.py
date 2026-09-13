@@ -39,13 +39,14 @@ def distribution(values):
                 maximum=max(values), iqr_over_median=(q[2]-q[0])/median if median else 0)
 
 
-def execute(out, name, threads, timing=True, repeats=1, all_cases=False, solvers='native-ipm-direct', nlp=False):
+def execute(out, name, threads, binary_dir, timing=True, repeats=1,
+            all_cases=False, solvers='native-ipm-direct', nlp=False):
     env = os.environ.copy()
     env.update(OMP_NUM_THREADS='1', MKL_NUM_THREADS=str(threads), MKL_DYNAMIC='FALSE',
                MIPSOLVERS_LP_FACTOR_TIMING='1' if timing else '0')
     env.pop('MIPSOLVERS_IPM_VERBOSE', None)
     env['MIPSOLVERS_BENCH_GIT_COMMIT'] = subprocess.check_output(['git','rev-parse','HEAD'], cwd=ROOT, text=True).strip()
-    exe = ROOT/'tests/Release'/('nlp_open_benchmark.exe' if nlp else 'netlib_solver_benchmark.exe')
+    exe = binary_dir/('nlp_open_benchmark.exe' if nlp else 'netlib_solver_benchmark.exe')
     command = [str(exe), '5', '1e-7'] if nlp else [str(exe), '--data-dir', 'tests/data',
         '--solvers', solvers, '--repeat', str(repeats), '--time-limit','15', '--max-iterations','100000',
         '--json', str(out/f'{name}.json')]
@@ -144,31 +145,42 @@ def main():
     parser=argparse.ArgumentParser(__doc__)
     parser.add_argument('--stage',choices=['overhead','stability','gates','summary'],required=True)
     parser.add_argument('--output',type=Path,required=True)
+    parser.add_argument('--binary-dir',type=Path,default=Path('tests/Release'))
     args=parser.parse_args()
     out=args.output.resolve();out.mkdir(parents=True,exist_ok=True)
     if os.name!='nt':
         raise RuntimeError('This measurement protocol requires Windows')
-    exe=ROOT/'tests/Release/netlib_solver_benchmark.exe'
-    provenance=dict(platform=platform.platform(),binary_sha256=hashlib.sha256(exe.read_bytes()).hexdigest(),
+    binary_dir=(args.binary_dir if args.binary_dir.is_absolute()
+                else ROOT/args.binary_dir).resolve()
+    required=['netlib_solver_benchmark.exe']
+    if args.stage=='gates':
+        required.append('nlp_open_benchmark.exe')
+    missing=[str(binary_dir/name) for name in required if not (binary_dir/name).is_file()]
+    if missing:
+        raise FileNotFoundError('missing benchmark executable(s): '+', '.join(missing))
+    binaries={name:hashlib.sha256((binary_dir/name).read_bytes()).hexdigest()
+              for name in required}
+    provenance=dict(platform=platform.platform(),binary_sha256=binaries['netlib_solver_benchmark.exe'],
+        binary_sha256s=binaries,binary_dir=str(binary_dir),
         command=__import__('sys').argv,commit=subprocess.check_output(['git','rev-parse','HEAD'],cwd=ROOT,text=True).strip())
     write(out/f'{args.stage}.provenance.json',provenance)
     if args.stage=='overhead':
         for threads in (2,4):
-            execute(out,f'overhead-warm-t{threads}',threads,False)
+            execute(out,f'overhead-warm-t{threads}',threads,binary_dir,False)
             for pair in range(1,4):
                 for timing in ((False,True) if pair%2 else (True,False)):
-                    execute(out,f'overhead-{pair}-t{threads}-{int(timing)}',threads,timing)
+                    execute(out,f'overhead-{pair}-t{threads}-{int(timing)}',threads,binary_dir,timing)
     elif args.stage=='stability':
         for threads in (2,4):
-            execute(out,f'warm-t{threads}',threads)
+            execute(out,f'warm-t{threads}',threads,binary_dir)
         for block in range(1,21):
             for threads in ((2,4) if block%2 else (4,2)):
-                execute(out,f'block-{block:02}-t{threads}',threads)
+                execute(out,f'block-{block:02}-t{threads}',threads,binary_dir)
         summarize(out)
     elif args.stage=='gates':
         for threads in (2,4):
-            execute(out,f'full-t{threads}',threads,False,3,True,'native-ipm-direct,native-auto')
-            execute(out,f'nlp-t{threads}',threads,False,nlp=True)
+            execute(out,f'full-t{threads}',threads,binary_dir,False,3,True,'native-ipm-direct,native-auto')
+            execute(out,f'nlp-t{threads}',threads,binary_dir,False,nlp=True)
     else:
         summarize(out)
 

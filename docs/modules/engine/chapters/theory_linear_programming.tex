@@ -1,0 +1,840 @@
+% theory_linear_programming.tex —— engine 通用理论：线性规划
+% （标准形与变换、对偶定理、最优性条件、对偶单纯形法、LP 预求解理论）
+% 本文件为理论层章节，遵循 docs/modules/THEORY_WRITING_GUIDE.md。
+
+\section{线性规划：对偶理论、单纯形方法与预求解}\label{sec:thlp}
+
+\begin{theorynote}
+本章为通用数学理论，按线性规划领域的标准模型与文献体系撰写，覆盖：标准形
+与等价变换、弱/强对偶定理及其证明、最优性条件、对偶单纯形法（对偶可行基
+维持、比率测试、退化与循环、Bland 规则、steepest edge / Devex / BFRT 定价
+原理与参考值框架更新推导、数值稳定性）以及 Andersen \& Andersen 意义下的
+LP 预求解理论。本章公式不要求逐式对应代码；与平台实现
+（\srcpath{src/engine/kernel/lp\_kernel/native\_dual/}、
+\srcpath{src/engine/presolve/lp\_presolve.cpp}）的对应关系见本章末
+``与实现的对应''表，超出实现的内容以``未实现扩展说明''框就地标记。
+\end{theorynote}
+
+\subsection{记号与约定}\label{subsec:thlp-notation}
+
+本章固定如下记号；与手册其余部分冲突时以本章声明为准。
+
+\begin{itemize}
+  \item 矩阵 $A\in\mathbb{R}^{m\times n}$（约束系数矩阵），$b\in\mathbb{R}^m$
+        （右端项），$c\in\mathbb{R}^n$（目标系数）；$A$ 的第 $j$ 列记作 $a_j$，
+        第 $i$ 行记作 $a^i$（行向量）。不作特殊说明时假设 $\mathrm{rank}(A)=m\le n$。
+  \item 下标 $j\in\mathbb{R}$ 的变量界：下界 $l_j\in\mathbb{R}\cup\{-\infty\}$，
+        上界 $u_j\in\mathbb{R}\cup\{+\infty\}$，$l_j\le u_j$；
+        $l\le x\le u$ 按分量理解。$x_j$ 称为 free 变量当且仅当
+        $l_j=-\infty$ 且 $u_j=+\infty$；fixed 变量当且仅当 $l_j=u_j$。
+  \item 基（basis）：列指标集 $B\subseteq\{1,\dots,n\}$，$|B|=m$ 且基矩阵
+        $A_B$（亦简记 $B$，上下文可区分）非奇异；非基指标集
+        $N=\{1,\dots,n\}\setminus B$。
+  \item 对基 $B$ 的典则量：原始基本解 $x_B=B^{-1}b$（记 $\bar b$），
+        对偶解 $y=B^{-T}c_B$，既约费用（reduced cost）
+        $\bar c=c-A^{T}y$； tableau 行/列
+        $\bar a_j=B^{-1}a_j$、$w^i=e_i^{T}B^{-1}$（$e_i$ 为单位向量）。
+  \item $\|\cdot\|$ 未注明时下标指明范数；$\kappa(M)=\|M\|\,\|M^{-1}\|$ 为条件数；
+        $\varepsilon_{\mathrm{mach}}$ 为双精度机器精度（$\approx 2.2\times10^{-16}$）。
+  \item 定理环境按节编号；``字典（dictionary）''指单纯形迭代中把基变量与目标
+        显式表示为非基变量仿射函数的方程组。
+\end{itemize}
+
+\subsection{标准形与等价变换}\label{subsec:thlp-standard}
+
+\begin{definition}[一般形式与标准形]\label{def:thlp-std}
+线性规划（LP）的一般形式为
+\begin{equation}\label{eq:thlp-general}
+  \min_{x}\; c^{T}x
+  \quad\text{s.t.}\quad
+  b^{L}\le Ax\le b^{U},\quad l\le x\le u,
+\end{equation}
+其中行侧 $b^{L}_i\in\mathbb{R}\cup\{-\infty\}$、$b^{U}_i\in\mathbb{R}\cup\{+\infty\}$。
+本章用于对偶与单纯形理论推导的\textbf{标准形}为
+\begin{equation}\label{eq:thlp-std}
+  \min_{x}\; c^{T}x \quad\text{s.t.}\quad Ax=b,\quad x\ge 0,
+\end{equation}
+其实现侧使用的\textbf{箱式有界标准形}为
+\begin{equation}\label{eq:thlp-boxed}
+  \min_{x}\; c^{T}x \quad\text{s.t.}\quad Ax=b,\quad l\le x\le u .
+\end{equation}
+\end{definition}
+
+\begin{proposition}[等价变换]\label{prop:thlp-transform}
+一般形式 \eqref{eq:thlp-general} 可在多项式（线性）规模的变换下化为标准形
+\eqref{eq:thlp-std}，且两问题的可行/不可行状态、最优值与最优解集通过显式
+仿射映射一一对应。具体地：
+\begin{enumerate}
+  \item \textbf{最大化变最小化}：$\max c^{T}x=-\min(-c)^{T}x$。
+  \item \textbf{不等式行变等式}：行 $a^{i}x\le b^{U}_i$ 引入松弛变量
+        $s_i\ge0$：$a^{i}x+s_i=b^{U}_i$；双侧行
+        $b^{L}_i\le a^{i}x\le b^{U}_i$ 引入 $0\le s_i\le b^{U}_i-b^{L}_i$
+        （ranged row 的松弛变量自身带箱式界）。
+  \item \textbf{自由变量拆分}：$x_j$ free 时令 $x_j=x_j^{+}-x_j^{-}$，
+        $x_j^{+},x_j^{-}\ge0$。
+  \item \textbf{一般下界平移}：$x_j\ge l_j$（$l_j$ 有限）令
+        $x_j'=x_j-l_j\ge0$，右端项吸收常数 $b\leftarrow b-l_j a_j$；
+        有限上界由第 2 步作为不等式处理。
+\end{enumerate}
+\end{proposition}
+
+\begin{proof}
+每步都是变量与约束的显式仿射替换，替换映射在可行点集上双射且保持目标值
+（第 1 步差一个符号与常数）。以第 2 步为例：若 $(x,s)$ 满足
+$a^{i}x+s_i=b^{U}_i$、$s_i\ge0$，则 $a^{i}x=b^{U}_i-s_i\le b^{U}_i$；
+反之若 $a^{i}x\le b^{U}_i$ 则取 $s_i=b^{U}_i-a^{i}x\ge0$。其余各步同理。
+\end{proof}
+
+\begin{remark}\label{rem:thlp-transform-cost}
+变换 3 把 $n$ 个变量至多扩为 $2n$ 个，变换 2 每行至多加一个变量，故标准形
+规模与原问题线性相关。工业实现通常不真的做拆分/松弛展开，而是直接在箱式
+有界形 \eqref{eq:thlp-boxed} 上运行（界 handled implicitly），这正是
+\srcpath{src/engine/kernel/lp\_kernel/native\_dual/} 的
+\srcpath{include/mipsolvers/engine/kernel/lp\_kernel/dual\_simplex.hpp:StandardFormLP} 采用的表示：等式约束 + 箱式变量界，
+非基变量只能处于下界、上界或（free 变量时）零点三种状态之一。
+\end{remark}
+
+\subsection{基、顶点与字典}\label{subsec:thlp-basis}
+
+\begin{definition}[基与基本解]\label{def:thlp-bfs}
+对标准形 \eqref{eq:thlp-std}，若列指标集 $B$ 使 $A_B$ 非奇异，则称 $B$ 为
+基；$x_B=A_B^{-1}b$、$x_N=0$ 称为对应的基本解；若 $x_B\ge0$ 则称
+\textbf{基本可行解}（BFS），$B$ 为可行基。若 $x_B$ 的某分量为 $0$，称该
+BFS（原始）退化。
+\end{definition}
+
+\begin{lemma}[锥的 Carath\'eodory 定理]\label{lem:thlp-caratheodory}
+设 $b=\sum_{j=1}^{k}\lambda_j a_j$，$\lambda_j>0$。则存在指标子集
+$S\subseteq\{j:\lambda_j>0\}$，$\{a_j\}_{j\in S}$ 线性无关，且
+$b=\sum_{j\in S}\mu_j a_j$，$\mu_j>0$。特别地 $|S|\le m$。
+\end{lemma}
+
+\begin{proof}
+取正系数个数最少的表示。若对应列 $\{a_j:\lambda_j>0\}$ 线性相关，则存在
+不全为零的 $\nu_j$（仅在正系数指标上非零）使 $\sum_j\nu_j a_j=0$。取
+$\theta=\min\{\lambda_j/|\nu_j|:\nu_j\ne0\}$ 并选择符号使
+$\lambda_j'=\lambda_j-\theta\nu_j\ge0$ 且至少一个 $\lambda_j'$ 变为 $0$，
+得到正系数更少的表示，矛盾。故最少表示的列线性无关，从而个数不超过
+$\mathrm{rank}(A)\le m$。
+\end{proof}
+
+\begin{proposition}[基本可行解的存在性]\label{prop:thlp-bfs-exist}
+若标准形 \eqref{eq:thlp-std} 可行且 $\mathrm{rank}(A)=m$，则存在 BFS。
+\end{proposition}
+
+\begin{proof}
+任取可行 $x$，$b=Ax=\sum_{j:x_j>0}x_j a_j$。由引理
+\ref{lem:thlp-caratheodory}，可用线性无关列子集 $S$（$|S|\le m$）正系数
+表示 $b$。因 $\mathrm{rank}(A)=m$，可把 $S$ 扩充为含 $m$ 列的基 $B$
+（Steinitz 换入），对应基本解满足 $x_B\ge0$（$S$ 上分量仍为正，其余为 $0$）。
+\end{proof}
+
+\begin{definition}[字典]\label{def:thlp-dict}
+对基 $B$，等式系统 $Ax=b$ 等价于
+\begin{equation}\label{eq:thlp-dict}
+  x_B=\bar b-\bar N x_N,\qquad
+  z=v+\bar c_N^{T}x_N,
+\end{equation}
+其中 $\bar N=A_B^{-1}A_N$，$\bar b=A_B^{-1}b$，$v=c_B^{T}\bar b$，
+$\bar c_N=c_N-\bar N^{T}c_B$。称 \eqref{eq:thlp-dict} 为基 $B$ 的字典。
+字典是把 $z=c^{T}x$ 与 $x_B$ 在仿射子空间 $\{x:Ax=b\}$ 上用坐标
+$x_N$ 表达的仿射表示；同一可行点用任何字典计算目标值都得到同一实数，
+这一事实在 Bland 终止性证明中起关键作用（定理 \ref{thm:thlp-bland}）。
+\end{definition}
+
+\begin{remark}\label{rem:thlp-boxed-nonbasic}
+箱式有界形 \eqref{eq:thlp-boxed} 中非基变量 $x_j$（$j\in N$）不必为 $0$：
+它被钉在其下界、上界或（free 时）零点上。此时
+$\bar b=B^{-1}(b-\sum_{j\in N}a_j x_j)$，既约费用符号条件按非基状态分类
+（见命题 \ref{prop:thlp-boxed-kkt}）。单纯形迭代允许非基变量在两个界之间
+直接翻转（bound flip）而不换基，这是箱式实现相对教科书形式的主要结构差异。
+\end{remark}
+
+\subsection{对偶理论}\label{subsec:thlp-duality}
+
+对标准形原问题（P）：$\min\{c^{T}x:Ax=b,\ x\ge0\}$，其对偶（D）为
+$\max\{b^{T}y:A^{T}y\le c\}$。对偶变量 $y$ 对应等式约束的乘子，自由取值。
+
+\begin{theorem}[弱对偶]\label{thm:thlp-weak}
+若 $x$ 对（P）可行、$y$ 对（D）可行，则 $b^{T}y\le c^{T}x$。
+\end{theorem}
+
+\begin{proof}
+$b^{T}y=y^{T}b=y^{T}Ax=(A^{T}y)^{T}x\le c^{T}x$，其中不等式由
+$A^{T}y\le c$ 与 $x\ge0$ 分量相乘保持方向得到。
+\end{proof}
+
+\begin{corollary}\label{cor:thlp-weak-conseq}
+（i）若（P）无界则（D）不可行；（ii）若（D）无界则（P）不可行；
+（iii）若可行对 $(x,y)$ 满足 $c^{T}x=b^{T}y$，则二者各自最优。
+\end{corollary}
+
+强对偶的证明依赖于 Farkas 引理与单纯形方法的存在性结论。我们先给出
+Farkas 引理的完整证明（投影论证），再从单纯形终止性推出强对偶。
+
+\begin{lemma}[Farkas]\label{lem:thlp-farkas}
+恰好下列二者之一成立：
+（i）存在 $x\ge0$ 使 $Ax=b$；
+（ii）存在 $y$ 使 $A^{T}y\ge0$ 且 $b^{T}y<0$。
+\end{lemma}
+
+\begin{proof}
+\textbf{不能同时成立}：若 $x\ge0$、$Ax=b$ 与 $A^{T}y\ge0$ 同时存在，则
+$0\le y^{T}Ax=y^{T}b<0$，矛盾。
+
+\textbf{至少其一成立}：设锥 $K=\{Ax:x\ge0\}$。由引理
+\ref{lem:thlp-caratheodory}，$K$ 是有限个闭锥
+$K_S=\{A_S\mu:\mu\ge0\}$（$S$ 取遍线性无关列子集）的并，故 $K$ 为闭凸锥。
+设 $b\notin K$。取 $z_0\in K$（如 $z_0=0$），令
+$R=\|z_0-b\|$；紧集 $K\cap\{z:\|z-b\|\le R\}$ 上连续函数 $\|z-b\|$ 取得
+最小值点 $p\in K$，且 $p$ 是 $K$ 中距 $b$ 最近的点。令 $y=p-b\ne0$。
+对任意 $z\in K$ 与 $t\in[0,1]$，凸性给出 $p+t(z-p)\in K$，由 $p$ 的最近性，
+\begin{equation*}
+  \|p+t(z-p)-b\|^{2}\ge\|p-b\|^{2}
+  \;\Longrightarrow\;
+  2t\,y^{T}(z-p)+t^{2}\|z-p\|^{2}\ge0 .
+\end{equation*}
+除以 $t>0$ 并令 $t\downarrow0$ 得 $y^{T}(z-p)\ge0$，即
+$y^{T}z\ge y^{T}p$（$\forall z\in K$）。取 $z=0$ 得 $y^{T}p\le0$；
+取 $z=2p$ 得 $y^{T}p\ge0$；故 $y^{T}p=0$。取 $z=a_j=Ae_j\in K$ 得
+$y^{T}a_j\ge0$，即 $A^{T}y\ge0$。最后
+$b^{T}y=(p-y)^{T}y=-\|y\|^{2}<0$。于是（ii）成立。
+\end{proof}
+
+\begin{remark}\label{rem:thlp-farkas-geo}
+（ii）中的 $y$ 是把 $b$ 与锥 $K$ 严格分离的超平面法向：$K$ 在其非负侧而
+$b$ 在其严格负侧。Farkas 引理是 LP 不可行性的代数证书（certificate）形式：
+求解器报 ``infeasible'' 时应能输出这样的乘子，见
+\srcpath{certificate.cpp:phase\_one\_farkas\_certificate}。
+\end{remark}
+
+\begin{theorem}[强对偶]\label{thm:thlp-strong}
+若（P）存在最优解，则（D）存在最优解，且二者最优值相等。
+\end{theorem}
+
+\begin{proof}
+设（P）有最优解 $x^{*}$，最优值 $z^{*}$ 有限。由命题
+\ref{prop:thlp-bfs-exist}，（P）存在 BFS。从任一可行基出发执行带 Bland
+规则的原始单纯形法；由 Bland 有限终止定理（定理 \ref{thm:thlp-bland}，
+其证明不依赖对偶理论），迭代必在有限步终止于某个基 $B$，使既约费用
+$\bar c=c-A^{T}y\ge0$，其中 $y=B^{-T}c_B$（若中途检测到无界，与
+$z^{*}$ 有限矛盾，故不可能）。于是 $A^{T}y\le c$，即 $y$ 对偶可行；且
+\begin{equation*}
+  b^{T}y=b^{T}B^{-T}c_B=(B^{-1}b)^{T}c_B=c_B^{T}x_B^{*}=c^{T}x^{*},
+\end{equation*}
+最后一步因 $x^{*}_N=0$。由弱对偶（定理 \ref{thm:thlp-weak}），$y$ 对偶
+最优，且两最优值相等。
+\end{proof}
+
+\begin{corollary}[互补松弛]\label{cor:thlp-cs}
+设 $x$、$y$ 分别为（P）、（D）可行。则二者皆最优当且仅当
+\begin{equation}\label{eq:thlp-cs}
+  x_j\bigl(c-A^{T}y\bigr)_j=0,\qquad j=1,\dots,n .
+\end{equation}
+\end{corollary}
+
+\begin{proof}
+弱对偶证明中的不等式链给出
+$c^{T}x-b^{T}y=(c-A^{T}y)^{T}x=\sum_j x_j(c-A^{T}y)_j\ge0$，
+求和各项均非负。由强对偶，最优当且仅当对偶间隙为零，当且仅当每项为零。
+\end{proof}
+
+\begin{proposition}[箱式有界形的最优性条件]\label{prop:thlp-boxed-kkt}
+对箱式有界形 \eqref{eq:thlp-boxed}，$x$ 最优当且仅当存在
+$y\in\mathbb{R}^m$ 使 $\bar c=c-A^{T}y$ 满足
+\begin{equation}\label{eq:thlp-boxed-kkt}
+  \begin{cases}
+    \bar c_j\ge0, & x_j=l_j\ (\text{仅贴下界}),\\
+    \bar c_j\le0, & x_j=u_j\ (\text{仅贴上界}),\\
+    \bar c_j=0, & l_j<x_j<u_j .
+  \end{cases}
+\end{equation}
+\end{proposition}
+
+\begin{proof}
+经命题 \ref{prop:thlp-transform} 的等价变换把 \eqref{eq:thlp-boxed} 化为
+标准形：下界平移 $\tilde x_j=x_j-l_j\ge0$，上界 $x_j\le u_j$ 引入松弛
+$s_j=u_j-x_j\ge0$（作为额外行 $x_j+s_j=u_j$）。对变换后问题应用推论
+\ref{cor:thlp-cs}：原变量与松弛的互补条件 $x_j^{+}\bar c_j^{+}=0$、
+$s_j\bar c_j^{-}=0$ 合并即得 \eqref{eq:thlp-boxed-kkt} 的三分支。具体地，
+等式行乘子合并为 $y$，$x_j$ 贴下界时对应 $\tilde x_j=0$ 的互补条件
+$\bar c_j\ge0$；贴上界时对应 $s_j=0$ 的互补条件 $\bar c_j\le0$；
+严格内部时两者同时施加，得 $\bar c_j=0$。
+\end{proof}
+
+\begin{remark}\label{rem:thlp-duality-cases}
+（P）/（D）的可行与有界组合共四种可能：皆有最优（值相等）、（P）不可行且
+（D）无界、（D）不可行且（P）无界、两者皆不可行。``（P）不可行而（D）有
+最优''不可能发生（弱对偶），等等。工业求解器返回的状态枚举
+（optimal / infeasible / unbounded / interrupted）正是该分类的计算对应。
+\end{remark}
+
+\subsection{对偶单纯形法}\label{subsec:thlp-dual-simplex}
+
+\subsubsection{对偶可行基与迭代结构}
+
+\begin{definition}[对偶可行基]\label{def:thlp-dualfeas}
+对标准形 \eqref{eq:thlp-std}，基 $B$ 称为\textbf{对偶可行}的，若既约费用
+$\bar c=c-A^{T}y\ge0$（$y=B^{-T}c_B$）。对箱式有界形
+\eqref{eq:thlp-boxed}，对偶可行指 $\bar c$ 满足 \eqref{eq:thlp-boxed-kkt}
+中与非基状态对应的符号条件。
+\end{definition}
+
+对偶单纯形法维持对偶可行，迭代消除原始不可行性（$x_B$ 的界违反），直到
+原始也可行——此时由推论 \ref{cor:thlp-cs} 已达最优；或检测到原始不可行
+（Farkas 证书）。为推导清晰，本小节先在标准形 $x\ge0$ 上演示比率测试，
+再回到箱式有界形给出实现所用的 BFRT。
+
+\begin{proposition}[对偶单纯形比率测试的正确性]\label{prop:thlp-bfrt-std}
+设基 $B$ 对偶可行（$\bar c\ge0$），$x_B=\bar b$ 的第 $p$ 个分量
+$\bar b_p<0$。记第 $p$ 行 tableau 行向量
+$\rho^{T}=e_p^{T}B^{-1}A$，其非基分量 $\bar a_{pj}=\rho_j$（$j\in N$）。
+\begin{enumerate}
+  \item 若对所有 $j\in N$ 都有 $\bar a_{pj}\ge0$，则（P）不可行。
+  \item 否则，取
+  \begin{equation}\label{eq:thlp-bfrt-std}
+    q\in\operatorname*{arg\,min}_{j\in N:\,\bar a_{pj}<0}
+    \frac{\bar c_j}{|\bar a_{pj}|},
+  \end{equation}
+  以 $(p,q)$ 为主元换基（$x_q$ 入基、$x_{B_p}$ 出基于 $0$），则新基仍对偶
+  可行，且对偶目标值 $b^{T}y$ 不减。
+\end{enumerate}
+\end{proposition}
+
+\begin{proof}
+（1）取 $y'=B^{-T}e_p$。则 $(y')^{T}b=e_p^{T}B^{-1}b=\bar b_p<0$；
+对任意 $x\ge0$ 若 $Ax=b$，则第 $p$ 行等式给出
+$\bar b_p=x_{B_p}+\sum_{j\in N}\bar a_{pj}x_j\ge0$（因 $x\ge0$、
+$\bar a_{pj}\ge0$），与 $\bar b_p<0$ 矛盾。等价地，$A^{T}y'\ge0$、
+$b^{T}y'<0$ 即 Farkas 证书（引理 \ref{lem:thlp-farkas} 的（ii））。
+
+（2）换基后新既约费用
+\begin{equation}\label{eq:thlp-rc-update}
+  \bar c_j'=\bar c_j-\frac{\bar a_{pj}}{\bar a_{pq}}\,\bar c_q ,
+  \qquad j\ne q,
+\end{equation}
+而 $\bar c_q'=0$。当 $\bar a_{pj}\ge0$ 时，
+$-\bar a_{pj}\bar c_q/\bar a_{pq}\ge0$（因 $\bar a_{pq}<0$、
+$\bar c_q\ge0$），故 $\bar c_j'\ge\bar c_j\ge0$。当 $\bar a_{pj}<0$ 时，
+\eqref{eq:thlp-bfrt-std} 的选择保证
+$\bar c_q/\bar a_{pq}\ge\bar c_j/\bar a_{pj}$（两边同除以负数
+$|\bar a_{pj}||\bar a_{pq}|$ 即见），从而 $\bar c_j'\ge0$。
+新对偶解 $y'=y-t\,B^{-T}e_p$，$t=\bar c_q/\bar a_{pq}\le0$，
+对偶目标变化 $b^{T}(y'-y)=-t\,\bar b_p\ge0$（$t\le0$、$\bar b_p<0$）。
+\end{proof}
+
+\begin{remark}\label{rem:thlp-dual-progress}
+命题 \ref{prop:thlp-bfrt-std}（2）中，若 $\bar c_q>0$ 且 $\bar b_p<0$
+严格，则对偶目标严格上升（$t<0$）；若 $\bar c_q=0$（对偶退化）则
+$t=0$，迭代只换基而目标不动，称为\textbf{停滞}（stalling）。对偶退化是
+对偶单纯形循环的根源，见 \ref{subsubsec:thlp-cycling} 小节。
+\end{remark}
+
+\subsubsection{箱式有界形上的 BFRT}
+
+实现侧在箱式有界形上工作，比率测试推广为\textbf{有界变量比率测试}
+（bounded-variable ratio test，实现中代号 BFRT）：出基行 $p$ 的基变量违反
+界（$\beta=x_{B_p}\notin[l_{B_p},u_{B_p}]$），以移动方向
+$\sigma=+1$（从下侧违反推向 $u$）或 $\sigma=-1$ 刻画；对每个非基列
+$j\in N$ 计算断点（breakpoint）
+\begin{equation}\label{eq:thlp-bfrt-boxed}
+  t_j=\frac{\bar c_j}{\sigma\,\bar a_{pj}}
+  \quad\text{（仅当 }\sigma\,\bar a_{pj}\text{ 的符号使 }t_j>0
+  \text{ 且移动缩小 }|\bar c_j|\text{ 朝 }0\text{ 时入候选集）},
+\end{equation}
+比率步长 $t^{*}=\min_j t_j$，候选集随 $t$ 增长依次达到符号边界；首个达到
+断点的列入基（或发生 bound flip）。该规则是命题 \ref{prop:thlp-bfrt-std}
+在非基变量可取上下界情形下的直接推广：既约费用沿 $t$ 的更新仍是
+\eqref{eq:thlp-rc-update} 的形式，符号条件逐分支验证即可，此处从略。
+
+\begin{remark}[Harris 两段比率测试]\label{rem:thlp-harris}
+精确的最小比率 $t^{*}$ 在数值上是脆弱的：两个断点相差
+$O(\varepsilon_{\mathrm{mach}})$ 量级时，取哪个主元应由数值质量而非算术
+次序决定。Harris 的\textbf{两段过程}（two-pass ratio test）\cite{lpharris1973}：
+第一段在\textbf{放宽的}容差 $\delta$（如 $10^{-6}$ 倍尺度）下求最大可接受
+步长 $\hat t$；第二段在所有断点不超过 $\hat t$ 的候选中，选主元元素
+$|\bar a_{pj}|$ 最大者。第一段保证对偶可行性维持在容差内，第二段把选择
+自由度用于数值稳定性（大主元减小换基后的误差放大）。该思想同时适用于
+原始与对偶比率测试；实现中原始侧为
+\srcpath{primal.cpp:choose\_leaving\_harris}，对偶侧 BFRT 的两段结构内嵌于
+\srcpath{pricing.cpp:choose\_entering\_bfrt}。
+\end{remark}
+
+\subsubsection{退化、停滞与循环}\label{subsubsec:thlp-cycling}
+
+\begin{definition}[对偶退化与循环]\label{def:thlp-cycling}
+对偶单纯形迭代中，若某个非基既约费用 $\bar c_j=0$，称当前基
+\textbf{对偶退化}。若比率测试的最小比率 $t^{*}=0$，称该次迭代
+\textbf{停滞}。若基序列 $B_0,B_1,\dots$ 出现 $B_{k+T}=B_k$（$T\ge1$），
+称发生\textbf{循环}（cycling）。
+\end{definition}
+
+由于同一基唯一确定字典（定义 \ref{def:thlp-dict}），循环意味着算法在有限
+个字典上无限打转。Beale 的经典例子 \cite{lpbeale1955} 表明：使用
+``最小比率 + 固定次序打破平局'' 的朴素主元规则，对偶（与原始）单纯形确实
+可以循环。实践中最小索引平局打破即足以在多数问题上避免循环，但理论上需要
+可证的反循环规则。
+
+\begin{theorem}[Bland 规则的有限终止性]\label{thm:thlp-bland}
+对标准形原始单纯形（$\max c^{T}x$，$Ax=b$，$x\ge0$；字典
+$z=v+\sum_{j\in N}\bar c_j x_j$），采用 Bland 规则
+\cite{lpbland1977}：
+\begin{enumerate}
+  \item 入基：取满足 $\bar c_j>0$ 的\textbf{最小}下标 $j$；
+  \item 出基：在比率测试取得最小值的行中，取基变量下标\textbf{最小}者。
+\end{enumerate}
+则单纯形法在有限步内终止（最优或检测到无界）。
+\end{theorem}
+
+\begin{proof}
+反设发生循环。循环中目标值 $v$ 不变（否则严格递增的 $v$ 不可能重复出现
+同一基），故循环内所有主元步的比率均为 $0$，即所有参与换基的变量在循环
+内取值恒为 $0$（退化主元）；称这些变量为\textbf{循环变量}，其余变量在
+循环中保持基/非基身份与取值不变。令
+$t$ 为循环中入基过的变量下标的最大值；$t$ 必也在循环中某次出基（基只有
+$m$ 个位置，循环回到起点）。取循环中两个字典：
+\begin{itemize}
+  \item $D_1$：$t$ 在该步\textbf{入基}。记其既约费用为 $\bar c$，
+        tableau 元为 $\bar a_{ij}$。由入基规则，
+        \begin{equation}\label{eq:thlp-bland-d1}
+          \bar c_t>0,\qquad \bar c_j\le0\quad(j\in N_1,\ j<t).
+        \end{equation}
+  \item $D_2$：$t$ 在该步\textbf{出基}，入基变量为 $s$，主元行 $r$ 为
+        $t$ 所在行。由入基规则
+        \begin{equation}\label{eq:thlp-bland-d2}
+          \bar d_s>0,\qquad \bar d_j\le0\quad(j\in N_2,\ j<s),
+        \end{equation}
+        其中 $\bar d$、$\hat a_{ij}$ 为 $D_2$ 的既约费用与 tableau 元。
+        $s$ 在循环中入基，故 $s\le t$；又 $s\ne t$（$t$ 此时在基内），
+        故 $s<t$。
+\end{itemize}
+\textbf{关键观察}：对 $D_2$ 中任一循环基变量 $x_j$（$j\ne t$，其所在行
+记 $i$），若 $\hat a_{is}>0$，则行 $i$ 与行 $r$ 同为比率 $0$ 的平局行
+（循环行右端项为 $0$），出基规则应取下标最小者，而已选 $t$，故 $j\ge t$；
+但 $j$ 是循环变量，$j\le t$，于是 $j=t$，矛盾。因此
+\begin{equation}\label{eq:thlp-bland-rowsign}
+  j\ \text{为}\ D_2\ \text{的循环基变量且}\ j\ne t
+  \;\Longrightarrow\; \hat a_{js}\le0 ,
+\end{equation}
+其中 $\hat a_{js}$ 简记 $j$ 所在行的 $s$ 列元。
+
+现在沿 $D_2$ 构造参数化点：令 $x_s=\varepsilon$（$\varepsilon\in\mathbb{R}$
+任意），其余 $D_2$ 非基变量取 $0$，基变量由等式确定：
+$x_j^{*}=\hat b_j-\hat a_{js}\varepsilon$（循环行 $\hat b_j=0$）。
+该点对所有 $\varepsilon$ 满足 $Ax=b$（不要求非负），其目标值用 $D_2$
+计算为 $z(\varepsilon)=v+\bar d_s\varepsilon$；用 $D_1$ 计算为
+\begin{equation*}
+  z(\varepsilon)=v+\bar c_s\,\mathbf{1}[s\in N_1]\,\varepsilon
+  \;-\!\!\sum_{\substack{j\in N_1\cap B_2\\ j\ \text{循环}}}\!\!
+  \bar c_j\,\hat a_{js}\,\varepsilon ,
+\end{equation*}
+其中 $\mathbf{1}[\cdot]$ 为示性函数（条件成立取 $1$，否则取 $0$）；
+$N_1\cap B_2$ 的循环基变量恰是那些需代入的项（$j$ 在 $D_1$ 中非基
+而在 $D_2$ 中为基，故必在循环中换过身份）。两字典表示同一仿射函数
+（定义 \ref{def:thlp-dict} 的说明），比较 $\varepsilon$ 的系数得
+\begin{equation}\label{eq:thlp-bland-id}
+  \bar d_s
+  =\bar c_s\,\mathbf{1}[s\in N_1]
+  \;-\!\!\sum_{\substack{j\in N_1\cap B_2\\ j\ \text{循环}}}
+  \bar c_j\,\hat a_{js}.
+\end{equation}
+逐项定号：
+\begin{itemize}
+  \item 若 $s\in N_1$：由 $s<t$ 与 \eqref{eq:thlp-bland-d1}，$\bar c_s\le0$。
+  \item 求和项中 $j\ne t$：$j<t$（$j$ 循环且 $j\ne t$），由
+        \eqref{eq:thlp-bland-d1} 得 $\bar c_j\le0$，由
+        \eqref{eq:thlp-bland-rowsign} 得 $\hat a_{js}\le0$，故
+        $-\bar c_j\hat a_{js}\le0$。
+  \item 求和项中 $j=t$（注意 $t\in N_1\cap B_2$ 且 $t$ 循环）：
+        $\bar c_t>0$（\eqref{eq:thlp-bland-d1}），
+        $\hat a_{ts}=\hat a_{rs}>0$（$D_2$ 主元元为正），故
+        $-\bar c_t\hat a_{ts}<0$。
+\end{itemize}
+于是 \eqref{eq:thlp-bland-id} 右端严格小于 $0$，而左端 $\bar d_s>0$
+（\eqref{eq:thlp-bland-d2}），矛盾。故循环不可能发生，迭代在有限步内终止。
+\end{proof}
+
+\begin{remark}\label{rem:thlp-bland-min-form}
+定理 \ref{thm:thlp-bland} 按最大化陈述；最小化问题等价于最大化 $-c^{T}x$，
+入基条件变为 $\bar c_j<0$ 中的最小下标，证明逐字适用。对偶单纯形的反循环
+通过对偶问题应用同一规则获得：对对偶 LP 而言，``入基/出基''角色互换，
+即\textbf{对偶 Bland 规则}要求出基行与入基列都按最小下标平局打破；有限
+终止性由定理 \ref{thm:thlp-bland} 作用于对偶 LP 保证。Bland 规则的理论
+意义在于\textbf{可证终止}，工程上它速度远慢于 steepest-edge 类规则，因此
+实现把它作为检测到循环迹象后的兜底（fallback）而非常态规则。
+\end{remark}
+
+\begin{remark}[摄动与移位]\label{rem:thlp-perturbation}
+另一类反循环机制是对右端项（原始侧）或目标系数（对偶侧）施加小摄动
+$\varepsilon$ 字典序（lexicographic）规则：把平局打破替换为对
+$(b+\varepsilon^1,\dots,\varepsilon^m)$ 的字典序比较，可证与原问题在
+$\varepsilon\to0$ 极限下一致且终止 \cite{lpchvatal1983}。实现侧的等价物是
+代价移位（cost shift）：给目标加确定性的小扰动，使对偶退化被结构性打破；
+详见 \srcpath{state.cpp:initialize\_stabilized\_cost} 与
+\srcpath{state.cpp:reperturb\_stabilized\_cost}。此外实现还维护基于基签名哈希
+的循环检测与 taboo 表（
+\srcpath{state.cpp:initialize\_cycle\_guard}、
+\srcpath{state.cpp:record\_cycle\_arrival}、
+\srcpath{state.cpp:is\_taboo\_row}），属于对 Bland 保证的工程化补充。
+\end{remark}
+
+\subsubsection{定价：Dantzig、steepest edge、Devex 与 DSE}\label{subsubsec:thlp-pricing}
+
+定价（pricing）指在每次迭代中选择入基列（原始）或出基行（对偶）的规则。
+Dantzig 原始规则选 $\bar c_j$ 最负者；其单位工作量小但迭代数多。下列规则
+以``沿边的目标改进率''为准则，显著减少迭代数。
+
+\begin{definition}[steepest edge]\label{def:thlp-se}
+对原始单纯形，非基列 $j$ 的\textbf{边方向}为
+$\eta_j=\bigl(-B^{-1}a_j;\ e_j\bigr)\in\mathbb{R}^{n}$（沿 $x_j$ 增大而保持
+等式的位移方向）。steepest edge 规则选取使
+$|\bar c_j|/\|\eta_j\|_2$ 最大的入基列 \cite{lpgoldfarb1977}。权重
+$w_j=\|\eta_j\|_2^2$ 称为 edge weight。对偶单纯形的对偶版本（DSE）为出基行
+$i$ 定义权重 $w_i=\|e_i^{T}B^{-1}\|_2^2$（结构列部分），选取使
+原始违反量与 $\sqrt{w_i}$ 之比最大的出基行
+\cite{lpforrest1992}。
+\end{definition}
+
+朴素地每次迭代重算全部权重代价过高。steepest edge 的实用性来自下列
+精确更新递推。
+
+\begin{theorem}[steepest edge 权重的换基更新]\label{thm:thlp-se-update}
+设换基把列 $q$ 换入位置 $p$（基矩阵 $B'=B+(a_q-Be_p)e_p^{T}$）。记
+$u=B^{-1}a_q$（主元列，FTRAN 结果），$u_p=e_p^{T}u\ne0$，
+$t=B^{-T}e_p$（出基行的 BTRAN）。则对 $i\ne p$，
+\begin{equation}\label{eq:thlp-se-rowupdate}
+  e_i^{T}(B')^{-1}
+  =e_i^{T}B^{-1}-\frac{u_i}{u_p}\,e_p^{T}B^{-1},
+  \qquad
+  e_p^{T}(B')^{-1}=\frac{1}{u_p}\,e_p^{T}B^{-1},
+\end{equation}
+从而对偶侧行权重满足精确递推
+\begin{equation}\label{eq:thlp-se-wupdate}
+  w_i'=w_i-2\,\frac{u_i}{u_p}\,\tau_i+\Bigl(\frac{u_i}{u_p}\Bigr)^{2}w_p,
+  \qquad
+  w_p'=\frac{w_p}{u_p^{2}},
+\end{equation}
+其中 $\tau_i=\bigl(e_i^{T}B^{-1}\bigr)t$ 可由一次 BTRAN（$t$）加逐行内积
+获得。
+\end{theorem}
+
+\begin{proof}
+ Sherman--Morrison 公式：$B'=B\bigl(I+(u-e_p)e_p^{T}\bigr)$（因
+$B(u-e_p)=a_q-Be_p$），而
+$\bigl(I+ve_p^{T}\bigr)^{-1}=I-ve_p^{T}/(1+e_p^{T}v)$（$v=u-e_p$，
+$1+e_p^{T}v=u_p$），故
+$(B')^{-1}=\bigl(I-\frac{(u-e_p)e_p^{T}}{u_p}\bigr)B^{-1}$。
+左乘 $e_i^{T}$（$i\ne p$ 时 $e_i^{T}(u-e_p)=u_i$；$i=p$ 时为 $u_p-1$，
+代入化简）即得 \eqref{eq:thlp-se-rowupdate}。对第一式取模方，
+\begin{equation*}
+  w_i'=\|e_i^{T}(B')^{-1}\|_2^2
+  =w_i-2\frac{u_i}{u_p}\bigl(e_i^{T}B^{-1}\bigr)\bigl(B^{-T}e_p\bigr)
+   +\Bigl(\frac{u_i}{u_p}\Bigr)^{2}w_p ,
+\end{equation*}
+中间项正是 $\tau_i$；$w_p'$ 由第二式取模方得到。
+\end{proof}
+
+\begin{remark}[计算代价与参考值框架]\label{rem:thlp-se-cost}
+定理 \ref{thm:thlp-se-update} 把每次迭代的权重维护降为一个 FTRAN
+（$u$，换基本就需要）、一个额外线性求解（$t$ 或等价量）与逐候选内积。
+对原始 steepest edge，列权重的对应递推（Goldfarb--Reid
+\cite{lpgoldfarb1977}）为
+\begin{equation*}
+  w_j'=w_j-2\,\frac{\bar a_{pj}}{\bar a_{pq}}\,\bigl(a_j^{T}t'\bigr)
+  +\Bigl(\frac{\bar a_{pj}}{\bar a_{pq}}\Bigr)^{2}w_q,
+  \qquad t'=B^{-T}u/u_p\ \text{的对应量},
+\end{equation*}
+结构与 \eqref{eq:thlp-se-wupdate} 相同：``标量比率项 + 与固定向量的内积 +
+出基权重二次项''。Harris 的 Devex 规则 \cite{lpharris1973} 放弃精确内积，
+只在\textbf{参考值框架}（reference framework，一个固定的行/列子集）上
+维护近似权重，换基时用
+$w_j'\approx\max\bigl\{w_j,\ (\bar a_{pj}/\bar a_{pq})^{2}w_q\bigr\}$
+之类的保守更新，并在框架漂移过大时整体重置。DSE（dual steepest edge）
+是定义 \ref{def:thlp-se} 的对偶权重在
+\eqref{eq:thlp-se-wupdate} 下的工程实现，常以 Devex 式参考框架初始化并按
+需切换为精确计算。实现对应：权重模式枚举
+\srcpath{model.hpp:EdgeWeightMode}（SteepestEdge / Devex），初始化
+\srcpath{state.cpp:initialize\_exact\_edge\_weights}、
+\srcpath{state.cpp:initialize\_devex\_framework}，DSE 权重计算
+\srcpath{pricing.cpp:compute\_dse\_weights}，精确权重
+\srcpath{factor.cpp:BasisFactor::compute\_exact\_edge\_weights}。
+\end{remark}
+
+\subsubsection{数值稳定性}\label{subsubsec:thlp-stability}
+
+单纯形迭代的每步核心线性代数是四次基矩阵求解：FTRAN（$Bu=a_q$，
+主元列；及比率/更新所需的更多右端）与 BTRAN（$B^{T}t=e_p$，定价行）。
+实现侧的设计原则如下（推导细节见内部文档
+\srcpath{docs/archive/numerical\_methods.md}，此处只给结论与条件）：
+
+\begin{enumerate}
+  \item \textbf{稀疏 LU + 乘积式更新}：基改变后不重分解，而把换基表示为
+        eta 矩阵序列（product-form update）；随 eta 链增长，求解误差与耗时
+        均上升，故定期\textbf{重分解}（refactorization，重构
+        \srcpath{factor.cpp:BasisFactor::rebuild}，增量更新
+        \srcpath{factor.cpp:BasisFactor::update}）。
+  \item \textbf{阈值主元}：LU 分解采用 Markowitz 计数择主 + 阈值容差
+        （主元不小于列最大元的 $u$ 倍，典型 $u\in[0.01,0.1]$），在稀疏性
+        与增长因子之间折中。
+  \item \textbf{残差校验与迭代精化}：对线性解 $\hat x$，计算残差
+        $r=b-B\hat x$；向后稳定意义下
+        \begin{equation}\label{eq:thlp-refinement}
+          \frac{\|\hat x-x\|}{\|x\|}
+          \ \lesssim\ \kappa(B)\,\frac{\|r\|}{\|b\|},
+        \end{equation}
+        故以相对残差作求解质量门（
+        \srcpath{factor.cpp:BasisFactor::solve\_checked}、
+        \srcpath{factor.cpp:BasisFactor::refine\_checked}、
+        \srcpath{factor.cpp:BasisFactor::backward\_error\_acceptable}），
+        不达标时做一次精化步 $B\delta=r$、$\hat x\leftarrow\hat x+\delta$，
+        仍不达标则触发重分解。
+  \item \textbf{容差分层}：可行性容差（primal/dual feasibility
+        tolerance）与最优性容差分离；比率测试在放宽容差下进行（Harris
+        两段，注记 \ref{rem:thlp-harris}），终态审计用严格容差复核
+        （\srcpath{state.cpp:audit}）。
+\end{enumerate}
+
+\begin{gapnote}
+下列对偶单纯形主题为文献中的成熟技术，但在当前代码中尚未实现或仅部分
+实现：
+（i）\textbf{子优化 / 多重定价}（suboptimization，多入基列同时换基）；
+（ii）\textbf{参数化与灵敏度分析}（rhs/cost ranging 的后最优分析）；
+（iii）\textbf{字典序摄动的全程维持}（实现以代价移位 + taboo + Bland
+兜底组合替代，见注记 \ref{rem:thlp-perturbation}）。
+对应表中相应条目标注为 ``未实现''。
+\end{gapnote}
+
+\subsection{LP 预求解理论}\label{subsec:thlp-presolve}
+
+预求解（presolve）在调用核心算法前，对 \eqref{eq:thlp-general} 做一系列
+保等价性的约简，产出更小的 LP 与一个\textbf{后求解映射}（postsolve），
+把约简问题的解映回原问题解。本节按 Andersen \& Andersen
+\cite{lpandersen1995} 的分类陈述主要约简规则及其正确性依据。
+
+\subsubsection{活动界与行约简}
+
+\begin{definition}[行活动界]\label{def:thlp-activity}
+对行 $i$，其在变量界上的\textbf{最小/最大活动}为区间算术
+\begin{equation}\label{eq:thlp-activity}
+  a_i^{-}=\sum_{j:a_{ij}>0}a_{ij}l_j+\sum_{j:a_{ij}<0}a_{ij}u_j,
+  \qquad
+  a_i^{+}=\sum_{j:a_{ij}>0}a_{ij}u_j+\sum_{j:a_{ij}<0}a_{ij}l_j ,
+\end{equation}
+遇无穷界时相应项使活动界取 $\pm\infty$（约定 $0\cdot\infty=0$，因为
+$a_{ij}=0$ 的项不参与求和）。
+\end{definition}
+
+\begin{proposition}[行约简规则的正确性]\label{prop:thlp-rowrules}
+对行 $b_i^{L}\le a^{i}x\le b_i^{U}$：
+\begin{enumerate}
+  \item \textbf{空行}：无非零系数。若 $0\notin[b_i^{L},b_i^{U}]$ 则问题
+        不可行，否则该行冗余可删。
+  \item \textbf{冗余行}：若 $[a_i^{-},a_i^{+}]\subseteq[b_i^{L},b_i^{U}]$，
+        行对所有可行 $x$ 自动成立，可删。
+  \item \textbf{forcing 行}：若 $a_i^{-}=b_i^{U}$（或 $a_i^{+}=b_i^{L}$），
+        则可行迫使每个正系数变量贴上界、负系数变量贴下界（对称情形反之），
+        行可删且相应变量固定。
+  \item \textbf{singleton 行}（行只有一个非零元 $a_{ij}$）：行约束等价于
+        对 $x_j$ 的一个界，并入变量界后删行。
+\end{enumerate}
+\end{proposition}
+
+\begin{proof}
+（1）（2）由定义 \ref{def:thlp-activity} 直接成立：$a_i^{-}\le a^{i}x\le a_i^{+}$
+对所有界内 $x$ 成立。（3）以 $a_i^{-}=b_i^{U}$ 为例：可行性要求
+$a^{i}x\le b_i^{U}=a_i^{-}$，而 $a^{i}x\ge a_i^{-}$，故 $a^{i}x=a_i^{-}$；
+求和 \eqref{eq:thlp-activity} 中每一项 $a_{ij}x_j$ 都已取其区间端点，
+任何 $x_j$ 偏离端点都使对应项严格内移、总和严格大于 $a_i^{-}$，矛盾，
+故所有变量钉在端点上。（4）$a_{ij}>0$ 时行约束等价于
+$b_i^{L}/a_{ij}\le x_j\le b_i^{U}/a_{ij}$（$a_{ij}<0$ 时不等号翻转），
+与原有变量界取交即可。
+\end{proof}
+
+\subsubsection{列约简}
+
+\begin{proposition}[列约简规则的正确性]\label{prop:thlp-colrules}
+\begin{enumerate}
+  \item \textbf{固定列}：$l_j=u_j$ 时把 $a_j x_j$ 并入右端项常数，删列。
+  \item \textbf{free/implied-free singleton 列}：$x_j$ 只出现在行 $i$。
+        若 $x_j$ free（或经活动界分析隐含 free：行 $i$ 除去 $x_j$ 后的剩余
+        活动区间允许 $x_j$ 在其整个界内自由移动），则对任意其余变量的取
+        值，行 $i$ 总可通过调整 $x_j$ 满足，且最优时 $x_j$ 由行等式唯一
+        确定；故可删去行 $i$ 与列 $j$，postsolve 由行方程回代 $x_j$。
+  \item \textbf{doubleton 方程代入}：行 $i$ 为等式且只含两列 $j,k$：
+        $a_{ij}x_j+a_{ik}x_k=b_i$。解出
+        $x_j=(b_i-a_{ik}x_k)/a_{ij}$ 代入目标与其他行，消去 $x_j$ 与行
+        $i$，并把 $x_j$ 的界投影为对 $x_k$ 的附加界
+        （$b_i-a_{ik}x_k\in a_{ij}[l_j,u_j]$）。
+  \item \textbf{singleton 等式列代入}：列 $j$ 唯一出现于等式行 $i$ 时
+        同理消元；与（3）的区别在于选择主元 $a_{ij}$ 时以数值稳定性
+        （$|a_{ij}|$ 不过小、代入后行侧膨胀受控）为准。
+\end{enumerate}
+\end{proposition}
+
+\begin{proof}
+（1）平凡。（2）设其余变量固定，行 $i$ 对 $x_j$ 的要求为
+$a_{ij}x_j\in[b_i^{L}-r_i^{-},b_i^{U}-r_i^{+}]$（$r$ 为剩余活动）。free /
+implied-free 条件保证该区间与 $[l_j,u_j]$ 的交非空且含内点区间，故可行性
+不依赖 $x_j$ 的具体值；目标中 $c_jx_j$ 一项在最优时把 $x_j$ 推向可行
+区间端点或由行方程钉住，两种情况都可由 postsolve 回代恢复。
+（3）（4）代入是线性方程组的高斯消元一步：等式约束把 $x_j$ 表达为其余
+变量的仿射函数，替换后可行域在该坐标子空间上的投影即约简问题的可行域；
+界投影来自 $x_j\in[l_j,u_j]$ 对代入表达式的约束。数值条件（主元大小、
+界膨胀上限）不改变正确性，只控制误差传播。
+\end{proof}
+
+\begin{remark}[约简的整体正确性原则]\label{rem:thlp-presolve-sound}
+每条规则的作用可归纳为三种之一：
+（a）\textbf{证书型}：直接给出原问题不可行/无界的证书（如空行）；
+（b）\textbf{等价型}：约简问题与原问题可行域之间存在显式仿射双射
+（保持目标值），如代入类规则；
+（c）\textbf{蕴含型}：删去的约束是其余约束与变量界的逻辑蕴含，如冗余行、
+forcing 行。
+因此任意规则序列的复合保持：原问题不可行 $\iff$ 约简问题不可行；
+否则最优值相等且 postsolve 把约简最优解映回原问题最优解。实现把规则组织
+为定点迭代（pass 到无新约简为止），并以 dirty 队列避免全量重扫：
+\srcpath{lp\_presolve.cpp:lp\_presolve\_run}（主驱动）、
+\srcpath{lp\_presolve.cpp:row\_sweep}（行规则）、
+\srcpath{lp\_presolve.cpp:col\_sweep}（列规则）、
+\srcpath{lp\_presolve.cpp:implied\_bound\_sweep}（活动界收紧）、
+\srcpath{lp\_presolve.cpp:substitution\_sweep} 与
+\srcpath{lp\_presolve.cpp:substitute\_singleton\_equality\_column}（代入类）、
+\srcpath{lp\_presolve.cpp:postsolve\_primal}（后求解回代）、
+\srcpath{lp\_presolve.cpp:rebuild\_activity}（活动界维护）。
+\end{remark}
+
+\begin{boundarynote}
+预求解的数值语义是\textbf{容差下的逻辑蕴含}：活动界比较、零系数判定都在
+缩放后的绝对/相对容差下进行（实现侧
+\srcpath{lp\_presolve.cpp:row\_tol} 与
+\srcpath{lp\_presolve.cpp:lp\_presolve\_publication\_tol\_scale}）。容差外的
+``近冗余'' 不作删除，以保证约简不改变可行状态；这与命题
+\ref{prop:thlp-rowrules} 的精确算术表述之间的差异是实现层的审慎放大，
+不是理论漏洞。
+\end{boundarynote}
+
+\subsection{与实现的对应}\label{subsec:thlp-mapping}
+
+\begin{longtable}{@{}p{0.40\textwidth}p{0.56\textwidth}@{}}
+\toprule
+理论条目 & 实现状态 \\
+\midrule
+\endhead
+箱式有界标准形 \eqref{eq:thlp-boxed} 与非基状态分类
+（注记 \ref{rem:thlp-boxed-nonbasic}）
+& \implfull{include/mipsolvers/engine/kernel/lp\_kernel/dual\_simplex.hpp:StandardFormLP} \\
+等价变换（命题 \ref{prop:thlp-transform}）
+& \implpart{实现不显式拆分自由变量/展开松弛，直接在箱式形上运行；行侧不等式在
+前端建模层处理} \\
+BFS 存在性与基表示（定义 \ref{def:thlp-bfs}）
+& \implfull{src/engine/kernel/lp\_kernel/native\_dual/state.cpp:build\_logical\_basis} \\
+Farkas 引理与不可行证书（引理 \ref{lem:thlp-farkas}）
+& \implfull{src/engine/kernel/lp\_kernel/native\_dual/certificate.cpp:phase\_one\_farkas\_certificate} \\
+原始不可行证书（Farkas，对偶侧）
+& \implfull{src/engine/kernel/lp\_kernel/native\_dual/certificate.cpp:primal\_infeasibility\_certificate} \\
+强对偶/最优性审计（定理 \ref{thm:thlp-strong}、命题
+\ref{prop:thlp-boxed-kkt}）
+& \implpart{定理本身不``实现''；最优性由终态审计按 \eqref{eq:thlp-boxed-kkt}
+三分支符号条件复核}，锚点
+\srcpath{src/engine/kernel/lp\_kernel/native\_dual/state.cpp:audit} \\
+对偶单纯形主迭代（命题 \ref{prop:thlp-bfrt-std} 的循环）
+& \implfull{src/engine/kernel/lp\_kernel/native\_dual/solver.cpp:minor\_iteration} \\
+相位组织（dual Phase-1 / Phase-2 与切换）
+& \implfull{src/engine/kernel/lp\_kernel/native\_dual/solver.cpp:run\_phase}；
+Phase-1 构造
+\srcpath{src/engine/kernel/lp\_kernel/native\_dual/state.cpp:initialize\_dual\_phase\_one}，
+切换
+\srcpath{src/engine/kernel/lp\_kernel/native\_dual/state.cpp:transition\_dual\_phase\_one\_to\_two} \\
+出基行选择（DSE merit + 堆）
+& \implfull{src/engine/kernel/lp\_kernel/native\_dual/pricing.cpp:choose\_leaving} \\
+箱式 BFRT 比率测试 \eqref{eq:thlp-bfrt-boxed}
+& \implfull{src/engine/kernel/lp\_kernel/native\_dual/pricing.cpp:choose\_entering\_bfrt} \\
+Harris 两段比率测试（注记 \ref{rem:thlp-harris}）
+& \implpart{原始侧独立函数
+\srcpath{src/engine/kernel/lp\_kernel/native\_dual/primal.cpp:choose\_leaving\_harris}；
+对偶侧两段结构内嵌于 \srcpath{pricing.cpp:choose\_entering\_bfrt}，无独立函数} \\
+Bland 规则（定理 \ref{thm:thlp-bland}）
+& \implpart{仅作循环兜底（\texttt{bland\_active} 触发），非常态定价规则}，
+锚点
+\srcpath{src/engine/kernel/lp\_kernel/native\_dual/pricing.cpp:choose\_leaving\_bland} \\
+代价移位摄动（注记 \ref{rem:thlp-perturbation}）
+& \implfull{src/engine/kernel/lp\_kernel/native\_dual/state.cpp:initialize\_stabilized\_cost}；
+重摄动
+\srcpath{src/engine/kernel/lp\_kernel/native\_dual/state.cpp:reperturb\_stabilized\_cost}；
+移位起点决策
+\srcpath{src/engine/kernel/lp\_kernel/native\_dual/state.cpp:decide\_cost\_shifted\_dual\_start} \\
+循环检测与 taboo（注记 \ref{rem:thlp-perturbation}）
+& \implfull{src/engine/kernel/lp\_kernel/native\_dual/state.cpp:record\_cycle\_arrival}；
+\srcpath{src/engine/kernel/lp\_kernel/native\_dual/state.cpp:is\_taboo\_row} \\
+steepest edge 权重递推（定理 \ref{thm:thlp-se-update}）
+& \implpart{精确权重按需计算并带重建门控，非每步无条件全量更新}，锚点
+\srcpath{src/engine/kernel/lp\_kernel/native\_dual/factor.cpp:BasisFactor::compute\_exact\_edge\_weights}、
+\srcpath{src/engine/kernel/lp\_kernel/native\_dual/pricing.cpp:compute\_dse\_weights} \\
+Devex 参考值框架（注记 \ref{rem:thlp-se-cost}）
+& \implfull{src/engine/kernel/lp\_kernel/native\_dual/state.cpp:initialize\_devex\_framework} \\
+FTRAN / BTRAN 与基求解
+& \implfull{src/engine/kernel/lp\_kernel/native\_dual/factor.cpp:BasisFactor::ftran}；
+\srcpath{src/engine/kernel/lp\_kernel/native\_dual/factor.cpp:BasisFactor::btran} \\
+LU 重分解与乘积式更新
+& \implfull{src/engine/kernel/lp\_kernel/native\_dual/factor.cpp:BasisFactor::rebuild}；
+\srcpath{src/engine/kernel/lp\_kernel/native\_dual/factor.cpp:BasisFactor::update} \\
+残差校验与迭代精化 \eqref{eq:thlp-refinement}
+& \implfull{src/engine/kernel/lp\_kernel/native\_dual/factor.cpp:BasisFactor::solve\_checked}；
+\srcpath{src/engine/kernel/lp\_kernel/native\_dual/factor.cpp:BasisFactor::refine\_checked} \\
+原始单纯形（作为重启/后备路径）
+& \implfull{src/engine/kernel/lp\_kernel/native\_dual/primal.cpp:run\_primal\_phase}；
+无界射线证书
+\srcpath{src/engine/kernel/lp\_kernel/native\_dual/primal.cpp:certify\_primal\_unbounded\_ray} \\
+预求解定点迭代与规则（命题 \ref{prop:thlp-rowrules}、
+\ref{prop:thlp-colrules}）
+& \implfull{src/engine/presolve/lp\_presolve.cpp:lp\_presolve\_run}；
+行规则 \srcpath{src/engine/presolve/lp\_presolve.cpp:row\_sweep}；
+列规则 \srcpath{src/engine/presolve/lp\_presolve.cpp:col\_sweep} \\
+活动界维护（定义 \ref{def:thlp-activity}）
+& \implfull{src/engine/presolve/lp\_presolve.cpp:rebuild\_activity}；
+增量更新 \srcpath{src/engine/presolve/lp\_presolve.cpp:update\_column\_activity} \\
+代入类约简（命题 \ref{prop:thlp-colrules}（3）（4））
+& \implfull{src/engine/presolve/lp\_presolve.cpp:substitution\_sweep}；
+singleton 等式列
+\srcpath{src/engine/presolve/lp\_presolve.cpp:substitute\_singleton\_equality\_column} \\
+postsolve 回代
+& \implpart{当前实现恢复原始变量与行乘子主路径}，锚点
+\srcpath{src/engine/presolve/lp\_presolve.cpp:postsolve\_primal} \\
+子优化/多重定价、灵敏度分析（gapnote）
+& \implnone \\
+\bottomrule
+\end{longtable}
+
+\subsection{参考文献}
+
+\begin{thebibliography}{19}\small
+\bibitem{lpdantzig1963}
+G. B. Dantzig, \emph{Linear Programming and Extensions}, Princeton University
+Press, 1963.
+\bibitem{lpchvatal1983}
+V. Chv\'atal, \emph{Linear Programming}, W. H. Freeman, 1983.
+\bibitem{lpbertsimas1997}
+D. Bertsimas, J. N. Tsitsiklis, \emph{Introduction to Linear Optimization},
+Athena Scientific, 1997.
+\bibitem{lpbland1977}
+R. G. Bland, New finite pivoting rules for the simplex method,
+\emph{Mathematics of Operations Research} 2(2):103--107, 1977.
+\bibitem{lpbeale1955}
+E. M. L. Beale, Cycling in the dual simplex algorithm,
+\emph{Naval Research Logistics Quarterly} 2(4):269--275, 1955.
+\bibitem{lpharris1973}
+P. M. J. Harris, Pivot selection methods of the Devex LP code,
+\emph{Mathematical Programming} 5(1):1--28, 1973.
+\bibitem{lpgoldfarb1977}
+D. Goldfarb, J. K. Reid, A practicable steepest-edge simplex algorithm,
+\emph{Mathematical Programming} 12(1):361--371, 1977.
+\bibitem{lpforrest1992}
+J. J. H. Forrest, D. Goldfarb, Steepest-edge simplex algorithms for linear
+programming, \emph{Mathematical Programming} 57(1):341--374, 1992.
+\bibitem{lpandersen1995}
+E. D. Andersen, K. D. Andersen, Presolving in linear programming,
+\emph{Mathematical Programming} 71(2):221--245, 1995.
+\bibitem{lpmaros2003}
+I. Maros, \emph{Computational Techniques of the Simplex Method}, Kluwer
+Academic Publishers, 2003.
+\end{thebibliography}

@@ -51,6 +51,7 @@ theory-guided 规则，所有算法/数值改动必须以这些推导文档为�
 | [native_milp_highs_lp_root_profile_2026-08-13.md](../archive/native_milp_highs_lp_root_profile_2026-08-13.md) | HiGHS LP 根节点剖面 |
 | [cplex_callable_library_integration_2026-09-12.md](../archive/cplex_callable_library_integration_2026-09-12.md) | CPLEX Callable Library 的等价模型映射、线性装配成本模型与 MIPLIB 对照协议 |
 | [native_milp_cplex_gap_improvement_2026-09-12.md](../archive/native_milp_cplex_gap_improvement_2026-09-12.md) | Native MILP 根节点 deadline、数值审计与 1/4 线程评估协议 |
+| [miplib2017_benchmark_protocol_2026-08-25.md](../archive/miplib2017_benchmark_protocol_2026-08-25.md) | MIPLIB 2017 审计协议：固定算例集、PAR-10 与移位几何均值定义 |
 
 ### 用户文档原始版本
 
@@ -67,7 +68,7 @@ theory-guided 规则，所有算法/数值改动必须以这些推导文档为�
 - OPF 定制化加速技术方案
 - 高性能线性代数内核理论分析与工程化差距评估
 - 高性能线性代数求解器进展与电力系统应用综述
-- linear_algebria.md（线性代数内核笔记）
+- linear_algebra.md（线性代数内核笔记）
 
 ## 11.3 教程资源（docs/tutorial/）
 

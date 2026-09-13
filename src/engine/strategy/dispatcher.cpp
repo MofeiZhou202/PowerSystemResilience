@@ -17,46 +17,47 @@ SolveResult unsupported(const std::string& reason) {
 
 SolveResult solve_with_adapter(const SolverAdapterPtr& adapter,
                                ProblemClass cls,
-                               const api::ProblemVariant& problem) {
+                               const api::ProblemVariant& problem,
+                               const SolveContext& context) {
   switch (cls) {
     case ProblemClass::LE: {
       const auto* p = std::get_if<SparseLinSys>(&problem);
-      return p ? adapter->solve_le(*p)
+      return p ? adapter->solve_le(*p, context)
                : unsupported("Problem payload mismatch for LE dispatch");
     }
     case ProblemClass::NLE: {
       const auto* p = std::get_if<NonlinearSystem>(&problem);
-      return p ? adapter->solve_nle(*p)
+      return p ? adapter->solve_nle(*p, context)
                : unsupported("Problem payload mismatch for NLE dispatch");
     }
     case ProblemClass::LP: {
       const auto* p = std::get_if<LPModel>(&problem);
-      return p ? adapter->solve_lp(*p)
+      return p ? adapter->solve_lp(*p, context)
                : unsupported("Problem payload mismatch for LP dispatch");
     }
     case ProblemClass::QP: {
       const auto* p = std::get_if<QPModel>(&problem);
-      return p ? adapter->solve_qp(*p)
+      return p ? adapter->solve_qp(*p, context)
                : unsupported("Problem payload mismatch for QP dispatch");
     }
     case ProblemClass::NLP: {
       const auto* p = std::get_if<NLPModel>(&problem);
-      return p ? adapter->solve_nlp(*p)
+      return p ? adapter->solve_nlp(*p, context)
                : unsupported("Problem payload mismatch for NLP dispatch");
     }
     case ProblemClass::MILP: {
       const auto* p = std::get_if<MIPModel>(&problem);
-      return p ? adapter->solve_milp(*p)
+      return p ? adapter->solve_milp(*p, context)
                : unsupported("Problem payload mismatch for MILP dispatch");
     }
     case ProblemClass::MINLP: {
       const auto* p = std::get_if<MINLPModel>(&problem);
-      return p ? adapter->solve_minlp(*p)
+      return p ? adapter->solve_minlp(*p, context)
                : unsupported("Problem payload mismatch for MINLP dispatch");
     }
     case ProblemClass::CONIC: {
       const auto* p = std::get_if<ConicModel>(&problem);
-      return p ? adapter->solve_conic(*p)
+      return p ? adapter->solve_conic(*p, context)
                : unsupported("Problem payload mismatch for CONIC dispatch");
     }
   }
@@ -88,6 +89,24 @@ std::vector<std::string> default_priority_for(ProblemClass cls) {
 bool is_external_adapter_name(const std::string& name) {
   return name == "HiGHS" || name == "Ipopt" || name == "Scip" ||
          name == "Gurobi" || name == "CPLEX";
+}
+
+SolveResult deadline_result(double runtime_sec) {
+  SolveResult out;
+  out.stats.success = false;
+  out.stats.status = "Time limit reached before fallback";
+  out.stats.solver_name = "StrategyDispatcher";
+  out.stats.runtime_sec = runtime_sec;
+  return out;
+}
+
+SolveResult cancelled_result(double runtime_sec) {
+  SolveResult out;
+  out.stats.success = false;
+  out.stats.status = "Cancelled before fallback";
+  out.stats.solver_name = "StrategyDispatcher";
+  out.stats.runtime_sec = runtime_sec;
+  return out;
 }
 
 bool is_native_adapter_name(const std::string& name) {
@@ -197,7 +216,8 @@ SolveResult StrategyDispatcher::solve(const AdapterRegistry& registry,
                                       const std::string& preferred_solver,
                                       bool allow_fallback,
                                       StrategyPolicy default_policy,
-                                      const std::map<ProblemClass, StrategyPolicy>& class_policy) const {
+                                      const std::map<ProblemClass, StrategyPolicy>& class_policy,
+                                      const SolveContext& context) const {
   const ProblemClass cls = api::problem_class(problem);
   const auto candidates = candidate_adapters(
       registry, cls, preferred_solver, default_policy, class_policy);
@@ -209,7 +229,15 @@ SolveResult StrategyDispatcher::solve(const AdapterRegistry& registry,
   SolveResult last_failure;
   bool have_failure = false;
   for (const auto& adapter : candidates) {
-    SolveResult out = solve_with_adapter(adapter, cls, problem);
+    // One absolute deadline owns the entire fallback transaction. See
+    // docs/archive/general_solver_performance_program_2026-09-13.md, R1.
+    if (context.deadline_expired()) {
+      return deadline_result(context.elapsed_sec());
+    }
+    if (context.stop_token().stop_requested()) {
+      return cancelled_result(context.elapsed_sec());
+    }
+    SolveResult out = solve_with_adapter(adapter, cls, problem, context);
     if (out.stats.success) {
       return out;
     }

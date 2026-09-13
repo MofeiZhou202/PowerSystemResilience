@@ -1,0 +1,642 @@
+% theory_interior_point.tex —— engine 通用理论：原始-对偶内点法
+% （障碍问题与中心路径、牛顿方向与预测-校正、KKT 线性代数、
+%   惯性校正与正则化、滤波线搜索与可行性恢复、步长与终止）
+% 本文件为理论层章节，遵循 docs/modules/THEORY_WRITING_GUIDE.md。
+
+\section{原始-对偶内点法：中心路径、牛顿系统与全局化}\label{sec:thipm}
+
+\begin{theorynote}
+本章为通用数学理论，按原始-对偶内点法（primal-dual interior-point method,
+IPM）领域的标准模型与文献体系撰写，覆盖：对数障碍问题与中心路径（含 LP
+中心路径存在唯一性定理及其证明）、原始-对偶牛顿方向、Mehrotra 预测-校正、
+增广 KKT 系统与 normal equations 的推导与权衡、惯性校正与正则化
+（W\"achter--Biegler 框架）、滤波线搜索与可行性恢复、步长规则与终止判据，
+以及 LP 与 NLP 两种形式的统一视角。本章公式不要求逐式对应代码；与平台实现
+（\srcpath{src/engine/kernel/ipm/}、\srcpath{src/engine/kernel/kkt/}）的
+对应关系见本章末``与实现的对应''表，超出实现的内容以``未实现扩展说明''框
+就地标记。
+\end{theorynote}
+
+\subsection{记号与约定}\label{subsec:thipm-notation}
+
+\begin{itemize}
+  \item NLP 标准写法：
+        \begin{equation}\label{eq:thipm-nlp}
+          \min_{x\in\mathbb{R}^{n}}\; f(x)
+          \quad\text{s.t.}\quad c_E(x)=0,\quad c_I(x)\ge0,
+        \end{equation}
+        $f$、$c_E$、$c_I$ 二次连续可微；等式 $m_E$ 个、不等式 $m_I$ 个。
+        引入松弛 $s=c_I(x)\ge0$ 后不等式化为 $c_I(x)-s=0$、$s\ge0$。
+  \item LP 特例：$f(x)=c^{T}x$，$c_E(x)=Ax-b$，无 $c_I$ 时变量界
+        $x\ge0$ 充当不等式；写为
+        \begin{equation}\label{eq:thipm-lp}
+          \min_{x}\;c^{T}x\quad\text{s.t.}\quad Ax=b,\quad x\ge0 .
+        \end{equation}
+  \item 大写对角矩阵约定：$X=\mathrm{diag}(x)$，$Z=\mathrm{diag}(z)$，
+        $S=\mathrm{diag}(s)$；$e=(1,\dots,1)^{T}$。
+  \item 对偶变量：等式乘子 $y$（NLP 中也记 $\lambda$），界/不等式乘子
+        $z\ge0$；Lagrange 函数
+        $\mathcal{L}(x,y,z)=f(x)-y^{T}c_E(x)-z^{T}c_I(x)$（LP 情形
+        $\mathcal{L}=c^{T}x-y^{T}(Ax-b)-z^{T}x$）。
+  \item barrier parameter $\mu>0$；对偶间隙度量 $\mu$ 的 LP 形式为
+        $x^{T}z/n$，NLP 形式为 $s^{T}z/m_I$（归一化按互补对个数）。
+  \item KKT 残差：原始可行性 $r_p$、对偶驻定性 $r_d$、互补性 $r_c$；
+        终止判据对三者分别取缩放后的无穷范数。
+\end{itemize}
+
+\subsection{障碍问题与中心路径}\label{subsec:thipm-central-path}
+
+\begin{definition}[对数障碍问题]\label{def:thipm-barrier}
+对 \eqref{eq:thipm-lp}，barrier parameter $\mu>0$ 的对数障碍问题为
+\begin{equation}\label{eq:thipm-barrier}
+  \min_{x}\; \varphi_\mu(x)=c^{T}x-\mu\sum_{j=1}^{n}\ln x_j
+  \quad\text{s.t.}\quad Ax=b,\quad x>0 .
+\end{equation}
+对 NLP \eqref{eq:thipm-nlp}（松弛化后）对应为
+\begin{equation}\label{eq:thipm-barrier-nlp}
+  \min_{x,s}\; f(x)-\mu\sum_{i=1}^{m_I}\ln s_i
+  \quad\text{s.t.}\quad c_E(x)=0,\quad c_I(x)-s=0,\quad s>0 .
+\end{equation}
+障碍项在边界 $x_j\downarrow0$（或 $s_i\downarrow0$）处趋于 $+\infty$，
+把不等式约束``软化''进目标。
+\end{definition}
+
+\begin{definition}[扰动 KKT 系统与中心路径]\label{def:thipm-perturbed-kkt}
+\eqref{eq:thipm-barrier} 的驻点条件（一阶最优性）写成原始-对偶形式：
+\begin{equation}\label{eq:thipm-primaldual}
+  Ax=b,\quad x>0;\qquad
+  A^{T}y+z=c,\quad z>0;\qquad
+  XZe=\mu e .
+\end{equation}
+对每个 $\mu>0$，\eqref{eq:thipm-primaldual} 的解
+$(x(\mu),y(\mu),z(\mu))$（若存在唯一）形成的轨迹称为\textbf{中心路径}
+（central path）。第三式称为扰动互补条件：$\mu=0$ 时退化为 LP 的互补松弛
+条件。
+\end{definition}
+
+\begin{lemma}[障碍问题的严格凸性]\label{lem:thipm-strictconvex}
+在 $\mathcal{F}^{\circ}=\{x:Ax=b,\ x>0\}$ 上，$\varphi_\mu$ 沿可行方向
+严格凸：对任意 $x\in\mathcal{F}^{\circ}$ 与 $d\ne0$、$Ad=0$，
+$d^{T}\nabla^{2}\varphi_\mu(x)\,d>0$。
+\end{lemma}
+
+\begin{proof}
+$\nabla^{2}\varphi_\mu(x)=\mu X^{-2}$（线性项 $c^{T}x$ 无曲率），
+$X^{-2}=\mathrm{diag}(x_j^{-2})$ 正定，故
+$d^{T}\nabla^{2}\varphi_\mu d=\mu\sum_j d_j^{2}/x_j^{2}>0$（$d\ne0$）。
+\end{proof}
+
+\begin{theorem}[LP 中心路径的存在唯一性]\label{thm:thipm-centralpath}
+设原始问题 \eqref{eq:thipm-lp} 与其对偶
+$\max\{b^{T}y:A^{T}y+z=c,\ z\ge0\}$ 都存在严格可行点（即存在
+$x>0$、$Ax=b$ 与 $(y,z)$、$z>0$、$A^{T}y+z=c$）。则对每个 $\mu>0$，
+扰动 KKT 系统 \eqref{eq:thipm-primaldual} 存在唯一解
+$(x(\mu),y(\mu),z(\mu))$；且对偶间隙
+\begin{equation}\label{eq:thipm-gap}
+  c^{T}x(\mu)-b^{T}y(\mu)=x(\mu)^{T}z(\mu)=n\mu .
+\end{equation}
+特别地，沿中心路径 $c^{T}x(\mu)\to z^{*}$（原问题最优值），$\mu\downarrow0$。
+\end{theorem}
+
+\begin{proof}
+\textbf{存在性}：固定对偶严格可行点 $(\bar y,\bar z)$，$\bar z>0$。对任意
+$x\in\mathcal{F}^{\circ}$，
+$c^{T}x=\bar y^{T}Ax+\bar z^{T}x=b^{T}\bar y+\bar z^{T}x$，故
+\begin{equation*}
+  \varphi_\mu(x)
+  =b^{T}\bar y+\sum_{j=1}^{n}\bigl(\bar z_j x_j-\mu\ln x_j\bigr).
+\end{equation*}
+一元函数 $t\mapsto \bar z_j t-\mu\ln t$（$t>0$）在 $t=\mu/\bar z_j$ 处取
+最小值 $\mu-\mu\ln(\mu/\bar z_j)$，且当 $t\downarrow0$ 或 $t\to\infty$ 时
+趋于 $+\infty$。因此 $\varphi_\mu$ 在 $\mathcal{F}^{\circ}$ 上下方有界，
+且任一子水平集 $\{x\in\mathcal{F}^{\circ}:\varphi_\mu(x)\le M\}$ 有界
+（每个分量 $x_j$ 都被控制）且与边界保持距离；又
+$\mathcal{F}^{\circ}$ 相对闭包中 $\varphi_\mu$ 连续延拓到边界时取
+$+\infty$，故 $\varphi_\mu$ 在 $\mathcal{F}^{\circ}$ 上取得最小值
+$x(\mu)$。\textbf{唯一性}：由引理 \ref{lem:thipm-strictconvex}，
+$\varphi_\mu$ 在凸集 $\mathcal{F}^{\circ}$ 上严格凸，最小值点唯一。
+\textbf{对偶变量的存在与唯一}：$x(\mu)$ 满足驻点条件：存在 $y$ 使
+$\nabla\varphi_\mu(x)=c-\mu X^{-1}e=A^{T}y$（等式约束的乘子法则，$A$
+行满秩时 $y$ 唯一；否则 $y$ 不唯一但 $z$ 唯一）。令
+$z=\mu X^{-1}e>0$，则 $A^{T}y+z=c$ 且 $XZe=\mu e$。反之任何
+\eqref{eq:thipm-primaldual} 的解给出 $\varphi_\mu$ 的驻点即最小点。
+\textbf{间隙}：$x^{T}z=e^{T}XZe=n\mu$，而
+$c^{T}x-b^{T}y=(c-A^{T}y)^{T}x=z^{T}x$。令 $\mu\downarrow0$：
+由强对偶（对偶可行给出 $b^{T}y(\mu)\le z^{*}\le c^{T}x(\mu)$）夹逼得
+$c^{T}x(\mu)\to z^{*}$。
+\end{proof}
+
+\begin{remark}\label{rem:thipm-analytic-center}
+中心路径当 $\mu\downarrow0$ 时的极限不仅是最优点，而且是最优面的
+\textbf{解析中心}（analytic center）：在严格互补意义下，极限点在每个起作用
+维度上均衡分布。该结论的证明需要最优面分解（Goldman--Tucker 严格互补定理）
+的工具，超出本章范围，见 \cite{ipmwright1997} 第 2 章。定理
+\ref{thm:thipm-centralpath} 的存在性证明本质上是 Fiacco--McCormick
+障碍函数理论 \cite{ipmfiacco1968} 在 LP 上的显式化。
+\end{remark}
+
+\begin{gapnote}
+\textbf{齐次自对偶嵌入}（homogeneous self-dual embedding, HSD）把可行性
+检测与最优性求解统一在一个恒严格可行的增广 LP 中，使 IPM 无需 Phase-1 且
+能给出不可行/无界证书 \cite{ipmye1994,ipmandersen2000}。当前实现
+（\srcpath{src/engine/kernel/ipm/ipm\_lp\_solver.cpp}）采用不可行起点 +
+Mehrotra 修正的经典框架，\textbf{未}实现 HSD；不可行/无界的判定依赖
+最优性审计与残差诊断（
+\srcpath{ipm\_lp\_solver.cpp:audit\_ipm\_lp\_optimality}），而非嵌入系统的
+证书。
+\end{gapnote}
+
+\subsection{原始-对偶牛顿方向}\label{subsec:thipm-newton}
+
+中心路径条件 \eqref{eq:thipm-primaldual} 是关于 $w=(x,y,z)$ 的非线性方程组
+$F_\mu(w)=0$。IPM 的每次迭代对当前点（不必可行，只要求 $x,z>0$）做一步
+阻尼牛顿法。牛顿方向由线性化系统给出：
+\begin{equation}\label{eq:thipm-newtonsystem}
+  \begin{pmatrix}
+    0 & A^{T} & I\\
+    A & 0 & 0\\
+    Z & 0 & X
+  \end{pmatrix}
+  \begin{pmatrix}\Delta x\\ \Delta y\\ \Delta z\end{pmatrix}
+  =-
+  \begin{pmatrix}
+    A^{T}y+z-c\\ Ax-b\\ XZe-\mu e
+  \end{pmatrix}.
+\end{equation}
+
+\begin{lemma}[牛顿系统的可解性]\label{lem:thipm-nonsingular}
+若 $A$ 行满秩且 $x>0$、$z>0$，则 \eqref{eq:thipm-newtonsystem} 的系数矩阵
+非奇异。
+\end{lemma}
+
+\begin{proof}
+设 $(\Delta x,\Delta y,\Delta z)$ 在其零空间中。第三行给出
+$\Delta z=-X^{-1}Z\Delta x$；代入第一行：
+$A^{T}\Delta y=X^{-1}Z\Delta x$。左乘 $\Delta x^{T}$ 并用第二行
+$A\Delta x=0$：
+$0=\Delta x^{T}A^{T}\Delta y=\Delta x^{T}X^{-1}Z\Delta x$。
+$X^{-1}Z$ 为严格正对角阵，故 $\Delta x=0$；于是 $A^{T}\Delta y=0$，
+由 $A$ 行满秩得 $\Delta y=0$，进而 $\Delta z=0$。零空间平凡即非奇异。
+\end{proof}
+
+\begin{remark}\label{rem:thipm-nlp-newton}
+NLP 情形的牛顿系统结构相同，只是 $(1,1)$ 块不再是零：
+线性化 Lagrange 驻定性得块
+$W=\nabla_{xx}^{2}\mathcal{L}(x,y,z)$，等式/松弛化不等式的 Jacobian 记
+$J$（行满秩是 LICQ 的线性代数形式），互补块为
+$S\Delta z+Z\Delta s=\mu e-SZe$。消去 $\Delta s$、$\Delta z$ 后得到
+增广系统
+\begin{equation}\label{eq:thipm-augmented-nlp}
+  \begin{pmatrix}
+    W+\Sigma & J^{T}\\
+    J & 0
+  \end{pmatrix}
+  \begin{pmatrix}\Delta x\\ \Delta y\end{pmatrix}
+  =
+  -\begin{pmatrix} r_d'\\ r_p\end{pmatrix},
+  \qquad \Sigma=S^{-1}Z\succ0,
+\end{equation}
+其中 $r_d'$ 吸收了互补残差的回代。与 LP 的本质差别仅在 $W\ne0$：
+$W$ 不定或奇异时，$(1,1)$ 块失去拟定性，这是 NLP-IPM 需要惯性校正
+（\ref{subsec:thipm-inertia} 小节）而 LP-IPM 不需要的根本原因。
+\end{remark}
+
+\subsection{Mehrotra 预测-校正}\label{subsec:thipm-mehrotra}
+
+纯牛顿步（对固定的 $\mu$ 解 \eqref{eq:thipm-newtonsystem}）有两个缺陷：
+（i）$\mu$ 的缩减节奏盲目；（ii）线性化忽略 $XZe$ 的二次项，步长常被边界
+截断得很小。Mehrotra 预测-校正 \cite{ipmmehrotra1992} 是实践中的标准解法：
+
+\begin{enumerate}
+  \item \textbf{预测（affine-scaling）步}：取 $\mu=0$ 解
+        \eqref{eq:thipm-newtonsystem}，得方向
+        $(\Delta x^{\mathrm{aff}},\Delta y^{\mathrm{aff}},\Delta z^{\mathrm{aff}})$。
+        按 fraction-to-boundary 规则计算最大可行步长
+        \begin{equation}\label{eq:thipm-ftb}
+          \alpha_p^{\mathrm{aff}}
+          =\min\Bigl\{1,\ \min_{j:\,\Delta x_j^{\mathrm{aff}}<0}
+          -\frac{x_j}{\Delta x_j^{\mathrm{aff}}}\Bigr\},
+          \qquad
+          \alpha_d^{\mathrm{aff}}
+          =\min\Bigl\{1,\ \min_{j:\,\Delta z_j^{\mathrm{aff}}<0}
+          -\frac{z_j}{\Delta z_j^{\mathrm{aff}}}\Bigr\},
+        \end{equation}
+        并估计仿射步后的间隙
+        $\mu_{\mathrm{aff}}=(x+\alpha_p^{\mathrm{aff}}\Delta x^{\mathrm{aff}})^{T}
+        (z+\alpha_d^{\mathrm{aff}}\Delta z^{\mathrm{aff}})/n$。
+  \item \textbf{中心化参数}：$\sigma=(\mu_{\mathrm{aff}}/\mu)^{3}$。
+        若仿射步几乎消除间隙（$\mu_{\mathrm{aff}}\ll\mu$），$\sigma$ 接近
+        $0$，下一步偏攻最优性；若仿射步受阻，$\sigma$ 接近 $1$，下一步
+        偏回中心路径。指数 $3$ 是 Mehrotra 的经验选择，理论上
+        $[0,1]$ 内任一连续递减响应都可行。
+  \item \textbf{校正步}：以右端项
+        \begin{equation}\label{eq:thipm-corrector}
+          r_c=XZe-\sigma\mu e+\Delta X^{\mathrm{aff}}\Delta Z^{\mathrm{aff}}e
+        \end{equation}
+        重解同一系数矩阵的牛顿系统（只需一次新的回代），得总方向。其中
+        二阶项 $\Delta X^{\mathrm{aff}}\Delta Z^{\mathrm{aff}}e$ 补偿了
+        线性化丢弃的交叉项，这正是``预测-校正''名称的由来。
+  \item \textbf{步长与更新}：对总方向按带回退因子 $\tau$ 的
+        fraction-to-boundary 取
+        $\alpha_p,\alpha_d$（$\tau$ 的典型取法见
+        \ref{subsec:thipm-steps} 小节），更新
+        $(x,y,z)\leftarrow(x+\alpha_p\Delta x,\ y+\alpha_d\Delta y,\
+        z+\alpha_d\Delta z)$。
+\end{enumerate}
+
+\begin{remark}[Gondzio 多重中心校正]\label{rem:thipm-gondzio}
+预测-校正之后，只要新的校正方向能显著增大步长且不破坏中心化，就可以用
+同一次因式分解反复回代，追加多个校正 \cite{ipmgondzio1996}；每个校正的
+收益递减，实现以校正次数上限与步长增益门限控制（
+\srcpath{ipm\_lp\_solver.cpp:NativeIPMLPAdapter::solve\_lp\_impl} 内的校正
+循环）。
+\end{remark}
+
+\subsection{KKT 线性代数：增广系统与法方程}\label{subsec:thipm-kkt}
+
+牛顿系统 \eqref{eq:thipm-newtonsystem} 每步都要以新右端求解一次，其线性
+代数占 IPM 总耗时的绝大部分。两种标准约简如下。由第三行
+$\Delta z=X^{-1}(r_c-Z\Delta x)$ 代入第一行，得\textbf{增广系统}
+（augmented system）
+\begin{equation}\label{eq:thipm-augmented}
+  \underbrace{\begin{pmatrix}
+    -D^{-2} & A^{T}\\
+    A & 0
+  \end{pmatrix}}_{K}
+  \begin{pmatrix}\Delta x\\ \Delta y\end{pmatrix}
+  =
+  \begin{pmatrix} -\hat r_d\\ \hat r_p\end{pmatrix},
+  \qquad D^{2}=XZ^{-1}\succ0 ,
+\end{equation}
+再消去 $\Delta x$ 得\textbf{法方程}（normal equations）
+\begin{equation}\label{eq:thipm-normal}
+  AD^{2}A^{T}\,\Delta y=\tilde r,
+  \qquad
+  \Delta x=D^{2}(A^{T}\Delta y-\hat r_d'),\quad
+  \Delta z=X^{-1}(r_c-Z\Delta x).
+\end{equation}
+
+\begin{lemma}[增广矩阵的惯性]\label{lem:thipm-inertia}
+约定惯性三元组 $\mathrm{In}(M)=(\text{正},\text{负},\text{零})$。设
+$D^{2}\succ0$ 对角、$A$ 行满秩。则 \eqref{eq:thipm-augmented} 的矩阵
+$K$ 是对称拟定（symmetric quasidefinite）矩阵 \cite{ipmvanderbei1995}，
+存在不带换主元崩溃的 $LDL^{T}$ 分解（$L$ 单位下三角、$D$ 对角非奇异），
+且
+\begin{equation}\label{eq:thipm-inertia-lp}
+  \mathrm{In}(K)=(m,\ n,\ 0),
+\end{equation}
+即 $m$ 个正、$n$ 个负特征值、无零特征值。等价地，把第一块行与第一块列同
+乘 $-1$ 得到的 congruence 矩阵
+$K'=\bigl[\begin{smallmatrix} D^{-2} & -A^{T}\\ -A & 0\end{smallmatrix}\bigr]$
+满足 $\mathrm{In}(K')=(n,\ m,\ 0)$。
+\end{lemma}
+
+\begin{proof}
+取 $P=\bigl[\begin{smallmatrix} I & 0\\ AD^{2} & I\end{smallmatrix}\bigr]$
+（下三角、对角线为 $I$，故 $P$ 非奇异），直接验证 congruence
+\begin{equation*}
+  P K P^{T}
+  =
+  \begin{pmatrix} -D^{-2} & 0\\ 0 & AD^{2}A^{T}\end{pmatrix}:
+\end{equation*}
+$(2,1)$ 块 $=-AD^{2}D^{-2}+A=0$；$(1,2)$ 块
+$=-D^{-2}D^{2}A^{T}+A^{T}=0$；$(2,2)$ 块 $=AD^{2}A^{T}$。
+$-D^{-2}\prec0$ 贡献 $n$ 个负方向；$A$ 行满秩且 $D^{2}\succ0$ 蕴含 Schur
+补 $AD^{2}A^{T}\succ0$，贡献 $m$ 个正方向；右端为块对角非奇异矩阵。由
+Sylvester 惯性定律，$\mathrm{In}(K)=\mathrm{In}(PKP^{T})=(m,n,0)$。
+$K'$ 与 $K$ 相差第一块行列的符号翻转，是一次换符号的 congruence，故
+$\mathrm{In}(K')=(n,m,0)$。零惯性为零保证了 $LDL^{T}$ 分解的存在性
+（拟定的标准性质，\cite{ipmvanderbei1995} 定理 2.1）。
+\end{proof}
+
+\begin{remark}[法方程 vs 增广系统的权衡]\label{rem:thipm-ne-vs-aug}
+法方程 \eqref{eq:thipm-normal} 的矩阵 $AD^{2}A^{T}$ 对称正定，可用
+Cholesky；但其稀疏模式是 $AA^{T}$ 的模式：$A$ 中任一``稠密列''（如自由
+变量拆分、大量界约束对应的列）会在 $AD^{2}A^{T}$ 中产生稠密块，需按
+列密度分裂处理。增广系统保持 $A$ 的原始稀疏性，代价是矩阵不定、需要支持
+惯性报告的 $LDL^{T}$（Bunch--Kaufman 型或带惯性统计的稀疏多波前/超节点
+分解）。$D^{2}=XZ^{-1}$ 的对角元在迭代后期\textbf{严重分离}（贴边界的
+$x_j$ 使比值趋 $0$ 或 $\infty$），这是 IPM 线性系统条件数恶化的结构性
+来源；两种形式都受影响，但增广形式的误差集中在可通过迭代精化恢复的通道，
+法方程形式则直接平方了条件数，$\kappa(AD^{2}A^{T})$ 可达
+$O(\kappa^{2})$ 量级。数值讨论见 \cite{ipmwright1997} 第 8 章；实现侧
+增广装配为
+\srcpath{kkt\_system.cpp:assemble\_augmented\_kkt}，法方程求解为
+\srcpath{kkt\_system.cpp:solve\_kkt\_reduced\_sparse}，因式分解复用为
+\srcpath{kkt\_system.cpp:factor\_current\_kkt}。
+\end{remark}
+
+\subsection{惯性校正与正则化（NLP 情形）}\label{subsec:thipm-inertia}
+
+对 NLP，增广矩阵 \eqref{eq:thipm-augmented-nlp} 的 $(1,1)$ 块
+$W+\Sigma$ 不再保证拟定：非凸问题的 $W$ 有负曲率，分解可能出现错误的
+惯性或病态主元。W\"achter--Biegler 框架 \cite{ipmwachter2006} 的处理分两层：
+
+\begin{enumerate}
+  \item \textbf{惯性判据}：约束化简后的 KKT 矩阵
+        \begin{equation}\label{eq:thipm-kkt-nlp}
+          K(\delta_w,\delta_c)=
+          \begin{pmatrix}
+            W+\Sigma+\delta_w I & J^{T}\\
+            J & -\delta_c I
+          \end{pmatrix}
+        \end{equation}
+        的 $LDL^{T}$ 惯性应为 $(n,\,m,\,0)$（$n$ 为原始变量含松弛的维数、
+        $m$ 为约束数）。其依据与引理 \ref{lem:thipm-inertia} 相同：块消去
+        后惯性等于 $(1,1)$ 块与负 Schur 补的惯性之和；惯性正确时，得到的
+        原始方向 $\Delta x$ 是 barrier 目标沿约束流形的下降方向
+        \cite{ipmwachter2006}（第 3.1 节）。
+  \item \textbf{$\delta_w$ 递增协议}：分解后检查惯性；不符则按
+        $\delta_w\leftarrow\kappa_w^{+}\delta_w$（首次失败取
+        $\delta_w^{0}$）放大 $(1,1)$ 块正则化并重分解；反复失败达上限时
+        触发 $\delta_c>0$ 的约束正则化或转入可行性恢复。该协议是
+        \eqref{eq:thipm-kkt-nlp} 保持拟定结构（从而可分解）与方向质量
+        之间的显式权衡：$\delta_w$ 过大使方向偏向最速下降、收敛变慢。
+\end{enumerate}
+
+\begin{remark}[正则化与 PMM 的边界]\label{rem:thipm-pmm-boundary}
+把 $\delta_w$、$\delta_c$ 同时取为随 $\mu$ 缩减的正则项并配合不动点内
+循环，即得原始-对偶正则化内点法（PDPM/IP-PMM）的骨架；但仅把 $\delta_w$
+当数值兜底（惯性不符才启用）\textbf{不是} PMM——前者是算法结构、后者是
+数值防护。当前实现属后者：惯性驱动的 $\delta_w$ 升级为
+\srcpath{kkt\_system.cpp:factor\_kkt\_inertia\_corrected\_sparse}、
+\srcpath{kkt\_system.cpp:solve\_kkt\_inertia\_corrected\_sparse}，参数解析为
+\srcpath{kkt\_system.cpp:resolve\_inertia\_settings}，递增规则为
+\srcpath{kkt\_system.cpp:increased\_primal\_regularization}；凝聚形式
+（condensed）的正定性证书为
+\srcpath{kkt\_system.cpp:certify\_primal\_positive\_definite}。
+\end{remark}
+
+\subsection{全局化：滤波线搜索与可行性恢复}\label{subsec:thipm-filter}
+
+NLP-IPM 需要全局化机制协调``减少不可行性''与``减少（barrier）目标''两个
+冲突目标。定义约束违反度与 barrier 目标
+\begin{equation}\label{eq:thipm-theta-phi}
+  \theta(x)=\|c_E(x)\|+\|c_I(x)-s\|\quad(\text{约定范数}),
+  \qquad
+  \phi_\mu(x,s)=f(x)-\mu\sum_{i}\ln s_i .
+\end{equation}
+
+\begin{definition}[滤波与可接受性]\label{def:thipm-filter}
+滤波（filter）是 $(\theta,\phi)$ 平面上互不支配的点集
+\cite{ipmfletcher2002,ipmwachter2006}：试验点 $(\theta_t,\phi_t)$ 被滤波
+接受，当且仅当对每个滤波条目 $(\theta_j,\phi_j)$，
+\begin{equation}\label{eq:thipm-filter-acc}
+  \theta_t\le(1-\gamma_\theta)\,\theta_j
+  \qquad\text{或}\qquad
+  \phi_t\le\phi_j-\gamma_\phi\,\theta_j ,
+\end{equation}
+其中 $\gamma_\theta,\gamma_\phi\in(0,1)$ 为小常数。条目 $(\theta_j,\phi_j)$
+支配所有同时劣于它的点，滤波即这些支配区域的并的补。
+\end{definition}
+
+\begin{remark}[切换条件与 Armijo 判据]\label{rem:thipm-switching}
+仅滤波可能排斥``目标显著改进''的好步，故当步长足够小且方向对 barrier
+目标有足够下降时切换为纯目标判据：设
+$m_k(\alpha)=\nabla\phi_\mu^{T}d(\alpha)$ 为方向导数（线性模型），若
+\begin{equation}\label{eq:thipm-switching}
+  m_k(\alpha)<0
+  \quad\text{且}\quad
+  \alpha\,[-m_k(\alpha)]^{s_\phi}>\delta\,[\theta_k]^{s_\theta}
+  \quad(\delta>0,\ s_\theta>1,\ s_\phi\ge1),
+\end{equation}
+则放弃滤波检验，改用 Armijo 充分下降
+\begin{equation}\label{eq:thipm-armijo}
+  \phi_\mu(x_k+\alpha d_k)\le\phi_\mu(x_k)+\eta_\mu\,\alpha\,m_k(\alpha),
+  \qquad \eta_\mu\in(0,\tfrac12),
+\end{equation}
+并要求试验点不劣化 $\theta$ 超过滤波上界
+$\theta_{\max}$（滤波初始化/扩张机制）。若连 Armijo 也失败，步长回退
+（backtracking）；回退到低于阈值仍无进展则进入可行性恢复。
+\end{remark}
+
+\begin{theorem}[滤波线搜索 IPM 的全局收敛性（陈述）]\label{thm:thipm-filter-conv}
+在 \cite{ipmwachter2006} 的标准假设下（约束函数与目标在迭代轨道所经水平
+集上连续可微且梯度 Lipschitz、乘子有界、KKT 矩阵分解满足惯性判据与有界
+性条件），上述滤波 + 切换 + Armijo + 可行性恢复的 IPM 满足：要么有限步
+终止于近似 KKT 点/近似不可行证书，要么任一极限点要么是 KKT 点，要么是
+约束违反度函数 $\theta$ 的驻点（即恢复阶段的收敛点）。
+\end{theorem}
+
+\begin{proof}
+完整证明（\cite{ipmwachter2006} 第 4--5 节，约二十页的精细分析）超出本章
+范围；此处只勾勒其结构：滤波机制保证 $\theta$ 与 $\phi$ 至少其一严格
+单调有下界，故 $\{(\theta_k,\phi_k)\}$ 收敛；切换条件
+\eqref{eq:thipm-switching} 保证当 $\theta_k\to0$ 后目标序列本身充分下降；
+可行性恢复阶段把``无法继续''的迭代转化为 $\theta$ 的一个光滑极小化子
+问题，其收敛性由标准无约束/界约束优化理论给出。三部分拼接即得定理。
+\end{proof}
+
+\begin{definition}[可行性恢复]\label{def:thipm-restoration}
+当线搜索无法找到可接受步长时，暂时放弃原目标，求解可行性恢复问题
+\begin{equation}\label{eq:thipm-restoration}
+  \min_{x,s}\; \theta(x)\ \Bigl(=\|c_E(x)\|+\|c_I(x)-s\|\Bigr)
+  \quad\text{的正则化光滑形式},
+\end{equation}
+实现上把 $\theta$ 的不可微范数用附加非负变量
+（$c_E(x)=p-n$，$p,n\ge0$ 等）重写为光滑 NLP，目标取
+$\zeta\|D_R(x-x_R)\|^{2}+\eta\sum(p_i+n_i)$ 一类的带锚点正则项
+（$x_R$ 为进入恢复时的参考点），仍用同一 IPM 求解
+\cite{ipmwachter2006}（第 3.3 节）。恢复收敛后以其解（或不可行证书）回到
+主问题。
+\end{definition}
+
+实现对应：滤波数据结构 \srcpath{ipm\_filter.cpp:Filter::is\_acceptable}、
+\srcpath{ipm\_filter.cpp:Filter::add\_entry}、
+\srcpath{ipm\_filter.cpp:Filter::reset\_with\_theta\_upper\_bound}；
+$\theta/\phi$ 与斜率计算
+\srcpath{ipm\_solver.cpp:compute\_theta}、
+\srcpath{ipm\_solver.cpp:compute\_barrier\_phi}、
+\srcpath{ipm\_solver.cpp:barrier\_descent\_slope}；试验点评估
+\srcpath{ipm\_solver.cpp:evaluate\_filter\_trial\_values}；主循环
+\srcpath{ipm\_solver.cpp:solve\_nlp\_filter\_impl}；恢复 NLP 构造
+\srcpath{ipm\_restoration.cpp:build\_restoration\_nlp} 与暖启动恢复
+\srcpath{ipm\_restoration.cpp:recover\_restoration\_warm\_start}。
+
+\subsection{步长规则与终止判据}\label{subsec:thipm-steps}
+
+\textbf{Fraction-to-boundary}：方向 $d$ 确定后，步长按
+\eqref{eq:thipm-ftb} 的形式取
+$\alpha=\min\{1,\ \tau\alpha_{\max}\}$，其中 $\alpha_{\max}$ 是保持
+$x+\alpha\Delta x\ge0$（及 $z+\alpha\Delta z\ge0$）的最大步长，回退因子
+\begin{equation}\label{eq:thipm-tau}
+  \tau=\max\{\tau_{\min},\ 1-\mu\},\qquad \tau_{\min}\in(0.99,1)
+\end{equation}
+随 $\mu$ 缩减而趋 $1$：迭代后期允许贴近边界，这是超线性收敛行为的必要
+条件之一 \cite{ipmwright1997}。NLP 情形还需满足滤波/Armijo 的额外约束，
+故 NLP 的步长是 \eqref{eq:thipm-ftb} 与线搜索回溯的复合。
+
+\textbf{终止判据}：以缩放 KKT 残差判定近似最优。记
+\begin{equation}\label{eq:thipm-scaled-residual}
+  \kappa_d=\frac{\|\nabla f(x)+J^{T}y-z\|_\infty}{s_d},
+  \qquad
+  \kappa_c=\frac{\|SZe-\mu e\|_\infty}{s_c},
+  \qquad
+  \kappa_p=\|c_E(x)\|_\infty+\|c_I(x)-s\|_\infty ,
+\end{equation}
+其中缩放因子（Ipopt 惯例，\cite{ipmwachter2006} 第 5 节）
+$s_d=\max\{s_{\max},\ (\|y\|_1+\|z\|_1)/(m+n)\}/s_{\max}$，
+$s_c=\max\{s_{\max},\ \|z\|_1/n\}/s_{\max}$（$s_{\max}\ge1$ 为常数）。
+当 $\max\{\kappa_d,\kappa_c,\kappa_p\}\le$ tol 时声明收敛；另设
+``acceptable'' 层级（容差放宽若干数量级）与发散/不可行/资源中断的
+分支判定。缩放的意义：把``残差绝对小''改为``相对当前乘子尺度小''，避免
+大乘子问题被绝对容差错误拒绝。实现对应：
+\srcpath{ipm\_solver.cpp:evaluate\_ipm\_termination}、
+\srcpath{ipm\_solver.cpp:apply\_optimality\_scaling}、
+\srcpath{ipm\_solver.cpp:strict\_termination}、
+\srcpath{ipm\_solver.cpp:acceptable\_termination}；LP 侧的独立审计为
+\srcpath{ipm\_lp\_solver.cpp:audit\_ipm\_lp\_optimality}。
+
+\textbf{初始化}：起点须严格内点（$x,s,z>0$ 于被障碍的坐标）；常见做法是
+把起点向界内投影（interiorization）并以最小二乘估计初始乘子，实现对应
+\srcpath{ipm\_solver.cpp:interiorize\_initial\_point}、
+\srcpath{ipm\_solver.cpp:initialize\_cold\_primal\_dual\_state}。
+
+\subsection{LP 与 NLP 形式的统一视角}\label{subsec:thipm-unify}
+
+LP 是 \eqref{eq:thipm-nlp} 中 $f$ 线性、$c_E$、$c_I$ 仿射的特例。统一
+框架下 LP-IPM 的简化逐项对应：
+
+\begin{itemize}
+  \item $W=\nabla^{2}\mathcal{L}=0$：增广矩阵恒为拟定（引理
+        \ref{lem:thipm-inertia}），惯性校正与 $\delta_w$ 协议退化为可选的
+        数值防护，而非算法必需；
+  \item 约束是仿射的：牛顿系统的线性化是\textbf{精确的}，不存在模型误差，
+        因此无需线搜索保证收敛性——步长由 fraction-to-boundary
+        \eqref{eq:thipm-ftb} 与中心化参数 $\sigma$ 完全决定，Mehrotra
+        预测-校正即是这一自由度的最优实践；
+  \item 收敛理论可达多项式复杂度：对 $\mu$ 缩减受控的短步/长步方法有
+        $O(\sqrt{n}\,L)$、$O(nL)$ 迭代界（$L$ 为输入位长），见
+        \cite{ipmwright1997}；这些界依赖位长模型，对浮点实现只有定性
+        指导意义，实践中 IPM 迭代数对问题规模近似 $O(\log n)$ 级别稳定；
+  \item NLP 侧 $W\ne0$ 与模型线性化误差是全部复杂性的来源：惯性校正
+        （\ref{subsec:thipm-inertia}）、滤波全局化
+        （\ref{subsec:thipm-filter}）、拟牛顿近似（当解析 Hessian 不可得，
+        实现对应 \srcpath{ipm\_solver.cpp:update\_quasi\_newton\_state}、
+        \srcpath{ipm\_solver.cpp:build\_lagrangian\_hessian}）。
+\end{itemize}
+
+\begin{gapnote}
+下列主题为文献中的成熟技术，当前实现未覆盖或仅部分覆盖：
+（i）\textbf{crossover}：IPM 终点向最优基/顶点的转换（单纯形 push 阶段），
+实现仅有 active-set KKT 抛光
+（\srcpath{ipm\_solver.cpp:try\_active\_set\_kkt\_polish}，部分实现）；
+（ii）\textbf{HSD 嵌入}（见 \ref{subsec:thipm-central-path} 节的
+gapnote）；
+（iii）\textbf{watchdog 非单调线搜索}：允许偶发目标回升以换取长步，
+当前滤波实现未包含该机制。
+\end{gapnote}
+
+\subsection{与实现的对应}\label{subsec:thipm-mapping}
+
+\begin{longtable}{@{}p{0.40\textwidth}p{0.56\textwidth}@{}}
+\toprule
+理论条目 & 实现状态 \\
+\midrule
+\endhead
+LP 障碍问题与中心路径（定理 \ref{thm:thipm-centralpath}）
+& \implpart{以箱式界的对数障碍 + 不可行起点实现，非可行起点路径跟踪}，锚点
+\srcpath{src/engine/kernel/ipm/ipm\_lp\_solver.cpp:NativeIPMLPAdapter::solve\_lp\_impl} \\
+Mehrotra 预测-校正（\ref{subsec:thipm-mehrotra}）
+& \implfull{src/engine/kernel/ipm/ipm\_lp\_solver.cpp:NativeIPMLPAdapter::solve\_lp\_impl} \\
+Gondzio 多重校正（注记 \ref{rem:thipm-gondzio}）
+& \implfull{src/engine/kernel/ipm/ipm\_lp\_solver.cpp:NativeIPMLPAdapter::solve\_lp\_impl} \\
+牛顿系统可解性（引理 \ref{lem:thipm-nonsingular}）与 LP 牛顿步
+& \implfull{src/engine/kernel/ipm/ipm\_lp\_solver.cpp:NativeIPMLPAdapter::solve\_lp\_impl} \\
+增广系统装配 \eqref{eq:thipm-augmented}（NLP 侧）
+& \implfull{src/engine/kernel/ipm/ipm\_solver.cpp:assemble\_augmented\_newton}；
+KKT 层 \srcpath{src/engine/kernel/kkt/kkt\_system.cpp:assemble\_augmented\_kkt} \\
+法方程求解 \eqref{eq:thipm-normal}
+& \implfull{src/engine/kernel/kkt/kkt\_system.cpp:solve\_kkt\_reduced\_sparse} \\
+因式分解复用与结构缓存
+& \implfull{src/engine/kernel/kkt/kkt\_system.cpp:factor\_current\_kkt}；
+节点级 LP 缓存
+\srcpath{src/engine/kernel/ipm/ipm\_lp\_solver\_cached.cpp:prepare\_for\_node\_solves}、
+\srcpath{src/engine/kernel/ipm/ipm\_lp\_solver\_cached.cpp:solve\_cached\_node\_lp} \\
+惯性校正与 $\delta_w$ 协议（\ref{subsec:thipm-inertia}）
+& \implfull{src/engine/kernel/kkt/kkt\_system.cpp:factor\_kkt\_inertia\_corrected\_sparse}；
+求解
+\srcpath{src/engine/kernel/kkt/kkt\_system.cpp:solve\_kkt\_inertia\_corrected\_sparse}；
+参数
+\srcpath{src/engine/kernel/kkt/kkt\_system.cpp:resolve\_inertia\_settings}、
+\srcpath{src/engine/kernel/kkt/kkt\_system.cpp:increased\_primal\_regularization} \\
+凝聚形式正定性证书
+& \implfull{src/engine/kernel/kkt/kkt\_system.cpp:certify\_primal\_positive\_definite} \\
+滤波与可接受性（定义 \ref{def:thipm-filter}）
+& \implfull{src/engine/kernel/ipm/ipm\_filter.cpp:Filter::is\_acceptable}；
+条目维护 \srcpath{src/engine/kernel/ipm/ipm\_filter.cpp:Filter::add\_entry} \\
+切换条件与 Armijo（注记 \ref{rem:thipm-switching}）
+& \implpart{判据实现在主循环内联，无量独立函数}，锚点
+\srcpath{src/engine/kernel/ipm/ipm\_solver.cpp:solve\_nlp\_filter\_impl}；
+斜率计算 \srcpath{src/engine/kernel/ipm/ipm\_solver.cpp:barrier\_descent\_slope} \\
+$\theta/\phi$ 计算 \eqref{eq:thipm-theta-phi}
+& \implfull{src/engine/kernel/ipm/ipm\_solver.cpp:compute\_theta}；
+\srcpath{src/engine/kernel/ipm/ipm\_solver.cpp:compute\_barrier\_phi} \\
+可行性恢复（定义 \ref{def:thipm-restoration}）
+& \implfull{src/engine/kernel/ipm/ipm\_restoration.cpp:build\_restoration\_nlp}；
+暖启动
+\srcpath{src/engine/kernel/ipm/ipm\_restoration.cpp:recover\_restoration\_warm\_start} \\
+缩放后终止判据 \eqref{eq:thipm-scaled-residual}
+& \implfull{src/engine/kernel/ipm/ipm\_solver.cpp:evaluate\_ipm\_termination}；
+\srcpath{src/engine/kernel/ipm/ipm\_solver.cpp:strict\_termination}、
+\srcpath{src/engine/kernel/ipm/ipm\_solver.cpp:acceptable\_termination} \\
+LP 最优性审计
+& \implfull{src/engine/kernel/ipm/ipm\_lp\_solver.cpp:audit\_ipm\_lp\_optimality} \\
+起点 interiorization 与冷启动
+& \implfull{src/engine/kernel/ipm/ipm\_solver.cpp:interiorize\_initial\_point}；
+\srcpath{src/engine/kernel/ipm/ipm\_solver.cpp:initialize\_cold\_primal\_dual\_state} \\
+问题缩放（equilibration）
+& \implpart{目标/约束梯度范数缩放，非完整 Ruiz 迭代均衡}，锚点
+\srcpath{src/engine/kernel/ipm/ipm\_scaling.cpp:compute\_scaling\_factors}、
+\srcpath{src/engine/kernel/ipm/ipm\_scaling.cpp:build\_scaled\_nlp\_model} \\
+解析/拟牛顿 Hessian
+& \implfull{src/engine/kernel/ipm/ipm\_solver.cpp:build\_lagrangian\_hessian}；
+拟牛顿 \srcpath{src/engine/kernel/ipm/ipm\_solver.cpp:update\_quasi\_newton\_state} \\
+crossover / HSD / watchdog（gapnote）
+& \implpart{crossover 仅有 active-set KKT 抛光
+\srcpath{src/engine/kernel/ipm/ipm\_solver.cpp:try\_active\_set\_kkt\_polish}；
+HSD 与 watchdog} \implnone \\
+\bottomrule
+\end{longtable}
+
+\subsection{参考文献}
+
+\begin{thebibliography}{19}\small
+\bibitem{ipmwright1997}
+S. J. Wright, \emph{Primal-Dual Interior-Point Methods}, SIAM, 1997.
+\bibitem{ipmmehrotra1992}
+S. Mehrotra, On the implementation of a primal-dual interior point method,
+\emph{SIAM Journal on Optimization} 2(4):575--601, 1992.
+\bibitem{ipmwachter2006}
+A. W\"achter, L. T. Biegler, On the implementation of an interior-point
+filter line-search algorithm for large-scale nonlinear programming,
+\emph{Mathematical Programming} 106(1):25--57, 2006.
+\bibitem{ipmfletcher2002}
+R. Fletcher, S. Leyffer, Nonlinear programming without a penalty function,
+\emph{Mathematical Programming} 91(2):239--269, 2002.
+\bibitem{ipmgondzio1996}
+J. Gondzio, Multiple centrality corrections in a primal-dual method for
+linear programming, \emph{Computational Optimization and Applications}
+6(2):137--156, 1996.
+\bibitem{ipmnocedal2006}
+J. Nocedal, S. J. Wright, \emph{Numerical Optimization}, 2nd ed., Springer,
+2006.
+\bibitem{ipmfiacco1968}
+A. V. Fiacco, G. P. McCormick, \emph{Nonlinear Programming: Sequential
+Unconstrained Minimization Techniques}, Wiley, 1968.
+\bibitem{ipmvanderbei1995}
+R. J. Vanderbei, Symmetric quasidefinite matrices,
+\emph{SIAM Journal on Optimization} 5(1):100--113, 1995.
+\bibitem{ipmye1994}
+Y. Ye, M. J. Todd, S. Mizuno, An $O(\sqrt{n}L)$-iteration homogeneous and
+self-dual linear programming algorithm,
+\emph{Mathematics of Operations Research} 19(1):53--67, 1994.
+\bibitem{ipmandersen2000}
+E. D. Andersen, K. D. Andersen, The MOSEK interior point optimizer for
+linear programming: an implementation of the homogeneous algorithm, in
+\emph{High Performance Optimization} (H. Frenk et al., eds.), Kluwer
+Academic Publishers, 197--232, 2000.
+\bibitem{ipmforsgren2002}
+A. Forsgren, P. E. Gill, M. H. Wright, Interior methods for nonlinear
+optimization, \emph{SIAM Review} 44(4):525--597, 2002.
+\end{thebibliography}

@@ -379,7 +379,7 @@ scuc_case_builder --case 6bus --T 24 --wind --storage --output case.json
 scuc_solve case.json result.json --solver StrictHiGHS --indent 2
 ```
 
-`scuc_solve` 未指定输出文件时 JSON 写到标准输出、进度写到标准错误；SCUC 未收敛时进程返回非零退出码。输入字段的完整说明见 SCUC 数据格式文档（`docs/data_format_spec.md`）。
+`scuc_solve` 未指定输出文件时 JSON 写到标准输出、进度写到标准错误；SCUC 未收敛时进程返回非零退出码。输入字段的完整说明见[第 4 章 建模与数据 (AML)](04-modeling-aml.md) 的 SCUC 输入 JSON 规范（历史版本见 `docs/archive/data_format_spec.md`）。
 
 ## 3.6 tutorial 脚本的位置与运行方式
 

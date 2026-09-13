@@ -1,0 +1,413 @@
+% engine_manual.tex —— MIPSolvers 求解引擎（engine）模块技术手册（专著级）
+% 规范：docs/modules/README.md 与 docs/modules/THEORY_WRITING_GUIDE.md。
+% 编译（本目录下，XeLaTeX 两遍）：
+%   xelatex -interaction=nonstopmode engine_manual.tex
+%   xelatex -interaction=nonstopmode engine_manual.tex
+\documentclass{ctexart}
+\usepackage{../../_manual_common/mipsolvers_manual}
+
+\title{MIPSolvers 求解引擎模块技术手册}
+\author{MIPSolvers 文档组}
+\date{2026 年 9 月 13 日}
+
+\begin{document}
+\maketitle
+
+\begin{abstract}
+本手册是 MIPSolvers 求解引擎（engine）模块的\textbf{专著级}技术文档。模块公共头文件
+位于 \srcpath{include/mipsolvers/engine/}，实现位于 \srcpath{src/engine/}；它对外提供统一
+门面 \texttt{SolverEngine}（LE/NLE/LP/QP/NLP/MILP/MINLP/锥规划八类问题），对内包含
+原生对偶单纯形 LP 内核、Mehrotra 预测-校正 LP 内点、filter 驱动 NLP 内点、锥内点
+（含 chordal 分解）、KKT 装配与稀疏线性代数后端、原生 MILP Branch-and-Cut 树搜索、
+LP 预求解，以及 HiGHS/Ipopt/SCIP/Gurobi/CPLEX 外部适配器层。
+
+手册分两层：第 3--6 章为通用理论层（专著级：完整推导与关键定理的严格证明，非代码
+转写）；第 7--10 章为源码等价转写层（公式只转写当前源码实际执行的赋值、残差、阈值
+与分支）；第 11 章给出数值验证证据，第 12 章列出接口与参数，第 13 章声明验证状态与
+边界局限，第 14 章为跨模块共享的工业级评价基线。所有 \srcpath{文件:函数名} 锚点均为
+仓库相对路径、禁止行号，由 \texttt{tools/doc\_anchor\_check.py} 回归校验。
+\end{abstract}
+
+\tableofcontents
+\newpage
+
+\section{阅读指南与约定}
+
+\subsection{数据来源}
+
+本手册实现层（第 7--10 章）的唯一事实来源是下列头/实现文件对，转写前已逐函数通读；
+凡代码未消费的输入字段、近似路径、回退与硬编码阈值均在相邻正文明确声明：
+
+\begin{center}
+\begin{footnotesize}
+\begin{tabular}{@{}ll@{}}
+\toprule
+\textbf{头文件（声明）} & \textbf{实现文件}\\
+\midrule
+\srcpath{include/mipsolvers/engine/api/solver.hpp} & \srcpath{src/engine/api/solver.cpp}（门面）\\
+\srcpath{include/mipsolvers/engine/api/session.hpp} & \srcpath{src/engine/api/session.cpp}（增量会话）\\
+\srcpath{include/mipsolvers/engine/api/options.hpp}、\srcpath{api/problem.hpp}、\srcpath{api/result.hpp} & 仅头文件；经门面与适配器消费\\
+\srcpath{include/mipsolvers/engine/solve\_context.hpp} & 资源契约（时限/线程/取消令牌），由各适配器消费\\
+\srcpath{include/mipsolvers/engine/solver/solver\_adapter.hpp}、\srcpath{solver/adapter\_registry.hpp} & \srcpath{src/engine/solver/solver\_adapter.cpp}、\srcpath{src/engine/solver/adapter\_registry.cpp}\\
+\srcpath{include/mipsolvers/engine/strategy/dispatcher.hpp} & \srcpath{src/engine/strategy/dispatcher.cpp} 及 \srcpath{src/engine/strategy/} 辅助件\\
+\srcpath{include/mipsolvers/engine/kernel/lp\_kernel/dual\_simplex.hpp}、\srcpath{lp\_kernel/backend.hpp} & \srcpath{src/engine/kernel/lp\_kernel/dual\_simplex.cpp}、\srcpath{dual\_simplex\_api.cpp}、\srcpath{native\_dual/}\\
+\srcpath{include/mipsolvers/engine/kernel/ipm/ipm\_lp\_solver.hpp} & \srcpath{src/engine/kernel/ipm/ipm\_lp\_solver.cpp}、\srcpath{ipm\_lp\_solver\_cached.cpp}\\
+\srcpath{include/mipsolvers/engine/kernel/ipm/ipm\_solver.hpp} & \srcpath{src/engine/kernel/ipm/ipm\_solver.cpp} 等 NLP 内点族\\
+\srcpath{include/mipsolvers/engine/kernel/ipm/conic\_ipm\_solver.hpp}、\srcpath{ipm/cones.hpp} & \srcpath{src/engine/kernel/ipm/conic\_ipm\_solver.cpp}、\srcpath{cones.cpp}、\srcpath{chordal\_decomposition.cpp}\\
+\srcpath{include/mipsolvers/engine/kernel/kkt/kkt\_system.hpp} & \srcpath{src/engine/kernel/kkt/kkt\_system.cpp}\\
+\srcpath{include/mipsolvers/engine/kernel/linear\_algebra/} 各头 & \srcpath{src/engine/kernel/linear\_algebra/}（CHOLMOD、HFactor、稀疏 LU）\\
+\srcpath{include/mipsolvers/engine/presolve/lp\_presolve.hpp} & \srcpath{src/engine/presolve/lp\_presolve.cpp}\\
+\srcpath{include/mipsolvers/engine/bc/api.hpp}、\srcpath{bc/options.hpp}、\srcpath{bc/enums.hpp} & \srcpath{src/engine/solver/native/milp/bc/api.cpp} 与 \srcpath{bc/legacy/} 树搜索族\\
+\srcpath{include/mipsolvers/engine/solver/native/native\_adapters.hpp} & \srcpath{src/engine/solver/native/}（LE/NLE/LP 选择器、PDLP、锥适配器）\\
+\srcpath{include/mipsolvers/engine/solver/external/adapters.hpp} & \srcpath{src/engine/solver/external/adapters.cpp}（HiGHS/Ipopt/SCIP/Gurobi/CPLEX）\\
+— & \srcpath{src/engine/util/problem\_validation.cpp}（输入校验，模块内部）\\
+\bottomrule
+\end{tabular}
+\end{footnotesize}
+\end{center}
+
+\subsection{索引空间与单位制}
+
+\begin{itemize}
+  \item \textbf{索引}：全模块一律为 \textbf{0 起始}整数索引（C++ 语义）。变量、约束、
+        基下标、锥块成员、树节点编号均从 0 开始；割平面暖启动池
+        \texttt{BCRootCuts} 的列下标明文规定为预求解前原始 LP 列空间
+        （\srcpath{include/mipsolvers/engine/bc/options.hpp}）。
+  \item \textbf{单位}：engine 为通用数值求解模块，模型系数本身无量纲，单位制由
+        调用方（如 scuc 模块的 MW/MWh 口径）自带。引擎内部的物理量纲仅出现在
+        资源契约上：时间一律为墙钟秒（\texttt{double}，字段名以
+        \texttt{\_sec} 结尾），内存预算为字节（\fld{memory\_limit\_bytes}），
+        线程数为个。容差类字段为绝对或相对无量纲阈值，逐字段口径见第 12 章。
+  \item \textbf{矩阵存储}：原生 LP 内核的标准形矩阵 \texttt{StandardColumnMatrix}
+        为列主序 CSC，索引宽度自适应（32/64 位）；行视图 \texttt{StandardRowMatrix}
+        与之共享值数组（\srcpath{include/mipsolvers/engine/kernel/lp\_kernel/dual\_simplex.hpp}）。
+\end{itemize}
+
+\subsection{诚实口径声明}
+
+\begin{itemize}
+  \item 本手册为\textbf{专著级}：理论章（第 3--6 章）含完整推导与关键定理的严格
+        证明，章首以 theorynote 声明``通用理论，非代码转写''，章末附``与实现的
+        对应''表，超出实现的内容就地以 gapnote 标记；
+  \item 实现转写章（第 7--10 章）与第 12 章参数表以 \textbf{2026-09-13 工作树}为准，
+        公式与字段经逐一核实；代码演进后必须重新核验并以锚点回归兜底；
+  \item 数值结论只引用第 11 章所列真实测试目标、基线文件与可复现命令；未执行的
+        交叉验证不写成已完成；
+  \item 与用户手册 \texttt{docs/manual/05-solvers-engines.md} 行文存在差异之处，
+        以代码为准并在 \ref{sec:impl-api-adapters} 章集中声明。
+\end{itemize}
+
+\subsection{排版宏}
+
+参数表使用 \texttt{paramtable} 环境（字段名|符号|单位|典型范围|默认值|说明）；字段名以
+\verb|\fld{}| 排版；源码锚点以 \verb|\srcpath{}| 排版；结构体元信息以
+\verb|\compmeta{名称}{头文件}| 排版；理论章三要素（theorynote、与实现的对应表、
+gapnote）按 \texttt{docs/modules/THEORY\_WRITING\_GUIDE.md} 执行。
+
+\section{功能定位与架构}
+
+\subsection{功能定位}
+
+engine 是 MIPSolvers 的\textbf{求解内核与调度层}：对上以统一门面
+\texttt{SolverEngine} 接收八类问题的结构化模型，按策略在原生内核与外部求解器之间
+选择、回退并归一化结果；对下包含自研的 LP/MILP/NLP/锥求解内核与稀疏线性代数栈。
+它不承担建模职责（代数建模属 aml 模块），也不绑定任何应用语义（SCUC 等应用层模块
+经门面调用本模块）。
+
+\subsection{对外入口一览}
+
+\begin{footnotesize}
+\begin{longtable}{@{}L{3.6cm}L{5.6cm}L{5.0cm}@{}}
+\toprule
+\textbf{入口} & \textbf{锚点} & \textbf{说明}\\
+\midrule
+\endhead
+统一求解 \texttt{solve} & \srcpath{src/engine/api/solver.cpp:SolverEngine::solve\_normalized} &
+\texttt{ProblemVariant} 总入口：规范化、校验、分派、结果映射\\
+\texttt{solve\_lp} & \srcpath{src/engine/api/solver.cpp:SolverEngine::solve\_lp} & 线性规划\\
+\texttt{solve\_qp} & \srcpath{src/engine/api/solver.cpp:SolverEngine::solve\_qp} & 二次规划\\
+\texttt{solve\_nlp} & \srcpath{src/engine/api/solver.cpp:SolverEngine::solve\_nlp} & 非线性规划\\
+\texttt{solve\_milp} & \srcpath{src/engine/api/solver.cpp:SolverEngine::solve\_milp} & 混合整数线性规划\\
+\texttt{solve\_minlp} & \srcpath{src/engine/api/solver.cpp:SolverEngine::solve\_minlp} & 混合整数非线性规划\\
+\texttt{solve\_conic} & \srcpath{src/engine/api/solver.cpp:SolverEngine::solve\_conic} & 锥规划（SOCP/SDP 等）\\
+\texttt{solve\_le} & \srcpath{src/engine/api/solver.cpp:SolverEngine::solve\_le} & 稀疏线性方程组\\
+\texttt{solve\_nle} & \srcpath{src/engine/api/solver.cpp:SolverEngine::solve\_nle} & 非线性方程组\\
+B\&C 直接入口 & \srcpath{src/engine/solver/native/milp/bc/api.cpp:solve\_milp\_bc}、
+\srcpath{src/engine/solver/native/milp/bc/api.cpp:solve\_minlp\_bc} &
+原生 Branch-and-Cut / 空间分支定界，支持暖启动与 ML 回调\\
+增量会话 & \srcpath{src/engine/api/session.cpp:LPModelSession::update\_objective} 等 &
+\texttt{LPModelSession}：目标/界/右端项的增量修改与重解\\
+\bottomrule
+\end{longtable}
+\end{footnotesize}
+
+原生内核层（经适配器挂入门面，亦可直接使用）：
+\begin{itemize}
+  \item 原生对偶单纯形 LP 内核：
+        \srcpath{src/engine/kernel/lp\_kernel/dual\_simplex.cpp:solve\_lp\_from\_sf}
+        （标准形装配见 \srcpath{src/engine/kernel/lp\_kernel/dual\_simplex\_api.cpp:build\_standard\_form\_lp}，
+        内核主循环在 \srcpath{src/engine/kernel/lp\_kernel/native\_dual/solver.cpp}）；
+  \item LP 内点（Mehrotra + Gondzio）：
+        \srcpath{src/engine/kernel/ipm/ipm\_lp\_solver.cpp:NativeIPMLPAdapter::solve\_lp}；
+  \item NLP 内点（filter 全局化）：
+        \srcpath{src/engine/kernel/ipm/ipm\_solver.cpp:NativeIPMAdapter::solve\_nlp}；
+  \item 锥内点：\srcpath{src/engine/kernel/ipm/conic\_ipm\_solver.cpp:ConicIPMSolver::solve}；
+  \item PDLP（一阶方法）：\srcpath{src/engine/solver/native/lp/pdlp\_solver.cpp:NativePDLPAdapter::solve\_lp}；
+  \item LP 原生选择器/portfolio：
+        \srcpath{src/engine/solver/native/native\_lp\_selector.cpp:NativeDualSimplexLPAdapter::solve\_lp}。
+\end{itemize}
+
+外部适配器层由 \srcpath{src/engine/solver/external/adapters.cpp} 实现
+（HiGHS/Ipopt/SCIP/Gurobi/CPLEX），与原生适配器一同注册进
+\srcpath{src/engine/solver/adapter\_registry.cpp:AdapterRegistry::register\_adapter}，
+由 \srcpath{src/engine/strategy/dispatcher.cpp} 的 \texttt{StrategyDispatcher} 按
+候选排序与回退策略分派。
+
+\subsection{关键结构体与类}
+
+\compmeta{SolverEngine}{include/mipsolvers/engine/api/solver.hpp}
+统一求解门面：持有 \texttt{AdapterRegistry} 与 \texttt{StrategyDispatcher}，提供
+上表全部 \texttt{solve\_*} 入口；构造函数可批量注册默认适配器。
+
+\compmeta{SolveOptions}{include/mipsolvers/engine/api/options.hpp}
+调用级选项：首选求解器、回退开关、策略枚举、时限/线程/内存预算、随机种子、
+组合模式与取消令牌（字段明细见第 12 章）。
+
+\compmeta{ProblemVariant / Result}{include/mipsolvers/engine/api/problem.hpp}
+问题变体（八类模型的 \texttt{std::variant}）与统一结果结构
+（\srcpath{include/mipsolvers/engine/api/result.hpp}）：状态、目标值、原始/对偶
+向量、残差与后端名。
+
+\compmeta{SolveContext}{include/mipsolvers/engine/solve\_context.hpp}
+求解资源契约：把时限、线程与取消令牌下发给适配器。
+
+\compmeta{LPModelSession}{include/mipsolvers/engine/api/session.hpp}
+LP 增量会话：在保留缓存状态的前提下更新目标、变量界与右端项并重解。
+
+\compmeta{StandardFormLP / SimplexOptions / SimplexBasis}{include/mipsolvers/engine/kernel/lp\_kernel/dual\_simplex.hpp}
+原生对偶单纯形核心的公共契约：标准形（含自适应宽度 CSC 存储与 Ruiz 缩放）、
+单纯形选项、可跨节点携带的基快照（含 DSE 权重与基操作缓存）。
+
+\compmeta{NativeIPMLPAdapter / IPMLPOptions}{include/mipsolvers/engine/kernel/ipm/ipm\_lp\_solver.hpp}
+LP 内点适配器与选项：Mehrotra 预测-校正、Gondzio 校正、Ruiz 均衡、可选 crossover
+与节点 LP 缓存求解。
+
+\compmeta{IPMOptions}{include/mipsolvers/engine/kernel/ipm/ipm\_solver.hpp}
+NLP 内点选项：容差族、可接受水平、步长上限与外部回退开关（字段明细见第 12 章）。
+
+\compmeta{ConicIPMSolver / ConicIPMOptions}{include/mipsolvers/engine/kernel/ipm/conic\_ipm\_solver.hpp}
+锥内点求解器与选项：cvxopt 标准形锥模型、NT 方向、KKT 精化与 chordal 分解开关。
+
+\compmeta{solve\_milp\_bc / BCOptions}{include/mipsolvers/engine/bc/api.hpp}
+原生 B\&C 入口与选项束（\srcpath{include/mipsolvers/engine/bc/options.hpp}）：
+节点/迭代/时限预算、容差、割平面族、分支与节点选择、启发式、并行与回退策略。
+
+\compmeta{SolverAdapter / AdapterRegistry}{include/mipsolvers/engine/solver/adapter\_registry.hpp}
+适配器基类（\srcpath{include/mipsolvers/engine/solver/solver\_adapter.hpp}）与按
+问题类索引的注册表。
+
+\compmeta{StrategyDispatcher}{include/mipsolvers/engine/strategy/dispatcher.hpp}
+候选排序与回退分派器：按策略枚举生成候选序列，失败时顺延并把剩余时限传给下一个
+候选。
+
+\subsection{架构分层}
+
+\begin{itemize}
+  \item \textbf{API 层}：\texttt{api/}（\texttt{SolverEngine}、\texttt{LPModelSession}、
+        \texttt{SolveOptions}/\texttt{ProblemVariant}/\texttt{Result}）——只做规范化、
+        校验与结果映射，不含算法；
+  \item \textbf{调度层}：\texttt{solver/} 与 \texttt{strategy/}——适配器接口、注册表、
+        候选排序与回退、presolve/postsolve/warmstart 管理器；
+  \item \textbf{原生内核层}：\texttt{kernel/}（对偶单纯形、LP/NLP/锥内点、KKT 装配、
+        稀疏线性代数）与 \texttt{solver/native/}（把内核包装为适配器，含 LP 选择器、
+        PDLP、B\&C）；
+  \item \textbf{外部适配器层}：\texttt{solver/external/}——第三方求解器的模型映射与
+        结果解析；
+  \item \textbf{支撑层}：\texttt{presolve/}（原生 LP 预求解）与 \texttt{util/}（输入
+        校验）。
+\end{itemize}
+
+\input{chapters/theory_linear_programming}
+
+\input{chapters/theory_interior_point}
+
+\input{chapters/theory_conic}
+
+\input{chapters/theory_milp}
+
+\input{chapters/source_equivalent_lp_kernel}
+
+\input{chapters/source_equivalent_ipm_kkt}
+
+\input{chapters/source_equivalent_milp_bc}
+
+\input{chapters/source_equivalent_api_adapters}
+
+\input{chapters/numerical_validation}
+
+\section{接口与参数}
+
+本章列出调用方最常接触的五组选项结构。所有字段均已对照 2026-09-13 工作树的
+头文件逐一核实；未列出即不代表不存在——\texttt{BCOptions} 等大型选项束仅收录关键
+字段，完整清单以头文件为准。``默认值''为 C++ 结构体的成员初始化值。
+
+\subsection{\texttt{SolveOptions}（调用级，\srcpath{include/mipsolvers/engine/api/options.hpp}）}
+
+\begin{paramtable}
+\fld{preferred\_solver} & — & — & 已注册适配器名 & 空串 & 首选求解器；空表示按策略自动\\
+\fld{allow\_fallback} & — & — & true/false & true & 首选失败时允许回退下一候选\\
+\fld{strategy\_policy} & — & — & Auto/NativeFirst/ ExternalFirst & Auto & 全局原生/外部优先策略\\
+\fld{class\_strategy\_policy} & — & — & 按问题类覆盖 & 空 & 逐 \texttt{ProblemClass} 的策略覆盖表\\
+\fld{time\_limit\_sec} & — & s & $\ge 0$ & 0.0 & 整次调用的协作式墙钟预算；0 = 不限，回退只继承剩余时间\\
+\fld{threads} & — & 个 & $\ge 0$ & 0 & 求解器工作线程上限；0 = 交由后端自选\\
+\fld{random\_seed} & — & — & $\ge 0$ & 0 & 透传给暴露种子接口的后端\\
+\fld{memory\_limit\_bytes} & — & 字节 & $\ge 0$ & 0 & 建议性内存预算；0 = 未指定，不能强制执行的后端必须如实报告\\
+\fld{portfolio\_mode} & — & — & Latency/ Throughput & Latency & 原生 LP 选择器优化单次时延或聚合吞吐\\
+\fld{stop\_token} & — & — & — & 空 & 调用方协作取消令牌，与时限一同检查\\
+\end{paramtable}
+
+\subsection{\texttt{IPMLPOptions}（LP 内点，\srcpath{include/mipsolvers/engine/kernel/ipm/ipm\_lp\_solver.hpp}）}
+
+\begin{paramtable}
+\fld{max\_iter} & — & 次 & 50--500 & 200 & IPM 最大迭代数\\
+\fld{time\_limit\_sec} & — & s & $\ge 0$ & 0.0 & 本次 LP 求解墙钟上限；0 = 不限\\
+\fld{tol\_primal} & $\varepsilon_p$ & — & $10^{-10}$--$10^{-6}$ & $10^{-8}$ & 原始可行容差\\
+\fld{tol\_dual} & $\varepsilon_d$ & — & $10^{-10}$--$10^{-6}$ & $10^{-8}$ & 对偶可行容差\\
+\fld{tol\_gap} & $\varepsilon_g$ & — & $10^{-10}$--$10^{-6}$ & $10^{-8}$ & 互补间隙容差\\
+\fld{ruiz\_rounds} & — & 轮 & 0--20 & 10 & Ruiz 均衡轮数；0 = 关闭\\
+\fld{max\_correctors} & — & 个 & $-1$--若干 & $-1$ & Gondzio 校正上限；$-1$=自动，0=关闭\\
+\fld{centrality\_step\_control} & — & — & — & true & 自适应向中心步长规则；false 回退固定 0.9995 边界比例\\
+\fld{presolve} & — & — & — & true & 内点自带预求解（定变量、单例行等）\\
+\fld{crossover} & — & — & — & false & 纯化解到顶点（供单纯形热启动）\\
+\fld{verbose} & — & — & — & false & 逐迭代日志\\
+\fld{use\_highs\_presolve} & — & — & — & false & 显式开启 HiGHS 预求解前置（仅冷启动，失败回退直接求解）\\
+\fld{newton\_formulation} & — & — & Auto/ForceNormal/ ForceAugmented & Auto & 牛顿系统形态：法方程或增广系统\\
+\fld{cancel\_flag} & — & — & — & nullptr & 协作中止标志（portfolio 竞速取消败者）；空 = 不改变行为\\
+\end{paramtable}
+
+\subsection{\texttt{IPMOptions}（NLP 内点关键字段，\srcpath{include/mipsolvers/engine/kernel/ipm/ipm\_solver.hpp}）}
+
+\begin{paramtable}
+\fld{max\_iter} & — & 次 & 100--1000 & 400 & 最大迭代数\\
+\fld{tol\_primal} & $\varepsilon_p$ & — & $10^{-8}$--$10^{-4}$ & $10^{-6}$ & 原始可行容差\\
+\fld{tol\_dual} & $\varepsilon_d$ & — & $10^{-8}$--$10^{-4}$ & $10^{-6}$ & 平稳性容差（配合乘子缩放口径，见头文件注释）\\
+\fld{tol\_complementarity} & $\varepsilon_c$ & — & $10^{-8}$--$10^{-4}$ & $10^{-6}$ & 互补守卫（未缩放 $\max_i|s_i\mu_i|$）\\
+\fld{tol\_accept} & — & — & $\ge 0$ & 0.0 & 可接受水平的缩放总误差；$\le 0$ 关闭可接受判据\\
+\fld{acceptable\_iter} & — & 次 & $\ge 0$ & 0 & 可接受水平需连续满足的迭代数\\
+\fld{alpha\_max} & $\bar\alpha$ & — & $(0,1]$ & 0.0 & 步长上限；$\le 0$ 取机器精度可辨的最大严格内点比例\\
+\fld{verbose} & — & — & — & false & 逐迭代日志\\
+\fld{allow\_external\_fallback} & — & — & — & false & 原生求解失败后可回退 Ipopt（结果中以后端名标识）\\
+\end{paramtable}
+
+\subsection{\texttt{ConicIPMOptions}（锥内点，\srcpath{include/mipsolvers/engine/kernel/ipm/conic\_ipm\_solver.hpp}）}
+
+\begin{paramtable}
+\fld{max\_iterations} & — & 次 & 20--200 & 100 & 牛顿迭代上限\\
+\fld{abstol} / \fld{reltol} & $\varepsilon_a,\varepsilon_r$ & — & $10^{-9}$--$10^{-4}$ & $10^{-7}$ / $10^{-6}$ & 对偶间隙绝对/相对容差\\
+\fld{feastol} & $\varepsilon_f$ & — & $10^{-9}$--$10^{-5}$ & $10^{-7}$ & 可行（原始/对偶残差）容差\\
+\fld{refinement} & — & 步 & 0--3 & 1 & KKT 精化步数上限（带同坐标 backward-error 闸门）\\
+\fld{num\_threads} & — & 个 & $\ge 0$ & 0 & OpenMP 线程数；0 = 库默认\\
+\fld{chordal\_decomposition} & — & — & — & true & 对有益稀疏 SDP 块做 chordal 分解\\
+\fld{chordal\_min\_order} & — & 阶 & $\ge 2$ & 32 & 参与分解的最小 SDP 阶\\
+\fld{chordal\_max\_clique\_ratio} & — & — & $(0,1)$ & 0.75 & 要求的最大团/阶压缩比\\
+\fld{chordal\_max\_expansion\_ratio} & — & — & $\ge 1$ & 2.0 & 团/原条目数膨胀比上限\\
+\fld{verbose} & — & — & — & false & 逐迭代进度表\\
+\end{paramtable}
+
+\subsection{\texttt{SimplexOptions}（对偶单纯形关键字段，\srcpath{include/mipsolvers/engine/kernel/lp\_kernel/dual\_simplex.hpp}）}
+
+\begin{paramtable}
+\fld{max\_iter} & — & 次 & $10^3$--$10^6$ & 2000 & 单纯形迭代上限\\
+\fld{time\_limit\_sec} & — & s & $\ge 0$ & 0.0 & 墙钟上限；0 = 不限\\
+\fld{feasibility\_tol} & $\varepsilon_f$ & — & $10^{-9}$--$10^{-6}$ & $10^{-8}$ & 可行容差\\
+\fld{optimality\_tol} & $\varepsilon_o$ & — & $10^{-9}$--$10^{-6}$ & $10^{-8}$ & 最优（对偶可行）容差\\
+\fld{verbose} & — & — & — & false & 日志开关\\
+\fld{allow\_warm\_primal\_phase\_one} & — & — & — & false & 显式允许对非对偶可行的热启动基先跑原始 Phase I\\
+\fld{incumbent\_bound} / \fld{incumbent\_check\_interval} & — & — / 次 & — & nullptr / 50 & 并行 B\&C 在位值早停：原子指针与检查间隔\\
+\fld{exact\_dse\_initialization} & — & — & — & false & 显式开启冷启动全精确 DSE 权重初始化（一次检查性 BTRAN/行）\\
+\fld{dual\_edge\_weight\_initiali\-zation} & — & — & Production/Devex/ StructuralExact/ FullExact/ CertifiedExact & Production & 对偶边权初始化模式\\
+\fld{lp\_kernel\_threads} & — & 个 & $\ge 0$ & 0 & PRICE/BFRT 并行预算；0 = 有界硬件默认，1 = 串行\\
+\fld{dual\_shift\_start\_max\_count} / \fld{dual\_shift\_start\_max\_fraction} & — & 个 / — & — & 256 / 0.125 & 对偶可行化移项预算：超过即改用真正的对偶 Phase I\\
+\fld{allow\_incremental\_row\_append\_factor} & — & — & — & false & 根割追加行时复用父基因子（块三角结构）\\
+\fld{retain\_standard\_form} & — & — & — & false & 结果中保留标准形副本（供割生成）；瞬态求解应关闭\\
+\fld{intermediate\_audit\_interval} & — & 次 & $\ge 0$ & 32 & 非终止 INVERT 的完全残差扫描间隔；$\le 0$ 关闭周期扫描\\
+\fld{lp\_kernel\_backend} & — & — & HiGHS/ ExperimentalNative & HiGHS & 连续 LP 数值内核；HiGHS 被拒即终止，不回退\\
+\fld{factor\_backend} & — & — & BackendA\_Umfpack\-Native 等 & BackendA & 基因子后端（A 为当前生产路径，B 系为实验）\\
+\fld{escalation\_residual\_tol} & — & — & $10^{-8}$--$10^{-4}$ & $10^{-6}$ & 冷启动结果原空间可行审计的接受阈值\\
+\fld{use\_native\_presolve} / \fld{use\_highs\_presolve} & — & — & — & false / false & 显式开启原生 P1 / HiGHS 预求解（仅冷启动，失败回退直解）\\
+\end{paramtable}
+
+遗留 ABI 字段（\fld{allow\_cold\_start}、\fld{use\_partial\_pricing}、
+\fld{perturb\_degenerate\_primal}、\fld{fallback\_basis}、
+\fld{enable\_degenerate\_frontier\_remap}、\fld{suppress\_degenerate\_frontier\_remap}、
+\fld{escalation\_*} 其余字段）仅为源码兼容保留，重写后的原生内核不消费；以头文件
+注释为准。
+
+\subsection{\texttt{BCOptions}（原生 B\&C 关键字段，\srcpath{include/mipsolvers/engine/bc/options.hpp}）}
+
+\texttt{BCOptions} 为大型平铺选项束（核心/割/启发式/并行/回退/自动调参等分组），
+下表只收录关键字段；完整清单与环境变量覆盖见头文件注释。
+
+\begin{paramtable}
+\fld{max\_nodes} & — & 个 & $10^2$--$10^6$ & 50000 & B\&B 节点上限\\
+\fld{max\_lp\_iter} & — & 次 & — & 500 & 每个节点 LP/NLP 松弛的迭代上限\\
+\fld{time\_limit\_sec} & — & s & $\ge 0$ & 120.0 & 墙钟时限\\
+\fld{int\_tol} & $\varepsilon_{\mathrm{int}}$ & — & $10^{-6}$--$10^{-4}$ & $10^{-5}$ & 整性容差\\
+\fld{gap\_tol} & $\varepsilon_{\mathrm{gap}}$ & — & $10^{-6}$--$10^{-2}$ & $10^{-4}$ & 相对原始-对偶间隙容差\\
+\fld{lp\_tol} & — & — & — & $10^{-6}$ & LP 松弛收敛容差\\
+\fld{root\_cut\_rounds} / \fld{cuts\_per\_round} & — & 轮 / 行 & 0--50 & 10 / 20 & 根节点割轮数 / 每轮每节点新增割上限\\
+\fld{max\_cut\_depth} & — & 层 & $\ge 0$ & 0 & 树节点割生成的最大深度（0 = 仅根）\\
+\fld{gmi\_min\_efficacy} / \fld{gmi\_max\_density} / \fld{gmi\_max\_parallelism} & — & — & — & $10^{-3}$ / 0.35 / 0.90 & GMI 割准入：最小规范违反度、最大非零率、近平行拒绝\\
+\fld{cuts} & — & — & None/IntRounding/ MIR/Gomory/ Cover/All & All & 割平面族选择\\
+\fld{branching} & — & — & MostInfeasible/ Pseudocost/ FirstFractional & Pseudocost & 分支变量选择策略\\
+\fld{node\_sel} & — & — & BestFirst/DepthFirst/ Hybrid & Hybrid & 节点选择策略\\
+\fld{use\_simplex\_lp\_nodes} & — & — & — & true & 节点 LP 用对偶单纯形\\
+\fld{use\_ipm\_root} / \fld{use\_ipm\_nodes} & — & — & — & false / false & 根/节点松弛改用 IPM\\
+\fld{ipm\_root\_probe} & — & — & — & true & 根节点 IPM 试探开关\\
+\fld{lp\_kernel\_backend} & — & — & HiGHS/ ExperimentalNative & HiGHS & 节点 LP 数值内核\\
+\fld{use\_feasibility\_pump} / \fld{use\_progressive\_rounding} & — & — & — & true / true & 可行性泵 / 渐进舍入启发式\\
+\fld{use\_papilo\_presolve} / \fld{native\_presolve\_probing} & — & — & — & true / true & PaPILO 预求解 / 原生探测\\
+\fld{feasibility\_pump\_iters} & — & 次 & — & 5 & 可行性泵迭代数\\
+\fld{max\_dive\_lps} / \fld{max\_probe\_vars} & — & 次 / 个 & — & 60 / 50 & 潜水 LP 数 / 探测变量数\\
+\fld{bound\_propagation\_rounds} & — & 轮 & — & 3 & 界传播轮数\\
+\fld{root\_cut\_stall\_tol} / \fld{root\_cut\_max\_stalls} & — & — / 次 & — & $10^{-4}$ / 2 & 根割停滞判据与最大停滞轮数\\
+\fld{cut\_pool\_max\_size} / \fld{cut\_pool\_max\_age} & — & 行 / 轮 & — & 2000 / 50 & 割池容量与割龄上限\\
+\fld{solution\_pool\_size} & — & 个 & — & 10 & 解池容量\\
+\fld{num\_threads} & — & 个 & $-1$--若干 & $-1$ & 树并行线程数；$-1$ = 自动\\
+\fld{deterministic\_parallel} & — & — & — & false & 确定性并行模式\\
+\fld{enable\_lp\_fallback} & — & — & — & true & 节点 LP 失败的分级回退\\
+\fld{verbose} & — & — & — & false & 日志开关\\
+\end{paramtable}
+
+\section{验证与边界局限}
+
+\subsection{验证状态}
+
+模块的数值验证证据集中在第 11 章：CTest 单元/集成测试矩阵、NETLIB 90 案例基准、
+MIPLIB 2017 协议与 CPLEX 对照、以及 \texttt{benchmark/} 下的独立内核微基准，均注明
+证据文件、日期、平台、构建配置与验证层级。历史快照只描述其对应提交与机器的状态，
+不直接代替当前提交的验证。
+
+\subsection{边界与局限}
+
+\begin{boundarynote}
+以下口径与 \texttt{docs/manual/05-solvers-engines.md} \S 5.8 一致：
+\begin{itemize}
+  \item \textbf{默认 LP 内核}：部分平台默认内核为 HiGHS；原生对偶单纯形的冷启动、
+        极端退化与大型 NETLIB 覆盖需逐平台验证（见第 11 章证据口径）；
+  \item \textbf{PDLP}：不提供 basis，不能替代依赖基热启动与精确约化成本的 B\&C
+        节点内核；
+  \item \textbf{NativeIPMLP}：无 HSD（齐次自对偶）状态机，不能从普通迭代失败推出
+        不可行/无界结论；
+  \item \textbf{NativeNLP}：固定罚参数不构成一般 NLP 的强收敛保证；``步长很小''
+        状态必须结合可行度审计判读；
+  \item \textbf{原生 B\&C}：主要实现依赖 HiGHS 库编译；非凸 MINLP 经空间分支定界
+        求解，无全局最优性保证；
+  \item \textbf{性能结论}：强依赖编译器、BLAS、稀疏后端、线程数与数据集；可复现
+        数据见第 11 章，源码用例数不等于通过数。
+\end{itemize}
+\end{boundarynote}
+
+\input{../../_manual_common/industrial_evaluation}
+
+\end{document}

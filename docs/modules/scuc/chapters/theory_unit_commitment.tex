@@ -1,0 +1,415 @@
+% theory_unit_commitment.tex —— scuc 通用理论：安全约束机组组合与节点电价
+% 本文件为理论层章节，遵循 docs/modules/THEORY_WRITING_GUIDE.md。
+
+\section{机组组合理论：标准模型、MILP 松弛与节点电价}
+
+\begin{theorynote}
+本章为通用数学理论，按电力市场出清与机组组合（Unit Commitment, UC）领域的标准
+模型体系撰写：SCUC 的标准 MILP 提法、分段线性化、直流潮流与 PTDF、备用与储能
+约束族、最小启停时间的紧 formulations、以及 SCED/LMP 定价原理。覆盖范围对应
+《南方区域电力市场现货交易规则（2025 V1.0）》§2.6 的日前出清模型框架
+\cite{southern2025}。本章公式不要求逐式对应代码；与平台实现
+（\texttt{src/scuc/}）的对应关系见本章末"与实现的对应"表，超出实现的内容以
+"未实现扩展说明"框就地标记。
+\end{theorynote}
+
+\subsection{记号与约定}
+
+\begin{center}
+\begin{footnotesize}
+\begin{longtable}{@{}ll@{}}
+\toprule
+\textbf{符号} & \textbf{含义}\\
+\midrule
+\endhead
+$\mathcal G,\ \mathcal B,\ \mathcal L$ & 机组、母线、交流支路集合；$n_g,n_b,n_l$ 为其基数\\
+$\mathcal W,\mathcal S,\mathcal H,\mathcal D^{dc}$ & 风电、光伏、储能、直流线集合\\
+$\mathcal T=\{0,\dots,T-1\}$ & 调度时段；$\Delta t$ 为时段长（h）\\
+$\mathcal T_c=\{0,\dots,T_c-1\}$ & 组合时段；$h(t)=\lfloor t/\mathrm{iph}\rfloor$ 为耦合映射\\
+$u_{g,h},y_{g,h},z_{g,h}\in\{0,1\}$ & 组合（在网）、启动、停机二进制变量\\
+$P_{g,t}\ge 0$ & 机组 $g$ 在时段 $t$ 的总出力（MW）\\
+$p_{g,k,t}\ge 0$ & 第 $k$ 报价段出力（MW），$k=1,\dots,K$\\
+$R^{spin}_{g,t},R^{up}_{g,t},R^{dn}_{g,t}\ge 0$ & 旋转备用、上调、下调调节备用（MW）\\
+$\underline P_g,\bar P_g$ & 最小/最大技术出力（MW）\\
+$R^+_g,R^-_g$ & 上/下爬坡率（MW/min）\\
+$T^U_g,T^D_g$ & 最小开机/停机时间（h，取整后以组合时段计）\\
+$C^U_g,C^{NL}_g$ & 启动成本（\$/次）、空载成本（\$/h）\\
+$c_{g,k}$ & 第 $k$ 段边际报价（\$/MWh）\\
+$D_{b,t}$ & 母线 $b$ 在时段 $t$ 的负荷（MW）\\
+$x_l,\bar F_l$ & 支路电抗（pu）与热稳定限额（MW）\\
+$\mathrm{PTDF}_{l,b}$ & 支路 $l$ 对母线 $b$ 注入的功率传输分布因子\\
+$M_1,M_2$ & 线路/断面松弛罚系数、可再生弃电罚系数（\$/MW、\$/MWh）\\
+$c^{shed},c^{curt}$ & 失负荷价值 VOLL、过剩惩罚 VOCC（\$/MWh）\\
+\bottomrule
+\end{longtable}
+\end{footnotesize}
+\end{center}
+
+全章未特别说明时，求和指标 $g\in\mathcal G$、$t\in\mathcal T$、$h\in\mathcal T_c$。
+
+\subsection{SCUC 标准模型}
+
+\subsubsection{问题提法}
+
+\begin{definition}[SCUC]
+安全约束机组组合问题是在调度时界 $\mathcal T$ 上同时决定各机组的启停状态
+$u_{g,h}$ 与出力计划 $P_{g,t}$，最小化总运行成本，满足：（i）系统功率平衡与
+备用需求；（ii）机组物理约束（出力限、爬坡、最小启停、启停次数）；（iii）储能
+与直流线动态约束；（iv）输电网络安全约束（直流潮流口径的线路与断面限额）。
+由于含二进制变量，SCUC 是混合整数线性规划（MILP），属 NP-hard
+\cite{wood2013}。
+\end{definition}
+
+\subsubsection{目标函数}
+
+标准日前出清目标为总成本最小化：
+\begin{equation}
+\min\ \underbrace{\sum_{g,t}\Big(C^{NL}_g\,u_{g,h(t)}\,\tfrac{1}{\mathrm{iph}}
+  + \sum_{k} c_{g,k}\,p_{g,k,t}\,\Delta t\Big)}_{\text{空载 + 分段能量成本}}
++ \underbrace{\sum_{g,h} C^U_g\, y_{g,h}}_{\text{启动成本}}
++ \underbrace{\sum_{g,t}\big(c^{spin}_g R^{spin}_{g,t}+c^{up}_g R^{up}_{g,t}
+  +c^{dn}_g R^{dn}_{g,t}\big)\Delta t}_{\text{备用成本}}
++ \Pi,
+\label{eq:scuc-obj}
+\end{equation}
+其中 $\Pi$ 汇总各类惩罚项：切负荷 $c^{shed}\,\Delta t\,P^{shed}_t$、
+过剩 $c^{curt}\,\Delta t\,P^{curt}_t$、线路/断面潮流松弛 $M_1(\sigma^+_{l,t}
++\sigma^-_{l,t}+\cdots)$、可再生弃电 $M_2\,\Delta t\,(P^{wc}_{w,t}+P^{sc}_{s,t})$，
+以及可选的储能充放电报价项与输电费项。惩罚系数量级需显著高于正常能量价格
+（典型 VOLL $\sim 10^4$ \$/MWh），使松弛仅在物理不可行时被使用；该设计即
+"软约束 + 大 M 罚"的市场出清惯例 \cite{southern2025}。
+
+\begin{remark}[惩罚口径的诚实声明]
+大 M 罚使模型在物理不可行时仍返回"带松弛的最优解"。判读结果时必须先检查
+松弛量（切负荷、弃电、线路松弛）是否为零量级，再接受调度方案；本模块在输出
+JSON 中单独给出 \texttt{load\_shedding}、\texttt{gen\_curtailment} 与成本分解
+中的 \texttt{penalty} 项用于该检查。
+\end{remark}
+
+\subsubsection{功率平衡与备用}
+
+系统功率平衡（单区域、损耗忽略）：
+\begin{equation}
+\sum_g P_{g,t}+\sum_w P_{w,t}+\sum_s P_{s,t}
++\sum_{s'}\big(P^{dis}_{s',t}-P^{ch}_{s',t}\big)+\sum_d P^{dc}_{d,t}
++P^{shed}_t-P^{curt}_t=\sum_b D_{b,t},\quad \forall t.
+\label{eq:balance}
+\end{equation}
+
+备用需求按系统负荷比例给定（§2.6.3.2--2.6.3.4 口径）：
+\begin{align}
+\sum_g R^{spin}_{g,t}&\ge r^{spin}\,D_t, &
+\sum_g R^{up}_{g,t}&\ge r^{up}\,D_t, &
+\sum_g R^{dn}_{g,t}&\ge r^{dn}\,D_t, \label{eq:reserve}\\
+\sum_g \big(P_{g,t}-\underline P_g u_{g,h(t)}\big)&\le D_t - r^{neg}D_t, &
+\sum_g \alpha^{pfr}_g \bar P_g u_{g,h(t)}&\ge R^{pfr}, && \nonumber
+\end{align}
+其中 $D_t=\sum_b D_{b,t}$。负备用约束的含义是：在线机组压到最小技术出力后的
+总下调空间不得侵入负备用需求；一次调频（PFR）备用按系数
+$\alpha^{pfr}_g\bar P_g$ 计入在线容量。
+
+\subsubsection{机组约束族}
+
+\paragraph{出力耦合与分段。}
+\begin{equation}
+P_{g,t}=\underline P_g u_{g,h(t)}+\sum_{k=1}^{K} p_{g,k,t},\qquad
+\underline P_g u_{g,h(t)}\le P_{g,t}\le \bar P_g u_{g,h(t)},\qquad
+0\le p_{g,k,t}\le q_{g,k}\,u_{g,h(t)},
+\label{eq:gen-coupling}
+\end{equation}
+其中 $q_{g,k}$ 为第 $k$ 段容量。该"段变量 + 等式聚合"形式把分段线性成本
+写成显式线性结构，见 \ref{sec:pwl} 节。
+
+\paragraph{启停逻辑。}
+\begin{equation}
+u_{g,h}-u_{g,h-1}=y_{g,h}-z_{g,h},\qquad y_{g,h}+z_{g,h}\le 1,
+\label{eq:logic}
+\end{equation}
+首时段以初始在网状态 $u_{g,0^-}$ 替换 $u_{g,-1}$；must-run 机组固定
+$u_{g,h}=1$。
+
+\paragraph{最小启停时间。}
+记 $TU_g=\lceil T^U_g\rceil$、$TD_g=\lceil T^D_g\rceil$（组合时段数），
+"启动触发在线"形式为 \cite{ostrowski2012}：
+\begin{equation}
+\sum_{\tau=\max(0,h-TU_g+1)}^{h} y_{g,\tau}\le u_{g,h},\qquad
+\sum_{\tau=\max(0,h-TD_g+1)}^{h} z_{g,\tau}\le 1-u_{g,h},\qquad \forall h.
+\label{eq:minupdown}
+\end{equation}
+时界起点处求和被截断（$\tau\ge 0$），初始状态历史不进入约束。
+
+\begin{remark}[等价紧形式]
+文献中常见的另一族 $\sum_{\tau=h}^{h+TU_g-1} z_{g,\tau}\le 1-u_{g,h}$（前视
+形式）与 \eqref{eq:minupdown} 在整数意义下等价，LP 松弛强度不同；
+Rajan--Takriti 证明最小启停 polytope 存在无附加变量的完全描述
+\cite{rajan2005}，Ostrowski 等给出各类形式的 LP 收紧比较
+\cite{ostrowski2012}，Morales-España 等给出"紧且紧凑"的三二进制变量形式
+\cite{morales2013}。当前实现采用 \eqref{eq:minupdown} 的后视形式。
+\end{remark}
+
+\paragraph{爬坡。}
+\begin{equation}
+P_{g,t}-P_{g,t-1}\le 60\Delta t\,R^+_g + \bar P_g\, y_{g,h(t)},\qquad
+P_{g,t-1}-P_{g,t}\le 60\Delta t\,R^-_g + \bar P_g\, z_{g,h(t)},
+\label{eq:ramp}
+\end{equation}
+首时段以初始出力 $P_{g,0^-}$ 替换 $P_{g,-1}$。右端的
+$\bar P_g y$（$\bar P_g z$）项是启动（停机）时段放开爬坡限制的 big-M 处理：
+启动时段机组可从 0 爬至任意 $\le\bar P_g$ 的出力。更紧的形式用
+$\min(\underline P_g+60\Delta t R^+_g,\bar P_g)$ 替代 $\bar P_g$（见
+\ref{sec:tightening} 节）。
+
+\paragraph{备用耦合。}
+\begin{align}
+P_{g,t}+R^{spin}_{g,t}+R^{up}_{g,t}&\le \bar P_g u_{g,h(t)},&
+R^{dn}_{g,t}&\le P_{g,t}-\underline P_g u_{g,h(t)},\nonumber\\
+R^{spin}_{g,t}&\le (\bar P_g-\underline P_g)u_{g,h(t)},&
+R^{up}_{g,t}&\le 10 R^+_g\, u_{g,h(t)},\quad
+R^{dn}_{g,t}\le 10 R^-_g\, u_{g,h(t)}.
+\label{eq:reserve-coupling}
+\end{align}
+末两式对应"10 分钟可调"口径：调节备用上限取 10 分钟爬坡能力（
+$10 R^{\pm}_g$，MW），这是§2.6 类规则中调节备用响应时间的标准近似
+\cite{southern2025}。
+
+\subsubsection{储能约束族}
+
+\begin{align}
+E_{s,t}&=E_{s,t-1}+\eta^{ch}_s \Delta t\, P^{ch}_{s,t}
+-\frac{\Delta t}{\eta^{dis}_s} P^{dis}_{s,t},&
+\underline E_s&\le E_{s,t}\le \bar E_s,\quad E_{s,T-1}\ge E^{fin}_s,
+\label{eq:soc}\\
+\underline P^{ch}_s \xi^+_{s,t}&\le P^{ch}_{s,t}\le \bar P^{ch}_s \xi^+_{s,t},&
+\underline P^{dis}_s \xi^-_{s,t}&\le P^{dis}_{s,t}\le \bar P^{dis}_s \xi^-_{s,t},&
+\xi^+_{s,t}+\xi^-_{s,t}&\le 1,
+\label{eq:sto-bin}
+\end{align}
+以及日循环上限
+$\sum_t\big(\tfrac{\Delta t}{\eta^{dis}_s}P^{dis}_{s,t}+\eta^{ch}_s\Delta t
+P^{ch}_{s,t}\big)\le 2 N^{cycle}_s \bar E_s$（吞吐能量口径，充放两侧各计一次，
+故右端为两倍循环乘容量）。分效率缺省时按 $\eta^{ch}=\eta^{dis}=\sqrt\eta$
+均分往返效率。
+
+\begin{remark}[无指示变量时的松弛]
+当 $\xi^\pm$ 不引入模型时，充放互斥只能靠目标中的效率损耗与报价结构"软"达成；
+若放电报价低于放电成本折算，LP 松弛可能出现同时充放的虚假套利。实现以
+$P^{ch}_{s,t}+P^{dis}_{s,t}\le\max(\bar P^{ch}_s,\bar P^{dis}_s)$ 作软互斥
+（见第 4 章声明），严格互斥需开 \fld{use\_binary\_indicators}。
+\end{remark}
+
+\subsubsection{直流线路}
+
+\begin{equation}
+\underline P^{dc}_d\le P^{dc}_{d,t}\le \bar P^{dc}_d,\qquad
+P^{dc}_{d,t}-P^{dc}_{d,t-1}\le R^{dc,+}_d,\quad
+P^{dc}_{d,t-1}-P^{dc}_{d,t}\le R^{dc,-}_d,
+\label{eq:dcline}
+\end{equation}
+直流功率可正可负（双向送电），在功率平衡中作为注入项、在网络约束中经
+PTDF 差 $\mathrm{PTDF}_{l,to}-\mathrm{PTDF}_{l,from}$ 计入。
+
+\subsection{分段线性化}
+\label{sec:pwl}
+
+\begin{definition}[分段线性能量成本]
+机组能量成本取报价曲线的下凸分段线性函数
+$C_g(P)=C_g(\underline P_g)+\sum_k c_{g,k} p_k$（$P=\underline P_g+\sum_k p_k$，
+$0\le p_k\le q_k$），段价单调不减 $c_{g,1}\le c_{g,2}\le\cdots$ 时
+最小化问题自动按段序填满（凸 PWL 无歧义）；段价非单调时，\eqref{eq:gen-coupling}
+的段上界耦合 $p_{g,k,t}\le q_{g,k}u_{g,h(t)}$ 仍是有效约束，但段的使用顺序由
+优化决定，报价曲线应为凸递增以符合市场规则 \cite{southern2025,wood2013}。
+\end{definition}
+
+\begin{remark}
+二次成本 $aP^2+bP$ 的常用三段等宽线性化：段宽 $w=(\bar P-\underline P)/3$，
+第 $k$ 段平均边际成本 $c_k=b+2a\big(\underline P+(2k-1)w/2\big)$——这正是
+算例构造器 \srcpath{src/scuc/case\_builder.cpp:build\_ieee118\_case} 中
+\texttt{make\_segments} lambda 采用的公式。
+\end{remark}
+
+\subsection{直流潮流与 PTDF}
+\label{sec:dcflow}
+
+直流潮流假设：无损、电压幅值恒定 1.0 pu、相角差小，得线性系统
+\begin{equation}
+B\,\theta = p^{inj},
+\end{equation}
+其中 $B\in\mathbb R^{n_b\times n_b}$，$B_{ff}=B_{tt}=\sum_{l\ni f,t} 1/x_l$、
+$B_{ft}=B_{tf}=-1/x_l$（仅计入在运支路）。删去平衡母线（取 0 号）行列得
+约化矩阵 $B_{red}$，可逆时支路潮流为
+\begin{equation}
+F_l=\frac{\theta_{f_l}-\theta_{t_l}}{x_l}
+=\sum_{b}\underbrace{\frac{1}{x_l}\big(B^{-1}_{red}\big)_{f_l b}
+-\frac{1}{x_l}\big(B^{-1}_{red}\big)_{t_l b}}_{\displaystyle \mathrm{PTDF}_{l,b}}
+\ p^{inj}_b ,
+\label{eq:ptdf}
+\end{equation}
+（涉及平衡母线的行列按 0 处理）。$\mathrm{PTDF}_{l,b}$ 即母线 $b$ 单位注入
+在支路 $l$ 上引起的潮流。网络安全约束为
+\begin{equation}
+-\bar F_l\le \sum_b \mathrm{PTDF}_{l,b}\, p^{inj}_b \le \bar F_l,\quad\forall l,t,
+\label{eq:linelim}
+\end{equation}
+$p^{inj}_b$ 由母线 $b$ 处机组出力、可再生、储能净放、直流注入与负荷代数和
+构成。监视断面（section）潮流定义为成员线路潮流的加权和，其灵敏度矩阵即
+PTDF 行的同一加权组合：
+\begin{equation}
+\mathrm{SECPTDF}_{s,b}=\sum_{l} w_{s,l}\,\mathrm{PTDF}_{l,b},\qquad
+-\bar F^{rev}_s\le \sum_b \mathrm{SECPTDF}_{s,b}\,p^{inj}_b\le \bar F^{fwd}_s.
+\label{eq:section}
+\end{equation}
+
+\begin{remark}[误差与适用条件]
+直流近似忽略网损与无功，电压/相角越界无约束表达；径向退化（$B_{red}$ 病态
+或奇异）时 PTDF 无定义。潮流精度对高压输电网典型误差在百分之几量级
+\cite{stott2009}；需要精确潮流或 N-1 校验时应外接交流潮流/安全分析程序。
+\end{remark}
+
+\subsection{MILP 松弛与紧化}
+\label{sec:tightening}
+
+SCUC 的可解性取决于 LP 松弛强度。标准结论（证明从略，见所引文献）：
+
+\begin{proposition}[启停转移的凸包]
+单机组三二进制 $(u,y,z)$ 在转移逻辑 \eqref{eq:logic} 与最小启停
+\eqref{eq:minupdown} 下的整数可行域，存在由其紧 formulation 给出的 LP 完全
+描述 \cite{rajan2005,morales2013}；附加大尺度聚合割（对称破缺、累计段耦合、
+爬坡透视割）可显著收紧多机组松弛 \cite{ostrowski2012}。
+\end{proposition}
+
+常用紧化手段（均为 LP-valid，即不改变整数可行域）：
+\begin{itemize}
+  \item \textbf{爬坡透视割}：把 \eqref{eq:ramp} 中 big-M 系数 $\bar P_g$
+        收紧为 $\min(\underline P_g+60\Delta t R^+_g,\bar P_g)$，启动时段
+        出力上界从 $\bar P_g$ 降到 $\underline P_g+R^+$ 量级，典型收紧
+        2--4 倍；
+  \item \textbf{转移壳割}：$y_{g,h}\le u_{g,h}$、$z_{g,h}\le 1-u_{g,h}$、
+        $y_{g,h}\le 1-u_{g,h-1}$、$z_{g,h}\le u_{g,h-1}$ 给出转移关系的
+        凸包刻画；
+  \item \textbf{备用覆盖割}：备用需求与单机备用能力按承诺变量聚合，
+        $\sum_g \kappa_g u_{g,h(t)}\ge$ 需求，迫使分数解也携带足够在线能力；
+  \item \textbf{对称破缺}：参数相同的机组按编号序施加 $u_{g_{j+1},h}\le
+        u_{g_j,h}$，削减同构分支。
+\end{itemize}
+
+这些割平面在主问题的根节点一次性加入（预构型），其有效性不依赖求解器内部
+割生成；代价是根 LP 行数膨胀，故大规模实例需按规模阈值取舍（实现见第 4 章）。
+
+\subsection{SCED 与节点边际电价（LMP）}
+
+\subsubsection{SCED：固定组合的 LP 再调度}
+
+MILP 的整数解固定后（$u,y,z$ 取整固定），SCUC 退化为线性规划——安全约束
+经济调度（SCED）。固定组合消除了 MILP 对偶不存在的问题，使 LP 对偶变量成为
+有经济解释的价格信号。三阶段分工（SCUC 定组合 → SCED 定出力 → LMP 定价格）
+是§2.6.4--2.6.6 口径的市场出清标准流程 \cite{southern2025}。
+
+\subsubsection{LMP 的分解}
+
+\begin{definition}[LMP]
+节点边际电价是功率平衡约束与网络约束对偶变量的组合：设 $\lambda_t$ 为时段
+$t$ 功率平衡 \eqref{eq:balance} 的对偶（系统边际价格，SMP），
+$\mu^+_{l,t},\mu^-_{l,t}\ge 0$ 为线路正/反向限额 \eqref{eq:linelim} 的对偶，
+则母线 $b$ 的节点电价为
+\begin{equation}
+\mathrm{LMP}_{b,t}=\lambda_t+\sum_{l}\big(\mu^-_{l,t}-\mu^+_{l,t}\big)
+\,\mathrm{PTDF}_{l,b},
+\label{eq:lmp}
+\end{equation}
+即\textbf{能量分量}（$\lambda_t$，全网相同）与\textbf{阻塞分量}之和
+\cite{schweppe1988,hogan1992}。无损直流模型下不含网损分量。
+\end{definition}
+
+\begin{remark}[$\delta$ 邻域定价]
+MILP 最优组合下的 SCED 对偶尔因退化基或分段拐点处次梯度不唯一而不稳定；
+§2.6.5.5 的邻域重调度口径把在线机组出力限制在 SCED 值的
+$[(1-\delta),(1+\delta)]$ 倍（并夹在 $[\underline P_g,\bar P_g]$）内重解 LP，
+以该 LP 的对偶作为发布价格 \cite{southern2025}。这属于定价规则层面的工程
+约定，而非新的优化理论。
+\end{remark}
+
+\subsubsection{与场景/安全校验的关系}
+
+\begin{gapnote}
+规则意义上的完整 SCUC 还包含：（i）N-1 预想事故集下的网络安全校验（事故态
+PTDF/LODF 约束或迭代式安全校核）；（ii）多场景/随机 UC 以覆盖可再生与负荷
+预测误差；（iii）交流潮流校验与无功/电压约束。当前代码\textbf{均未实现}：
+网络约束仅基态直流潮流，输入为单条确定性预测曲线（\fld{profiles}），无场景
+维度；\fld{startup\_cost\_warm}/\fld{startup\_cost\_cold} 与启停过程
+（\fld{ud\_periods}/\fld{dd\_periods}）等规则要素已解析未建模。这些差异在
+第 4 章转写层逐条声明。
+\end{gapnote}
+
+\subsection{与实现的对应}
+
+\begin{footnotesize}
+\begin{longtable}{@{}L{5.6cm}L{8.6cm}@{}}
+\toprule
+\textbf{理论条目} & \textbf{实现状态}\\
+\midrule
+\endhead
+目标函数 \eqref{eq:scuc-obj}（能量+空载+启动+备用+罚） &
+\implfull{src/scuc/scuc.cpp:build\_formulation}（启动成本只用
+\texttt{startup\_cost}；温/冷启动字段未消费）\\
+功率平衡 \eqref{eq:balance} &
+\implfull{src/scuc/scuc.cpp:build\_formulation}（含切负荷/过剩松弛变量）\\
+备用需求与耦合 \eqref{eq:reserve}\eqref{eq:reserve-coupling} &
+\implfull{src/scuc/scuc.cpp:build\_formulation}（含负备用与 PFR 容量形式）\\
+出力耦合与分段 \eqref{eq:gen-coupling} &
+\implfull{src/scuc/scuc.cpp:build\_formulation}\\
+启停逻辑 \eqref{eq:logic}、最小启停 \eqref{eq:minupdown} &
+\implfull{src/scuc/scuc.cpp:build\_formulation}（后视形式；时界起点截断，
+初始状态历史不进约束）\\
+爬坡 \eqref{eq:ramp} &
+\implfull{src/scuc/scuc.cpp:build\_formulation}（big-M 取 $\bar P_g$；
+紧系数形式作为 Family R 割平面另行加入）\\
+储能 \eqref{eq:soc}\eqref{eq:sto-bin} 与循环上限 &
+\implfull{src/scuc/scuc.cpp:build\_formulation}（$\xi^\pm$ 由
+\fld{use\_binary\_indicators} 控制；否则软互斥）\\
+直流线路 \eqref{eq:dcline} &
+\implfull{src/scuc/scuc.cpp:build\_formulation}\\
+PTDF \eqref{eq:ptdf} 与线路限额 \eqref{eq:linelim} &
+\implfull{src/scuc/scuc.cpp:compute\_ptdf}（平衡母线固定为 0，
+Eigen FullPivLU 求逆；限额 $>10^5$ MW 的支路不加约束）\\
+断面约束 \eqref{eq:section} &
+\implfull{src/scuc/scuc.cpp:build\_formulation}（SEC\_PTDF 为 PTDF 行加权和）\\
+预构型割平面族（\ref{sec:tightening} 节） &
+\implpart{实现 6/A/T/H/R/G/P/Q/C/V/11 共 11 族；$n_g\times T_c>800$ 时
+关闭 T/H/R/P/Q 五族，见 \srcpath{src/scuc/scuc.cpp:build\_formulation}}\\
+SCED 固定组合 LP &
+\implfull{src/scuc/scuc.cpp:solve\_sced\_stage}\\
+LMP 分解 \eqref{eq:lmp} 与 $\delta$ 邻域 &
+\implfull{src/scuc/scuc.cpp:solve\_lmp\_stage}（对偶取自
+\srcpath{src/scuc/scuc.cpp:run\_lp\_with\_duals}）\\
+热/温/冷态启动成本 & \implpart{字段已解析（\srcpath{src/scuc/scuc.cpp:scuc\_from\_json}），
+目标中一律按热态成本 \texttt{startup\_cost} 计费}\\
+启停过程出力曲线（§2.6.3.8 UD/DD） & \implnone（\fld{ud\_periods}/\fld{dd\_periods} 已解析未消费）\\
+N-1 安全校验、多场景/随机 UC、交流潮流 & \implnone\\
+\bottomrule
+\end{longtable}
+\end{footnotesize}
+
+\subsection{参考文献}
+
+\begin{thebibliography}{9}\small
+\bibitem{southern2025} 南方区域电力市场管理委员会，《南方区域电力市场现货交易
+规则（2025 V1.0）》，§2.6 日前市场出清模型（\texttt{src/scuc/scuc.cpp} 与
+\texttt{include/mipsolvers/scuc/scuc.hpp} 头部注释所引规则文本）。
+\bibitem{wood2013} A.~J. Wood, B.~F. Wollenberg, G.~B. Shebl\'e,
+\emph{Power Generation, Operation, and Control}, 3rd ed., Wiley, 2013.
+\bibitem{schweppe1988} F.~C. Schweppe, M.~C. Caramanis, R.~D. Tabors,
+R.~E. Bohn, \emph{Spot Pricing of Electricity}, Kluwer Academic, 1988.
+\bibitem{hogan1992} W.~W. Hogan, ``Contract networks for electric power
+transmission,'' \emph{Journal of Regulatory Economics} 4(3):211--242, 1992.
+\bibitem{rajan2005} D.~Rajan, S.~Takriti, ``Minimum up/down polytopes of the
+unit commitment problem with start-up costs,'' IBM Research Report RC23628,
+2005.
+\bibitem{ostrowski2012} J.~Ostrowski, M.~F. Anjos, A.~Vannelli, ``Tight mixed
+integer linear programming formulations for the unit commitment problem,''
+\emph{IEEE Transactions on Power Systems} 27(1):39--46, 2012.
+\bibitem{morales2013} G.~Morales-Espa\~na, J.~M. Latorre, A.~Ramos, ``Tight
+and compact MILP formulation for the thermal unit commitment problem,''
+\emph{IEEE Transactions on Power Systems} 28(4):4897--4908, 2013.
+\bibitem{stott2009} B.~Stott, J.~Jardim, O.~Alsa\c{c}, ``DC power flow
+revisited,'' \emph{IEEE Transactions on Power Systems} 24(3):1290--1300, 2009.
+\end{thebibliography}

@@ -1,0 +1,139 @@
+name: solver-gates
+
+on:
+  push:
+    branches: ['**']
+    tags: ['v*']
+  pull_request:
+  workflow_dispatch:
+    inputs:
+      release_gate:
+        description: Run the stable-hardware Windows release gate
+        required: false
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+jobs:
+  correctness:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04, windows-2022]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: ilammy/msvc-dev-cmd@v1
+        if: runner.os == 'Windows'
+        with:
+          arch: x64
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Configure
+        shell: bash
+        run: >-
+          cmake -S . -B build/ci -G Ninja
+          -DCMAKE_BUILD_TYPE=Release
+          -DMIPSOLVERS_BUILD_TESTS=ON
+          -DMIPSOLVERS_BUILD_SCUC=OFF
+          -DMIPSOLVERS_BUILD_SCUC_CASE_BUILDER=OFF
+          -DMIPSOLVERS_BUILD_PYTHON=OFF
+          -DMIPSOLVERS_BUILD_LOCAL_IPOPT=OFF
+          -DMIPSOLVERS_USE_MKL=OFF
+          -DMIPSOLVERS_USE_MUMPS=OFF
+          -DMIPSOLVERS_USE_SUITESPARSE=OFF
+          -DMIPSOLVERS_USE_SUPERLU=OFF
+          -DMIPSOLVERS_USE_GUROBI=OFF
+          -DMIPSOLVERS_USE_CPLEX=OFF
+          -DMIPSOLVERS_ENABLE_NATIVE_ARCH=OFF
+          -DMIPSOLVERS_ENABLE_IPO=OFF
+          -DMIPSOLVERS_PGO_MODE=OFF
+      - name: Build
+        run: cmake --build build/ci --parallel 2
+      - name: Correctness gates
+        run: >-
+          python tools/run_with_hard_deadline.py --timeout 3000 --
+          ctest --test-dir build/ci --output-on-failure --timeout 300 -LE benchmark
+      - name: Shared-runner benchmark smoke gate
+        run: >-
+          python tools/run_with_hard_deadline.py --timeout 600 --
+          ctest --test-dir build/ci --output-on-failure --timeout 300 -L benchmark
+      - name: Reject incomplete additions
+        shell: bash
+        run: |
+          marker_pattern='TO''DO|FIX''ME|X''XX|HA''CK|place''holder|not.?imple''mented|st''ub'
+          if git diff --unified=0 "origin/${{ github.event.repository.default_branch }}...HEAD" |
+            grep -inE "^\+.*(${marker_pattern})"; then
+            echo "Incomplete implementation marker found in added lines."
+            exit 1
+          fi
+
+  release-windows:
+    if: >-
+      startsWith(github.ref, 'refs/tags/v') ||
+      (github.event_name == 'workflow_dispatch' && inputs.release_gate)
+    runs-on: [self-hosted, Windows, X64, solver-release]
+    timeout-minutes: 180
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - uses: ilammy/msvc-dev-cmd@v1
+        with:
+          arch: x64
+      - name: Configure fixed release profile
+        shell: pwsh
+        run: >-
+          cmake -S . -B build/release-gate -G Ninja
+          -DCMAKE_BUILD_TYPE=Release
+          -DMIPSOLVERS_BUILD_TESTS=ON
+          -DMIPSOLVERS_BUILD_SCUC=OFF
+          -DMIPSOLVERS_BUILD_SCUC_CASE_BUILDER=OFF
+          -DMIPSOLVERS_BUILD_PYTHON=OFF
+          -DMIPSOLVERS_BUILD_LOCAL_IPOPT=ON
+          -DMIPSOLVERS_IPOPT_LINEAR_SOLVER=pardisomkl
+          -DMIPSOLVERS_USE_MKL=ON
+          -DMIPSOLVERS_MKL_THREADING=INTEL
+          -DMIPSOLVERS_ENABLE_NATIVE_ARCH=OFF
+          -DMIPSOLVERS_ENABLE_IPO=OFF
+          -DMIPSOLVERS_PGO_MODE=OFF
+          -DMIPSOLVERS_USE_GUROBI=OFF
+          -DMIPSOLVERS_USE_CPLEX=OFF
+      - name: Build release gates
+        run: >-
+          cmake --build build/release-gate --parallel 3 --target
+          test_engine_api netlib_solver_benchmark nlp_open_benchmark
+      - name: API contract gate
+        run: tests/test_engine_api.exe
+      - name: LP stability evidence
+        run: >-
+          python tools/run_with_hard_deadline.py --timeout 3600 --
+          python tools/windows_lp_stability.py --stage stability
+          --binary-dir tests
+          --output reports/release-gate
+      - name: Stable-hardware performance gate
+        run: >-
+          python benchmark/check_lp_release_gate.py
+          --result reports/release-gate/summary.json
+          --baseline benchmark/windows_lp_release_baseline.json
+      - name: Full LP and NLP accuracy gates
+        run: >-
+          python tools/run_with_hard_deadline.py --timeout 7200 --
+          python tools/windows_lp_stability.py --stage gates
+          --binary-dir tests
+          --output reports/release-gate-full
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: windows-solver-release-evidence-${{ github.sha }}
+          path: reports/release-gate*
+          if-no-files-found: warn

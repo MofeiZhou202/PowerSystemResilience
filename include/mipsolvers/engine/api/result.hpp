@@ -1,6 +1,7 @@
 #pragma once
 
 #include <limits>
+#include <cstddef>
 #include <string>
 
 #include <Eigen/Core>
@@ -31,6 +32,15 @@ struct Stats {
   double dual_objective{std::numeric_limits<double>::quiet_NaN()};
   double mip_gap{0.0};
   double runtime_sec{0.0};
+  int thread_budget{0};
+  int portfolio_workers{0};
+  int worker_thread_limit{0};
+  std::size_t memory_limit_bytes{0};
+  bool memory_limit_enforced{false};
+  bool hard_deadline_enforced{false};
+  double deadline_overrun_sec{0.0};
+  bool persistent_backend_reused{false};
+  std::size_t incremental_update_count{0};
   std::string status;
   std::string solver_name;
   int cglp_cuts_added{0};

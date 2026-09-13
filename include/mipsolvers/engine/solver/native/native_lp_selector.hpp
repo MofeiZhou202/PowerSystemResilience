@@ -19,6 +19,8 @@ class NativeDualSimplexLPAdapter final : public SolverAdapter {
   std::string name() const override;
   bool supports(ProblemClass cls) const override;
   SolveResult solve_lp(const LPModel& prob) const override;
+  SolveResult solve_lp(const LPModel& prob,
+                       const SolveContext& context) const override;
 
  private:
   double time_limit_sec_{0.0};
@@ -42,8 +44,12 @@ class NativeAutoLPAdapter final : public SolverAdapter {
   std::string name() const override;
   bool supports(ProblemClass cls) const override;
   SolveResult solve_lp(const LPModel& prob) const override;
+  SolveResult solve_lp(const LPModel& prob,
+                       const SolveContext& context) const override;
 
  private:
+  SolveResult solve_with_context(const LPModel& prob,
+                                 const SolveContext* context) const;
   double time_limit_sec_{0.0};
 };
 

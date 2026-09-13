@@ -65,7 +65,7 @@ K(v) = P·diag(v)·Pᵀ + R
 
 **惯性是 LDLᵀ 的免费副产品。** `K = LDLᵀ` 是合同变换，由 Sylvester 惯性定律 `inertia(K) = inertia(D)`：负主元计数即负特征值数（MUMPS `INFOG(12)`，经 `MumpsSolver::negative_eigenvalues()` 暴露）。LU 类后端完全无法提供惯性——用它们时 IPM 只能盲正则化。对称不定分解带来的逐迭代免费惯性是一阶算法优势，不是实现细节；它是 §6.5 惯性校正的前提。
 
-**后端选择的一个非对称性（重要）**：parity-IPM 的 OPF KKT 经 Ruiz 均衡 + `δ_W` 后是良态的，默认后端为 MUMPS；而*通用* IPM 的 `δ_C` 升级逻辑依赖分解器的**奇异标志**驱动——MUMPS 会吸收零/小主元（`CNTL(3)`、`ICNTL(24)`）而不报错，反而使该机制失效，所以 `make_default_sparse_solver()` 保持 `UMFPACK > KLU > …`，MUMPS 只在 KKT 已知良态处显式选用。这是算法性质的后果，不是偏好。
+**后端选择的一个非对称性（重要）**：parity-IPM 的 OPF KKT 经 Ruiz 均衡 + `δ_W` 后是良态的，默认后端为 MUMPS；而*通用* IPM 的 `δ_C` 升级逻辑依赖分解器的**奇异标志**驱动——MUMPS 会吸收零/小主元（`CNTL(3)`、`ICNTL(24)`）而不报错，反而使该机制失效，所以 `make_default_sparse_solver()` 保持 `KLU > UMFPACK > PARDISO > SuperLU > Eigen SparseLU` 的编译期回退序（`src/engine/kernel/linear_algebra/linear_solver.cpp:make_default_sparse_solver`），MUMPS 只在 KKT 已知良态处显式选用。这是算法性质的后果，不是偏好。诊断时可用环境变量 `MIPSOLVERS_LINEAR_BACKEND`（`klu`/`umfpack`/`superlu`/`pardiso`/`eigen`）强制指定后端；缺省编译行为不变。
 
 **KLU 固定模式数值重分解**。缓存型电力潮流 Newton 在首次完整 KLU 分解后，可对后续同模式 Jacobian 使用 `klu_refactor`。该路径固定首次主元顺序且不重新选主元，因此只在压缩列 `Ap/Ai` 逐项相同时启用；模式变化、奇异或固定主元失败均重新执行符号分析和完整分解。一次性 LE 和通用非缓存 NLE 不使用此优化。完整契约与成本模型见 [KLU numeric refactor 推导](../archive/klu_numeric_refactor_2026-08-20.md)。
 
@@ -93,7 +93,7 @@ q ≈ κ(A)·u   （u ≈ 2.2e−16 为机器精度）
 
 使用约定：
 
-- **残差门控，而非常开**：先评估 `‖r‖∞ ≤ τ·max(1,‖b‖∞)`（τ ≈ 1e−12），只有残差需要时才付回代价。KKT 路径（≤2 步）、LP-IPM 法方程、UMFPACK 的 `IRSTEP=2` 都是这个策略。
+- **残差门控，而非常开**：只有残差需要时才付回代价。τ 的取值按路径区分：LP-IPM 法方程精化用 `‖r‖∞ > 1e−12·max(1,‖b‖∞)` 触发（`src/engine/kernel/ipm/ipm_lp_solver.cpp`）；LP Newton 方向的 KKT 精化由相对强制项控制（η = 0.1 量级），且只提交**严格降低原系统残差**的校正；UMFPACK 的 `IRSTEP=2` 同为门控策略。
 - **发散守卫**：`q ≥ 1`（矩阵太病态）时改进不收敛，继续精化只会放大近零空间噪声。KKT 路径只在校正**严格减小原组装系统残差**时才提交它；若不存在减小残差的校正，应把它当作正则化问题处理（升级 `δ_W`/`dyn_reg`），而不是再要更多精化轮次。OPF 轨迹中曾实测到无守卫精化把方向放大到 `‖d‖ ~ 1e85`。
 - 锥路径的精化同样不再是固定轮次：`ConicIPMOptions::refinement` 是**最大校正次数**，求解器在 NT 缩放的 3×3 坐标中计算分块后向误差，仅当其超过 inexact-Newton 收缩门槛（0.1）才回代，并拒绝不严格降低误差的校正。结果字段 `kkt_linear_solves`、`kkt_refinements`、`max_*_kkt_backward_error` 使该决策可审计。
 
@@ -117,13 +117,13 @@ q ≈ κ(A)·u   （u ≈ 2.2e−16 为机器精度）
 inertia(增广) = inertia(凝聚) + (0, m_ineq, 0)
 ```
 
-即凝聚形上的下降条件 `inertia = (n, m_eq, 0)` 恰好对应增广形上的 `(n, m_eq + m_ineq, 0)`——同一套 Wächter–Biegler `δ_W` 校正原样适用。选择准则（`IPMOptions::use_augmented_newton`）：`J_h` 宽/稠密或 `nnz(J_hᵀJ_h) ≫ nnz(J_h)` 时用增广形；窄带状 `J_h`、额外的 `m_ineq` 维分解代价占主导时用凝聚形。OPF 实测：凝聚形在 stall 点 `κ(W) ≳ 1e10`，方向只剩 5–6 位有效数字（"解得准但方向错"——KKT 残差小、步毫无价值，任何线性求解器都救不了）；换增广形后 case1354pegase 由失败转为收敛，目标值与 Ipopt 吻合到 4e-6。
+即凝聚形上的下降条件 `inertia = (n, m_eq, 0)` 恰好对应增广形上的 `(n, m_eq + m_ineq, 0)`——同一套 Wächter–Biegler `δ_W` 校正原样适用。注意上式是未缩放形式；代码实际组装的是经合同变换 `T = diag(I, I, √(μ/s))` 的等价系统（变换后 (3,3) 块为 `−I`，惯性相同、数值尺度更好），见 `src/engine/kernel/ipm/ipm_solver.cpp` 的增广装配（Wächter–Biegler 2006 §2.2/§3.1）。选择准则（`IPMOptions::use_augmented_newton`）：`J_h` 宽/稠密或 `nnz(J_hᵀJ_h) ≫ nnz(J_h)` 时用增广形；窄带状 `J_h`、额外的 `m_ineq` 维分解代价占主导时用凝聚形。OPF 实测：凝聚形在 stall 点 `κ(W) ≳ 1e10`，方向只剩 5–6 位有效数字（"解得准但方向错"——KKT 残差小、步毫无价值，任何线性求解器都救不了）；换增广形后 case1354pegase 由失败转为收敛，目标值与 Ipopt 吻合到 4e-6。
 
 ### 6.5.2 Wächter–Biegler δ_W 惯性校正环
 
 简约 Hessian 正定时 `inertia(K_aug) = (n, m_eq + m_ineq, 0)`。LDLᵀ 分解免费报告负主元数（§6.3）；当 `negevals ≠ m_eq + m_ineq` 时简约 Hessian 不定，步不保证下降，于是升级 `δ_W` 并重新分解：
 
-- 起步踢量 `1e-8·‖Lxx‖`，每次重试 ×8，上限 `1e-2·‖Lxx‖`。
+- 起步踢量 `√ε·scale`（`scale = max(1, ‖W‖_max)`，ε 为双精度机器精度），每次重试 ×2（精确取 2 的幂，避免十进制增长策略引入额外舍入），上限 `scale/√ε`；超过上限后 `δ_W·I` 已低于 √ε 分辨率，继续升级与所给局部模型无可辩护的联系。实现见 `kkt_system.cpp:resolve_inertia_settings` 与 `kkt_system.cpp:increased_primal_regularization`。
 
 这取代了旧的盲正则化阶梯（旧逻辑接受第一个"没失败"的分解，包括惯性错误的分解——这正是非下降步被接受的路径）。`δ_C`（等式块正则化）则按奇异*标志*升级，与上节的后端非对称性联动：走 MUMPS 的良态 KKT 用惯性驱动，走 UMFPACK/KLU 的通用路径用奇异标志驱动。
 

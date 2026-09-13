@@ -1,0 +1,20 @@
+{
+  "schema_version": 1,
+  "baseline_commit": "78939619f31ebe19b9399c8f52d5c35f6d6c06ba",
+  "profile": "MSVC 19.44 Release, oneMKL INTEL, IPO/PGO/native-arch off",
+  "thread_budget": 2,
+  "minimum_accurate_runs": 60,
+  "case_limits": {"median_ratio": 1.10, "p95_ratio": 1.10},
+  "aggregate_limits": {"median_ratio": 1.05, "p95_ratio": 1.10},
+  "cases": {
+    "dfl001": {"median_ms": 4353.3274, "p95_ms": 4557.8769},
+    "greenbea": {"median_ms": 3056.0230, "p95_ms": 5628.8435},
+    "maros-r7": {"median_ms": 1257.3588, "p95_ms": 1404.4485}
+  },
+  "aggregate": {"median_ms": 8669.21285, "p95_ms": 11386.7504},
+  "fixed_iteration_sets": {
+    "dfl001": [44],
+    "maros-r7": [21]
+  },
+  "greenbea_policy": "Accuracy and latency distribution only; path variance requires the recovery model in derivation R3."
+}

@@ -35,7 +35,12 @@
 #include <utility>
 #include <vector>
 
-#ifndef _WIN32
+#ifdef _WIN32
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#include <windows.h>
+#else
 #include <sys/types.h>
 #include <sys/wait.h>
 #include <unistd.h>
@@ -2985,22 +2990,11 @@ std::string precise_number(double value) {
   return out.str();
 }
 
-Result run_solver_isolated(const Instance& instance, const Config& cfg,
-                           const std::string& solver,
-                           const fs::path& executable) {
-#ifdef _WIN32
-  // Windows needs a CreateProcess implementation before this benchmark can
-  // claim a hard deadline there. Keep the platform limitation explicit.
-  return run_solver(instance, cfg, solver);
-#else
-  Result fallback;
-  set_dimensions(instance, fallback);
-  fallback.solver = solver;
-
-  const auto stamp = std::chrono::steady_clock::now().time_since_epoch().count();
-  const fs::path output_path = fs::temp_directory_path() /
-      ("miplib_worker_" + std::to_string(static_cast<long long>(getpid())) +
-       "_" + std::to_string(stamp) + ".json");
+std::vector<std::string> worker_arguments(const Instance& instance,
+                                          const Config& cfg,
+                                          const std::string& solver,
+                                          const fs::path& executable,
+                                          const fs::path& output_path) {
   std::vector<std::string> arguments{
       executable.string(),
       "--worker-instance", instance.solver_path.string(),
@@ -3031,8 +3025,7 @@ Result run_solver_isolated(const Instance& instance, const Config& cfg,
     arguments.push_back("--native-no-row-propagation");
   } else {
     arguments.push_back("--native-row-propagation-rounds");
-    arguments.push_back(
-        std::to_string(cfg.native_row_propagation_rounds));
+    arguments.push_back(std::to_string(cfg.native_row_propagation_rounds));
   }
   arguments.push_back("--native-probe-max");
   arguments.push_back(std::to_string(cfg.native_probe_max));
@@ -3055,13 +3048,182 @@ Result run_solver_isolated(const Instance& instance, const Config& cfg,
   arguments.push_back("--native-tree-restart-min-open-nodes");
   arguments.push_back(std::to_string(cfg.native_tree_restart_min_open_nodes));
   arguments.push_back("--native-tree-restart-min-improvement");
-  arguments.push_back(precise_number(
-      cfg.native_tree_restart_min_improvement));
+  arguments.push_back(precise_number(cfg.native_tree_restart_min_improvement));
   arguments.push_back("--native-tree-restart-min-remaining");
-  arguments.push_back(precise_number(
-      cfg.native_tree_restart_min_remaining_sec));
+  arguments.push_back(
+      precise_number(cfg.native_tree_restart_min_remaining_sec));
+  return arguments;
+}
+
+#ifdef _WIN32
+class UniqueWinHandle {
+ public:
+  explicit UniqueWinHandle(HANDLE handle = nullptr) : handle_(handle) {}
+  ~UniqueWinHandle() {
+    if (handle_ != nullptr && handle_ != INVALID_HANDLE_VALUE) {
+      CloseHandle(handle_);
+    }
+  }
+  UniqueWinHandle(const UniqueWinHandle&) = delete;
+  UniqueWinHandle& operator=(const UniqueWinHandle&) = delete;
+  HANDLE get() const { return handle_; }
+  bool valid() const {
+    return handle_ != nullptr && handle_ != INVALID_HANDLE_VALUE;
+  }
+
+ private:
+  HANDLE handle_;
+};
+
+std::wstring widen_windows_argument(const std::string& argument) {
+  if (argument.empty()) return {};
+  const int length = MultiByteToWideChar(
+      CP_ACP, 0, argument.data(), static_cast<int>(argument.size()), nullptr, 0);
+  if (length <= 0) return {};
+  std::wstring wide(static_cast<std::size_t>(length), L'\0');
+  MultiByteToWideChar(CP_ACP, 0, argument.data(),
+                      static_cast<int>(argument.size()), wide.data(), length);
+  return wide;
+}
+
+std::wstring quote_windows_argument(const std::wstring& argument) {
+  std::wstring quoted{L'"'};
+  std::size_t backslashes = 0;
+  for (const wchar_t ch : argument) {
+    if (ch == L'\\') {
+      ++backslashes;
+    } else if (ch == L'"') {
+      quoted.append(backslashes * 2 + 1, L'\\');
+      quoted.push_back(ch);
+      backslashes = 0;
+    } else {
+      quoted.append(backslashes, L'\\');
+      quoted.push_back(ch);
+      backslashes = 0;
+    }
+  }
+  quoted.append(backslashes * 2, L'\\');
+  quoted.push_back(L'"');
+  return quoted;
+}
+
+std::wstring windows_command_line(const std::vector<std::string>& arguments) {
+  std::wstring command_line;
+  for (const std::string& argument : arguments) {
+    if (!command_line.empty()) command_line.push_back(L' ');
+    command_line += quote_windows_argument(widen_windows_argument(argument));
+  }
+  return command_line;
+}
+#endif
+
+Result run_solver_isolated(const Instance& instance, const Config& cfg,
+                           const std::string& solver,
+                           const fs::path& executable) {
+  Result fallback;
+  set_dimensions(instance, fallback);
+  fallback.solver = solver;
+
+  const auto stamp = std::chrono::steady_clock::now().time_since_epoch().count();
+#ifdef _WIN32
+  const auto process_id = static_cast<unsigned long>(GetCurrentProcessId());
+#else
+  const auto process_id = static_cast<long long>(getpid());
+#endif
+  const fs::path output_path = fs::temp_directory_path() /
+      ("miplib_worker_" + std::to_string(process_id) +
+       "_" + std::to_string(stamp) + ".json");
+  const std::vector<std::string> arguments =
+      worker_arguments(instance, cfg, solver, executable, output_path);
 
   const auto process_start = std::chrono::steady_clock::now();
+#ifdef _WIN32
+  // Process supervision follows general_solver_performance_program_2026-09-13.md,
+  // R1: the parent owns the absolute hard deadline and the complete worker tree.
+  UniqueWinHandle job(CreateJobObjectW(nullptr, nullptr));
+  if (!job.valid()) {
+    fallback.status = "worker job creation failed: error=" +
+                      std::to_string(GetLastError());
+    return fallback;
+  }
+  JOBOBJECT_EXTENDED_LIMIT_INFORMATION job_limits{};
+  job_limits.BasicLimitInformation.LimitFlags =
+      JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+  if (!SetInformationJobObject(job.get(), JobObjectExtendedLimitInformation,
+                               &job_limits, sizeof(job_limits))) {
+    fallback.status = "worker job configuration failed: error=" +
+                      std::to_string(GetLastError());
+    return fallback;
+  }
+
+  std::wstring command_line = windows_command_line(arguments);
+  STARTUPINFOW startup{};
+  startup.cb = sizeof(startup);
+  PROCESS_INFORMATION process_info{};
+  if (!CreateProcessW(executable.c_str(), command_line.data(), nullptr, nullptr,
+                      FALSE, CREATE_SUSPENDED | CREATE_NO_WINDOW, nullptr,
+                      nullptr, &startup, &process_info)) {
+    fallback.status = "worker process creation failed: error=" +
+                      std::to_string(GetLastError());
+    return fallback;
+  }
+  UniqueWinHandle process(process_info.hProcess);
+  UniqueWinHandle thread(process_info.hThread);
+  if (!AssignProcessToJobObject(job.get(), process.get())) {
+    const DWORD error = GetLastError();
+    TerminateProcess(process.get(), error);
+    WaitForSingleObject(process.get(), INFINITE);
+    fallback.status = "worker job assignment failed: error=" +
+                      std::to_string(error);
+    return fallback;
+  }
+  if (ResumeThread(thread.get()) == static_cast<DWORD>(-1)) {
+    const DWORD error = GetLastError();
+    TerminateJobObject(job.get(), error);
+    WaitForSingleObject(process.get(), INFINITE);
+    fallback.status = "worker resume failed: error=" + std::to_string(error);
+    return fallback;
+  }
+
+  const double hard_limit_sec =
+      cfg.time_limit_sec + cfg.hard_timeout_grace_sec;
+  const double elapsed_sec = std::chrono::duration<double>(
+      std::chrono::steady_clock::now() - process_start).count();
+  const double remaining_sec = std::max(0.0, hard_limit_sec - elapsed_sec);
+  const double remaining_ms = std::ceil(remaining_sec * 1000.0);
+  const DWORD wait_ms = remaining_ms >= static_cast<double>(INFINITE - 1)
+                            ? INFINITE - 1
+                            : static_cast<DWORD>(remaining_ms);
+  const DWORD wait_result = WaitForSingleObject(process.get(), wait_ms);
+  if (wait_result == WAIT_TIMEOUT) {
+    TerminateJobObject(job.get(), ERROR_TIMEOUT);
+    WaitForSingleObject(process.get(), INFINITE);
+    fallback.solve_ms = std::chrono::duration<double, std::milli>(
+        std::chrono::steady_clock::now() - process_start).count();
+    fallback.timed_out = true;
+    fallback.hard_timeout = true;
+    fallback.status = "Hard process timeout";
+    std::error_code error;
+    fs::remove(output_path, error);
+    return fallback;
+  }
+  if (wait_result != WAIT_OBJECT_0) {
+    const DWORD error = GetLastError();
+    TerminateJobObject(job.get(), error);
+    WaitForSingleObject(process.get(), INFINITE);
+    fallback.status = "worker wait failed: error=" + std::to_string(error);
+    std::error_code remove_error;
+    fs::remove(output_path, remove_error);
+    return fallback;
+  }
+  DWORD exit_code = 0;
+  if (!GetExitCodeProcess(process.get(), &exit_code) || exit_code != 0) {
+    fallback.status = "worker exit " + std::to_string(exit_code);
+    std::error_code error;
+    fs::remove(output_path, error);
+    return fallback;
+  }
+#else
   const pid_t child = fork();
   if (child == 0) {
     std::vector<char*> argv;
@@ -3131,6 +3293,7 @@ Result run_solver_isolated(const Instance& instance, const Config& cfg,
     fs::remove(output_path, error);
     return fallback;
   }
+#endif
 
   try {
     std::ifstream input(output_path);
@@ -3149,7 +3312,6 @@ Result run_solver_isolated(const Instance& instance, const Config& cfg,
     fs::remove(output_path, remove_error);
     return fallback;
   }
-#endif
 }
 
 std::vector<Summary> summarize(const Config& cfg,
@@ -3283,11 +3445,7 @@ void write_json(const fs::path& path, const Config& cfg,
   out["solution_file"] = cfg.solution_file.string();
   out["time_limit_sec"] = cfg.time_limit_sec;
   out["hard_timeout_grace_sec"] = cfg.hard_timeout_grace_sec;
-#ifdef _WIN32
-  out["hard_deadline_enforced"] = false;
-#else
   out["hard_deadline_enforced"] = true;
-#endif
   out["gap"] = cfg.gap;
   out["audit_tolerance"] = kAuditTolerance;
   out["reference_objective_tolerance"] =
