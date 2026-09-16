@@ -23,6 +23,9 @@
 // AML forward declaration — defined in aml_bindings.cpp
 void bind_aml(pybind11::module_& parent);
 
+// Two-stage decomposition forward declaration — defined in decomposition_bindings.cpp
+void bind_decomposition(pybind11::module_& parent);
+
 // SCUC public API
 #include "mipsolvers/scuc/case_builder.hpp"
 #include "mipsolvers/scuc/scuc.hpp"
@@ -2241,4 +2244,5 @@ The solver still validates and repairs the seed before accepting an incumbent.
 
   // ── AML submodule ──────────────────────────────────────────────────────────
   bind_aml(m);
+  bind_decomposition(m);
 }
