@@ -2284,9 +2284,11 @@ SolveResult ScipAdapter::solve_milp(const MIPModel& prob) const {
     return out;
   }
   out.stats.success = sol.success;
-  out.stats.status = sol.success
-                         ? "Solved"
-                         : (sol.status.empty() ? "SCIP finished without solution" : sol.status);
+  // Preserve SCIP's proof-bearing solution-file status. A feasible incumbent
+  // written after a limit is useful to general callers but is not an exact
+  // optimum for decomposition bounds/cuts (SCIP solution format contract).
+  out.stats.status = sol.status.empty() ? "SCIP finished without solution"
+                                        : sol.status;
   out.stats.objective = sol.objective;
   out.x = Eigen::VectorXd::Zero(n);
   for (int i = 0; i < n; ++i) {
@@ -2517,8 +2519,8 @@ SolveResult ScipAdapter::solve_minlp(const MINLPModel& prob_in) const {
   }
 
   out.stats.success = sol.success;
-  out.stats.status = sol.success ? "Solved" : (sol.status.empty() ? "SCIP finished without solution"
-                                                                     : sol.status);
+  out.stats.status = sol.status.empty() ? "SCIP finished without solution"
+                                        : sol.status;
 
   const int n = static_cast<int>(prob.nonlinear_part.vars.size());
   out.x = Eigen::VectorXd::Zero(n);

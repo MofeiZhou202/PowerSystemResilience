@@ -11,12 +11,14 @@
 
 #include <algorithm>
 #include <atomic>
+#include <cctype>
 #include <chrono>
 #include <cmath>
 #include <cstdio>
 #include <limits>
 #include <memory>
 #include <string>
+#include <string_view>
 #include <thread>
 #include <vector>
 
@@ -78,6 +80,109 @@ struct WorkerPool {
 double relative_gap(double upper, double lower) {
   if (!std::isfinite(upper) || !std::isfinite(lower)) return kInf;
   return std::max(0.0, upper - lower) / std::max(1.0, std::abs(upper));
+}
+
+enum class SolveState { Optimal, Infeasible, Unbounded, Failed };
+
+/// Proof-bearing status mapping for the LP/MILP adapters. Design doc §5.
+constexpr SolveState classify_termination_status(std::string_view status) {
+  const bool proven_infeasible =
+      status == "infeasible" || status == "highs infeasible" ||
+      status == "lp infeasible" || status == "integer infeasible" ||
+      status == "infeasible (presolve)" ||
+      status == "infeasible (batch bounds)" ||
+      status == "infeasible (papilo presolve)" ||
+      status == "infeasible (highs presolve)" ||
+      status == "infeasible (native presolve)" ||
+      status == "infeasible variable bounds";
+  if (proven_infeasible)
+    return SolveState::Infeasible;
+
+  const bool proven_unbounded =
+      status == "unbounded" || status == "highs unbounded" ||
+      status == "lp unbounded" || status == "integer unbounded";
+  if (proven_unbounded)
+    return SolveState::Unbounded;
+
+  const bool explicit_optimum =
+      status == "optimal" || status == "solved" ||
+      status == "optimal solution found" || status == "highs empty" ||
+      status == "highs optimal" || status == "integer optimal solution" ||
+      status.rfind("stricthighs optimal run=", 0) == 0 ||
+      status == "optimal (tree exhausted)" ||
+      status == "optimal (root gap closed)" ||
+      status == "optimal (highs presolve)" ||
+      status == "optimal (original kkt audit)" ||
+      status == "optimal (final original kkt audit)";
+  return explicit_optimum ? SolveState::Optimal : SolveState::Failed;
+}
+
+static_assert(classify_termination_status("optimal") == SolveState::Optimal);
+static_assert(classify_termination_status("stricthighs optimal run=0") ==
+              SolveState::Optimal);
+static_assert(classify_termination_status("infeasible") == SolveState::Infeasible);
+static_assert(classify_termination_status("lp unbounded") == SolveState::Unbounded);
+static_assert(classify_termination_status("unboundedorinfeasible") ==
+              SolveState::Failed);
+static_assert(classify_termination_status("infeasible (residuals diverged)") ==
+              SolveState::Failed);
+static_assert(classify_termination_status("integer optimal, tolerance") ==
+              SolveState::Failed);
+static_assert(classify_termination_status("feasible (limit)") == SolveState::Failed);
+static_assert(classify_termination_status("optimality gap reached") ==
+              SolveState::Failed);
+
+std::string lowercase(std::string value) {
+  std::transform(value.begin(), value.end(), value.begin(), [](unsigned char c) {
+    return static_cast<char>(std::tolower(c));
+  });
+  return value;
+}
+
+/// Decomposition bounds and cuts require proven optima, not merely feasible
+/// incumbents. SolverEngine's `success` flag intentionally also accepts limited
+/// incumbents, so classify the backend termination separately. Design doc §5,
+/// "Proof-aware subsolve contract".
+SolveState classify_solve(const api::Result& result, int expected_cols) {
+  const std::string status = lowercase(result.stats.status);
+  const SolveState termination = classify_termination_status(status);
+  if (termination == SolveState::Infeasible || termination == SolveState::Unbounded)
+    return termination;
+
+  const bool has_expected_solution =
+      result.stats.success && result.x.size() == expected_cols && result.x.allFinite() &&
+      std::isfinite(result.stats.objective);
+  if (!has_expected_solution) return SolveState::Failed;
+
+  // Design doc §5: a backend may label a MILP "optimal" after meeting its
+  // configured relative gap. Exact decomposition requires the reported
+  // primal/dual gap to be closed to the module's proof tolerance.
+  constexpr double kExactMipGapTolerance = 1e-8;
+  const bool gap_closed = std::isfinite(result.stats.mip_gap) &&
+                          result.stats.mip_gap >= 0.0 &&
+                          result.stats.mip_gap <= kExactMipGapTolerance;
+  return termination == SolveState::Optimal && gap_closed ? SolveState::Optimal
+                                                          : SolveState::Failed;
+}
+
+bool finite_vector(const Eigen::VectorXd& v) { return v.allFinite(); }
+
+bool finite_sparse(const Eigen::SparseMatrix<double>& m) {
+  for (int k = 0; k < m.outerSize(); ++k)
+    for (Eigen::SparseMatrix<double>::InnerIterator it(m, k); it; ++it)
+      if (!std::isfinite(it.value())) return false;
+  return true;
+}
+
+std::string validate_vars(const std::vector<VariableMeta>& vars,
+                          const std::string& label) {
+  for (const auto& v : vars) {
+    if (!std::isfinite(v.lb) || !std::isfinite(v.ub) || v.lb > v.ub)
+      return label + " has invalid variable bounds";
+    if (v.type == VarType::Binary && (v.lb > 1.0 || v.ub < 0.0))
+      return label + " has an empty binary-variable domain";
+  }
+  return {};
 }
 
 bool has_integrality(const std::vector<VariableMeta>& vars) {
@@ -233,7 +338,8 @@ RecourseSolve solve_recourse_for_cut(const SolverEngine& eng,
   if (time_limit_sec > 0.0) opts.time_limit_sec = time_limit_sec;
   api::Result res = eng.solve_lp(lp, opts);
 
-  if (res.stats.success && res.x.size() == n) {
+  const SolveState primal_state = classify_solve(res, n);
+  if (primal_state == SolveState::Optimal) {
     if (res.constraint_duals.size() < m) {
       out.status = "recourse LP returned no dual certificate";
       return out;  // fail loudly upstream
@@ -244,6 +350,13 @@ RecourseSolve solve_recourse_for_cut(const SolverEngine& eng,
     out.y = res.x;
     // grad Q_s(x) = T_s^T mu  (mu = duals of the <= rows).  Design doc §2.1.
     out.g = r.T.transpose() * res.constraint_duals.head(m);
+    return out;
+  }
+
+  if (primal_state != SolveState::Infeasible) {
+    out.status = primal_state == SolveState::Unbounded
+                     ? "recourse LP is unbounded"
+                     : "recourse LP was not proven optimal: " + res.stats.status;
     return out;
   }
 
@@ -270,8 +383,18 @@ RecourseSolve solve_recourse_for_cut(const SolverEngine& eng,
   fe.beq.resize(0);
 
   api::Result fres = eng.solve_lp(fe, opts);
-  if (!fres.stats.success || fres.constraint_duals.size() < m) {
+  if (classify_solve(fres, n + m) != SolveState::Optimal ||
+      fres.constraint_duals.size() < m) {
     out.status = "recourse feasibility subproblem failed: " + fres.stats.status;
+    return out;
+  }
+  // Birge & Louveaux §5.1: only a strictly positive elastic optimum certifies
+  // infeasibility. The numerical separation threshold is the model-contract
+  // tolerance derived in design doc §5; a smaller value is not distinguished
+  // reliably from zero by the supported LP solve tolerances.
+  constexpr double kFeasibilityCertificateTolerance = 1e-8;
+  if (!(fres.stats.objective > kFeasibilityCertificateTolerance)) {
+    out.status = "recourse infeasibility was not certified by the elastic LP";
     return out;
   }
   out.solved = true;
@@ -284,7 +407,7 @@ RecourseSolve solve_recourse_for_cut(const SolverEngine& eng,
 
 /// Evaluate Q_s(x) exactly for the CCG oracle (LP or MILP recourse).
 struct OracleSolve {
-  bool feasible{false};
+  SolveState state{SolveState::Failed};
   double q{0.0};
   Eigen::VectorXd y;
   std::string status;
@@ -311,23 +434,32 @@ OracleSolve evaluate_recourse(const SolverEngine& eng, const Recourse& r,
   collect_integrality(r.vars, 0, int_idx, bin_idx);
   api::Result res =
       solve_generic(eng, lp, int_idx, bin_idx, solver, time_limit_sec);
-  if (res.stats.success && res.x.size() == n) {
-    out.feasible = true;
+  out.state = classify_solve(res, n);
+  if (out.state == SolveState::Optimal) {
     out.q = res.stats.objective;
     out.y = res.x;
-  } else {
-    out.status = res.stats.status;
-    (void)m;
   }
+  out.status = res.stats.status;
+  (void)m;
   return out;
 }
 
 /// Continuous under-estimator L_s = min_{x in relax(X), y} d_s'y
 ///   s.t. W_s y + T_s x >= h_s, A x <= b, Aeq x = beq, box(x), y in Y_s.
-/// Valid lower bound on theta_s (design doc §3.1). Falls back to `fallback`.
-double theta_under_estimator(const SolverEngine& eng, const FirstStage& first,
-                             const Recourse& r, const std::string& lp_solver,
-                             double fallback) {
+/// Valid lower bound on theta_s (design doc §3.1). A caller-provided fallback
+/// is used only when the LP is proven unbounded below.
+struct LowerBoundSolve {
+  bool ok{false};
+  double value{0.0};
+  std::string status;
+};
+
+LowerBoundSolve theta_under_estimator(const SolverEngine& eng,
+                                      const FirstStage& first,
+                                      const Recourse& r,
+                                      const std::string& lp_solver,
+                                      double fallback) {
+  LowerBoundSolve out;
   const int n1 = static_cast<int>(first.c.size());
   const int n = static_cast<int>(r.W.cols());
   const int m = static_cast<int>(r.W.rows());
@@ -371,9 +503,23 @@ double theta_under_estimator(const SolverEngine& eng, const FirstStage& first,
   opts.preferred_solver = lp_solver;
   opts.allow_fallback = true;
   api::Result res = eng.solve_lp(lp, opts);
-  if (res.stats.success && std::isfinite(res.stats.objective))
-    return res.stats.objective;
-  return fallback;
+  const SolveState state = classify_solve(res, n1 + n);
+  if (state == SolveState::Optimal) {
+    out.ok = true;
+    out.value = res.stats.objective;
+    return out;
+  }
+  if (state == SolveState::Unbounded && std::isfinite(fallback)) {
+    out.ok = true;
+    out.value = fallback;
+    return out;
+  }
+  out.status = state == SolveState::Unbounded
+                   ? "theta under-estimator is unbounded; supply a certified "
+                     "BendersOptions::theta_lower_bound"
+                   : "theta under-estimator was not proven optimal: " +
+                         res.stats.status;
+  return out;
 }
 
 std::string validate_common(const TwoStageModel& model) {
@@ -384,6 +530,10 @@ std::string validate_common(const TwoStageModel& model) {
   if (f.A.cols() != n1 || f.Aeq.cols() != n1) return "first-stage matrix width mismatch";
   if (f.b.size() != f.A.rows() || f.beq.size() != f.Aeq.rows())
     return "first-stage rhs size mismatch";
+  if (!finite_vector(f.c) || !finite_vector(f.b) || !finite_vector(f.beq) ||
+      !finite_sparse(f.A) || !finite_sparse(f.Aeq))
+    return "first stage contains non-finite coefficients";
+  if (std::string err = validate_vars(f.vars, "first stage"); !err.empty()) return err;
   if (model.scenarios.empty()) return "no scenarios provided";
   for (std::size_t s = 0; s < model.scenarios.size(); ++s) {
     const auto& r = model.scenarios[s];
@@ -394,7 +544,57 @@ std::string validate_common(const TwoStageModel& model) {
     if (static_cast<int>(r.vars.size()) != n) return "recourse vars size mismatch";
     if (r.T.rows() != m || r.T.cols() != n1) return "technology matrix shape mismatch";
     if (static_cast<int>(r.h.size()) != m) return "recourse rhs size mismatch";
+    if (!finite_vector(r.d) || !finite_vector(r.h) || !finite_sparse(r.T) ||
+        !finite_sparse(r.W))
+      return "scenario contains non-finite coefficients";
+    if (std::string err = validate_vars(r.vars, "recourse"); !err.empty()) return err;
   }
+  return {};
+}
+
+std::string validate_stochastic(const TwoStageModel& model) {
+  if (std::string err = validate_common(model); !err.empty()) return err;
+  double probability_sum = 0.0;
+  for (const auto& r : model.scenarios) {
+    if (!(r.probability > 0.0) || !std::isfinite(r.probability))
+      return "stochastic scenario probabilities must be finite and positive";
+    probability_sum += r.probability;
+  }
+  // Design doc §1 defines probabilities on the simplex. The tolerance is only
+  // for floating-point input accumulation and is far below the solve gap.
+  constexpr double kProbabilityTolerance = 1e-10;
+  if (std::abs(probability_sum - 1.0) >
+      kProbabilityTolerance * std::max(1, static_cast<int>(model.scenarios.size())))
+    return "stochastic scenario probabilities must sum to one";
+  return {};
+}
+
+std::string validate_benders_options(const BendersOptions& options) {
+  if (options.max_iterations <= 0) return "max_iterations must be positive";
+  if (!(options.gap_tolerance >= 0.0) || !std::isfinite(options.gap_tolerance))
+    return "gap_tolerance must be finite and non-negative";
+  if (!(options.time_limit_sec >= 0.0) || !std::isfinite(options.time_limit_sec))
+    return "time_limit_sec must be finite and non-negative";
+  if (options.threads <= 0) return "threads must be positive";
+  if (!(options.stabilization_alpha >= 0.0) ||
+      !(options.stabilization_alpha < 1.0) ||
+      !std::isfinite(options.stabilization_alpha))
+    return "stabilization_alpha must be in [0,1)";
+  if (options.lagrangian_inner_iterations <= 0)
+    return "lagrangian_inner_iterations must be positive";
+  if (!(options.lagrangian_dual_bound > 0.0) ||
+      !std::isfinite(options.lagrangian_dual_bound))
+    return "lagrangian_dual_bound must be finite and positive";
+  return {};
+}
+
+std::string validate_ccg_options(const CCGOptions& options) {
+  if (options.max_iterations <= 0) return "max_iterations must be positive";
+  if (!(options.gap_tolerance >= 0.0) || !std::isfinite(options.gap_tolerance))
+    return "gap_tolerance must be finite and non-negative";
+  if (!(options.time_limit_sec >= 0.0) || !std::isfinite(options.time_limit_sec))
+    return "time_limit_sec must be finite and non-negative";
+  if (options.threads <= 0) return "threads must be positive";
   return {};
 }
 
@@ -432,9 +632,14 @@ DecompositionResult benders_integer_lshaped(const TwoStageModel& model,
   std::vector<double> Ls(static_cast<std::size_t>(S));
   for (int s = 0; s < S; ++s) {
     p[s] = model.scenarios[static_cast<std::size_t>(s)].probability;
-    Ls[static_cast<std::size_t>(s)] = theta_under_estimator(
+    const LowerBoundSolve lower = theta_under_estimator(
         eng, f, model.scenarios[static_cast<std::size_t>(s)], dual_lp,
         options.theta_lower_bound);
+    if (!lower.ok) {
+      out.status = lower.status;
+      return out;
+    }
+    Ls[static_cast<std::size_t>(s)] = lower.value;
     theta_vars[static_cast<std::size_t>(s)] = {VarType::Continuous,
                                                Ls[static_cast<std::size_t>(s)], 1e20, "theta"};
   }
@@ -455,8 +660,8 @@ DecompositionResult benders_integer_lshaped(const TwoStageModel& model,
     LPModel master = assemble_master(f, S, master_obj, theta_vars, cuts);
     api::Result mres = solve_generic(eng, master, int_idx, bin_idx,
                                      options.master_solver, remaining());
-    if (!mres.stats.success || mres.x.size() != n1 + S) {
-      out.status = "Benders master solve failed: " + mres.stats.status;
+    if (classify_solve(mres, n1 + S) != SolveState::Optimal) {
+      out.status = "Benders master was not proven optimal: " + mres.stats.status;
       return out;
     }
     LB = mres.stats.objective;
@@ -511,10 +716,12 @@ DecompositionResult benders_integer_lshaped(const TwoStageModel& model,
 
       // (2) Exact recourse MILP => Q_s(x_k) and the integer optimality cut.
       const OracleSolve& o = os[static_cast<std::size_t>(s)];
-      if (!o.feasible) {
-        out.status =
-            "integer recourse infeasible at incumbent; IntegerLShaped assumes "
-            "relatively complete recourse (design doc §3.3)";
+      if (o.state != SolveState::Optimal) {
+        out.status = o.state == SolveState::Infeasible
+                         ? "integer recourse infeasible at incumbent; "
+                           "IntegerLShaped assumes relatively complete recourse "
+                           "(design doc §3.3)"
+                         : "integer recourse was not proven optimal: " + o.status;
         return out;
       }
       expectation += p[s] * o.q;
@@ -575,6 +782,7 @@ struct LagInner {
   bool ok{false};
   double v{0.0};
   Eigen::VectorXd z;
+  std::string status;
 };
 
 LagInner lagrangian_inner(const SolverEngine& eng, const Recourse& r,
@@ -606,7 +814,10 @@ LagInner lagrangian_inner(const SolverEngine& eng, const Recourse& r,
   collect_integrality(r.vars, 0, int_idx, bin_idx);
   for (int j = 0; j < n1; ++j) bin_idx.push_back(n + j);
   api::Result res = solve_generic(eng, lp, int_idx, bin_idx, solver, tl);
-  if (!res.stats.success || res.x.size() != n + n1) return out;
+  if (classify_solve(res, n + n1) != SolveState::Optimal) {
+    out.status = res.stats.status;
+    return out;
+  }
   out.ok = true;
   out.v = res.stats.objective;
   out.z = res.x.segment(n, n1);
@@ -617,8 +828,10 @@ LagInner lagrangian_inner(const SolverEngine& eng, const Recourse& r,
 /// box [-B, B] by an inner cutting-plane loop. Returns the best (lambda, v).
 struct LagCut {
   bool ok{false};
+  bool certified{false};
   Eigen::VectorXd lambda;
   double v{0.0};
+  std::string status;
 };
 
 LagCut lagrangian_dual(const SolverEngine& eng, const Recourse& r,
@@ -630,7 +843,10 @@ LagCut lagrangian_dual(const SolverEngine& eng, const Recourse& r,
   std::vector<CutRow> planes;  // over [lambda(0..n1-1) | t(n1)]
   for (int it = 0; it < std::max(1, inner_iters); ++it) {
     LagInner in = lagrangian_inner(eng, r, lambda, n1, solver, tl);
-    if (!in.ok) break;
+    if (!in.ok) {
+      out.status = "Lagrangian inner MILP was not proven optimal: " + in.status;
+      return out;
+    }
     const double phi = lambda.dot(xk) + in.v;
     if (phi > best_phi) {
       best_phi = phi;
@@ -669,10 +885,50 @@ LagCut lagrangian_dual(const SolverEngine& eng, const Recourse& r,
     dm.Aeq.resize(0, n1 + 1);
     dm.beq.resize(0);
     api::Result dr = eng.solve_lp(dm, {});
-    if (!dr.stats.success || dr.x.size() != n1 + 1) break;
+    if (classify_solve(dr, n1 + 1) != SolveState::Optimal) {
+      out.status = "Lagrangian dual master was not proven optimal: " + dr.stats.status;
+      return out;
+    }
     lambda = dr.x.head(n1);
-    if (dr.x[n1] - best_phi <= 1e-7 * (1.0 + std::abs(best_phi))) break;
+    // Zou, Ahmed & Sun (2019), Thm. 2: tightness requires solving the
+    // unrestricted multiplier dual. An interior optimum of the bounded box is
+    // also globally optimal for the concave dual; a boundary optimum is not a
+    // certificate and requires a larger caller-supplied box. The scaled 1e-7
+    // closure tolerance is derived in design doc §3.6.
+    const double closure_tolerance = 1e-7 * (1.0 + std::abs(best_phi));
+    if (dr.x[n1] - best_phi <= closure_tolerance) {
+      // `lambda` is the next outer-approximation trial point and may be a
+      // boundary point chosen from a tied master face. The proof applies to
+      // the best evaluated multiplier that supplies the cut, `out.lambda`.
+      if (out.lambda.cwiseAbs().maxCoeff() >= 0.99 * B) {
+        // A flat optimum may include both the sampled boundary point and an
+        // interior point. Evaluate a contracted multiplier and certify it
+        // directly against the same master upper bound (design doc §3.6).
+        const Eigen::VectorXd interior_lambda = 0.98 * out.lambda;
+        LagInner interior =
+            lagrangian_inner(eng, r, interior_lambda, n1, solver, tl);
+        if (!interior.ok) {
+          out.status =
+              "Lagrangian interior certificate MILP was not proven optimal: " +
+              interior.status;
+          return out;
+        }
+        const double interior_phi =
+            interior_lambda.dot(xk) + interior.v;
+        if (interior_lambda.cwiseAbs().maxCoeff() >= 0.99 * B ||
+            dr.x[n1] - interior_phi > closure_tolerance) {
+          out.status = "Lagrangian multiplier bound is active; increase "
+                       "lagrangian_dual_bound";
+          return out;
+        }
+        out.lambda = interior_lambda;
+        out.v = interior.v;
+      }
+      out.certified = true;
+      return out;
+    }
   }
+  out.status = "Lagrangian dual did not converge within lagrangian_inner_iterations";
   return out;
 }
 
@@ -708,10 +964,15 @@ DecompositionResult benders_lagrangian(const TwoStageModel& model,
   std::vector<VariableMeta> theta_vars(static_cast<std::size_t>(S));
   for (int s = 0; s < S; ++s) {
     p[s] = model.scenarios[static_cast<std::size_t>(s)].probability;
-    const double Ls = theta_under_estimator(
+    const LowerBoundSolve lower = theta_under_estimator(
         eng, f, model.scenarios[static_cast<std::size_t>(s)], dual_lp,
         options.theta_lower_bound);
-    theta_vars[static_cast<std::size_t>(s)] = {VarType::Continuous, Ls, 1e20, "theta"};
+    if (!lower.ok) {
+      out.status = lower.status;
+      return out;
+    }
+    theta_vars[static_cast<std::size_t>(s)] =
+        {VarType::Continuous, lower.value, 1e20, "theta"};
   }
   Eigen::VectorXd master_obj(n1 + S);
   master_obj.head(n1) = f.c;
@@ -730,8 +991,8 @@ DecompositionResult benders_lagrangian(const TwoStageModel& model,
     LPModel master = assemble_master(f, S, master_obj, theta_vars, cuts);
     api::Result mres = solve_generic(eng, master, int_idx, bin_idx,
                                      options.master_solver, remaining());
-    if (!mres.stats.success || mres.x.size() != n1 + S) {
-      out.status = "Lagrangian master solve failed: " + mres.stats.status;
+    if (classify_solve(mres, n1 + S) != SolveState::Optimal) {
+      out.status = "Lagrangian master was not proven optimal: " + mres.stats.status;
       return out;
     }
     LB = mres.stats.objective;
@@ -754,15 +1015,16 @@ DecompositionResult benders_lagrangian(const TwoStageModel& model,
     std::vector<Eigen::VectorXd> yk(static_cast<std::size_t>(S));
     for (int s = 0; s < S; ++s) {
       const LagCut& l = lc[static_cast<std::size_t>(s)];
-      if (!l.ok) {
-        out.status = "Lagrangian dual solve failed";
+      if (!l.ok || !l.certified) {
+        out.status = l.status.empty() ? "Lagrangian dual solve failed" : l.status;
         return out;
       }
       const OracleSolve& o = os[static_cast<std::size_t>(s)];
-      if (!o.feasible) {
-        out.status =
-            "integer recourse infeasible at incumbent; Lagrangian mode assumes "
-            "relatively complete recourse (design doc §3.6)";
+      if (o.state != SolveState::Optimal) {
+        out.status = o.state == SolveState::Infeasible
+                         ? "integer recourse infeasible at incumbent; Lagrangian "
+                           "mode assumes relatively complete recourse (design doc §3.6)"
+                         : "integer recourse was not proven optimal: " + o.status;
         return out;
       }
       expectation += p[s] * o.q;
@@ -822,8 +1084,12 @@ DecompositionResult benders_lagrangian(const TwoStageModel& model,
 DecompositionResult solve_extensive_form_stochastic(
     const TwoStageModel& model, const ExtensiveFormOptions& options) {
   DecompositionResult out;
-  if (std::string err = validate_common(model); !err.empty()) {
+  if (std::string err = validate_stochastic(model); !err.empty()) {
     out.status = err;
+    return out;
+  }
+  if (!(options.time_limit_sec >= 0.0) || !std::isfinite(options.time_limit_sec)) {
+    out.status = "time_limit_sec must be finite and non-negative";
     return out;
   }
   const auto& f = model.first;
@@ -887,7 +1153,11 @@ DecompositionResult solve_extensive_form_stochastic(
   api::Result res = solve_generic(eng, lp, int_idx, bin_idx, options.solver,
                                   options.time_limit_sec);
   out.status = res.stats.status;
-  if (!res.stats.success || res.x.size() != ncols) return out;
+  if (classify_solve(res, ncols) != SolveState::Optimal) {
+    out.status = "extensive stochastic solve was not proven optimal: " +
+                 res.stats.status;
+    return out;
+  }
   out.success = true;
   out.x = res.x.head(n1);
   out.objective = res.stats.objective;
@@ -910,6 +1180,10 @@ DecompositionResult solve_extensive_form_robust(
   DecompositionResult out;
   if (std::string err = validate_common(model); !err.empty()) {
     out.status = err;
+    return out;
+  }
+  if (!(options.time_limit_sec >= 0.0) || !std::isfinite(options.time_limit_sec)) {
+    out.status = "time_limit_sec must be finite and non-negative";
     return out;
   }
   const auto& f = model.first;
@@ -983,7 +1257,11 @@ DecompositionResult solve_extensive_form_robust(
   api::Result res = solve_generic(eng, lp, int_idx, bin_idx, options.solver,
                                   options.time_limit_sec);
   out.status = res.stats.status;
-  if (!res.stats.success || res.x.size() != ncols) return out;
+  if (classify_solve(res, ncols) != SolveState::Optimal) {
+    out.status = "extensive robust solve was not proven optimal: " +
+                 res.stats.status;
+    return out;
+  }
   out.success = true;
   out.x = res.x.head(n1);
   out.objective = res.stats.objective;
@@ -1004,7 +1282,11 @@ DecompositionResult solve_extensive_form_robust(
 DecompositionResult solve_benders_stochastic(const TwoStageModel& model,
                                              const BendersOptions& options) {
   DecompositionResult out;
-  if (std::string err = validate_common(model); !err.empty()) {
+  if (std::string err = validate_stochastic(model); !err.empty()) {
+    out.status = err;
+    return out;
+  }
+  if (std::string err = validate_benders_options(options); !err.empty()) {
     out.status = err;
     return out;
   }
@@ -1047,18 +1329,29 @@ DecompositionResult solve_benders_stochastic(const TwoStageModel& model,
   Eigen::VectorXd theta_obj(n_theta);
   if (multi) {
     for (int s = 0; s < S; ++s) {
-      const double Ls = theta_under_estimator(
+      const LowerBoundSolve lower = theta_under_estimator(
           eng, f, model.scenarios[static_cast<std::size_t>(s)], dual_lp,
           options.theta_lower_bound);
-      theta_vars[static_cast<std::size_t>(s)] = {VarType::Continuous, Ls, 1e20, "theta"};
+      if (!lower.ok) {
+        out.status = lower.status;
+        return out;
+      }
+      theta_vars[static_cast<std::size_t>(s)] =
+          {VarType::Continuous, lower.value, 1e20, "theta"};
       theta_obj[s] = p[s];
     }
   } else {
     double Lsum = 0.0;
-    for (int s = 0; s < S; ++s)
-      Lsum += p[s] * theta_under_estimator(
-                         eng, f, model.scenarios[static_cast<std::size_t>(s)],
-                         dual_lp, options.theta_lower_bound);
+    for (int s = 0; s < S; ++s) {
+      const LowerBoundSolve lower = theta_under_estimator(
+          eng, f, model.scenarios[static_cast<std::size_t>(s)], dual_lp,
+          options.theta_lower_bound);
+      if (!lower.ok) {
+        out.status = lower.status;
+        return out;
+      }
+      Lsum += p[s] * lower.value;
+    }
     theta_vars[0] = {VarType::Continuous, Lsum, 1e20, "theta"};
     theta_obj[0] = 1.0;
   }
@@ -1092,8 +1385,8 @@ DecompositionResult solve_benders_stochastic(const TwoStageModel& model,
         assemble_master(f, n_theta, master_obj, theta_vars, cuts);
     api::Result mres = solve_generic(eng, master, int_idx, bin_idx,
                                      options.master_solver, remaining());
-    if (!mres.stats.success || mres.x.size() != n1 + n_theta) {
-      out.status = "Benders master solve failed: " + mres.stats.status;
+    if (classify_solve(mres, n1 + n_theta) != SolveState::Optimal) {
+      out.status = "Benders master was not proven optimal: " + mres.stats.status;
       return out;
     }
     LB = mres.stats.objective;
@@ -1243,6 +1536,10 @@ DecompositionResult solve_ccg_robust(const TwoStageModel& model,
     out.status = err;
     return out;
   }
+  if (std::string err = validate_ccg_options(options); !err.empty()) {
+    out.status = err;
+    return out;
+  }
   const auto& f = model.first;
   const int n1 = static_cast<int>(f.c.size());
   const int S = static_cast<int>(model.scenarios.size());
@@ -1323,8 +1620,8 @@ DecompositionResult solve_ccg_robust(const TwoStageModel& model,
                               std::chrono::duration<double>(Clock::now() - t0).count());
     api::Result mres =
         solve_generic(eng, lp, int_idx, bin_idx, options.master_solver, rem);
-    if (!mres.stats.success || mres.x.size() != ncols) {
-      out.status = "CCG master solve failed: " + mres.stats.status;
+    if (classify_solve(mres, ncols) != SolveState::Optimal) {
+      out.status = "CCG master was not proven optimal: " + mres.stats.status;
       return out;
     }
     const Eigen::VectorXd xk = mres.x.head(n1);
@@ -1345,12 +1642,23 @@ DecompositionResult solve_ccg_robust(const TwoStageModel& model,
     int infeasible_pick = -1;
     double max_q = -kInf;
     for (int s = 0; s < S; ++s) {
-      if (!os[static_cast<std::size_t>(s)].feasible) {
+      const OracleSolve& scenario = os[static_cast<std::size_t>(s)];
+      if (scenario.state == SolveState::Failed ||
+          scenario.state == SolveState::Unbounded) {
+        out.status = "CCG scenario " + std::to_string(s) +
+                     " was not solved to a finite optimum: " + scenario.status;
+        return out;
+      }
+      if (scenario.state == SolveState::Infeasible) {
+        if (in_active[static_cast<std::size_t>(s)]) {
+          out.status = "active CCG scenario became recourse-infeasible";
+          return out;
+        }
         if (!in_active[static_cast<std::size_t>(s)] && infeasible_pick < 0)
           infeasible_pick = s;  // prioritize restoring robust feasibility
         continue;
       }
-      const double q = os[static_cast<std::size_t>(s)].q;
+      const double q = scenario.q;
       max_q = std::max(max_q, q);
       if (q > worst_q && !in_active[static_cast<std::size_t>(s)]) {
         worst_q = q;
@@ -1378,6 +1686,10 @@ DecompositionResult solve_ccg_robust(const TwoStageModel& model,
                    "[CCG] it=%d |O|=%d LB=%.10g UB=%.10g gap=%.3e worst=%d\n",
                    it + 1, K, LB, UB, out.relative_gap, worst);
 
+    if (std::isfinite(UB) && LB > UB + 1e-6 * (1.0 + std::abs(UB))) {
+      out.status = "CCG lower bound exceeded upper bound";
+      return out;
+    }
     if (std::isfinite(LB) && out.relative_gap <= options.gap_tolerance) {
       out.success = true;
       out.status = "Optimal";
@@ -1412,7 +1724,8 @@ DecompositionResult solve_ccg_robust(const TwoStageModel& model,
       OracleSolve os = evaluate_recourse(
           eng, model.scenarios[static_cast<std::size_t>(s)], best_x,
           options.recourse_solver, rem);
-      if (os.feasible) out.y[static_cast<std::size_t>(s)] = os.y;
+      if (os.state == SolveState::Optimal)
+        out.y[static_cast<std::size_t>(s)] = os.y;
     }
   }
   return out;
@@ -1608,8 +1921,8 @@ PolyOracle poly_worst_case(const SolverEngine& eng, const RobustRecourse& rr,
 
   api::Result res =
       solve_generic(eng, lp, int_idx, bin_idx, solver, time_limit_sec);
-  if (!res.stats.success || res.x.size() != ncols) {
-    out.status = "oracle MILP failed: " + res.stats.status;
+  if (classify_solve(res, ncols) != SolveState::Optimal) {
+    out.status = "oracle MILP was not proven optimal: " + res.stats.status;
     return out;
   }
   // Runtime big-M validity check (design doc §3.4 / §4).
@@ -1640,7 +1953,16 @@ std::string validate_polyhedral(const PolyhedralRobustModel& model) {
   const int nu = static_cast<int>(U.u_lb.size());
   if (n1 <= 0) return "first stage has no columns";
   if (static_cast<int>(f.vars.size()) != n1) return "first-stage vars size mismatch";
+  if (f.A.cols() != n1 || f.Aeq.cols() != n1)
+    return "first-stage matrix width mismatch";
+  if (f.b.size() != f.A.rows() || f.beq.size() != f.Aeq.rows())
+    return "first-stage rhs size mismatch";
+  if (!finite_vector(f.c) || !finite_vector(f.b) || !finite_vector(f.beq) ||
+      !finite_sparse(f.A) || !finite_sparse(f.Aeq))
+    return "first stage contains non-finite coefficients";
+  if (std::string err = validate_vars(f.vars, "first stage"); !err.empty()) return err;
   if (m <= 0 || n <= 0) return "empty recourse";
+  if (nu <= 0) return "uncertainty set has no dimensions";
   if (rr.T.rows() != m || rr.T.cols() != n1) return "technology matrix shape mismatch";
   if (static_cast<int>(rr.d.size()) != n) return "recourse cost size mismatch";
   if (static_cast<int>(rr.vars.size()) != n) return "recourse vars size mismatch";
@@ -1649,6 +1971,17 @@ std::string validate_polyhedral(const PolyhedralRobustModel& model) {
   if (static_cast<int>(U.u_ub.size()) != nu) return "uncertainty bound size mismatch";
   if (U.G.cols() != nu || U.g.size() != U.G.rows())
     return "uncertainty budget shape mismatch";
+  if (!finite_vector(rr.d) || !finite_vector(rr.h0) || !finite_sparse(rr.T) ||
+      !finite_sparse(rr.W) || !finite_sparse(rr.P))
+    return "recourse contains non-finite coefficients";
+  if (!finite_vector(U.u_lb) || !finite_vector(U.u_ub) || !finite_vector(U.g) ||
+      !finite_sparse(U.G))
+    return "uncertainty set contains non-finite coefficients";
+  for (int k = 0; k < nu; ++k) {
+    if (U.u_lb[k] > U.u_ub[k] || std::abs(U.u_lb[k]) >= kVariableNoBound ||
+        std::abs(U.u_ub[k]) >= kVariableNoBound)
+      return "uncertainty set must have finite, ordered box bounds";
+  }
   // The KKT max-min oracle (ORACLE) relies on strong LP duality of the inner
   // recourse; it is invalid for integer recourse (no MILP duality). Reject it
   // loudly rather than emit inexact cuts -- see design doc §3.5 for the exact
@@ -1656,6 +1989,24 @@ std::string validate_polyhedral(const PolyhedralRobustModel& model) {
   if (has_integrality(rr.vars))
     return "polyhedral CCG requires continuous recourse; integer recourse needs "
            "finite-scenario solve_ccg_robust or nested C&CG (design doc §3.5)";
+  // The stationarity W'pi+rho=d and complementarity y*rho=0 in (ORACLE)
+  // represent exactly the domain y>=0. General lower/upper bounds require their
+  // own multipliers and complementarity pairs (design doc §3.4).
+  for (const auto& v : rr.vars) {
+    if (v.lb != 0.0 || variable_has_finite_upper_bound(v.ub))
+      return "polyhedral CCG requires recourse bounds lb=0 and no finite upper bound";
+  }
+  return {};
+}
+
+std::string validate_polyhedral_options(const PolyhedralCCGOptions& options) {
+  if (options.max_iterations <= 0) return "max_iterations must be positive";
+  if (!(options.gap_tolerance >= 0.0) || !std::isfinite(options.gap_tolerance))
+    return "gap_tolerance must be finite and non-negative";
+  if (!(options.time_limit_sec >= 0.0) || !std::isfinite(options.time_limit_sec))
+    return "time_limit_sec must be finite and non-negative";
+  if (!(options.big_m > 0.0) || !std::isfinite(options.big_m))
+    return "big_m must be finite and positive";
   return {};
 }
 
@@ -1665,6 +2016,10 @@ DecompositionResult solve_ccg_polyhedral_robust(
     const PolyhedralRobustModel& model, const PolyhedralCCGOptions& options) {
   DecompositionResult out;
   if (std::string err = validate_polyhedral(model); !err.empty()) {
+    out.status = err;
+    return out;
+  }
+  if (std::string err = validate_polyhedral_options(options); !err.empty()) {
     out.status = err;
     return out;
   }
@@ -1689,8 +2044,9 @@ DecompositionResult solve_ccg_polyhedral_robust(
     RobustMasterBuild mb = build_robust_master(f, active);
     api::Result mres = solve_generic(eng, mb.lp, mb.int_idx, mb.bin_idx,
                                      options.master_solver, remaining());
-    if (!mres.stats.success || mres.x.size() != mb.ncols) {
-      out.status = "polyhedral CCG master solve failed: " + mres.stats.status;
+    if (classify_solve(mres, mb.ncols) != SolveState::Optimal) {
+      out.status = "polyhedral CCG master was not proven optimal: " +
+                   mres.stats.status;
       return out;
     }
     const Eigen::VectorXd xk = mres.x.head(n1);
@@ -1715,6 +2071,10 @@ DecompositionResult solve_ccg_polyhedral_robust(
       std::fprintf(stderr,
                    "[PolyCCG] it=%d |O|=%zu LB=%.10g UB=%.10g gap=%.3e\n",
                    it + 1, active.size(), LB, UB, out.relative_gap);
+    if (std::isfinite(UB) && LB > UB + 1e-6 * (1.0 + std::abs(UB))) {
+      out.status = "polyhedral CCG lower bound exceeded upper bound";
+      return out;
+    }
     if (std::isfinite(LB) && out.relative_gap <= options.gap_tolerance) {
       out.success = true;
       out.status = "Optimal";

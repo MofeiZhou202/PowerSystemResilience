@@ -74,8 +74,9 @@ struct BendersOptions {
   /// x_sep = alpha*x_center + (1-alpha)*x_master. 0 disables it (pure Kelley).
   double stabilization_alpha{0.0};
   /// Fallback valid lower bound on each Q_s when the automatic under-estimator
-  /// LP is unbounded below. Must be a true under-estimate to stay exact.
-  double theta_lower_bound{-1e12};
+  /// LP is proven unbounded below. Must be supplied by the caller and be a true
+  /// under-estimate to stay exact; NaN means no certified fallback is available.
+  double theta_lower_bound{std::numeric_limits<double>::quiet_NaN()};
   /// Lagrangian mode (design doc §3.6): inner cutting-plane iterations for the
   /// Lagrangian dual, and the box bound B on the multipliers lambda.
   int lagrangian_inner_iterations{20};
@@ -107,7 +108,7 @@ struct DecompositionResult {
   std::string status;
   Eigen::VectorXd x;                 ///< first-stage optimum
   std::vector<Eigen::VectorXd> y;    ///< recourse optimum per scenario (empty if not recovered)
-  double objective{0.0};
+  double objective{std::numeric_limits<double>::quiet_NaN()};
   double lower_bound{-std::numeric_limits<double>::infinity()};
   double upper_bound{std::numeric_limits<double>::infinity()};
   double relative_gap{std::numeric_limits<double>::infinity()};
@@ -162,7 +163,7 @@ struct RobustRecourse {
   Eigen::SparseMatrix<double> W;     ///< recourse matrix,   m x n
   Eigen::VectorXd h0;                ///< nominal rhs, size m
   Eigen::SparseMatrix<double> P;     ///< uncertainty map,   m x nu   (h(u)=h0+P u)
-  std::vector<VariableMeta> vars;    ///< size n; continuous, non-negative recourse
+  std::vector<VariableMeta> vars;    ///< size n; continuous, lb=0, no finite ub
 };
 
 struct PolyhedralRobustModel {

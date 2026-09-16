@@ -14,6 +14,7 @@
 #include <pybind11/pybind11.h>
 #include <pybind11/stl.h>
 
+#include <algorithm>
 #include <cctype>
 #include <stdexcept>
 #include <string>
@@ -80,27 +81,39 @@ py::array_t<double> req_arr(const py::dict& d, const char* k) {
 }
 
 std::vector<VariableMeta> vars_from(int n, const py::object& lb,
-                                    const py::object& ub, const py::object& vtype) {
+                                    const py::object& ub, const py::object& vtype,
+                                    double default_lb = -1e20,
+                                    double default_ub = 1e20) {
   std::vector<VariableMeta> vars(static_cast<std::size_t>(n));
   Eigen::VectorXd lbv, ubv;
   if (!lb.is_none()) lbv = vec_from_numpy(lb.cast<py::array_t<double>>());
   if (!ub.is_none()) ubv = vec_from_numpy(ub.cast<py::array_t<double>>());
   std::string vt = vtype.is_none() ? std::string() : vtype.cast<std::string>();
+  if (!lb.is_none() && lbv.size() != n)
+    throw std::invalid_argument("lower-bound vector length mismatch");
+  if (!ub.is_none() && ubv.size() != n)
+    throw std::invalid_argument("upper-bound vector length mismatch");
+  if (!vtype.is_none() && static_cast<int>(vt.size()) != n)
+    throw std::invalid_argument("vtype string length mismatch");
   for (int i = 0; i < n; ++i) {
     VariableMeta& v = vars[static_cast<std::size_t>(i)];
-    v.lb = lbv.size() == n ? lbv[i] : -1e20;
-    v.ub = ubv.size() == n ? ubv[i] : 1e20;
+    v.lb = lbv.size() == n ? lbv[i] : default_lb;
+    v.ub = ubv.size() == n ? ubv[i] : default_ub;
     const char ch = static_cast<int>(vt.size()) > i
                         ? static_cast<char>(std::toupper(static_cast<unsigned char>(vt[static_cast<std::size_t>(i)])))
                         : 'C';
     if (ch == 'B') {
       v.type = VarType::Binary;
-      v.lb = 0.0;
-      v.ub = 1.0;
+      // Binary declarations intersect, rather than replace, caller bounds;
+      // this preserves fixed binaries and exposes empty domains to validation.
+      v.lb = std::max(v.lb, 0.0);
+      v.ub = std::min(v.ub, 1.0);
     } else if (ch == 'I') {
       v.type = VarType::Integer;
-    } else {
+    } else if (ch == 'C') {
       v.type = VarType::Continuous;
+    } else {
+      throw std::invalid_argument("vtype must contain only C, I, or B");
     }
   }
   return vars;
@@ -150,7 +163,7 @@ RobustRecourse build_robust_recourse(const py::dict& d) {
   r.h0 = vec_from_numpy(req_arr(d, "h0"));
   r.P = sparse_from_dense(req_arr(d, "P"));
   r.vars = vars_from(static_cast<int>(r.d.size()), get(d, "lb"), get(d, "ub"),
-                     get(d, "vtype"));
+                     get(d, "vtype"), 0.0, 1e20);
   return r;
 }
 
@@ -197,6 +210,8 @@ py::dict solve_stochastic(const py::dict& first, const py::list& scenarios,
   for (const auto& s : scenarios)
     m.scenarios.push_back(build_recourse(s.cast<py::dict>()));
   if (method == "extensive") return result_to_dict(solve_extensive_form_stochastic(m));
+  if (method != "benders")
+    throw std::invalid_argument("method must be 'benders' or 'extensive'");
   BendersOptions opt;
   opt.threads = threads;
   opt.max_iterations = max_iterations;
@@ -208,8 +223,11 @@ py::dict solve_stochastic(const py::dict& first, const py::list& scenarios,
     opt.cut_mode = BendersCutMode::IntegerLShaped;
   else if (cut_mode == "lagrangian")
     opt.cut_mode = BendersCutMode::Lagrangian;
-  else
+  else if (cut_mode == "multi")
     opt.cut_mode = BendersCutMode::MultiCut;
+  else
+    throw std::invalid_argument(
+        "cut_mode must be 'multi', 'single', 'integer', or 'lagrangian'");
   return result_to_dict(solve_benders_stochastic(m, opt));
 }
 
@@ -221,6 +239,8 @@ py::dict solve_robust(const py::dict& first, const py::list& scenarios,
   for (const auto& s : scenarios)
     m.scenarios.push_back(build_recourse(s.cast<py::dict>()));
   if (method == "extensive") return result_to_dict(solve_extensive_form_robust(m));
+  if (method != "ccg")
+    throw std::invalid_argument("method must be 'ccg' or 'extensive'");
   CCGOptions opt;
   opt.threads = threads;
   opt.max_iterations = max_iterations;

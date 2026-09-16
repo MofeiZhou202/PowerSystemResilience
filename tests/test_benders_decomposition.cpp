@@ -6,6 +6,8 @@
 #include <catch2/catch_approx.hpp>
 #include <catch2/catch_test_macros.hpp>
 
+#include <cmath>
+#include <limits>
 #include <vector>
 
 #include <Eigen/SparseCore>
@@ -64,12 +66,14 @@ TEST_CASE("Benders stochastic multi-cut matches extensive form", "[benders]") {
                      make_capacity_recourse(8.0, 0.5)};
 
   const auto ext = solve_extensive_form_stochastic(model);
+  INFO(ext.status);
   REQUIRE(ext.success);
   CHECK(ext.objective == Approx(8.0).margin(1e-6));
 
   BendersOptions opt;
   opt.cut_mode = BendersCutMode::MultiCut;
   const auto ben = solve_benders_stochastic(model, opt);
+  INFO(ben.status);
   REQUIRE(ben.success);
   CHECK(ben.objective == Approx(ext.objective).margin(1e-6));
   CHECK(ben.x[0] == Approx(8.0).margin(1e-5));
@@ -85,6 +89,7 @@ TEST_CASE("Benders stochastic single-cut matches extensive form", "[benders]") {
                      make_capacity_recourse(8.0, 0.7)};
 
   const auto ext = solve_extensive_form_stochastic(model);
+  INFO(ext.status);
   REQUIRE(ext.success);
 
   BendersOptions opt;
@@ -165,6 +170,7 @@ TEST_CASE("CCG robust matches extensive form", "[ccg]") {
                      make_capacity_recourse(8.0, 1.0)};
 
   const auto ext = solve_extensive_form_robust(model);
+  INFO(ext.status);
   REQUIRE(ext.success);
   CHECK(ext.objective == Approx(8.0).margin(1e-6));
 
@@ -199,8 +205,10 @@ TEST_CASE("CCG robust handles integer recourse", "[ccg]") {
   model.first = make_capacity_first_stage();
   model.scenarios = {make_int_recourse(4.0), make_int_recourse(7.0),
                      make_int_recourse(9.0)};
+  for (auto& scenario : model.scenarios) scenario.probability = 1.0 / 3.0;
 
   const auto ext = solve_extensive_form_robust(model);
+  INFO(ext.status);
   REQUIRE(ext.success);
 
   CCGOptions opt;
@@ -246,6 +254,7 @@ TEST_CASE("Integer L-shaped matches extensive form", "[benders][integer]") {
   model.scenarios = {make_int_recourse(3.0, 0.5), make_int_recourse(10.0, 0.5)};
 
   const auto ext = solve_extensive_form_stochastic(model);
+  INFO(ext.status);
   REQUIRE(ext.success);
   CHECK(ext.objective == Approx(13.0).margin(1e-6));
 
@@ -262,6 +271,7 @@ TEST_CASE("Integer L-shaped matches extensive form", "[benders][integer]") {
   BendersOptions lag;
   lag.cut_mode = BendersCutMode::Lagrangian;
   const auto benlag = solve_benders_stochastic(model, lag);
+  INFO(benlag.status);
   REQUIRE(benlag.success);
   CHECK(benlag.objective == Approx(ext.objective).margin(1e-6));
   CHECK(benlag.lower_bound <= benlag.upper_bound + 1e-6);
@@ -328,6 +338,7 @@ TEST_CASE("Polyhedral CCG matches finite CCG over vertices", "[ccg][polyhedral]"
     model.uncertainty.g = Eigen::VectorXd::Constant(1, 3.0);
 
     const auto poly = solve_ccg_polyhedral_robust(model, {});
+    INFO(poly.status);
     REQUIRE(poly.success);
     CHECK(poly.objective == Approx(7.0).margin(1e-5));
     CHECK(poly.x[0] == Approx(7.0).margin(1e-4));
@@ -348,6 +359,7 @@ TEST_CASE("Polyhedral CCG matches finite CCG over vertices", "[ccg][polyhedral]"
     model.uncertainty.g.resize(0);
 
     const auto poly = solve_ccg_polyhedral_robust(model, {});
+    INFO(poly.status);
     REQUIRE(poly.success);
     CHECK(poly.objective == Approx(14.0).margin(1e-5));
 
@@ -441,8 +453,95 @@ TEST_CASE("two-stage validation rejects malformed models", "[decomposition]") {
   const auto r1 = solve_benders_stochastic(model, {});
   CHECK_FALSE(r1.success);
   CHECK_FALSE(r1.status.empty());
+  CHECK(std::isnan(r1.objective));
 
   const auto r2 = solve_ccg_robust(model, {});
   CHECK_FALSE(r2.success);
   CHECK_FALSE(r2.status.empty());
+  CHECK(std::isnan(r2.objective));
+
+  TwoStageModel infinite_bound;
+  infinite_bound.first = make_capacity_first_stage();
+  infinite_bound.first.vars[0].lb =
+      -std::numeric_limits<double>::infinity();
+  infinite_bound.scenarios = {make_capacity_recourse(4.0, 1.0)};
+  const auto r3 = solve_extensive_form_stochastic(infinite_bound);
+  CHECK_FALSE(r3.success);
+  CHECK(r3.status.find("invalid variable bounds") != std::string::npos);
+  CHECK(std::isnan(r3.objective));
+}
+
+TEST_CASE("stochastic probabilities must define a simplex",
+          "[benders][validation]") {
+  TwoStageModel model;
+  model.first = make_capacity_first_stage();
+  model.scenarios = {make_capacity_recourse(4.0, 0.6),
+                     make_capacity_recourse(8.0, 0.6)};
+
+  const auto ext = solve_extensive_form_stochastic(model);
+  CHECK_FALSE(ext.success);
+  CHECK(ext.status.find("sum to one") != std::string::npos);
+  CHECK(std::isnan(ext.objective));
+
+  model.scenarios[0].probability = -0.2;
+  model.scenarios[1].probability = 1.2;
+  const auto ben = solve_benders_stochastic(model, {});
+  CHECK_FALSE(ben.success);
+  CHECK(ben.status.find("positive") != std::string::npos);
+}
+
+TEST_CASE("decomposition options reject invalid numerical contracts",
+          "[decomposition][validation]") {
+  TwoStageModel model;
+  model.first = make_capacity_first_stage();
+  model.scenarios = {make_capacity_recourse(4.0, 1.0)};
+
+  BendersOptions bopt;
+  bopt.threads = 0;
+  const auto ben = solve_benders_stochastic(model, bopt);
+  CHECK_FALSE(ben.success);
+  CHECK(ben.status.find("threads") != std::string::npos);
+
+  CCGOptions copt;
+  copt.gap_tolerance = -1.0;
+  const auto ccg = solve_ccg_robust(model, copt);
+  CHECK_FALSE(ccg.success);
+  CHECK(ccg.status.find("gap_tolerance") != std::string::npos);
+}
+
+TEST_CASE("polyhedral CCG enforces the KKT recourse domain",
+          "[ccg][polyhedral][validation]") {
+  PolyhedralRobustModel model;
+  model.first = make_capacity_first_stage();
+  model.recourse.d = Eigen::VectorXd::Constant(1, 10.0);
+  model.recourse.T = sparse(1, 1, {{0, 0, 1.0}});
+  model.recourse.W = sparse(1, 1, {{0, 0, 1.0}});
+  model.recourse.h0 = Eigen::VectorXd::Constant(1, 4.0);
+  model.recourse.P = sparse(1, 1, {{0, 0, 1.0}});
+  model.uncertainty.u_lb = Eigen::VectorXd::Zero(1);
+  model.uncertainty.u_ub = Eigen::VectorXd::Ones(1);
+  model.uncertainty.G.resize(0, 1);
+  model.uncertainty.g.resize(0);
+
+  SECTION("free recourse is rejected") {
+    model.recourse.vars = {{VarType::Continuous, -1e20, 1e20, "y"}};
+    const auto res = solve_ccg_polyhedral_robust(model, {});
+    CHECK_FALSE(res.success);
+    CHECK(res.status.find("lb=0") != std::string::npos);
+  }
+
+  SECTION("finite recourse upper bounds are rejected") {
+    model.recourse.vars = {{VarType::Continuous, 0.0, 10.0, "y"}};
+    const auto res = solve_ccg_polyhedral_robust(model, {});
+    CHECK_FALSE(res.success);
+    CHECK(res.status.find("upper bound") != std::string::npos);
+  }
+
+  SECTION("malformed first-stage matrices are rejected") {
+    model.recourse.vars = {{VarType::Continuous, 0.0, 1e20, "y"}};
+    model.first.A.resize(0, 2);
+    const auto res = solve_ccg_polyhedral_robust(model, {});
+    CHECK_FALSE(res.success);
+    CHECK(res.status.find("matrix width") != std::string::npos);
+  }
 }

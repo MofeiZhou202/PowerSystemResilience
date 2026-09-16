@@ -200,8 +200,11 @@ $$
 
 with $\widehat X$ the continuous relaxation of $X$. Since it minimizes over the
 relaxed first stage, $L_s \le \min_{x\in X} Q_s(x) \le Q_s(x^\star)$, hence
-$\theta_s \ge L_s$ is valid. If this LP is unbounded below the module falls back
-to the user-supplied `theta_lower_bound`.
+$\theta_s \ge L_s$ is valid. If this LP is **proven** unbounded below, the module
+requires a finite user-supplied `theta_lower_bound`; the default NaN rejects the
+solve because no automatically verifiable lower bound is available. Numerical
+failure, interruption, or an ambiguous solver status never activates the
+fallback.
 
 **Iteration.**
 1. Solve the master $\Rightarrow (x_k,\theta_k)$; set $\text{LB} = $ master objective.
@@ -444,6 +447,30 @@ terminates at a global optimum, exactly as in Theorem 3. Lagrangian cuts are
 generally tighter than the integer optimality cut (INT), at the cost of an inner
 dual solve per scenario and iteration.
 
+The implementation solves the multiplier dual over the configured box
+$[-B,B]^{n_1}$ by a cutting-plane method. It emits a cut as *tight* only when the
+inner upper/lower gap is closed and the best evaluated multiplier that supplies
+the cut is strictly inside the box. The next cutting-plane master trial can lie
+on a tied boundary face and is not the lower-bound incumbent used in the cut.
+Reaching `lagrangian_inner_iterations` or obtaining the best evaluated
+multiplier on the box boundary fails with a diagnostic; accepting either case
+would invalidate the finite-convergence claim above.
+
+A tied cutting-plane face can first supply a boundary multiplier even when the
+same optimum is attained in the interior. In that case the implementation
+evaluates one contracted multiplier, $0.98\lambda$, with the exact inner MILP
+and accepts it only when its value closes the existing master upper bound to the
+same tolerance. This costs zero additional solves on the usual interior path
+and exactly one additional inner MILP on the boundary-certificate path; failure
+of that independent check still rejects the cut and requests a larger box.
+
+The inner stopping test is
+$U-L\le 10^{-7}(1+|L|)$. This is one order of magnitude tighter than the
+default outer relative gap and above double-precision roundoff at the objective
+scales admitted by the model contract. Thus the inner cut is certified to a
+smaller numerical error than the outer convergence decision; a caller needing
+a tighter outer gap must also use a backend whose solve tolerance supports it.
+
 
 ---
 
@@ -478,7 +505,11 @@ Re-derive here before editing code, per the repository theory-guided contract.
 
 - First stage and every recourse are **minimization** problems.
 - Dimensions: $T_s \in \mathbb{R}^{m_s\times n_1}$, $W_s\in\mathbb{R}^{m_s\times n_s}$,
-  $h_s\in\mathbb{R}^{m_s}$, $d_s\in\mathbb{R}^{n_s}$; probabilities $p_s>0$ for (SP).
+  $h_s\in\mathbb{R}^{m_s}$, $d_s\in\mathbb{R}^{n_s}$; all coefficients and
+  right-hand sides and stored variable bounds are finite, and bounds are
+  ordered. The project-wide large finite sentinels represent absent bounds.
+- Stochastic probabilities satisfy $p_s>0$ and $|\sum_s p_s-1|\le
+  10^{-10}S$. Robust solvers ignore the scenario probability field.
 - `solve_benders_stochastic` with `MultiCut`/`SingleCut` requires **continuous
   recourse** (A1); an integer recourse variable is rejected with an explicit
   status, not silently relaxed.
@@ -486,8 +517,24 @@ Re-derive here before editing code, per the repository theory-guided contract.
   requires a **pure-binary first stage** (Proposition 3); a non-binary first
   stage is rejected with an explicit status.
 - `solve_ccg_robust` accepts continuous **or** integer recourse.
+- The polyhedral KKT oracle accepts exactly continuous recourse with lower bound
+  zero and no finite upper bound. General variable bounds require additional KKT
+  multipliers and complementarity pairs and are rejected.
+- A backend `success` flag is not an optimality certificate: decomposition
+  masters, cut subproblems, exact recourse evaluations, and KKT oracles accept
+  only explicit optimal termination. Infeasible, unbounded, limited, ambiguous,
+  and failed solves remain distinct and cannot update LB, UB, or a cut.
+- Adapter statuses are matched by an explicit proof-bearing allowlist. In
+  particular, CPLEX gap-tolerance optimality, SCIP feasible-limit solutions,
+  HiGHS feasible-limit solutions, and native B&C gap termination are rejected.
+  Even for an allowlisted status, the reported relative MIP gap must be at most
+  `1e-8`, two orders of magnitude below the default outer gap `1e-6`; this keeps
+  inner-solve uncertainty below the outer stopping decision.
+- The elastic feasibility LP certifies infeasibility only when its optimum is
+  greater than `1e-8`; a zero elastic value after an infeasible primal status is
+  treated as a contradictory backend result.
 - No placeholder path returns a fabricated number: unsupported or failed solves
-  set `success=false` with a diagnostic `status`.
+  set `success=false` with a diagnostic `status`, and `objective` remains NaN.
 
 ---
 
