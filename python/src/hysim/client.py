@@ -181,6 +181,42 @@ class HySimClient:
             raise ValueError(f"unknown analysis {analysis!r}; choose one of: {choices}")
         return self._run_analysis(analysis, payload or {}, timeout=timeout)
 
+    def execute(
+        self,
+        *,
+        name: str,
+        route: str,
+        method: str = "POST",
+        modifies_model: bool = False,
+        payload: Mapping[str, Any] | None = None,
+        query: Mapping[str, str | int | float] | None = None,
+        timeout: float | None = None,
+    ) -> AnalysisResult:
+        """Run any catalog route with honest result and revision semantics.
+
+        This is the low-level seam used by the comprehensive family facade. It
+        does not know the analysis catalog; callers pass the resolved route,
+        method, and whether the call mutates the session model so the revision
+        is incremented exactly once for a mutation.
+        """
+
+        request_id = str(uuid.uuid4())
+        with self._operation_lock:
+            revision = self.model_revision
+            data = self._request_json(
+                method,
+                route,
+                payload=payload,
+                query=query,
+                timeout=timeout,
+                request_id=request_id,
+            )
+            if modifies_model:
+                with self._state_lock:
+                    self._model_revision += 1
+                revision = self._model_revision
+        return AnalysisResult(name, route, request_id, revision, data)
+
     def tspf_frame(self, step: int) -> AnalysisResult:
         return self._get_frame(
             "time_series_power_flow_frame",

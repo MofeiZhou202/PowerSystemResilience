@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import Any, Callable, Mapping
+from typing import Any, Callable, Iterable, Mapping
 
 from .client import HySimClient
 from .errors import ToolPolicyError
@@ -219,6 +219,72 @@ class HySimToolRegistry:
         return self.client.optimal_power_flow(request).to_record(
             include_raw=bool(args.get("include_raw", False))
         )
+
+    def register_family_tools(
+        self,
+        *,
+        include: Iterable[str] | None = None,
+        categories: Iterable[Any] | None = None,
+    ) -> tuple[str, ...]:
+        """Register a bounded, effect-gated tool per catalog analysis.
+
+        Opt-in: not registered by default. Each tool wraps one production
+        analysis, maps its catalog effect to the tool policy, and returns a
+        compact honest record. Names already curated (e.g. the power-flow
+        tools) are left untouched. Returns the newly registered tool names.
+        """
+
+        from .analyses import ANALYSIS_CATALOG, AnalysisEffect
+
+        effect_map = {
+            AnalysisEffect.READ: ToolEffect.READ,
+            AnalysisEffect.ANALYZE: ToolEffect.ANALYZE,
+            AnalysisEffect.MODIFY: ToolEffect.MODIFY_MODEL,
+        }
+        include_set = set(include) if include is not None else None
+        category_set = set(categories) if categories is not None else None
+        registered: list[str] = []
+        for spec in ANALYSIS_CATALOG:
+            if include_set is not None and spec.name not in include_set:
+                continue
+            if category_set is not None and spec.category not in category_set:
+                continue
+            tool_name = f"hysim_{spec.name}"
+            if tool_name in self._tools:
+                continue
+            self.register(
+                ToolSpec(
+                    tool_name,
+                    spec.summary,
+                    {
+                        "type": "object",
+                        "properties": {
+                            "request": {"type": "object"},
+                            "include_raw": {"type": "boolean", "default": False},
+                        },
+                        "additionalProperties": False,
+                    },
+                    effect_map[spec.effect],
+                    self._make_family_handler(spec),
+                )
+            )
+            registered.append(tool_name)
+        return tuple(registered)
+
+    def _make_family_handler(self, spec: Any) -> ToolHandler:
+        def handler(args: Mapping[str, Any]) -> Mapping[str, Any]:
+            request = args.get("request")
+            payload = dict(request) if isinstance(request, Mapping) else {}
+            result = self.client.execute(
+                name=spec.name,
+                route=spec.route,
+                method=spec.method,
+                modifies_model=spec.mutates_model,
+                payload=payload,
+            )
+            return result.to_record(include_raw=bool(args.get("include_raw", False)))
+
+        return handler
 
 
 class HySimV1ToolRegistry:

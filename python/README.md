@@ -36,3 +36,33 @@ the scalable read contracts. Raw `topology()`, `subgraph()`, `frame()`, and
 `violations()` methods remain available for forward-compatible JSON access.
 `HySimClient` remains available for the legacy GUI-compatible process-global
 routes. See `docs/python_api.md` for architecture and AI tool policy.
+
+## Comprehensive facade
+
+`HySim` composes one typed, namespaced surface over every production analysis
+family (18 families, 69 catalogued analyses). Each method resolves its route
+through a single `ANALYSIS_CATALOG` and returns an honest `AnalysisResult`.
+
+```python
+from hysim import HySim, MarketClearingRequest, ShortCircuitRequest, UnitCommitmentRequest
+
+sim = HySim("http://127.0.0.1:8088")
+sim.load_builtin("ieee14_acdc")
+
+pf = sim.pf.run()
+uc = sim.time_series.unit_commitment(UnitCommitmentRequest(num_steps=24))
+mkt = sim.market.clearing(MarketClearingRequest(num_steps=24, reserve_fraction=0.06))
+sc = sim.short_circuit.detailed(ShortCircuitRequest(fault_bus_ids=[3]))
+sim.model_io.export("matpower")
+mkt.require_usable()  # honest gate: raises on failed/stale/invalid results
+```
+
+Families include `pf`, `opf`, `reactive_power`, `short_circuit`, `harmonics`,
+`dynamics`, `time_series`, `carbon`, `market`, `reliability`, `resilience`,
+`reconfiguration`, `hosting_capacity`, `integrated_energy`, `ev_traffic`,
+`planning`, `scenario`, and `model_io`. The catalog carries an `AnalysisEffect`
+(`read`/`analyze`/`modify`) plus a narrower `mutates_model` flag per analysis so
+tool policies and audit hooks can gate a call without parsing its payload.
+`HySimToolRegistry.register_family_tools()` exposes one effect-gated AI tool per
+analysis. The design and coverage roadmap are in
+`docs/reference/python_comprehensive_api_design.md`.

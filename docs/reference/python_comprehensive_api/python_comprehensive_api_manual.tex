@@ -1,0 +1,237 @@
+% !TEX program = xelatex
+% 编译方式：在本目录执行两遍 xelatex（详见 docs/_manual_common/README.md）。
+% 源码依据：python/src/hysim/（analyses.py、requests.py、client.py、v1.py、ai.py、models.py）
+%           与生产路由 tests/run_gui_server.cpp、契约 docs/reference/python_comprehensive_api_design.md。
+\documentclass[UTF8,fontset=fandol,a4paper,11pt]{ctexart}
+\usepackage{../../_manual_common/hysim_manual}
+
+\title{\textbf{交直流混合高弹性能源电力系统仿真平台}\\[0.5em]
+       {\Large 综合 Python API 技术手册}\\[0.3em]
+       {\large 分析目录、家族接口、诚实结果口径与效果门控}}
+\author{HySim-XJTU-HRPES（西安交通大学 HRPES 团队）}
+\date{\today}
+
+\begin{document}
+\maketitle
+\begin{abstract}
+\noindent 本手册依据 HySim-XJTU-HRPES 平台的综合 Python API 整理，实现于
+\srcpath{python/src/hysim/}（\srcpath{analyses.py}、\srcpath{requests.py}、
+\srcpath{client.py}、\srcpath{v1.py}、\srcpath{ai.py}、\srcpath{models.py}）。该 API 是
+编排与智能层，不是第二套仿真内核：全部电气语义、四级校验、规范投影、求解器族与
+授权空间结果归因仍在 C++ 侧，经 \srcpath{tests/run\_gui\_server.cpp} 暴露的生产路由被
+调用。Python 侧只做请求构造、传输与诚实结果封装。综合面在既有 SDK 之上叠加统一的
+\textbf{分析目录}（\texttt{ANALYSIS\_CATALOG}，69 项分析）与\textbf{命名空间家族门面}
+（\texttt{HySim}，18 个家族），并保留隔离会话运行时 \srcpath{/api/v1} 与进程内全局
+遗留路由两条通道。设计契约见 \srcpath{docs/reference/python\_comprehensive\_api\_design.md}；
+运行行为以源码、生产路由与注册测试为准。版式与 23 部模块手册一致。
+\end{abstract}
+
+\tableofcontents
+\newpage
+
+\section{阅读指南与约定}
+\subsection{数据来源}
+\begin{itemize}
+  \item \srcpath{python/src/hysim/analyses.py} —— 分析目录（\texttt{AnalysisSpec}、
+        \texttt{AnalysisCatalog}、\texttt{AnalysisEffect}、\texttt{AnalysisCategory}）、
+        家族门面与综合外观 \texttt{HySim}；
+  \item \srcpath{python/src/hysim/requests.py} —— 家族类型化请求数据类；
+  \item \srcpath{python/src/hysim/client.py} —— 进程全局客户端 \texttt{HySimClient} 与
+        低层执行入口 \srcpath{HySimClient.execute}；
+  \item \srcpath{python/src/hysim/v1.py} —— 隔离会话客户端 \texttt{HySimV1Client}；
+  \item \srcpath{python/src/hysim/models.py} —— \texttt{BusRef}、\texttt{ComponentRef}、
+        PF/OPF 请求与诚实结果 \texttt{AnalysisResult}；
+  \item \srcpath{python/src/hysim/ai.py} —— AI 工具注册表与效果策略；
+  \item \srcpath{tests/run\_gui\_server.cpp} —— 生产路由（如 \srcpath{/api/session/run\_uc}、
+        \srcpath{/api/session/run\_market\_clearing}）；
+  \item \srcpath{python/tests/test\_analyses.py} —— 目录、请求、家族路由与 AI 工具的验证依据。
+\end{itemize}
+
+\subsection{单位制与索引空间}
+Python 侧不改变各子系统的单位与索引口径：潮流量以 MW/Mvar/标幺电压表达，结果向量索引
+空间与对应求解器一致。母线引用为域限定 \texttt{\{domain, index\}}（\texttt{BusRef}），
+\fld{index} 恒指稳定的授权组件 ID，绝不暴露 C++ 向量位置或图节点索引。AC 与 DC 域分开，
+不引入跨域裸整数母线身份。
+
+\subsection{符号与命名约定}
+家族以命名空间属性暴露于综合外观（\srcpath{sim.market}、\srcpath{sim.reliability} 等）；
+类型化请求数据类以 \texttt{*Request} 命名，配置类以 \texttt{*Config} 命名；每个请求提供
+\srcpath{to\_dict()}，其中 \texttt{None} 字段被省略以让 C++ 侧默认值权威，长尾字段经
+\fld{extra} 映射透传。路由处理器一律以其注册路径字符串引用，不写行号——行号随代码漂移。
+
+\subsection{诚实口径}
+Python 面是薄封装：一次成功的 HTTP 响应\textbf{不}等于有效的工程结果。消费者必须检查
+\srcpath{AnalysisResult.scientific\_status}、调用 \srcpath{require\_usable()}，并保留
+\fld{model\_scope}、\fld{validity\_flags}、回退状态、告警与 \fld{model\_limitations}。
+API 从不用零值填充缺失结果字段，从不把未收敛解平均掉，也从不上调 \fld{model\_scope} 或
+隐藏限制。模型变更与分析在进程全局会话下非幂等，故请求不自动重试。
+
+\section{模块定位与工程应用场景}
+\subsection{功能定位}
+综合 Python API 是面向 AI、优化与数据科学工作负载的\textbf{统一编排边界}：它把全库
+分析族以类型化、安全、诚实的方式暴露给 Python，而不在 Python 侧复制任何求解或投影逻辑。
+综合面是增量的——保留隔离会话 \srcpath{/api/v1} 运行时与进程全局遗留路由，并在其上叠加
+统一的分析目录与命名空间家族门面。
+
+\subsection{工程应用场景}
+典型场景：AI 代理经效果门控的目录工具安全地读取拓扑与运行分析；数据科学脚本经
+\texttt{HySim} 家族方法批量运行 UC/市场/可靠性/动态并以 NumPy/pandas 后处理原始结果；
+代理训练经隔离会话在同一传输上并发提交 PF/OPF 作业。
+
+\section{输入、输出与边界条件}
+\subsection{输入}
+已加载于会话的工程模型（经 \srcpath{sim.load\_builtin} 等 I/O 通道）与对应家族的类型化
+请求数据类；每个请求经 \srcpath{to\_dict()} 序列化为生产路由所需的 JSON 载荷；未提升为
+具名参数的字段经 \fld{extra} 透传。
+
+\subsection{输出}
+统一为 \texttt{AnalysisResult}：携带分析名、路由、请求 ID、提交时模型修订号、诚实科学
+状态与原始载荷。大向量在 \srcpath{summary()} 中以尺寸表示；\srcpath{to\_record()} 供
+审计与压缩上下文使用；\srcpath{require\_usable()} 拒绝失败/过期/无效/未限定结果。
+
+\subsection{边界条件}
+空系统、未加载模型、忙碌会话（HTTP 409 映射为 \texttt{BusyError}）、非幂等重复调用、
+缺失可选后端与 time-limit/回退结果均属边界集；这些情况如实反映在结果字段与异常分类中，
+不被静默吞没。
+
+\section{架构与分层}
+综合面自上而下分层，每层职责单一：
+
+\begin{itemize}
+  \item \textbf{家族门面}：\texttt{PowerFlowApi}、\texttt{OptimalPowerFlowApi}、
+        \texttt{ReactivePowerApi}、\texttt{ShortCircuitApi}、\texttt{HarmonicsApi}、
+        \texttt{DynamicsApi}、\texttt{TimeSeriesApi}、\texttt{CarbonApi}、
+        \texttt{MarketApi}、\texttt{ReliabilityApi}、\texttt{ResilienceApi}、
+        \texttt{ReconfigurationApi}、\texttt{HostingCapacityApi}、
+        \texttt{IntegratedEnergyApi}、\texttt{EvTrafficApi}、\texttt{PlanningApi}、
+        \texttt{ScenarioApi}、\texttt{ModelIoApi}（18 个家族）；
+  \item \textbf{分析目录}：\texttt{ANALYSIS\_CATALOG}（\texttt{AnalysisSpec} 的注册表），
+        单一权威地登记每项分析的名称、路由、HTTP 方法、效果分级、模型变更标志与类别；
+  \item \textbf{类型化请求}：\srcpath{requests.py} 与 \srcpath{models.py} 中的
+        \texttt{*Request}/\texttt{*Config} 数据类；
+  \item \textbf{会话与作业}：隔离会话 \texttt{HySimV1Client}（ETag、异步作业）与进程全局
+        \texttt{HySimClient}（模型生命周期、审计钩子、低层 \srcpath{execute}）；
+  \item \textbf{传输协议}：\texttt{Transport}/\texttt{UrllibTransport}（可替换，无不安全自动重试）；
+  \item \textbf{诚实结果}：\texttt{AnalysisResult}。
+\end{itemize}
+
+综合外观 \texttt{HySim} 组合一个 \texttt{HySimClient} 承担传输、模型生命周期与审计，并为
+每个类别挂接一个家族对象；\srcpath{sim.isolated()} 返回绑定同一传输的隔离会话客户端。
+
+\section{分析目录与效果分级}
+\subsection{目录条目}
+每项分析由 \texttt{AnalysisSpec} 描述：\fld{name}（稳定 Python 标识）、\fld{route}
+（生产路由字符串）、\fld{method}（\texttt{POST}/\texttt{GET}）、\fld{effect}（效果分级）、
+\fld{category}（类别）、\fld{mutates\_model}（是否推进模型修订号）。目录经
+\srcpath{AnalysisCatalog.require} 解析名称，缺失时抛出带候选清单的 \texttt{ValueError}；
+\srcpath{by\_category} 与 \srcpath{by\_effect} 提供过滤。当前目录登记 69 项分析。
+
+\subsection{效果分级与模型变更标志}
+\fld{effect} 是 AI 风险分级，供工具策略与审计钩子在\textbf{不解析载荷}的前提下门控调用；
+\fld{mutates\_model} 是更窄的事实：调用是否替换或编辑授权系统模型并因此推进模型修订号。
+二者刻意解耦：会话配置写入 \srcpath{set\_ts\_config} 的 \fld{effect} 为 \texttt{MODIFY}，
+但 \fld{mutates\_model} 为 \texttt{False}，因此不推进模型修订号。
+
+\begin{center}\footnotesize
+\begin{tabular}{@{}L{2.6cm}L{3.0cm}L{7.6cm}@{}}
+\toprule
+\textbf{效果} & \textbf{语义} & \textbf{示例} \\
+\midrule
+\texttt{READ} & 纯查询，不求解、不改模型 & \srcpath{topology}、\srcpath{export\_json}、\srcpath{market\_ptdf} \\
+\texttt{ANALYZE} & 运行求解器，不改授权模型 & \srcpath{power\_flow}、\srcpath{market\_clearing}、\srcpath{transient} \\
+\texttt{MODIFY} & 替换或编辑会话状态 & \srcpath{load\_builtin}、\srcpath{update\_components}、\srcpath{set\_ts\_config} \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+默认工具策略允许 \texttt{READ} 与 \texttt{ANALYZE}；\texttt{MODIFY} 需部署显式放开且每次
+调用仍需批准。全部模型载入的 \fld{mutates\_model} 为真；导出与 \srcpath{set\_ts\_config}
+不推进模型修订号。
+
+\section{家族接口与类型化请求}
+\subsection{调用范式}
+家族方法把处理器字段转写为类型化请求并返回诚实的 \texttt{AnalysisResult}。例如：
+\srcpath{sim.time\_series.unit\_commitment(UnitCommitmentRequest(num\_steps=24))}、
+\srcpath{sim.market.clearing(MarketClearingRequest(...))}、
+\srcpath{sim.short\_circuit.detailed(ShortCircuitRequest(fault\_bus\_ids=[3]))}、
+\srcpath{sim.model\_io.export("matpower")}。原始 \texttt{Mapping} 亦可直接传入以透传
+新增服务端字段。综合外观另提供 \srcpath{sim.run(name, payload)} 经目录按名分派。
+
+\subsection{类型化请求模式}
+每个请求数据类遵循 \srcpath{models.py} 既有范式：高信号处理器字段为具名参数，\texttt{None}
+字段被省略以让 C++ 默认值权威，\fld{extra} 映射承载长尾（如 SCUC 网络割阈值、可靠性
+数据策略、园区多能时序）。字段名逐字转写自当前处理器；处理器改名或改默认值时，本手册与
+对应请求数据类必须在同一次改动中同步。代表性请求：
+
+\begin{center}\footnotesize
+\begin{tabular}{@{}L{3.6cm}L{4.0cm}L{5.6cm}@{}}
+\toprule
+\textbf{请求类} & \textbf{路由} & \textbf{代表性具名字段} \\
+\midrule
+\texttt{UnitCommitmentRequest} & \srcpath{/api/session/run\_uc} & \fld{num\_steps} \\
+\texttt{MarketClearingRequest} & \srcpath{/api/session/run\_market\_clearing} & \fld{num\_steps}、\fld{reserve\_fraction}、\fld{scuc\_time\_limit\_sec}、\fld{network\_constraints} \\
+\texttt{ShortCircuitRequest} & \srcpath{/api/session/sc\_detailed} & \fld{fault\_type}、\fld{calc\_type}、\fld{fault\_bus\_ids} \\
+\texttt{TransientRequest} & \srcpath{/api/session/run\_transient} & \fld{t\_end\_s}、\fld{dt\_s}、\fld{solver\_type} \\
+\texttt{ResilienceRequest} & \srcpath{/api/session/run\_distribution\_resilience} & \fld{horizon\_hours}、\fld{allow\_mess\_dispatch}、\fld{mip\_solver} \\
+\texttt{CampusIesRequest} & \srcpath{/api/session/run\_campus\_ies} & \fld{solver}、\fld{num\_steps}、\fld{enable\_transport} \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\subsection{模型 I/O 家族}
+\texttt{ModelIoApi} 以格式键分派载入与导出：\srcpath{sim.model\_io.load(fmt, payload)} 与
+\srcpath{sim.model\_io.export(fmt)}。载入路由 \fld{mutates\_model} 为真（推进模型修订号），
+导出为只读。未知格式在网络请求前以 \texttt{ValueError} 拒绝。ETAP XLSX 载入与一条 BPA DAT
+路径接受原始二进制/文本体而非 JSON 对象，故经 \texttt{HySimClient} 原始方法而非类型化模型
+到达。
+
+\section{诚实结果与安全策略}
+\subsection{结果状态机}
+\texttt{AnalysisResult} 的 \srcpath{scientific\_status} 从结果自身的 \fld{error}、
+\fld{\_result\_contract.stale} 与布尔限定键（\fld{accepted}、\fld{converged}、
+\fld{success}、\fld{feasible}）导出 \texttt{failed}/\texttt{stale}/\texttt{invalid}/
+\texttt{unqualified}/\texttt{qualified}；\srcpath{require\_usable()} 拒绝失败、过期、无效
+或未限定结果通过。
+
+\subsection{AI 工具与效果门控}
+\srcpath{HySimToolRegistry.register\_family\_tools()} 为每项目录分析登记一个有界、效果门控
+的工具（\srcpath{hysim\_<name>}）：工具继承分析的效果分级，故默认策略下 \texttt{MODIFY}
+家族工具被禁用；已定制的名称（潮流、OPF、SPPT 工具）不被覆盖。工具结果默认压缩：保留标量
+状态与诊断，大向量以尺寸表示；直接 SDK 调用保留完整原始结果供后处理。
+
+\section{与其他模块与层的接口关系}
+接口链路遵循“工程语义模型 $\to$ 校验 $\to$ 投影/装配 $\to$ 求解或分析 $\to$ 结果回投影”。
+Python 面只做语义保持适配：它构造请求、传输并封装诚实结果，不重新解释求解状态。综合面
+与隔离会话 \srcpath{/api/v1} 及进程全局遗留路由并存；隔离会话当前仅接受平衡聚合 PF/OPF
+作业，其余家族在进程全局路由上运行。C++ 公共门面手册见
+\srcpath{docs/modules/api/api\_manual.tex}，HTTP/会话协议见 \srcpath{docs/reference/runtime\_api.md}。
+
+\section{测试与验证}
+\srcpath{python/tests/test\_analyses.py} 以 \texttt{FakeTransport} 在无求解器环境下断言：
+目录一致性（名称唯一、路由唯一、方法合法）、\fld{mutates\_model} 语义（模型载入推进修订号、
+\srcpath{set\_ts\_config} 与导出不推进）、每个家族解析到正确路由与序列化载荷、未知分析/格式
+被拒绝、无效结果不被静默使用，以及 AI 家族工具的效果门控。综合套件与遗留 SDK 测试
+（\srcpath{test\_client.py}、\srcpath{test\_v1.py}、\srcpath{test\_ai.py}）一并保持通过。
+
+\section{适用范围与局限性}
+\begin{itemize}
+  \item 结果诚实度不超过处理器：处理器返回回退、time-limit 或缩减 \fld{model\_scope} 时，
+        API 逐字透传，绝不上调范围或隐藏限制；
+  \item 隔离会话当前仅接受平衡聚合 PF/OPF 作业，跨家族并发需独立服务进程；
+  \item 会话与作业结果在服务重启后不持久；
+  \item 超出可信工作站的暴露仍需在网关处提供认证、授权、请求大小限制与 TLS；
+  \item 类型化请求覆盖当前处理器所命名字段，新增服务端字段经 \fld{extra} 透传，直至被提升
+        为具名参数。
+\end{itemize}
+
+\section{后续改进方向}
+按“缺口 $\to$ 可量化指标 $\to$ 源码/测试变更 $\to$ 独立验证”闭环推进。已完成：深度类型化
+I/O 载荷（MATPOWER、JSON、BPA、CIM、GridLAB-D、OpenDSS、ETAP XML、SVG 载入与 SVG 导出请求）
+与谐波状态空间 \srcpath{harmonics\_hss}。待办：ETAP XLSX 二进制上传因接受原始二进制体而非
+JSON 对象，其类型化封装仍走 \texttt{HySimClient} 原始方法；可选的 pybind11 进程内传输
+（仅面向高吞吐内核，避免 HTTP 序列化开销）。每一步只有在公式—源码—测试—数值证据齐备后
+方可宣称完成。
+
+\input{../../_manual_common/industrial_evaluation}
+
+\end{document}
