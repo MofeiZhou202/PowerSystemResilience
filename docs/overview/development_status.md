@@ -71,6 +71,29 @@ catalog from `/api/cases`; the smoke server was then stopped. This rebuild did
 not repeat the full `macos-release` CTest suite; the complete 1863-test result
 above is the independently verified `full-dev` baseline.
 
+## Renewable CAS neural surrogate (2026-09-13)
+
+`docs/research/market_related/renewable-sample-factory/numerics/nn_surrogate.py`
+now implements the Section-NN classify-then-regress learner: a temporal
+Conv1D/GELU encoder, commitment BCE head, price and cost heads gated by the
+commitment probabilities, training-set standardization, CAS-tier weighting,
+AdamW/gradient clipping, scenario-level split and early stopping. Inference
+rounds commitments, repairs minimum up/down runs, re-solves the fixed-
+commitment LP, and records exact-SCUC fallback when the repaired commitment is
+still infeasible. `save_checkpoint`/`load_checkpoint` preserve architecture and
+scalers; `project_predictions` exposes the feasibility and fallback audit used
+by the L2O boundary optimizer.
+
+Validation evidence: `python3 -m pytest -q
+tests/test_renewable_nn_surrogate.py` passes (1 test). A reproducible
+CAS-to-neural run with `--train 120 --test 40 --epochs 40`, seed `20250913`,
+and 30% renewable penetration produced held-out cost RMSE 58.70, price RMSE
+54.99, commitment F1 0.9283, projected feasible fraction 1.0, discrete repair
+fraction 0.20, and exact fallback fraction 0.0. These are a small controllable
+study, not IEEE-118 or week-scale production accuracy; the L2O Case-IV
+NumPy surrogate remains the reference decision experiment and every boundary
+recommendation still requires exact re-clearing.
+
 ## Southern A1–A7 hand-oracle anchors
 
 `tests/test_southern_market.cpp` gained six minimal per-interpretation oracle

@@ -1,6 +1,6 @@
 # 文档分类台账
 
-最后核实：2026-09-05
+最后核实：2026-09-13
 
 本台账给 `docs/` 下 Markdown 资产指定唯一的**主要归属**。Markdown 已按分类物理迁移到对应目录；
 一个文档可由其他分类交叉引用，但只在本表登记一个主要归属。
@@ -50,6 +50,9 @@
 - 工业手册：与 `src/` 顶层目录严格同名的
   [23 个 `modules/<module>/` 目录](../modules/README.md)。
 - 研究论文：`latex/paper/`，由 [论文工作区索引](../latex/paper/README.md) 逐篇登记。
+  已纳入版本控制的稿件：`structure_preserving_semismooth_acdc_pf/`、
+  `certified_warmstart_parity_ipm_opf/`（混合 AC/DC OPF 两步原始对偶内点法）与
+  `pes_letter_two_step_ipm_opf/`（后者的三页 PES Letter 浓缩初稿，2026-09-14）。
 - 专题长文、章节片段与生成证据：`latex/`，由 [LaTeX 文档说明](../latex/README.md) 分类。
 - 历史 LaTeX 审计：`archive/`，由 [归档索引](../archive/README.md) 管理。
 

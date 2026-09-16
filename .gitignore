@@ -190,3 +190,14 @@ docs/latex/paper/ev_power_traffic_joint_opt/*
 !docs/latex/paper/structure_preserving_semismooth_acdc_pf/figures/*.json
 !docs/latex/paper/structure_preserving_semismooth_acdc_pf/figures/*.py
 !docs/latex/paper/structure_preserving_semismooth_acdc_pf/figures/*.pdf
+
+# Tracked manuscript: certified two-step warm start + Parity IPM for hybrid AC/DC OPF.
+docs/latex/paper/certified_warmstart_parity_ipm_opf/
+docs/latex/paper/certified_warmstart_parity_ipm_opf/main.tex
+docs/latex/paper/certified_warmstart_parity_ipm_opf/references.bib
+docs/latex/paper/certified_warmstart_parity_ipm_opf/README.md
+docs/latex/paper/certified_warmstart_parity_ipm_opf/main.pdf
+docs/latex/paper/certified_warmstart_parity_ipm_opf/sections/
+docs/latex/paper/certified_warmstart_parity_ipm_opf/sections/*.tex
+
+docs/research/*

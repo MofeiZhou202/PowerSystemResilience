@@ -17,6 +17,7 @@
 #endif
 
 #include "hacdcpf/io/matpower_parser.hpp"
+#include "hacdcpf/io/case_builders.hpp"
 #include "hacdcpf/optimal_power_flow/ac_opf_solver.hpp"
 #include "hacdcpf/optimal_power_flow/dc_opf_solver.hpp"
 #include "hacdcpf/optimal_power_flow/opf_options.hpp"
@@ -51,6 +52,7 @@ struct Arguments {
   double dc_time_limit_ms{2000.0};
   bool dc_time_limit_explicit{false};
   double phase_one_admission_factor{1.0};
+  bool use_ipopt{false};
 };
 
 StartMode parse_mode(std::string_view value) {
@@ -147,6 +149,16 @@ Arguments parse_arguments(int argc, char** argv) {
         throw std::invalid_argument(
             "--phase-one-admission must be nonnegative and finite");
       }
+    } else if (option == "--backend") {
+      const std::string_view backend = value;
+      if (backend == "ipopt") {
+        args.use_ipopt = true;
+      } else if (backend == "parity" || backend == "native") {
+        args.use_ipopt = false;
+      } else {
+        throw std::invalid_argument(
+            "--backend must be ipopt, parity, or native");
+      }
     } else {
       throw std::invalid_argument("unknown option: " + std::string(option));
     }
@@ -182,26 +194,30 @@ double peak_rss_mib() {
 
 hacdcpf::opf::ACOPFOptions options_for(const Arguments& args) {
   hacdcpf::opf::ACOPFOptions options;
-  options.ac_solver_backend = hacdcpf::opf::ACOPFSolverBackend::ParityIPM;
+  options.ac_solver_backend =
+      args.use_ipopt ? hacdcpf::opf::ACOPFSolverBackend::Ipopt
+                     : hacdcpf::opf::ACOPFSolverBackend::ParityIPM;
   options.allow_fallback = false;
   options.max_inner_iterations = args.max_iterations;
   options.max_outer_iterations = 1;
   options.enable_phase_one =
-      args.mode == StartMode::PhaseOne ||
-      args.mode == StartMode::PowerFlowPhaseOne ||
-      args.mode == StartMode::PreparedSession ||
-      args.mode == StartMode::PreparedSweep;
+      !args.use_ipopt &&
+      (args.mode == StartMode::PhaseOne ||
+       args.mode == StartMode::PowerFlowPhaseOne ||
+       args.mode == StartMode::PreparedSession ||
+       args.mode == StartMode::PreparedSweep);
   options.phase_one_dispatch_dual_predictor =
       args.mode == StartMode::PowerFlowPhaseOne;
   options.ac_pf_warm_start =
-      args.mode == StartMode::PowerFlow ||
-      args.mode == StartMode::PowerFlowPhaseOne ||
-      args.mode == StartMode::PreparedPowerFlow ||
-      args.mode == StartMode::EconomicPowerFlow ||
-      args.mode == StartMode::StructuredPowerFlow ||
-      args.mode == StartMode::DcOpfPowerFlow ||
-      args.mode == StartMode::DcOpfHighsPowerFlow ||
-      args.mode == StartMode::DcOpfGurobiPowerFlow;
+      !args.use_ipopt &&
+      (args.mode == StartMode::PowerFlow ||
+       args.mode == StartMode::PowerFlowPhaseOne ||
+       args.mode == StartMode::PreparedPowerFlow ||
+       args.mode == StartMode::EconomicPowerFlow ||
+       args.mode == StartMode::StructuredPowerFlow ||
+       args.mode == StartMode::DcOpfPowerFlow ||
+       args.mode == StartMode::DcOpfHighsPowerFlow ||
+       args.mode == StartMode::DcOpfGurobiPowerFlow);
   options.phase_one_admission_mu_factor = args.phase_one_admission_factor;
   options.ac_pf_dc_phase_one = args.mode == StartMode::StructuredPowerFlow;
   options.ac_pf_dc_phase_one_time_limit_ms = args.dc_time_limit_ms;
@@ -523,17 +539,25 @@ int run_dc_opf_power_flow_benchmark(
   return ac_result.converged ? EXIT_SUCCESS : EXIT_FAILURE;
 }
 
+// Load a case by path, or synthesize an internal hybrid AC/DC fixture when the
+// path stem names one (so the benchmark can trace hybrid cases that have no
+// MATPOWER file).
+hacdcpf::HybridPowerSystem load_case_system(const std::filesystem::path& p) {
+  const std::string stem = p.stem().string();
+  if (stem == "case300_acdc") return hacdcpf::io::build_case300_acdc();
+  if (stem == "case2000_acdc") return hacdcpf::io::build_case2000_acdc();
+  if (!std::filesystem::is_regular_file(p)) {
+    throw std::invalid_argument("case file not found: " + p.string());
+  }
+  return hacdcpf::io::parse_matpower(p.string());
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
   try {
     const Arguments args = parse_arguments(argc, argv);
-    if (!std::filesystem::is_regular_file(args.case_path)) {
-      throw std::invalid_argument("case file not found: " +
-                                  args.case_path.string());
-    }
-    const hacdcpf::HybridPowerSystem system =
-        hacdcpf::io::parse_matpower(args.case_path.string());
+    const hacdcpf::HybridPowerSystem system = load_case_system(args.case_path);
     if (args.mode == StartMode::DcOpf ||
         args.mode == StartMode::DcOpfHighs ||
         args.mode == StartMode::DcOpfGurobi) {

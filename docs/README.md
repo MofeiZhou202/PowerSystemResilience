@@ -1,6 +1,12 @@
 # HySim-XJTU-HRPES 文档中心
 
-最后核实：2026-09-12
+最后核实：2026-09-13
+
+新能源样本工厂已补充可执行的 PyTorch 多任务 surrogate（CAS 标签、早停训练、
+固定承诺 LP 可行性投影与 checkpoint 验证），入口见
+`research/market_related/renewable-sample-factory/numerics/nn_surrogate.py`；
+L2O 边界优化可复用其 commitment/price/cost 输出，但边界推荐仍须 exact
+re-clearing 安全过滤。
 
 [电力市场模块文档校核与手册升级](modules/market/README.md)：全部md契约与LaTeX手册
 经六路文档—代码双向校核；修正过时表述、接口字段缺口与公式转写问题；手册对标
@@ -142,6 +148,8 @@ Native固定整数LP修复、GAP退出条件及IEEE118恢复出清的证据见�
 | Python 客户端边界 | 契约 | [Python API](reference/python_api.md) |
 | 模块文档覆盖与缺口 | 状态 | [模块文档地图](overview/module_documentation_map.md) |
 | 代码审计深度与开放问题 | 状态 | [模块代码审计](testing/module_code_audit.md) |
+| 混合 AC/DC OPF 两步原始对偶内点法论文稿件（可行性恢复 + 全状态延拓） | 研究资料 | [certified_warmstart_parity_ipm_opf](latex/paper/certified_warmstart_parity_ipm_opf/README.md) |
+| 上述论文的三页 PES Letter 浓缩初稿（2026-09-14） | 研究资料 | [pes_letter_two_step_ipm_opf](latex/paper/pes_letter_two_step_ipm_opf/README.md) |
 
 ## 工业级 LaTeX 手册
 
