@@ -110,6 +110,8 @@ struct Build {
   J solver_timing = nullptr;
   J price_consistency = nullptr;
   J gap_certificate = nullptr;
+  bool solver_fallback_used{false};
+  std::string solver_fallback_reason;
   J primal_start{{"status","not_requested"},{"runtime_sec",0.0},{"accepted",false}};
   bool reference{false}, layout_match{false}, column_layout_match{false}, reusable{false};
   std::map<std::string,std::map<std::string,int>::const_iterator> column_hints;
@@ -129,6 +131,8 @@ struct Build {
     solver_timing=nullptr;
     price_consistency=nullptr;
     gap_certificate=nullptr;
+    solver_fallback_used=false;
+    solver_fallback_reason.clear();
     primal_start={{"status","not_requested"},{"runtime_sec",0.0},{"accepted",false}};
   }
   void register_column(const std::string& name,int col) {
@@ -1519,6 +1523,47 @@ std::optional<engine::SolveResult> certified_integer_repair(Build& b,const J& in
 }
 
 engine::SolveResult solve_scaled(Build& b, const J& input) {
+  if (input.at("execution").value("solver",std::string("highs")) == "cplex") {
+    // Backend-only substitution preserves min c^T x and all assembled rows.
+    // The Callable Library adapter owns MILP solves; fixed-commitment SCED/LMP
+    // retain HiGHS. See MIPSolvers docs/cplex_callable_library.md and the
+    // CPLEX section in southern_execution_contract.md.
+    const bool use_cplex = b.stage == "scuc" && !b.model.binary_idx.empty();
+    if (use_cplex) {
+      engine::CplexOptions options;
+      options.time_limit_sec = num(input.at("execution"), "time_limit_sec");
+      options.mip_gap = num(input.at("execution"), "mip_gap");
+      options.threads = input.at("execution").value("threads", 0);
+      engine::CplexAdapter adapter(options);
+      if (!adapter.available()) {
+        throw std::runtime_error(
+            "CPLEX unavailable: Callable Library or license initialization failed");
+      }
+      auto result = adapter.solve_milp(b.model);
+      const auto info = engine::last_cplex_solve_info();
+      const auto seconds = [](const std::optional<double>& value) {
+        return value ? J(*value) : J(nullptr);
+      };
+      b.solver_timing = {
+          {"scope", "cplex-milp-solve-wall"},
+          {"model_import_sec", seconds(info.model_import_sec)},
+          {"optimize_sec", seconds(info.optimize_sec)},
+          {"result_extract_sec", seconds(info.result_extract_sec)},
+          {"best_bound", seconds(info.best_bound)},
+          {"node_count", info.node_count ? J(*info.node_count) : J(nullptr)},
+          {"timed_out", info.timed_out}};
+      return result;
+    }
+    b.solver_fallback_used = true;
+    b.solver_fallback_reason = b.stage == "lmp"
+        ? "CPLEX adapter supports MILP only; LMP pricing LP solved by HiGHS"
+        : "CPLEX adapter supports MILP only; fixed-commitment SCED LP solved by HiGHS";
+    if (b.stage == "lmp") {
+      return engine::HighsAdapter{}.solve_pricing_lp(
+          b.model.linear_part, num(input.at("execution"), "time_limit_sec"));
+    }
+    return engine::HighsAdapter{}.solve_lp(b.model.linear_part);
+  }
   if (input.at("execution").value("solver",std::string("highs")) == "gurobi") {
     // Same sparse model and row ordering; options and parity ledger in execution contract.
     engine::GurobiOptions options;
@@ -1814,6 +1859,8 @@ J stage_result(const Build& b, const engine::SolveResult& solved, const J& j) {
     {"lp_algorithm",b.stage == "lmp" ? (b.price_consistency.is_object()?b.price_consistency.value("algorithm",std::string("dual_simplex")):"dual_simplex") : j.at("execution").value("solver",std::string("highs")) != "gurobi" ? "solver_default" : gurobi_method(b,j) == 2 ? "barrier" : gurobi_method(b,j) == 1 ? "dual_simplex" : "solver_default"},
     {"mip_gap", solved.stats.success ? J(solved.stats.mip_gap) : J(nullptr)},
     {"requested_solver",j.at("execution").value("solver",std::string("highs"))},
+    {"solver_fallback_used", b.solver_fallback_used},
+    {"solver_fallback_reason", b.solver_fallback_reason.empty() ? J(nullptr) : J(b.solver_fallback_reason)},
     {"requested_time_limit_sec",num(j.at("execution"),"time_limit_sec")},
     {"requested_mip_gap",num(j.at("execution"),"mip_gap")},
     {"requested_threads",j.at("execution").value("threads",0)},
@@ -2324,9 +2371,12 @@ J southern_market_ptdf(const J& boundary, int period, const std::vector<int>& br
 
 J southern_market_solver_capabilities() {
   const bool gurobi = engine::GurobiAdapter{}.available();
+  const bool cplex = engine::CplexAdapter{}.available();
   return J::array({{{"id","highs"},{"available",true},{"label","HiGHS"}},
     {{"id","gurobi"},{"available",gurobi},{"label","Gurobi"},
      {"reason",gurobi ? "Local environment initialized; model-specific license limits checked at solve" : "Gurobi library or license initialization unavailable"}},
+    {{"id","cplex"},{"available",cplex},{"label","CPLEX"},
+     {"reason",cplex ? "CPLEX Callable Library initialized; MILP stages use CPLEX, LP pricing stages use HiGHS" : "CPLEX Callable Library or license initialization unavailable"}},
     {{"id","native"},{"available",true},{"label","Native B&C / HiGHS LP"},
      {"root_cut_profiles",{"default","enhanced"}},
      {"reason","Native tree and cuts; HiGHS continuous kernel and pricing LP. Experimental for large markets; LP calls have no hard deadline."}}});

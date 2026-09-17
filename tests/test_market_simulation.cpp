@@ -9,10 +9,14 @@
 
 #include "hacdcpf/io/matpower_parser.hpp"
 #include "hacdcpf/io/case_builders.hpp"
+#include "hacdcpf/engine/solver/external/adapters.hpp"
 #include "hacdcpf/market/market_simulation.hpp"
 
 #ifndef HACDCPF_TEST_DATA_DIR
 #define HACDCPF_TEST_DATA_DIR "../data"
+#endif
+#ifndef HACDCPF_MATPOWER_DATA_DIR
+#define HACDCPF_MATPOWER_DATA_DIR "../external_data/matpower"
 #endif
 
 namespace {
@@ -135,6 +139,32 @@ double lmp_spread(const std::vector<double>& lmp) {
 }
 
 }  // namespace
+
+TEST_CASE("Case9 day-ahead market discloses CPLEX routing", "[market][case9][cplex]") {
+  hacdcpf::engine::CplexAdapter cplex;
+  auto system = hacdcpf::io::parse_matpower(
+      std::string(HACDCPF_MATPOWER_DATA_DIR) + "/case9.m");
+  auto options = market_options();
+  options.uc_options.uc_solver = hacdcpf::UCSolverChoice::CPLEX;
+  options.uc_options.uc_solver_threads = cplex.available() ? 1 : 0;
+  options.run_ac_validation = false;
+
+  const auto result = hacdcpf::market::run_day_ahead_market(
+      system, case9_day_profile(), options);
+  INFO("market status=" << result.status);
+  INFO("SCUC status=" << result.commitment.solver_status);
+  REQUIRE(result.feasible);
+  CHECK(result.commitment.requested_solver == "cplex");
+  CHECK(result.performance.scuc_requested_solver == "cplex");
+  if (cplex.available()) {
+    CHECK(result.commitment.solver_name == "CPLEX");
+    CHECK_FALSE(result.commitment.solver_fallback_used);
+  } else {
+    CHECK(result.commitment.solver_name != "CPLEX");
+    CHECK(result.commitment.solver_fallback_used);
+    CHECK(result.commitment.solver_fallback_reason.find("CPLEX") != std::string::npos);
+  }
+}
 
 TEST_CASE("Case9 24-hour native market closes SCUC-SCED-LMP-ACPF-settlement",
           "[market][case9][integration]") {

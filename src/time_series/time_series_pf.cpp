@@ -2887,6 +2887,25 @@ std::shared_ptr<engine::GurobiAdapter> make_uc_gurobi() {
   return std::make_shared<engine::GurobiAdapter>(options);
 }
 
+std::shared_ptr<engine::CplexAdapter> make_uc_cplex() {
+  engine::CplexOptions options;
+  options.mip_gap = 1e-3;
+  options.threads = g_active_uc_solver_threads;
+  return std::make_shared<engine::CplexAdapter>(options);
+}
+
+const char* uc_solver_choice_name(UCSolverChoice choice) {
+  switch (choice) {
+    case UCSolverChoice::Native: return "native";
+    case UCSolverChoice::HiGHS: return "highs";
+    case UCSolverChoice::SCIP: return "scip";
+    case UCSolverChoice::Gurobi: return "gurobi";
+    case UCSolverChoice::CPLEX: return "cplex";
+    case UCSolverChoice::Auto: return "auto";
+  }
+  return "auto";
+}
+
 struct ScopedUCSolverThreadOverride {
   explicit ScopedUCSolverThreadOverride(int threads)
       : previous(g_active_uc_solver_threads) {
@@ -2954,6 +2973,20 @@ engine::SolverAdapterPtr create_milp_adapter(UCSolverChoice choice) {
     }
     return make_tuned_native();
   }
+  if (choice == UCSolverChoice::CPLEX) {
+    auto cplex = make_uc_cplex();
+    if (cplex->available() && cplex->supports(ProblemClass::MILP)) {
+      g_configured_uc_solver_threads =
+          g_active_uc_solver_threads > 0 ? g_active_uc_solver_threads : -1;
+      return cplex;
+    }
+    auto highs = std::make_shared<HighsAdapter>();
+    if (g_active_uc_solver_threads == 0 && highs->available() &&
+        highs->supports(ProblemClass::MILP)) {
+      return highs;
+    }
+    return make_tuned_native();
+  }
 
   auto gurobi = make_uc_gurobi();
   if (gurobi->available() && gurobi->supports(ProblemClass::MILP)) {
@@ -2965,10 +2998,45 @@ engine::SolverAdapterPtr create_milp_adapter(UCSolverChoice choice) {
 }
 
 engine::SolveResult solve_uc_milp_with_fallback(
-    const engine::MIPModel& model, UCSolverChoice choice) {
+    const engine::MIPModel& model, UCSolverChoice choice,
+    bool* fallback_used, std::string* fallback_reason) {
   using namespace engine;
-  if (choice != UCSolverChoice::Auto && choice != UCSolverChoice::Gurobi) {
+  if (fallback_used != nullptr) *fallback_used = false;
+  if (fallback_reason != nullptr) fallback_reason->clear();
+  if (choice != UCSolverChoice::Auto && choice != UCSolverChoice::Gurobi &&
+      choice != UCSolverChoice::CPLEX) {
     return create_milp_adapter(choice)->solve_milp(model);
+  }
+
+  if (choice == UCSolverChoice::CPLEX) {
+    // Backend-only substitution: the UC remains min c^T x over the same
+    // linear rows and integer columns. See MIPSolvers
+    // docs/cplex_callable_library.md and market_simulation_runtime.md.
+    std::string cplex_failure = "unavailable or unlicensed";
+    auto cplex = make_uc_cplex();
+    if (cplex->available() && cplex->supports(ProblemClass::MILP)) {
+      g_configured_uc_solver_threads =
+          g_active_uc_solver_threads > 0 ? g_active_uc_solver_threads : -1;
+      auto solved = cplex->solve_milp(model);
+      if (solved.stats.success) return solved;
+      cplex_failure = solved.stats.status;
+    }
+    if (fallback_used != nullptr) *fallback_used = true;
+    if (fallback_reason != nullptr) {
+      *fallback_reason = "CPLEX failed: " + cplex_failure;
+    }
+    HighsAdapter highs;
+    if (g_active_uc_solver_threads == 0 && highs.available() &&
+        highs.supports(ProblemClass::MILP)) {
+      g_configured_uc_solver_threads = -1;
+      auto solved = highs.solve_milp(model);
+      solved.stats.status += " (fallback after CPLEX: " +
+          cplex_failure + ")";
+      if (solved.stats.success) return solved;
+    }
+    auto solved = create_milp_adapter(UCSolverChoice::Native)->solve_milp(model);
+    solved.stats.status += " (fallback after CPLEX: " + cplex_failure + ")";
+    return solved;
   }
 
   std::string gurobi_failure = "unavailable or unlicensed";
@@ -3708,7 +3776,11 @@ UCSchedule solve_unit_commitment(const HybridPowerSystem& sys,
   build.model.initial_solution =
       priority_list_uc_heuristic(sys, ts_data, build, total_load);
 
-  auto result = solve_uc_milp_with_fallback(build.model, opts.uc_solver);
+  bool solver_fallback_used = false;
+  std::string solver_fallback_reason;
+  auto result = solve_uc_milp_with_fallback(
+      build.model, opts.uc_solver,
+      &solver_fallback_used, &solver_fallback_reason);
 
   // Validate solver produced a usable solution vector
   const int expected_size = build.model.linear_part.c.size();
@@ -3718,6 +3790,9 @@ UCSchedule solve_unit_commitment(const HybridPowerSystem& sys,
     sched.solver_threads_configured = g_configured_uc_solver_threads;
     sched.solver_name = result.stats.solver_name;
     sched.solver_status = result.stats.status;
+    sched.requested_solver = uc_solver_choice_name(opts.uc_solver);
+    sched.solver_fallback_used = solver_fallback_used;
+    sched.solver_fallback_reason = solver_fallback_reason;
     sched.mip_gap = result.stats.mip_gap;
     sched.total_cost = 0.0;
     return sched;
@@ -3727,6 +3802,9 @@ UCSchedule solve_unit_commitment(const HybridPowerSystem& sys,
                           result.stats.objective + build.obj_offset,
                           result.stats);
   schedule.solver_threads_configured = g_configured_uc_solver_threads;
+  schedule.requested_solver = uc_solver_choice_name(opts.uc_solver);
+  schedule.solver_fallback_used = solver_fallback_used;
+  schedule.solver_fallback_reason = solver_fallback_reason;
   return schedule;
 }
 

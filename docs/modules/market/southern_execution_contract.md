@@ -784,11 +784,11 @@ N 的事件范围为 `[events/N,(events+n_unknown)/N]`。Wilson95 反映完整�
 出现异常，Wilson95 为 [.438503,1]；这是人为压力条件下的小样本演示，不能作为
 真实风险概率。截图 `demo-config.png/demo-statistics.png/demo-causes.png/demo-mobile.png`。
 
-### Gurobi 市场后端
+### Gurobi / CPLEX 市场后端
 
-`execution.solver`支持`highs`（旧快照默认）、`gurobi`和`native`，不自动替换；
+`execution.solver`支持`highs`（旧快照默认）、`gurobi`、`cplex`和`native`，不自动替换；
 Native 路径见本文 Native 根割与整数修复两节。
-`execution.threads`默认0；非零仅接受Gurobi（最大128）。`time_limit_sec`与
+`execution.threads`默认0；非零仅接受Gurobi或CPLEX（最大128）。`time_limit_sec`与
 `mip_gap`沿用原范围；Gurobi参数作用于每个SCUC/SCED/LMP优化调用，LP也限时。
 时限不包含建模、许可证启动或全部恢复实验，仍不是整日硬预算。HiGHS路径中
 SCUC MILP与LMP定价LP接收时限（Gurobi 并发双解各自持有完整请求时限，HiGHS 顺序复算使用剩余预算），SCED连续LP不设时限。
@@ -797,6 +797,14 @@ SCUC MILP与LMP定价LP接收时限（Gurobi 并发双解各自持有完整请�
 GUI手工页和预测页分别编辑并重载这四项；日前边界页按schema编辑execution。
 API `/api/session/market_operation.solver_capabilities`报告本地环境初始化结果，
 模型特定许可证限制仍须实际求解确认。Gurobi不可用时返回错误，不回落HiGHS。
+
+CPLEX使用MIPSolvers Callable Library适配器，仅承担SCUC的MILP。固定组合后的
+SCED与LMP为连续LP，继续由HiGHS求解。这两个阶段返回
+`solver_fallback_used=true`和`solver_fallback_reason`，不将HiGHS伪装为CPLEX。
+CPLEX初始化或许可证失败时，南方市场显式请求路径直接返回错误；
+不静默切换SCUC后端。`solver_timing`中的CPLEX导入、优化、提取耗时及
+best bound/node count只是运行时遥测，不构成性能结论。理论与状态映射依据
+MIPSolvers `docs/cplex_callable_library.md`、IBM ILOG CPLEX Callable Library状态与参数文档。
 
 RATIONALE: `southern_market.cpp::solve`将同一Build模型交给Gurobi适配器，不改
 98点、目标或约束；显式参数构造使LP复用稀疏装配，传递成本O(nnz+m+n)。

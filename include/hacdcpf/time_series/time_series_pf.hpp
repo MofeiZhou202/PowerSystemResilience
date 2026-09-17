@@ -76,6 +76,9 @@ struct UCSchedule {
   bool feasible{false};
   std::string solver_name;
   std::string solver_status;
+  std::string requested_solver{"auto"};
+  bool solver_fallback_used{false};
+  std::string solver_fallback_reason;
   int solver_threads_configured{-1}; // Configured cap, not observed usage; -1 = unknown/default
   double mip_gap{0.0};
   bool mip_gap_target_met{false};
@@ -131,7 +134,7 @@ struct CrossValStep {
 // ═══════════════════════════════════════════════════════════════════════
 // Time-Series PF Options — controls for the entire UC→OPF→PF pipeline
 // ═══════════════════════════════════════════════════════════════════════
-enum class UCSolverChoice { Auto, Native, HiGHS, SCIP, Gurobi };
+enum class UCSolverChoice { Auto, Native, HiGHS, SCIP, Gurobi, CPLEX };
 
 // Unit-commitment objective selection.  All terms are linear, so any choice
 // keeps the model a MILP solvable by every backend.  The reported $ cost is

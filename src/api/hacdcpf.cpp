@@ -2860,6 +2860,10 @@ SolverCapabilities get_solver_capabilities() noexcept {
   caps.has_gurobi = true;
   caps.supports_integer_variables = true;
 #endif
+#ifdef HACDCPF_HAVE_CPLEX
+  caps.has_cplex = true;
+  caps.supports_integer_variables = true;
+#endif
 #ifdef HACDCPF_HAVE_IPOPT
   caps.has_ipopt = true;
 #endif

@@ -80,6 +80,8 @@ option(HACDCPF_USE_SUITESPARSE
        "Use SuiteSparse-backed sparse linear solvers when available"        ON)
 option(HACDCPF_USE_GUROBI
        "Enable Gurobi detection through MIPSolvers when available"          ON)
+option(HACDCPF_USE_CPLEX
+       "Enable CPLEX detection through MIPSolvers when available"           OFF)
 option(HACDCPF_USE_PAPILO
        "Enable bundled local PaPILO presolve through MIPSolvers"            ON)
 option(HACDCPF_USE_HFACTOR
@@ -180,6 +182,8 @@ set(MIPSOLVERS_USE_SUITESPARSE ${HACDCPF_USE_SUITESPARSE} CACHE BOOL
     "Use SuiteSparse in MIPSolvers when available" FORCE)
 set(MIPSOLVERS_USE_GUROBI ${HACDCPF_USE_GUROBI} CACHE BOOL
     "Enable Gurobi detection in MIPSolvers when available" FORCE)
+set(MIPSOLVERS_USE_CPLEX ${HACDCPF_USE_CPLEX} CACHE BOOL
+    "Enable CPLEX detection in MIPSolvers when available" FORCE)
 set(MIPSOLVERS_USE_PAPILO ${_hacdcpf_use_papilo} CACHE BOOL
     "Enable PaPILO presolve in MIPSolvers when available" FORCE)
 # MUMPS must be built from the vendored in-tree sources — a cached

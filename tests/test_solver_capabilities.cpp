@@ -11,6 +11,7 @@
 
 #include "hacdcpf/api/hacdcpf.hpp"
 #include "hacdcpf/api/solver_capabilities.hpp"
+#include "hacdcpf/engine/solver/external/adapters.hpp"
 #include "hacdcpf/io/matpower_parser.hpp"
 #include "hacdcpf/model/hybrid_power_system.hpp"
 
@@ -38,6 +39,7 @@ TEST_CASE("SolverCapabilities: default-constructed struct has sane values", "[ca
     // Optional backends must default to false.
     CHECK_FALSE(caps.has_highs);
     CHECK_FALSE(caps.has_gurobi);
+    CHECK_FALSE(caps.has_cplex);
     CHECK_FALSE(caps.has_ipopt);
     CHECK_FALSE(caps.has_scip);
     CHECK_FALSE(caps.has_klu);
@@ -70,6 +72,7 @@ TEST_CASE("get_solver_capabilities: is noexcept and repeatable", "[capabilities]
     CHECK(c1.has_sparse_lu    == c2.has_sparse_lu);
     CHECK(c1.has_highs        == c2.has_highs);
     CHECK(c1.has_gurobi       == c2.has_gurobi);
+    CHECK(c1.has_cplex        == c2.has_cplex);
     CHECK(c1.has_ipopt        == c2.has_ipopt);
     CHECK(c1.has_scip         == c2.has_scip);
     CHECK(c1.has_klu          == c2.has_klu);
@@ -104,7 +107,7 @@ TEST_CASE("get_solver_capabilities: Gurobi is disabled by default", "[capabiliti
 TEST_CASE("SolverCapabilities: integer_variables requires at least one MIP backend", "[capabilities][consistency]") {
     const auto caps = get_solver_capabilities();
     if (caps.supports_integer_variables) {
-        const bool has_mip = caps.has_highs || caps.has_gurobi || caps.has_scip;
+        const bool has_mip = caps.has_highs || caps.has_gurobi || caps.has_cplex || caps.has_scip;
         CHECK(has_mip);
     }
 }
@@ -114,11 +117,12 @@ TEST_CASE("SolverCapabilities: if no MIP backend, integer_variables is false", "
     SolverCapabilities caps;
     caps.has_highs  = false;
     caps.has_gurobi = false;
+    caps.has_cplex  = false;
     caps.has_scip   = false;
     caps.supports_integer_variables = false;
 
     // Rule: no MIP ⇒ no integers.
-    if (!caps.has_highs && !caps.has_gurobi && !caps.has_scip)
+    if (!caps.has_highs && !caps.has_gurobi && !caps.has_cplex && !caps.has_scip)
         CHECK_FALSE(caps.supports_integer_variables);
 }
 
@@ -177,6 +181,17 @@ TEST_CASE("SolverCapabilities: HiGHS flag true at compile time", "[capabilities]
 TEST_CASE("SolverCapabilities: Ipopt flag true at compile time", "[capabilities][ipopt]") {
     const auto caps = get_solver_capabilities();
     CHECK(caps.has_ipopt);
+}
+#endif
+
+#ifdef HACDCPF_HAVE_CPLEX
+TEST_CASE("SolverCapabilities: CPLEX flag reports compiled adapter support", "[capabilities][cplex]") {
+    const auto caps = get_solver_capabilities();
+    CHECK(caps.has_cplex);
+    hacdcpf::engine::CplexAdapter adapter;
+    CHECK(adapter.supports(hacdcpf::engine::ProblemClass::MILP));
+    // Runtime availability additionally depends on local library loading and
+    // license initialization, so it is intentionally not inferred here.
 }
 #endif
 

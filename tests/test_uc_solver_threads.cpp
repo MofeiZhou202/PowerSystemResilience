@@ -76,6 +76,30 @@ TEST_CASE("Auto and Gurobi keep explicit UC thread limits through fallback", "[u
   CHECK_THROWS_AS(engine::GurobiAdapter(invalid_high), std::invalid_argument);
 }
 
+TEST_CASE("CPLEX UC selection reports its actual backend and any fallback", "[uc_solver][cplex]") {
+  using namespace hacdcpf;
+  engine::CplexAdapter cplex;
+  TimeSeriesPFOptions opts;
+  opts.uc_solver = UCSolverChoice::CPLEX;
+  opts.uc_solver_threads = cplex.available() ? 1 : 0;
+  opts.enable_external_grid = false;
+  opts.run_opf = false;
+  const auto result = solve_unit_commitment(thread_case(), thread_series(), opts);
+  INFO(result.solver_name << ": " << result.solver_status);
+  REQUIRE(result.feasible);
+  CHECK(result.requested_solver == "cplex");
+  CHECK(result.total_cost == Catch::Approx(2200).margin(1e-5));
+  if (cplex.available()) {
+    CHECK(result.solver_name == "CPLEX");
+    CHECK_FALSE(result.solver_fallback_used);
+    CHECK(result.solver_threads_configured == 1);
+  } else {
+    CHECK(result.solver_name != "CPLEX");
+    CHECK(result.solver_fallback_used);
+    CHECK(result.solver_fallback_reason.find("CPLEX") != std::string::npos);
+  }
+}
+
 TEST_CASE("Annual coupled SCUC forwards solver threads independently of daily workers", "[uc_threads]") {
   using namespace hacdcpf;
   analysis::AnnualProductionSimOptions opts;

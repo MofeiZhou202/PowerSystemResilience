@@ -155,6 +155,9 @@ struct MarketPerformanceProfile {
   bool component_n1_parallel_effective{false};
   int component_n1_parallel_workers{1};
   std::string scuc_solver_name;
+  std::string scuc_requested_solver;
+  bool scuc_solver_fallback_used{false};
+  std::string scuc_solver_fallback_reason;
   std::string pricing_solver_name;
   bool pricing_solver_fallback_used{false};
   bool pricing_large_model_direct_highs_used{false};

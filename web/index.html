@@ -1172,6 +1172,7 @@
         <select id="tspfUcSolver">
           <option value="auto" selected>Auto (优选)</option>
           <option value="gurobi">Gurobi</option>
+          <option value="cplex">CPLEX</option>
           <option value="native">Native B&amp;C</option>
           <option value="highs">HiGHS</option>
           <option value="scip">SCIP</option>
@@ -1388,7 +1389,11 @@
           <option value="scip">SCIP</option>
           <option value="native">Native B&amp;C</option>
           <option value="gurobi">Gurobi</option>
+          <option value="cplex">CPLEX</option>
         </select>
+      </label>
+      <label class="sub-label" title="Gurobi/CPLEX 的 SCUC 线程上限；0 为后端默认。">SCUC线程数
+        <input id="marketScucThreads" type="number" value="0" min="0" max="256" step="1"/>
       </label>
       <label class="sub-label">原生定价变量上限
         <input id="marketPricingNativeMaxVariables" type="number" value="5000" min="0" step="100" title="超过该变量数直接使用 HiGHS；0 表示所有定价 LP 均使用 HiGHS"/>

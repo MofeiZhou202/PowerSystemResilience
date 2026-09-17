@@ -22,7 +22,7 @@
 #include <mipsolvers/engine/engine.hpp>                             // problem_types, solver_adapter, adapter_registry
 #include <mipsolvers/engine/branch_and_cut.hpp>                    // BCOptions, BCStats, BCResult, BCWarmStart, BranchingStrategy, NodeSelection, CutType
 #include <mipsolvers/engine/solver/native/native_adapters.hpp>     // NativeBranchAndCutAdapter, NativeLinearAdapter, NativeNewtonAdapter, ...
-#include <mipsolvers/engine/solver/external/adapters.hpp>          // HighsAdapter, IpoptAdapter, ScipAdapter, GurobiAdapter
+#include <mipsolvers/engine/solver/external/adapters.hpp>          // HighsAdapter, IpoptAdapter, ScipAdapter, GurobiAdapter, CplexAdapter
 
 namespace hacdcpf::engine {
   /// Forward the entire mipsolvers::engine namespace.

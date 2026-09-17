@@ -55,6 +55,8 @@ hacdcpf_add_test(test_uc_mobile_storage    test_uc_mobile_storage.cpp)
 # project's executable target distinct so both dependency and application
 # integration suites can be configured in the same CTest tree.
 hacdcpf_add_test(hacdcpf_test_market_simulation test_market_simulation.cpp)
+target_compile_definitions(hacdcpf_test_market_simulation PRIVATE
+  HACDCPF_MATPOWER_DATA_DIR="${CMAKE_SOURCE_DIR}/external_data/matpower")
 hacdcpf_add_test(test_southern_market test_southern_market.cpp)
 if(UNIX)
   add_executable(run_southern_market_benchmark run_southern_market_benchmark.cpp)

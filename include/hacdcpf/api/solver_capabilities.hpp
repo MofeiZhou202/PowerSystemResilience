@@ -22,6 +22,7 @@ struct SolverCapabilities {
     // ── MIP / QP / NLP solver backends ───────────────────────────────────────
     bool has_highs{false};                ///< HiGHS LP/MIP solver
     bool has_gurobi{false};               ///< Gurobi LP/QP/MIP solver
+    bool has_cplex{false};                ///< CPLEX Callable Library MILP solver
     bool has_ipopt{false};                ///< Ipopt NLP solver
     bool has_scip{false};                 ///< SCIP MIP solver
     bool has_papilo{false};               ///< PaPILO presolve library
@@ -33,7 +34,7 @@ struct SolverCapabilities {
 
     // ── Solver feature flags ─────────────────────────────────────────────────
     bool supports_quadratic_objective{true};  ///< QP objective (native + HiGHS)
-    bool supports_integer_variables{false};   ///< MIP variables (requires HiGHS/Gurobi/SCIP)
+    bool supports_integer_variables{false};   ///< MIP variables (requires HiGHS/Gurobi/CPLEX/SCIP)
     bool supports_ac_opf{true};               ///< Nonlinear AC OPF (always)
     bool supports_dc_opf{true};               ///< Linear DC OPF (always)
     bool supports_three_phase{true};          ///< Three-phase unbalanced PF (always)

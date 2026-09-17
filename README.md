@@ -73,8 +73,9 @@
   通用结算不包含南方水库/AC储能优化，详见市场契约覆盖矩阵。
 - 南方运行模拟修正为D日96点＋下一日预测峰谷2点；周8日预测/7日出清，GUI展示
   末日预测、峰谷来源与求解质量。限额可行解不等同于异常不可避免，详见市场执行契约。
-- 南方市场支持显式选择本地Gurobi或HiGHS；Gurobi的MILP/LP均支持每次调用时限、
-  MIP gap及线程配置。相同98点模型和原残差审计保持，大规模吞吐仍未认证。
+- 南方市场支持显式选择本地Gurobi、CPLEX或HiGHS；CPLEX只接管SCUC
+  MILP，固定组合后的SCED/LMP保持HiGHS并返回回退原因。相同98点模型和
+  原残差审计保持，大规模吞吐仍未认证。
 - 市场“运行模拟”按选择算例、设置边界、运行、结果与原因四步组织，支持可配置
   火电数量（新研究案例默认120火电+720水电）、逐时PTDF查询及三后端比较，默认GAP=0.01。
 - IEEE 118多资源案例已通过一周市场边界压力测试；15/30/60分钟预测分辨率实验保持
@@ -273,6 +274,7 @@ powershell -ExecutionPolicy Bypass -File tools/package_trial_windows.ps1
 | IPOPT `HACDCPF_ENABLE_IPOPT` | macOS/Windows 默认及 preset `ON`，Linux preset `OFF` | Windows 使用 MIPSolvers 导出的本地 sequential oneMKL 静态 prebuilt 包与 PardisoMKL；包不完整时配置失败，不静默关闭。 |
 | PaPILO `HACDCPF_USE_PAPILO` | `ON` | 默认使用 MIPSolvers 包内 PaPILO 与 Boost 头；关闭或 minimal profile 时回退到原生 presolve。 |
 | Gurobi `HACDCPF_USE_GUROBI` | `ON` | 默认探测并优先使用本机 Gurobi；未安装、许可证不可用或求解失败时自动回退到包内 HiGHS/原生求解器。 |
+| CPLEX `HACDCPF_USE_CPLEX` | `OFF` | 显式启用 MIPSolvers Callable Library MILP 适配器；需本地 SDK 与可用许可证，不随 Windows 便携包分发。 |
 
 ### 3) 测试覆盖信号（如何判断“不是纸面功能”）
 

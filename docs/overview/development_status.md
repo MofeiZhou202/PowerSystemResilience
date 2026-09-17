@@ -1,6 +1,6 @@
 # Development Status
 
-Updated: 2026-09-13
+Updated: 2026-09-17
 
 This is the living handoff for verified build state and active engineering work.
 Update it in place; do not create dated copies. Source, registered tests, and
@@ -36,6 +36,34 @@ registered the test and it passed 1/1; `cmake --list-presets=all` also parsed
 all three `windows-source-release` preset entries. Actual MSVC compilation, DLL
 inspection, packaging, and extracted-binary execution remain pending on a
 Windows host.
+
+## CPLEX market routing integration (2026-09-17)
+
+The integration branch adds an opt-in `HACDCPF_USE_CPLEX` configure switch and
+forwards it to the existing MIPSolvers CPLEX adapter without changing the
+dependency pin. Generic UC and day-ahead SCUC now accept `cplex`, forward
+threads/time-limit/gap where those options exist, and expose requested solver,
+actual solver, fallback flag, and reason. Southern market SCUC uses CPLEX
+strictly when selected; its fixed-commitment SCED and LMP remain on HiGHS and
+report that stage route explicitly. `SolverCapabilities::has_cplex` means the
+adapter was compiled, not that a license is currently usable.
+
+The portable Windows packaging contract remains unchanged: it neither enables
+nor redistributes CPLEX. No performance improvement is claimed. A Debug/minimal
+macOS build first passed with CPLEX disabled: solver capabilities 61 assertions,
+UC routing 35 assertions, the generic market CPLEX fallback case 6 assertions,
+and the southern unavailable path 3 assertions. Reconfiguring the same build
+with the local CPLEX Studio 22.1.1 arm64 SDK detected `libcplex2211.dylib`; the
+four CPLEX-focused runs then passed 2, 6, 5, and 13 assertions respectively,
+including actual CPLEX SCUC and explicit HiGHS SCED/LMP routing.
+
+The complete generic market test executable was also attempted. Its 16
+non-MATPOWER cases passed, but 17 existing Case9 cases failed before solve
+because their shared fixture resolves the absent `data/case9.m` instead of
+`external_data/matpower/case9.m`. The new CPLEX case has an explicit correct
+data root and is green; this branch does not rewrite the unrelated legacy
+fixture contract. Large-system performance, Windows MSVC runtime loading, and
+license redistribution remain unverified.
 
 ## MIPSolvers main upgrade full regression (2026-09-13)
 

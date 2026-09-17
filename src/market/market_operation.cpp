@@ -151,7 +151,7 @@ J summarize(const J& result) {
     {"validation_sec", result.value("validation_sec",J(nullptr))},
     {"stages", J::object()}, {"periods", J::array()}, {"nodes", J::array()}, {"lines", J::array()}};
   for (const auto* stage : {"scuc", "sced", "lmp"}) if (result.contains(stage)) {
-    for (const auto* field : {"solver", "requested_solver", "requested_time_limit_sec", "requested_mip_gap", "requested_threads", "solver_status", "mip_gap", "max_residual", "objective", "optimality_proven", "solution_quality", "limit_reached", "variables", "binary_variables", "runtime_sec", "assembly_sec", "audit_sec", "nonzeros", "formulation", "compact_units", "compact_storage", "projected_commitment_units", "reconstructed_max_residual", "lp_algorithm", "reservoir_scaling", "primal_start", "model_size", "native_diagnostics"})
+    for (const auto* field : {"solver", "requested_solver", "solver_fallback_used", "solver_fallback_reason", "requested_time_limit_sec", "requested_mip_gap", "requested_threads", "solver_status", "mip_gap", "max_residual", "objective", "optimality_proven", "solution_quality", "limit_reached", "variables", "binary_variables", "runtime_sec", "assembly_sec", "audit_sec", "nonzeros", "formulation", "compact_units", "compact_storage", "projected_commitment_units", "reconstructed_max_residual", "lp_algorithm", "reservoir_scaling", "primal_start", "model_size", "native_diagnostics"})
       day["stages"][stage][field] = result.at(stage).value(field, J(nullptr));
     for (const auto* field : {"solve_wall_sec", "solution_export_sec", "assembly_template", "solver_timing", "price_consistency", "gap_certificate"})
       day["stages"][stage][field] = result.at(stage).value(field, J(nullptr));

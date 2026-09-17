@@ -800,6 +800,18 @@ bool market_gurobi_available() {
   return available;
 }
 
+const char* market_solver_choice_name(UCSolverChoice choice) {
+  switch (choice) {
+    case UCSolverChoice::Native: return "native";
+    case UCSolverChoice::HiGHS: return "highs";
+    case UCSolverChoice::SCIP: return "scip";
+    case UCSolverChoice::Gurobi: return "gurobi";
+    case UCSolverChoice::CPLEX: return "cplex";
+    case UCSolverChoice::Auto: return "auto";
+  }
+  return "auto";
+}
+
 engine::SolverAdapterPtr create_market_milp_adapter(
     UCSolverChoice choice,
     const MarketOptions& market_options,
@@ -847,6 +859,17 @@ engine::SolverAdapterPtr create_market_milp_adapter(
     }
     return highs();
   }
+  if (choice == UCSolverChoice::CPLEX) {
+    CplexOptions options;
+    options.time_limit_sec = std::max(0.0, market_options.scuc_time_limit_sec);
+    options.mip_gap = std::max(0.0, market_options.scuc_mip_relative_gap);
+    options.threads = std::max(0, market_options.uc_options.uc_solver_threads);
+    auto adapter = std::make_shared<CplexAdapter>(options);
+    if (adapter->available() && adapter->supports(ProblemClass::MILP)) {
+      return adapter;
+    }
+    return highs();
+  }
   if (market_gurobi_available()) {
     return std::make_shared<GurobiAdapter>();
   }
@@ -860,10 +883,49 @@ engine::SolveResult solve_market_milp_with_fallback(
     UCSolverChoice choice,
     const MarketOptions& market_options,
     int binary_variables,
-    bool* structured_branching_used = nullptr) {
+    bool* structured_branching_used = nullptr,
+    bool* fallback_used = nullptr,
+    std::string* fallback_reason = nullptr) {
   using namespace engine;
   if (structured_branching_used != nullptr) {
     *structured_branching_used = false;
+  }
+  if (fallback_used != nullptr) *fallback_used = false;
+  if (fallback_reason != nullptr) fallback_reason->clear();
+
+  if (choice == UCSolverChoice::CPLEX) {
+    // Backend-only substitution: SCUC remains min c^T x over the assembled
+    // MIP. See MIPSolvers docs/cplex_callable_library.md and the runtime
+    // contract in docs/reference/market_simulation_runtime.md.
+    CplexOptions cplex_options;
+    cplex_options.time_limit_sec =
+        std::max(0.0, market_options.scuc_time_limit_sec);
+    cplex_options.mip_gap =
+        std::max(0.0, market_options.scuc_mip_relative_gap);
+    cplex_options.threads =
+        std::max(0, market_options.uc_options.uc_solver_threads);
+    std::string cplex_failure = "unavailable or unlicensed";
+    CplexAdapter cplex(cplex_options);
+    if (cplex.available() && cplex.supports(ProblemClass::MILP)) {
+      auto solved = cplex.solve_milp(model);
+      if (solved.stats.success) return solved;
+      cplex_failure = solved.stats.status;
+    }
+    if (fallback_used != nullptr) *fallback_used = true;
+    if (fallback_reason != nullptr) {
+      *fallback_reason = "CPLEX failed: " + cplex_failure;
+    }
+    bool used_structured = false;
+    auto fallback = create_market_milp_adapter(
+        UCSolverChoice::HiGHS, market_options, binary_variables,
+        &used_structured);
+    auto solved = fallback->solve_milp(model);
+    if (structured_branching_used != nullptr) {
+      *structured_branching_used = used_structured;
+    }
+    solved.stats.status += " (fallback after CPLEX: " +
+        cplex_failure + ")";
+    return solved;
   }
 
   if (choice != UCSolverChoice::Auto &&
@@ -2084,6 +2146,8 @@ UCSchedule solve_market_commitment(
   int root_cuts_reused_count = 0;
   bool root_basis_reused = false;
   bool pseudocosts_reused = false;
+  bool solver_fallback_used = false;
+  std::string solver_fallback_reason;
   const bool enable_in_solve_generation =
       generate_network_constraints &&
       options.enable_scuc_in_solve_network_constraint_generation;
@@ -2254,10 +2318,17 @@ UCSchedule solve_market_commitment(
 #endif
     } else {
       bool adapter_structured = false;
+      bool iteration_fallback = false;
+      std::string iteration_fallback_reason;
       solved = solve_market_milp_with_fallback(
           build.model,
           options.uc_options.uc_solver, iteration_options,
-          binary_variables, &adapter_structured);
+          binary_variables, &adapter_structured,
+          &iteration_fallback, &iteration_fallback_reason);
+      solver_fallback_used = solver_fallback_used || iteration_fallback;
+      if (!iteration_fallback_reason.empty()) {
+        solver_fallback_reason = iteration_fallback_reason;
+      }
     }
     structured_branching_used =
         structured_branching_used || iteration_structured;
@@ -2300,6 +2371,10 @@ UCSchedule solve_market_commitment(
   UCSchedule schedule;
   schedule.solver_name = solved.stats.solver_name;
   schedule.solver_status = solved.stats.status;
+  schedule.requested_solver = market_solver_choice_name(
+      options.uc_options.uc_solver);
+  schedule.solver_fallback_used = solver_fallback_used;
+  schedule.solver_fallback_reason = solver_fallback_reason;
   schedule.mip_gap = solved.stats.mip_gap;
   schedule.mip_gap_target_met =
       solved.stats.status.find("Optimal") != std::string::npos ||
@@ -4824,6 +4899,11 @@ MarketResult run_day_ahead_market(
   performance.scuc_sec = market_elapsed_sec(scuc_started);
   const auto capture_scuc_performance = [&]() {
     performance.scuc_solver_name = result.commitment.solver_name;
+    performance.scuc_requested_solver = result.commitment.requested_solver;
+    performance.scuc_solver_fallback_used =
+        result.commitment.solver_fallback_used;
+    performance.scuc_solver_fallback_reason =
+        result.commitment.solver_fallback_reason;
     performance.scuc_mip_start_provided =
         result.commitment.mip_start_provided;
     performance.scuc_structure_hint_provided =
@@ -4895,6 +4975,11 @@ MarketResult run_day_ahead_market(
       result.warnings.push_back(
           "The requested SCUC backend did not return a feasible schedule; "
           "the market runner recovered with the HiGHS backend.");
+      retry.requested_solver = market_solver_choice_name(
+          options.uc_options.uc_solver);
+      retry.solver_fallback_used = true;
+      retry.solver_fallback_reason =
+          "Requested SCUC backend returned no feasible schedule; HiGHS recovered the market run";
       result.commitment = std::move(retry);
       uc_options = retry_options.uc_options;
       capture_scuc_performance();

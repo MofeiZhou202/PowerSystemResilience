@@ -95,16 +95,16 @@
     const target = $(`${prefix}SolverOptions`); target.replaceChildren();
     const select = el('select');select.id=`${prefix}Solver`;select.required=true;select.dataset.requestedSolver=value.solver||'highs';
     const label=el('label','求解器');label.append(select);target.append(label);
-    for(const [id,title,v,min,max,step] of [['TimeLimit','每次求解时限（秒）',value.time_limit_sec??120,.1,3600,'any'],['MipGap','相对 MIP gap',value.mip_gap??.01,0,.1,'any'],['Threads','Gurobi线程数（0自动）',value.threads??0,0,128,'1']]) {
+    for(const [id,title,v,min,max,step] of [['TimeLimit','每次求解时限（秒）',value.time_limit_sec??120,.1,3600,'any'],['MipGap','相对 MIP gap',value.mip_gap??.01,0,.1,'any'],['Threads','Gurobi/CPLEX线程数（0自动）',value.threads??0,0,128,'1']]) {
       const label=el('label',title),input=el('input');Object.assign(input,{id:`${prefix}${id}`,type:'number',min:String(min),max:String(max),step,required:true,value:String(v)});label.append(input);target.append(label);
     }
     const cutLabel=el('label','Native 根节点割策略'),cuts=el('select');cuts.id=`${prefix}RootCuts`;
     for(const [id,title] of [['default','默认自适应'],['enhanced','增强分离（实验）']]) { const option=el('option',title);option.value=id;cuts.append(option); }
     cuts.value=value.native_root_cuts||'default';cutLabel.append(cuts);target.append(cutLabel);
-    const threads=()=>{ const solver=select.value||select.dataset.requestedSolver;$(`${prefix}Threads`).disabled=solver!=='gurobi';if(solver!=='gurobi')$(`${prefix}Threads`).value=0;cutLabel.hidden=!rootCutProfiles();cuts.disabled=solver!=='native'||!rootCutProfiles();if(solver!=='native')cuts.value='default'; };
+    const threads=()=>{ const solver=select.value||select.dataset.requestedSolver;const threaded=solver==='gurobi'||solver==='cplex';$(`${prefix}Threads`).disabled=!threaded;if(!threaded)$(`${prefix}Threads`).value=0;cutLabel.hidden=!rootCutProfiles();cuts.disabled=solver!=='native'||!rootCutProfiles();if(solver!=='native')cuts.value='default'; };
     select.onchange=()=>{select.dataset.requestedSolver=select.value;threads();};solverEditors.set(prefix,threads);populateSolverSelect(prefix);
     ensureSolverCapabilities().catch(e=>{$('operationWorkflowStatus').textContent=e.message;});
-    const scope=el('span','Gurobi：MILP/LP均限时；HiGHS：MILP限时；Native：原生整数搜索，HiGHS连续求解，单次LP可能超时。时限不含建模和恢复实验总耗时。');target.append(scope);
+    const scope=el('span','CPLEX/Gurobi：适用的MILP阶段；CPLEX固定组合后的SCED/LMP连续阶段由HiGHS执行并标注fallback。HiGHS：MILP阶段；Native：原生整数搜索，HiGHS连续求解。时限不含建模和恢复实验总耗时。');target.append(scope);
   }
   async function api(body, path = '/api/session/market_operation') {
     return window.HySimMarketActivity.request(path, body, { owner: 'marketOperation',
@@ -192,6 +192,8 @@
     const stageRows = ['scuc','sced','lmp'].filter(name=>d.stages?.[name]).map(name=>[name,d.stages[name]]);
     const gap = value => value != null && Number(value) > 0 && Number(value) < 0.0001 ? Number(value).toExponential(3) : fmt(value);
     root.append(table(['求解阶段 / 后端', '质量', '原始状态', 'MIP gap', '二进制变量数', '耗时 s'], stageRows.map(([name,s])=>[`${name.toUpperCase()} / ${s.solver||'未知'}`, quality(s),s.solver_status,gap(s.mip_gap),fmt(s.binary_variables),fmt(s.runtime_sec)])));
+    const fallbacks = stageRows.filter(([,s])=>s.solver_fallback_used);
+    if (fallbacks.length) root.append(el('p', `求解器路径说明：${fallbacks.map(([name,s])=>`${name.toUpperCase()}：${s.solver_fallback_reason || '已使用兼容后端'}`).join('；')}`));
     const performance = table(['阶段 / 建模形式', 'LP算法', '变量数', '非零系数数', '启动分类消元机组数', '建模 s', '复核及结果生成 s', '恢复约束残差'], stageRows.map(([name,s])=>[`${name.toUpperCase()} / ${s.formulation === 'compact' ? '等价紧凑式' : s.formulation === 'reference' ? '原式' : '未知'}`,({barrier:'障碍法',dual_simplex:'对偶单纯形',solver_default:'求解器默认'})[s.lp_algorithm] || '未知',fmt(s.variables),fmt(s.nonzeros),fmt(s.compact_units),fmt(s.assembly_sec),fmt(s.audit_sec),s.reconstructed_max_residual == null ? '不可用' : Number(s.reconstructed_max_residual).toExponential(2)]));
     performance.dataset.testid = 'market-stage-performance';
     root.append(performance);

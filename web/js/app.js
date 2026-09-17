@@ -10317,6 +10317,9 @@ const App = (() => {
     const objLabel = data.objective_label || '目标函数值';
     const objVal = (data.objective_value != null) ? data.objective_value : data.total_generation_cost;
     const solverTag = data.uc_solver_name || data.uc_solver_requested || '';
+    const solverFallback = data.uc_solver_fallback_used ? `
+      <div class="result-item"><span class="result-label">求解器回退</span>
+        <span class="result-value">${escapeHtml(data.uc_solver_fallback_reason || '已使用兼容后端')}</span></div>` : '';
     const parExec = data.parallel_execution || {};
     const parWorkers = Number(data.parallel_workers || 1);
     const parLabel = data.parallel_daily_effective
@@ -10352,6 +10355,7 @@ const App = (() => {
         <span class="result-value ${ucClass}">${ucStatus}${data.uc_solver_name ? ' (' + data.uc_solver_name + ')' : ''}</span></div>
       <div class="result-item"><span class="result-label">求解器</span>
         <span class="result-value">${solverTag || '—'}</span></div>
+      ${solverFallback}
       <div class="result-item"><span class="result-label">日任务执行</span>
         <span class="result-value">${parLabel}${parDetail}</span></div>
       <div class="result-item uc-thread-result"><span class="result-label">UC 求解器线程</span>
@@ -15640,10 +15644,13 @@ const App = (() => {
   }
 
   function collectMarketPayload() {
+    const marketSolver = document.getElementById('marketUcSolver')?.value || 'auto';
     return {
       num_steps: Math.round(marketNumber('marketNumSteps', 24, 1, 8760)),
       offer_segments: Math.round(marketNumber('marketOfferSegments', 8, 1, 64)),
-      uc_solver: document.getElementById('marketUcSolver')?.value || 'auto',
+      uc_solver: marketSolver,
+      uc_solver_threads: ['gurobi', 'cplex'].includes(marketSolver)
+        ? Math.round(marketNumber('marketScucThreads', 0, 0, 256)) : 0,
       pricing_native_max_variables:
         Math.round(marketNumber('marketPricingNativeMaxVariables', 5000, 0, 100000000)),
       structured_scuc_branching: marketChecked('marketStructuredScuc', true),
@@ -15874,7 +15881,10 @@ const App = (() => {
     const pricingRoute = performance.pricing_solver_fallback_used
       ? ' (fallback)'
       : (performance.pricing_large_model_direct_highs_used ? ' (large-model direct)' : '');
-    const solverText = `${performance.scuc_solver_name || '—'} / ${performance.pricing_solver_name || '—'}${pricingRoute}`;
+    const scucRoute = performance.scuc_solver_fallback_used
+      ? ` (fallback: ${performance.scuc_solver_fallback_reason || '未提供原因'})`
+      : '';
+    const solverText = `${performance.scuc_solver_name || '—'}${scucRoute} / ${performance.pricing_solver_name || '—'}${pricingRoute}`;
     document.getElementById('marketPerformanceResults').innerHTML =
       `<div class="sub-hint">求解器 SCUC / SCED：${escapeHtml(solverText)}；SCUC结构提示 ${performance.scuc_structure_hint_provided ? '已注入' : '无'}，可行MIP start ${performance.scuc_mip_start_provided ? '已注入' : '未生成'}，结构化分支 ${performance.scuc_structured_branching_used ? '已启用' : '未启用'}，树内热限 ${performance.scuc_in_solve_network_constraint_generation_used ? `已启用，提交 ${Number(performance.scuc_in_solve_network_constraints_submitted || 0)}` : '未启用'}，跨轮状态 ${performance.scuc_cross_round_solver_state_reuse_used ? `已复用 ${Number(performance.scuc_cross_round_solver_state_reuse_rounds || 0)} 轮` : '未复用'}，搜索树 ${performance.scuc_search_tree_rebuilt ? '已重建' : '未重建'}，gap ${marketFmt(100 * Number(performance.scuc_mip_gap || 0), 3)}%；热限生成 ${performance.scuc_network_constraint_generation_run ? (performance.scuc_network_constraint_generation_converged ? '已收敛' : '未完成') : '未触发'}；全元件事故求解 ${Number(performance.component_contingency_solves || 0)} 次；事故并行 ${performance.component_n1_parallel_effective ? `${Number(performance.component_n1_parallel_workers || 1)} workers` : '未生效'}</div>` +
       `<table><thead><tr><th>指标/阶段</th><th>数值</th><th>单位</th></tr></thead><tbody>${performanceRows.map(([label, value, unit]) => `<tr><td>${label}</td><td>${marketFmt(value, unit ? 3 : 0)}</td><td>${unit}</td></tr>`).join('')}</tbody></table>`;
@@ -19161,13 +19171,22 @@ const App = (() => {
       const solver = document.getElementById('tspfUcSolver')?.value;
       const input = document.getElementById('tspfSolverThreads');
       const hint = document.getElementById('tspfSolverThreadsHint');
-      const supported = ['auto', 'native', 'gurobi'].includes(solver);
+      const supported = ['auto', 'native', 'gurobi', 'cplex'].includes(solver);
       if (input) input.disabled = !supported;
       if (hint) hint.textContent = supported
         ? '（0=后端默认；执行UC时生效）' : '（当前适配器不支持自定义线程数）';
     };
     document.getElementById('tspfUcSolver')?.addEventListener('change', syncUCSolverThreads);
     syncUCSolverThreads();
+    const syncMarketSolverThreads = () => {
+      const solver = document.getElementById('marketUcSolver')?.value;
+      const input = document.getElementById('marketScucThreads');
+      if (!input) return;
+      input.disabled = !['gurobi', 'cplex'].includes(solver);
+      if (input.disabled) input.value = '0';
+    };
+    document.getElementById('marketUcSolver')?.addEventListener('change', syncMarketSolverThreads);
+    syncMarketSolverThreads();
     // Parallel daily decomposition only applies to per-day DynamicOPF; disable
     // the control (with a hint) for the coupled SCUC/SCED modes so the constraint
     // is clear before running instead of surfacing only as a post-run downgrade.

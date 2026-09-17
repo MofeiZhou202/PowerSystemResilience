@@ -455,8 +455,24 @@ security-cost attribution, AC/DC and DC-storage settlement,
 generator/participant settlement, behaviour audit, market-power metrics, and
 the cashflow ledger. `performance` contains the model-size and stage-timing
 profile, including exact network-generation candidates, activated bounds,
-iterations, remaining violations, and worst violation MW; `uc_solver` accepts `auto`, `highs`, `scip`, `native`, or `gurobi`
-with existing backend-availability fallback semantics.
+iterations, remaining violations, and worst violation MW; `uc_solver` accepts
+`auto`, `highs`, `scip`, `native`, `gurobi`, or `cplex`. CPLEX is opt-in at
+configure time through `HACDCPF_USE_CPLEX=ON`. The option is forwarded to the
+local MIPSolvers checkout and does not change the recorded dependency pin.
+
+CPLEX is a MILP-only route in this integration. The generic UC and day-ahead
+market paths pass the requested thread cap, time limit, and relative gap to the
+Callable Library adapter. If initialization, licensing, or the solve fails,
+they may recover through HiGHS/native, but must return `requested_solver`, the
+actual `solver_name`, `solver_fallback_used`, and `solver_fallback_reason`.
+`SolverCapabilities::has_cplex` records that the adapter was compiled; it does
+not certify a runtime license. Southern-market capability discovery constructs
+the adapter and reports runtime availability separately.
+
+SCED/LMP remain continuous LP stages. Selecting CPLEX for the southern market
+therefore routes SCUC to CPLEX and routes fixed-commitment SCED/LMP to HiGHS,
+with an explicit per-stage fallback reason. This is a backend-routing contract,
+not a performance claim.
 The Case9 contracts are registered in
 `tests/test_market_simulation.cpp`.
 

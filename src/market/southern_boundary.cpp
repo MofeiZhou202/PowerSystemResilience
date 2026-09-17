@@ -221,8 +221,8 @@ J southern_market_schema() {
   auto& required = schema["required"];
   schema["properties"]["execution"]["properties"]["balance_policy"] = choice("节点平衡策略", {"strict", "diagnostic"});
   schema["properties"]["execution"]["properties"]["balance_penalty_per_mwh"] = number("诊断缺额/富余罚价", "CNY/MWh", 1, 1e7);
-  schema["properties"]["execution"]["properties"]["solver"] = choice("市场求解器", {"highs", "gurobi", "native"});
-  schema["properties"]["execution"]["properties"]["threads"] = integer("Gurobi线程数（0自动；HiGHS须0）",0,128);
+  schema["properties"]["execution"]["properties"]["solver"] = choice("市场求解器", {"highs", "gurobi", "cplex", "native"});
+  schema["properties"]["execution"]["properties"]["threads"] = integer("Gurobi/CPLEX线程数（0自动；HiGHS/Native须0）",0,128);
   schema["properties"]["execution"]["properties"]["formulation"] = choice("等价建模形式", {"compact", "reference"});
   schema["properties"]["execution"]["properties"]["gurobi_method"] = choice("Gurobi 调度算法（定价使用固定策略）", {"auto", "solver_default", "barrier", "dual_simplex"});
   schema["properties"]["execution"]["properties"]["large_mip_strategy"] = choice("大型整数模型求解", {"auto", "reference", "certified_repair"});
@@ -310,8 +310,8 @@ J validate_southern_market(const J& boundary) {
     "execution", "explicit mip_start requires gurobi");
   require(effective["execution"]["solver"] == "gurobi" || effective["execution"]["gurobi_method"] == "auto",
     "execution", "explicit gurobi_method requires gurobi");
-  require(effective["execution"]["solver"] == "gurobi" || effective["execution"]["threads"] == 0,
-    "execution", "nonzero threads currently requires gurobi");
+  require(effective["execution"]["solver"] == "gurobi" || effective["execution"]["solver"] == "cplex" || effective["execution"]["threads"] == 0,
+    "execution", "nonzero threads currently requires Gurobi or CPLEX");
   if (!effective.contains("controllable_loads")) effective["controllable_loads"] = J::array();
   std::map<std::string, std::set<int>> ids;
   for (const auto* name : {"areas", "buses", "generators", "branches", "sections", "external_schedules", "groups", "storage", "dc_hubs", "dc_links", "trades", "reservoirs", "primary_groups"}) {

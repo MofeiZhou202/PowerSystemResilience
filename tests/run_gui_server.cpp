@@ -9285,7 +9285,7 @@ json opf_dc_branch_dispatch_json(const hacdcpf::HybridPowerSystem& sys,
 // Build default 24-h (or N-step) scaling profiles
 // ─────────────────────────────────────────────────────────────────────────
 // Parse a GUI MILP-solver selection string into the engine enum.
-// Accepts: "auto" | "native" | "highs" | "scip" | "gurobi" (case-insensitive).
+// Accepts: "auto" | "native" | "highs" | "scip" | "gurobi" | "cplex" (case-insensitive).
 // Unknown / empty values fall back to Auto so the solve never dead-ends.
 hacdcpf::UCSolverChoice parse_uc_solver_choice(const std::string& s) {
   std::string v;
@@ -9295,6 +9295,7 @@ hacdcpf::UCSolverChoice parse_uc_solver_choice(const std::string& s) {
   if (v == "highs")  return hacdcpf::UCSolverChoice::HiGHS;
   if (v == "scip")   return hacdcpf::UCSolverChoice::SCIP;
   if (v == "gurobi") return hacdcpf::UCSolverChoice::Gurobi;
+  if (v == "cplex")  return hacdcpf::UCSolverChoice::CPLEX;
   return hacdcpf::UCSolverChoice::Auto;
 }
 
@@ -9307,7 +9308,7 @@ bool read_uc_solver_threads(const json& j, int& threads, httplib::Response& res)
     error = "uc_solver_threads must be an integer in [0, 256]";
   else if (value != 0 && (solver == hacdcpf::UCSolverChoice::HiGHS ||
                          solver == hacdcpf::UCSolverChoice::SCIP))
-    error = "uc_solver_threads: current HiGHS/SCIP adapters do not support custom thread limits; use Auto, Native or Gurobi";
+    error = "uc_solver_threads: current HiGHS/SCIP adapters do not support custom thread limits; use Auto, Native, Gurobi or CPLEX";
   if (!error.empty()) {
     res.status = 400;
     res.set_content(json{{"error", error}}.dump(), "application/json");
@@ -9324,6 +9325,7 @@ const char* uc_solver_choice_label(hacdcpf::UCSolverChoice c) {
     case hacdcpf::UCSolverChoice::HiGHS:  return "highs";
     case hacdcpf::UCSolverChoice::SCIP:   return "scip";
     case hacdcpf::UCSolverChoice::Gurobi: return "gurobi";
+    case hacdcpf::UCSolverChoice::CPLEX:  return "cplex";
     case hacdcpf::UCSolverChoice::Auto:   return "auto";
   }
   return "auto";
@@ -10213,6 +10215,9 @@ json market_performance_json(
       {"component_n1_parallel_workers",
        profile.component_n1_parallel_workers},
       {"scuc_solver_name", profile.scuc_solver_name},
+      {"scuc_requested_solver", profile.scuc_requested_solver},
+      {"scuc_solver_fallback_used", profile.scuc_solver_fallback_used},
+      {"scuc_solver_fallback_reason", profile.scuc_solver_fallback_reason},
       {"pricing_solver_name", profile.pricing_solver_name},
       {"pricing_solver_fallback_used",
        profile.pricing_solver_fallback_used},
@@ -21483,6 +21488,10 @@ int main(int argc, char** argv) {
             ? json(result.uc_schedule.solver_threads_configured) : json(nullptr);
         out["uc_solver_name"] = result.uc_schedule.solver_name;
         out["uc_solver_status"] = result.uc_schedule.solver_status;
+        out["uc_solver_fallback_used"] =
+            result.uc_schedule.solver_fallback_used;
+        out["uc_solver_fallback_reason"] =
+            result.uc_schedule.solver_fallback_reason;
         out["uc_mip_gap"] = result.uc_schedule.mip_gap;
         out["uc_mip_gap_target_met"] = result.uc_schedule.mip_gap_target_met;
         out["uc_optimality_proven"] = result.uc_schedule.optimality_proven;
@@ -22708,6 +22717,8 @@ int main(int argc, char** argv) {
         }
 
         const auto j = json::parse(req.body.empty() ? "{}" : req.body);
+        int uc_threads = 0;
+        if (!read_uc_solver_threads(j, uc_threads, res)) return;
         const int num_periods = std::max(1, j.value("num_steps", 24));
 
         hacdcpf::TimeSeriesData ts_data;
@@ -22795,6 +22806,7 @@ int main(int argc, char** argv) {
         opts.verbose = j.value("verbose", false);
         opts.uc_options.uc_solver = parse_uc_solver_choice(
             j.value("uc_solver", std::string("auto")));
+        opts.uc_options.uc_solver_threads = uc_threads;
         opts.ac_validation_options.max_iter = 100;
         opts.ac_validation_options.tol = 1e-8;
         if (j.contains("participants") && j["participants"].is_array()) {
@@ -22913,6 +22925,11 @@ int main(int argc, char** argv) {
             {"cost", market.commitment_cost},
             {"solver_name", market.commitment.solver_name},
             {"solver_status", market.commitment.solver_status},
+            {"requested_solver", market.commitment.requested_solver},
+            {"solver_fallback_used",
+             market.commitment.solver_fallback_used},
+            {"solver_fallback_reason",
+             market.commitment.solver_fallback_reason},
             {"mip_gap", market.commitment.mip_gap},
             {"mip_gap_target_met",
              market.commitment.mip_gap_target_met},

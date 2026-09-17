@@ -964,6 +964,35 @@ TEST_CASE("Southern solver options normalize old inputs and reject unavailable s
   }
 }
 
+TEST_CASE("Southern CPLEX route is capability-gated and stage-explicit", "[southern_market][cplex]") {
+  const auto capabilities = southern_market_solver_capabilities();
+  const auto cplex = std::find_if(capabilities.begin(), capabilities.end(),
+      [](const auto& item) { return item.value("id", "") == "cplex"; });
+  REQUIRE(cplex != capabilities.end());
+
+  auto boundary = make_southern_market_example();
+  boundary["execution"]["solver"] = "cplex";
+  boundary["execution"]["threads"] = 1;
+  boundary["execution"]["ac_security"] = "schedule_only";
+  REQUIRE_NOTHROW(validate_southern_market(boundary));
+  if (!cplex->value("available", false)) {
+    REQUIRE_THROWS(run_southern_day_ahead_market(boundary));
+    return;
+  }
+
+  const auto result = run_southern_day_ahead_market(boundary);
+  INFO(result.dump().substr(0, 3000));
+  REQUIRE(result["schedule_feasible"] == true);
+  CHECK(result["scuc"]["solver"] == "CPLEX");
+  CHECK(result["scuc"]["requested_solver"] == "cplex");
+  for (const auto* stage : {"sced", "lmp"}) {
+    CHECK(result[stage]["solver"] == "HiGHS");
+    CHECK(result[stage]["requested_solver"] == "cplex");
+    CHECK(result[stage]["solver_fallback_used"] == true);
+    CHECK(result[stage]["solver_fallback_reason"].get<std::string>().find("CPLEX") != std::string::npos);
+  }
+}
+
 TEST_CASE("Southern reservoir coordinate preserves shared cascade conservation", "[southern_market][compact]") {
   auto small = make_southern_market_demo();
   REQUIRE_FALSE(small["reservoirs"].empty());
