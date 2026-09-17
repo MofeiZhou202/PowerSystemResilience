@@ -3,8 +3,18 @@
 These rules are **mandatory for every code change** in this repository. They
 are not suggestions and do not depend on task phrasing. The full workflow
 (rationale template, citation format, mismatch protocol) is in the
-`theory-guided-coding` skill (`~/.agents/skills/theory-guided-coding/SKILL.md`);
+repository-local `theory-guided-coding` skill (see the skills index below);
 follow it for all algorithmic/numerical work.
+
+## Skills
+
+| Skill | When to use |
+|-------|-------------|
+| [theory-guided-coding](.github/skills/theory-guided-coding/SKILL.md) | Before implementing or modifying numerical algorithms, and when benchmarking or optimizing them. |
+
+Use the repository copy on every platform, including offline Windows machines.
+No installation under the user's home directory or network access is required
+to read this skill. Keep this copy complete when transferring the repository.
 
 ## Theory-guided development (non-negotiable)
 

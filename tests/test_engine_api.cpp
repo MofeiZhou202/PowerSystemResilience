@@ -8,6 +8,7 @@
 #include <cmath>
 #include <memory>
 #include <limits>
+#include <stop_token>
 #include <stdexcept>
 #include <thread>
 #include <utility>
@@ -22,6 +23,7 @@
 #include "mipsolvers/engine/kernel/kkt/kkt_system.hpp"
 #include "mipsolvers/engine/solver/adapter_registry.hpp"
 #include "mipsolvers/engine/solver/external/adapters.hpp"
+#include "mipsolvers/engine/solver/native/native_lp_selector.hpp"
 
 using namespace mipsolvers::engine;
 using Catch::Approx;
@@ -200,6 +202,70 @@ TEST_CASE("CPLEX preserves a two-sided MILP row",
   CHECK(result.stats.objective == Approx(1.0).margin(1e-4));
   REQUIRE(result.x.size() == 2);
   CHECK(result.x.sum() == Approx(1.0).margin(1e-4));
+
+  auto engine_adapter = std::make_shared<CplexAdapter>(options);
+  REQUIRE(engine_adapter->available());
+  SolverEngine engine(/*register_defaults=*/false);
+  engine.register_adapter(engine_adapter);
+  SolveOptions call_options;
+  call_options.preferred_solver = "CPLEX";
+  call_options.allow_fallback = false;
+  const api::Result engine_result = engine.solve_milp(mip, call_options);
+  REQUIRE(engine_result.stats.success);
+  CHECK(engine_result.stats.solver_name == "CPLEX");
+  CHECK(engine_result.stats.objective == Approx(1.0).margin(1e-4));
+
+  call_options.time_limit_sec = 10.0;
+  call_options.threads = 1;
+  call_options.random_seed = 17;
+  const api::Result bounded_result = engine.solve_milp(mip, call_options);
+  REQUIRE(bounded_result.stats.success);
+  CHECK(bounded_result.stats.solver_name == "CPLEX");
+  CHECK(bounded_result.stats.objective == Approx(1.0).margin(1e-4));
+  CHECK(bounded_result.stats.thread_budget == 1);
+  CHECK_FALSE(bounded_result.stats.hard_deadline_enforced);
+}
+
+TEST_CASE("CPLEX maps equality, objective sense, integer types and MIP start",
+          "[engine][api][cplex][milp]") {
+  CplexOptions options;
+  options.time_limit_sec = 10.0;
+  options.threads = 1;
+  CplexAdapter adapter(options);
+  if (!adapter.available()) SKIP("CPLEX environment or license unavailable");
+
+  // max 3x+2y subject to x+y=2, x binary, y integer in [0,2].
+  MIPModel mip;
+  mip.linear_part.sense = Sense::Maximize;
+  mip.linear_part.c.resize(2);
+  mip.linear_part.c << 3.0, 2.0;
+  mip.linear_part.A.resize(0, 2);
+  mip.linear_part.b.resize(0);
+  mip.linear_part.Aeq.resize(1, 2);
+  mip.linear_part.Aeq.insert(0, 0) = 1.0;
+  mip.linear_part.Aeq.insert(0, 1) = 1.0;
+  mip.linear_part.Aeq.makeCompressed();
+  mip.linear_part.beq = Eigen::VectorXd::Constant(1, 2.0);
+  mip.linear_part.vars = {
+      VariableMeta{VarType::Binary, 0.0, 1.0},
+      VariableMeta{VarType::Integer, 0.0, 2.0},
+  };
+  mip.binary_idx = {0};
+  mip.integer_idx = {1};
+  mip.initial_solution.resize(2);
+  mip.initial_solution << 0.0, 2.0;
+
+  const SolveResult result = adapter.solve_milp(mip);
+  const CplexSolveInfo info = last_cplex_solve_info();
+  INFO("status=" << result.stats.status);
+  REQUIRE(result.stats.success);
+  CHECK(info.optimal);
+  REQUIRE(info.best_bound.has_value());
+  CHECK(*info.best_bound == Approx(5.0).margin(1e-4));
+  CHECK(result.stats.objective == Approx(5.0).margin(1e-4));
+  REQUIRE(result.x.size() == 2);
+  CHECK(result.x[0] == Approx(1.0).margin(1e-6));
+  CHECK(result.x[1] == Approx(1.0).margin(1e-6));
 }
 #endif
 
@@ -309,6 +375,61 @@ TEST_CASE("Caller cancellation prevents adapter start",
   CHECK_FALSE(result.stats.success);
   CHECK(result.stats.status == "Cancelled before fallback");
   CHECK(*calls == 0);
+}
+
+TEST_CASE("Native LP throughput mode uses one deadline-aware worker",
+          "[engine][api][lp][cancellation][timing]") {
+  SolveOptions options;
+  options.time_limit_sec = 1.0;
+  options.threads = 4;
+  options.portfolio_mode = PortfolioMode::Throughput;
+  const SolveContext context(options);
+
+  const SolveResult result = NativeAutoLPAdapter().solve_lp(
+      make_dispatch_lp(), context);
+  INFO("status=" << result.stats.status);
+  REQUIRE(result.stats.success);
+  CHECK(result.stats.portfolio_workers == 1);
+  CHECK(result.stats.worker_thread_limit == 4);
+  CHECK(result.stats.portfolio_first_result_sec >= 0.0);
+  CHECK(result.stats.portfolio_cancel_wait_sec == 0.0);
+  CHECK(result.stats.runtime_sec >= result.stats.portfolio_first_result_sec);
+}
+
+TEST_CASE("Native LP latency portfolio joins its cancelled worker",
+          "[engine][api][lp][cancellation][timing]") {
+  SolveOptions options;
+  options.time_limit_sec = 1.0;
+  options.threads = 4;
+  options.portfolio_mode = PortfolioMode::Latency;
+  const SolveContext context(options);
+
+  const SolveResult result = NativeAutoLPAdapter().solve_lp(
+      make_dispatch_lp(), context);
+  INFO("status=" << result.stats.status);
+  REQUIRE(result.stats.success);
+  CHECK(result.stats.portfolio_workers == 2);
+  CHECK(result.stats.worker_thread_limit == 2);
+  CHECK(result.stats.portfolio_first_result_sec >= 0.0);
+  CHECK(result.stats.portfolio_cancel_wait_sec >= 0.0);
+  CHECK(result.stats.runtime_sec >= result.stats.portfolio_first_result_sec);
+  CHECK(result.stats.runtime_sec + 1e-9 >=
+        result.stats.portfolio_first_result_sec +
+            result.stats.portfolio_cancel_wait_sec);
+}
+
+TEST_CASE("SolveOptions reject invalid call-wide resource limits",
+          "[engine][api][deadline]") {
+  SolverEngine eng(false);
+  SolveOptions negative_time;
+  negative_time.time_limit_sec = -1.0;
+  CHECK_THROWS_AS(eng.solve_lp(make_dispatch_lp(), negative_time),
+                  std::invalid_argument);
+
+  SolveOptions negative_threads;
+  negative_threads.threads = -1;
+  CHECK_THROWS_AS(eng.solve_lp(make_dispatch_lp(), negative_threads),
+                  std::invalid_argument);
 }
 
 #ifdef HACDCPF_HAVE_IPOPT

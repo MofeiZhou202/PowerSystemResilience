@@ -75,6 +75,13 @@ add_library(highs_extras INTERFACE)
 # MIPSolvers_root/highs which is exactly our _HIGHS_SRC.
 add_subdirectory("${_HIGHS_SRC}" "${_HIGHS_BIN}" EXCLUDE_FROM_ALL)
 
+# HiGHS 1.15.1 contains translation units with private symbols that collide
+# when CMake unity-builds them together on AppleClang. Keep the embedded target
+# split into normal translation units for macOS correctness.
+if(APPLE)
+  set_target_properties(highs PROPERTIES UNITY_BUILD OFF)
+endif()
+
 # ── 7. Post-setup: expose public headers ─────────────────────────────────────
 # The FAST_BUILD path in highs/CMakeLists.txt already adds PUBLIC includes
 # via target_include_directories with $<INSTALL_INTERFACE:...> and

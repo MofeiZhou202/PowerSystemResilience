@@ -615,3 +615,37 @@ print(mipsolvers.engine.list_solvers("MILP"))
 - 求解器选择经验：LP 优先 `"HiGHS"`（无需许可证）、大规模可试 `"NativePDLP"`；
   MILP 有许可证优先 `"Gurobi"`，否则 `"HiGHS"`；SCUC 超 100 台机组建议
   `"Gurobi"` 并放宽 `mip_gap=0.005`。
+
+
+## 7.3 两阶段随机与鲁棒优化
+
+C++ 头文件为 `mipsolvers/engine/decomposition/two_stage.hpp`，命名空间为
+`mipsolvers::engine::decomposition`。Python 扩展启用后，对应入口在
+`mipsolvers.decomposition`：`solve_stochastic`、`solve_robust` 和
+`solve_robust_polyhedral`，参数使用字典与 NumPy 数组。下表列出 C++ 函数。
+本模块直接使用求解引擎，不依赖 SCUC 数据结构。
+
+`TwoStageModel` 包含 `FirstStage` 与各场景的 `Recourse`；场景约束统一为
+`W y >= h - T x`。随机模型按场景概率加权，鲁棒模型取最坏场景成本。
+
+| 入口 | 用途与限制 |
+|---|---|
+| `solve_extensive_form_stochastic` / `solve_extensive_form_robust` | 确定性等价整体模型，可作为分解结果的对照 |
+| `solve_benders_stochastic` | 随机规划；`MultiCut` / `SingleCut` 使用连续追索；`IntegerLShaped` / `Lagrangian` 支持整数追索，要求纯二进制第一阶段 |
+| `solve_ccg_robust` | 有限场景集合的鲁棒优化，追索变量可连续或整数 |
+| `solve_ccg_polyhedral_robust` | `PolyhedralRobustModel` 的多面体不确定集；要求连续、下界为零且无有限上界的追索变量，以及相对完全追索 |
+
+`BendersOptions` 和 `CCGOptions` 的 `threads` 控制场景并行度，默认 1；
+`time_limit_sec=0` 表示无调用时限，`gap_tolerance` 默认 `1e-6`。
+Benders 可配置 `stabilization_alpha`、追索下界和 Lagrangian 内层迭代预算。
+多面体 CCG 的 `big_m` 必须覆盖有效 KKT 解；触及大 M 安全阈值会明确拒绝结果。
+
+`DecompositionResult` 返回 `success`、`status`、第一阶段解 `x`、场景解 `y`、
+目标值、上下界、相对间隙及迭代统计。必须检查状态；可行 incumbent 不等于
+最优性证明，未证明最优的子问题不能用于生成已认证的割或更新界。
+详细模型假设与推导见[两阶段分解设计](../archive/two_stage_decomposition_design.md)。
+
+组合 LP 求解新增 `portfolio_first_result_sec` 与 `portfolio_cancel_wait_sec`
+统计，分别记录首个可返回结果的等待时间和取消后等待工作线程退出的时间。
+调用返回前会等待所有工作线程结束；这是协作式取消，不是进程级硬截止。
+本分支继续保留内存预算、deadline overrun 和持久后端复用统计。

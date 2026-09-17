@@ -332,7 +332,11 @@ SolveResult NativeIPMLPAdapter::solve_lp(const LPModel& prob,
   }
   IPMLPOptions effective = opt_;
   if (context.has_deadline()) {
-    effective.time_limit_sec = context.backend_time_limit_sec(0.0);
+    const double remaining = context.backend_time_limit_sec(0.0);
+    effective.time_limit_sec = effective.time_limit_sec > 0.0
+                                   ? std::min(effective.time_limit_sec,
+                                              remaining)
+                                   : remaining;
   }
   std::atomic<bool> cancelled{false};
   std::stop_callback callback(context.stop_token(), [&cancelled] {

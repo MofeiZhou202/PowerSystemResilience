@@ -627,3 +627,22 @@ R3 gate 还核验隔离基准 checkout 的实际 HEAD 以及唯一允许的观�
 并锁定探针头文件哈希。当前构建证据读取 Visual Studio 生成的 MSVC 工程配置。
 Native-IPM benchmark 将 CLI iteration budget 截至每 variant 最多 2000；返回
 iterations 不是全部回退 variant 的迭代总和。
+
+
+## 9.11 main 同步与两阶段分解回归（2026-09-17）
+
+本次同步的父提交为 Windows `253d82b0` 和 main `8fdea5a1`。
+验证协议、构建配置与结果见[同步记录](../archive/windows_main_sync_2026-09-17.md)。
+新增 `test_benders_decomposition` 覆盖整体模型对照、连续及整数追索、
+多面体 CCG、稳定化与并行场景求解。开启 Python 构建时还注册
+`decomposition_reference`，通过 Python 接口复核参考实例。
+
+MIPLIB 的 `--native-threads` 表示线程预算；并行分支树需要显式指定
+`--native-concurrent-tree`，默认关闭。Windows 隔离工作进程使用 Unicode
+路径和 Job Object 管理进程树；JSON 中 `hard_deadline_enforced` 表示基准
+进程监督的硬截止能力，不代表进程内求解 API 提供同样保证。
+
+JSON 中的路径按 UTF-8 写出；中文目录的进程监督回归使用仓库自带的
+`tests/data/windows_worker_smoke.mps`，不依赖额外下载 MIPLIB 数据。
+本机结果：MSVC Release 构建通过，CTest 22/22，通过 R3 校验器测试 19/19；
+中文目录恢复一致，整数规划最优目标为 1，原模型审计通过。

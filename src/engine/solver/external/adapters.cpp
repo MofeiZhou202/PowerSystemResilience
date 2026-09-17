@@ -511,8 +511,10 @@ std::optional<SolveResult> solve_lp_with_embedded_highs(const LPModel& prob,
   highs.setOptionValue("log_to_console", highs_log_on);
   highs.setOptionValue("threads", threads);
   highs.setOptionValue("random_seed", static_cast<HighsInt>(random_seed));
-  if (std::isfinite(time_limit) && time_limit > 0.0) {
-    highs.setOptionValue("time_limit", time_limit);
+  if (std::isfinite(time_limit) && time_limit > 0.0 &&
+      highs.setOptionValue("time_limit", time_limit) == HighsStatus::kError) {
+    out.stats.status = "HiGHS rejected solve deadline";
+    return out;
   }
   // Fixed ordered-LP price selection; docs/solvers.md, deterministic pricing.
   if (pricing && (highs.setOptionValue("solver", "simplex") == HighsStatus::kError ||
@@ -1981,6 +1983,7 @@ SolveResult HighsAdapter::solve_lp_impl(const LPModel& prob,
   return out;
 }
 
+
 SolveResult HighsAdapter::solve_milp(const MIPModel& prob) const {
   return solve_milp_impl(prob, kHighsInf, 1, 0);
 }
@@ -2136,6 +2139,7 @@ SolveResult HighsAdapter::solve_milp_impl(const MIPModel& prob,
   fs::remove(log_path, ec);
   return out;
 }
+
 
 IpoptAdapter::IpoptAdapter(std::string executable)
     : executable_(resolve_explicit_executable(executable)) {}
@@ -2362,9 +2366,11 @@ SolveResult ScipAdapter::solve_milp_impl(const MIPModel& prob,
     return out;
   }
   out.stats.success = sol.success;
-  out.stats.status = sol.success
-                         ? "Solved"
-                         : (sol.status.empty() ? "SCIP finished without solution" : sol.status);
+  // Preserve SCIP's proof-bearing solution-file status. A feasible incumbent
+  // written after a limit is useful to general callers but is not an exact
+  // optimum for decomposition bounds/cuts (SCIP solution format contract).
+  out.stats.status = sol.status.empty() ? "SCIP finished without solution"
+                                        : sol.status;
   out.stats.objective = sol.objective;
   out.x = Eigen::VectorXd::Zero(n);
   for (int i = 0; i < n; ++i) {
@@ -2646,8 +2652,8 @@ SolveResult ScipAdapter::solve_minlp_impl(
   }
 
   out.stats.success = sol.success;
-  out.stats.status = sol.success ? "Solved" : (sol.status.empty() ? "SCIP finished without solution"
-                                                                     : sol.status);
+  out.stats.status = sol.status.empty() ? "SCIP finished without solution"
+                                        : sol.status;
 
   const int n = static_cast<int>(prob.nonlinear_part.vars.size());
   out.x = Eigen::VectorXd::Zero(n);
@@ -2914,6 +2920,8 @@ struct CplexProblemGuard {
   }
 };
 
+// IBM ILOG CPLEX 22.1.1 Callable Library, solution status reference;
+// docs/archive/cplex_callable_library.md, "Result mapping".
 bool cplex_status_proven(int status) {
   return status == CPXMIP_OPTIMAL || status == CPXMIP_OPTIMAL_TOL ||
          status == CPXMIP_INFEASIBLE || status == CPXMIP_UNBOUNDED ||
@@ -3138,6 +3146,8 @@ SolveResult CplexAdapter::solve_milp(const MIPModel& prob) const {
   for (int index : prob.integer_idx) {
     column_type[static_cast<std::size_t>(index)] = 'I';
   }
+  // Binary domain intersection follows docs/archive/cplex_callable_library.md,
+  // "Model and claim", and the public MIPModel binary-index contract.
   for (int index : prob.binary_idx) {
     column_type[static_cast<std::size_t>(index)] = 'B';
     lower_bound[static_cast<std::size_t>(index)] =

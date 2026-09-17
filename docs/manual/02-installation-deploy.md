@@ -434,3 +434,13 @@ UMFPACK/KLU/CHOLMOD 的公共头文件安装于
 消费者可直接链接 `mipsolvers::umfpack_vendored`、`mipsolvers::klu_vendored`。
 实际构建参数、成功范围与残留限制见
 [集成验证](09-testing-benchmarks.md#windowsmain-integration-validation)。
+
+
+### 同步主线后的增量构建检查
+
+2026-09 主线同步增加了公开求解统计字段。静态库、测试程序和 SDK 消费方
+必须使用同一套头文件重新构建，不能混用旧布局的对象文件。
+若 Ninja 显示构建成功但程序异常退出，可用 `ninja -t deps` 检查受影响对象：
+包含公开头文件的对象若显示 `#deps 0`，旧缓存可能漏掉头文件变更。
+请重建受影响对象或使用全新的构建目录，并重跑测试。
+本次发现及修复记录见[同步验证](../archive/windows_main_sync_2026-09-17.md)。

@@ -480,7 +480,8 @@ SolveResult StrictHighsBranchAndCutAdapter::solve_milp(
     const MIPModel& prob, const SolveContext& context) const {
   BCOptions effective = make_strict_highs_problem_options(prob, opt_);
   if (context.has_deadline()) {
-    effective.time_limit_sec = context.backend_time_limit_sec(0.0);
+    effective.time_limit_sec = std::min(
+        effective.time_limit_sec, context.backend_time_limit_sec(0.0));
   }
   if (context.has_explicit_thread_budget()) {
     effective.num_threads = effective.num_threads > 0
@@ -603,7 +604,8 @@ SolveResult NativeBranchAndCutAdapter::solve_milp(
   }
   BCOptions effective = opt_;
   if (context.has_deadline()) {
-    effective.time_limit_sec = context.backend_time_limit_sec(0.0);
+    effective.time_limit_sec = std::min(
+        effective.time_limit_sec, context.backend_time_limit_sec(0.0));
   }
   if (context.has_explicit_thread_budget()) {
     effective.num_threads = effective.num_threads > 0
@@ -634,7 +636,8 @@ SolveResult NativeBranchAndCutAdapter::solve_minlp(
   }
   BCOptions effective = opt_;
   if (context.has_deadline()) {
-    effective.time_limit_sec = context.backend_time_limit_sec(0.0);
+    effective.time_limit_sec = std::min(
+        effective.time_limit_sec, context.backend_time_limit_sec(0.0));
   }
   if (context.has_explicit_thread_budget()) {
     effective.num_threads = effective.num_threads > 0

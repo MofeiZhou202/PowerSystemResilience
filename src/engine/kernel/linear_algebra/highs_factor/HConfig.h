@@ -12,8 +12,8 @@
 
 #define HIGHS_GITHASH "vendored-from-dcc25308d"
 #define HIGHS_VERSION_MAJOR 1
-#define HIGHS_VERSION_MINOR 14
-#define HIGHS_VERSION_PATCH 0
+#define HIGHS_VERSION_MINOR 15
+#define HIGHS_VERSION_PATCH 1
 
 // 64-bit index type (HighsInt = int64_t): raises the factor-nnz ceiling
 // from 2^31 to 2^63 for the vendored HFactor simplex backend.

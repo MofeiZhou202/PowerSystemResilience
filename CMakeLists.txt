@@ -148,6 +148,7 @@ add_library(mipsolvers STATIC
   src/l2o/trace_writer.cpp
   src/aml/model.cpp
   src/aml/set.cpp
+  src/engine/decomposition/two_stage.cpp
 )
 
 # ── Profile-guided optimization ─────────────────────────────────────────────
@@ -975,6 +976,7 @@ if(MIPSOLVERS_BUILD_TESTS)
     target_link_libraries(test_dual_simplex PRIVATE highs::highs)
   endif()
   mipsolvers_add_test(test_branch_and_cut      TIER integration)
+  mipsolvers_add_test(test_benders_decomposition TIER integration)
   mipsolvers_add_test(test_problem_validation  TIER unit)
   mipsolvers_add_test(test_adapter_registry    TIER unit)
   mipsolvers_add_test(test_presolve            TIER unit)
@@ -1140,6 +1142,7 @@ if(MIPSOLVERS_BUILD_PYTHON)
   pybind11_add_module(mipsolvers_py MODULE
     src/python/mipsolvers_py.cpp
     src/python/aml_bindings.cpp
+    src/python/decomposition_bindings.cpp
     src/scuc/scuc.cpp          # SCUC is header-only-ish; include impl
     src/scuc/case_builder.cpp
   )
@@ -1167,6 +1170,18 @@ if(MIPSOLVERS_BUILD_PYTHON)
     SUFFIX "${_py_ext_suffix}")
 
   message(STATUS "Python bindings: ${PYTHON_EXECUTABLE}, suffix: ${_py_ext_suffix}")
+
+  # Reference-instance regression driven through the Python bindings: checks
+  # that extensive form == Benders == CCG on a MATLAB-convention instance.
+  if(MIPSOLVERS_BUILD_TESTS AND
+     EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/benchmark/decomposition_reference.py")
+    add_test(NAME decomposition_reference
+      COMMAND "${PYTHON_EXECUTABLE}"
+        "${CMAKE_CURRENT_SOURCE_DIR}/benchmark/decomposition_reference.py")
+    set_tests_properties(decomposition_reference PROPERTIES
+      LABELS "integration"
+      ENVIRONMENT "PYTHONPATH=$<TARGET_FILE_DIR:mipsolvers_py>")
+  endif()
 endif()
 
 # ── Install rules ─────────────────────────────────────────────────────────────

@@ -82,6 +82,8 @@ class ScipAdapter final : public SolverAdapter {
 };
 
 /// CPLEX adapter using the native Callable Library C API.
+/// Defaults and validation gates: docs/archive/cplex_callable_library.md,
+/// "Cost model and fixed validation".
 struct CplexOptions {
   double time_limit_sec{3600.0};
   double mip_gap{1e-9};

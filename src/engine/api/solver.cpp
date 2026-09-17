@@ -50,6 +50,8 @@ api::Result to_api_result(SolveResult in) {
   out.stats.worker_thread_limit = in.stats.worker_thread_limit;
   out.stats.memory_limit_bytes = in.stats.memory_limit_bytes;
   out.stats.memory_limit_enforced = in.stats.memory_limit_enforced;
+  out.stats.portfolio_first_result_sec = in.stats.portfolio_first_result_sec;
+  out.stats.portfolio_cancel_wait_sec = in.stats.portfolio_cancel_wait_sec;
   out.stats.hard_deadline_enforced = in.stats.hard_deadline_enforced;
   out.stats.deadline_overrun_sec = in.stats.deadline_overrun_sec;
   out.stats.persistent_backend_reused = in.stats.persistent_backend_reused;

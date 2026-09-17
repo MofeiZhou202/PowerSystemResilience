@@ -28,6 +28,7 @@
 #include "mipsolvers/engine/detail/bc_objective_propagation.hpp"
 #include "mipsolvers/engine/detail/bc_utils.hpp"
 #include "mipsolvers/engine/problem_types.hpp"
+#include "mipsolvers/engine/solver/native/milp/bc/milp_presolve.hpp"
 #include "mipsolvers/engine/strategy/highs_presolve_side_state.hpp"
 
 using namespace mipsolvers::engine;
@@ -533,6 +534,20 @@ TEST_CASE("B&C: result records the effective solve environment",
         next_result.effective_environment.end());
 }
 
+TEST_CASE("B&C: concurrent tree requires explicit experimental opt-in",
+          "[bc][parallel][policy]") {
+  BCOptions opt;
+  opt.num_threads = 4;
+  opt.enable_parallel_tree = false;
+  const BCResult result = solve_milp_bc(make_knapsack_10(), opt);
+
+  REQUIRE(result.stats.success);
+  CHECK(result.bc_stats.parallel_requested_threads == 4);
+  CHECK_FALSE(result.bc_stats.parallel_tree_launched);
+  CHECK(result.bc_stats.parallel_effective_threads == 1);
+  CHECK(result.bc_stats.parallel_schedule_reason == "disabled_by_policy");
+}
+
 TEST_CASE("B&C: bound events retain audited user-space incumbents",
           "[bc][progress][audit]") {
   const MIPModel mip = make_knapsack_10();
@@ -812,6 +827,28 @@ TEST_CASE("B&C: timed-out HiGHS presolve side state is not cached",
 
   (void)detail::cached_highs_presolve_side_state(lp, 1.0, &cache_hit);
   CHECK(cache_hit);
+}
+
+TEST_CASE("B&C: native presolve timeout does not publish a partial model",
+          "[bc][deadline][native_presolve]") {
+  MIPModel mip = make_knapsack_10();
+  LPModel lp = mip.linear_part;
+  const LPModel original = lp;
+  std::vector<int> binary = mip.binary_idx;
+  std::vector<int> integer;
+
+  PresolveOptions options;
+  options.time_limit_sec = 1e-12;
+  MILPPresolve presolve(options);
+  const PresolveStats stats = presolve.run(lp, binary, integer);
+
+  CHECK(stats.timed_out);
+  CHECK_FALSE(stats.infeasible);
+  CHECK(lp.c.isApprox(original.c, 0.0));
+  CHECK(lp.A.rows() == original.A.rows());
+  CHECK(lp.A.cols() == original.A.cols());
+  CHECK(lp.A.nonZeros() == original.A.nonZeros());
+  CHECK(binary == mip.binary_idx);
 }
 
 TEST_CASE("B&C: HiGHS presolve forward map applies retained affine transforms",

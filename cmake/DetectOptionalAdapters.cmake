@@ -56,8 +56,12 @@ if(MIPSOLVERS_USE_CPLEX)
       "${CPLEX_STUDIO_DIR}"
       "$ENV{CPLEX_STUDIO_DIR2211}"
       "$ENV{CPLEX_STUDIO_DIR}"
+      /Applications/CPLEX_Studio2211
+      /Applications/CPLEX_Studio2210
       "C:/Program Files/IBM/ILOG/CPLEX_Studio2211"
-      /opt/ibm/ILOG/CPLEX_Studio2211)
+      "C:/Program Files/IBM/ILOG/CPLEX_Studio2210"
+      /opt/ibm/ILOG/CPLEX_Studio2211
+      /opt/ibm/ILOG/CPLEX_Studio2210)
   find_path(MIPSOLVERS_CPLEX_INCLUDE_DIR NAMES ilcplex/cplex.h
     HINTS ${_mipsolvers_cplex_hints}
     PATH_SUFFIXES cplex/include)
@@ -65,6 +69,10 @@ if(MIPSOLVERS_USE_CPLEX)
     HINTS ${_mipsolvers_cplex_hints}
     PATH_SUFFIXES
       cplex/lib/x64_windows_msvc14/stat_mda
+      cplex/lib/arm64_osx/static_pic
+      cplex/lib/x86-64_osx/static_pic
+      cplex/bin/arm64_osx
+      cplex/bin/x86-64_osx
       cplex/lib/x86-64_linux/static_pic
       cplex/lib/x86-64_linux/static_mt
       cplex/lib/x86-64_linux)
@@ -72,6 +80,13 @@ if(MIPSOLVERS_USE_CPLEX)
     set(MIPSOLVERS_HAVE_CPLEX ON)
     set(MIPSOLVERS_CPLEX_INCLUDE_DIRS ${MIPSOLVERS_CPLEX_INCLUDE_DIR})
     set(MIPSOLVERS_CPLEX_LIBRARIES ${MIPSOLVERS_CPLEX_LIBRARY})
+    if(APPLE AND MIPSOLVERS_CPLEX_LIBRARY MATCHES "\\.a$")
+      find_library(MIPSOLVERS_CPLEX_COREFOUNDATION CoreFoundation REQUIRED)
+      find_library(MIPSOLVERS_CPLEX_IOKIT IOKit REQUIRED)
+      list(APPEND MIPSOLVERS_CPLEX_LIBRARIES
+        ${MIPSOLVERS_CPLEX_COREFOUNDATION}
+        ${MIPSOLVERS_CPLEX_IOKIT})
+    endif()
     message(STATUS "mipsolvers: CPLEX detected: ${MIPSOLVERS_CPLEX_LIBRARY}")
   else()
     message(STATUS

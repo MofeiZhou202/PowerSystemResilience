@@ -37,6 +37,8 @@ struct Stats {
   int worker_thread_limit{0};
   std::size_t memory_limit_bytes{0};
   bool memory_limit_enforced{false};
+  double portfolio_first_result_sec{0.0};
+  double portfolio_cancel_wait_sec{0.0};
   bool hard_deadline_enforced{false};
   double deadline_overrun_sec{0.0};
   bool persistent_backend_reused{false};

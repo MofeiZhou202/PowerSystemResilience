@@ -132,6 +132,8 @@ struct IPMNodeBatchEntry {
 /// centering corrections.  Returns constraint duals and Farkas certificates.
 class NativeIPMLPAdapter final : public SolverAdapter {
  public:
+  using SolverAdapter::solve_lp;
+
   explicit NativeIPMLPAdapter(IPMLPOptions opt = {});
   ~NativeIPMLPAdapter();
 

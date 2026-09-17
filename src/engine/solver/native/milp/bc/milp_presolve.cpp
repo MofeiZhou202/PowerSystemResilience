@@ -1822,7 +1822,9 @@ PresolveStats MILPPresolve::run(LPModel& lp,
     stats_.final_nnz = stats_.orig_nnz;
   }
 
-  for (int round = 0; !stats_.infeasible && round < opts_.max_rounds; ++round) {
+  for (int round = 0;
+       !stats_.infeasible && !stats_.timed_out && round < opts_.max_rounds;
+       ++round) {
     if (deadline_expired()) {
       stats_.timed_out = true;
       break;

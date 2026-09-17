@@ -56,6 +56,42 @@ jobs:
           -DMIPSOLVERS_PGO_MODE=OFF
       - name: Build
         run: cmake --build build/ci --parallel 2
+      - name: Hard-deadline probe
+        shell: bash
+        run: |
+          set +e
+          python tools/run_with_hard_deadline.py --timeout 0.1 -- \
+            python -c "import time; time.sleep(10)"
+          status=$?
+          set -e
+          test "$status" -eq 124
+      - name: Windows Unicode-path Job Object smoke
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $data = Join-Path $env:RUNNER_TEMP 'mipsolvers-路径'
+          $result = Join-Path $data 'result.json'
+          New-Item -ItemType Directory -Force -Path $data | Out-Null
+          Copy-Item tests/data/windows_worker_smoke.mps $data
+          & tests/miplib2017_benchmark.exe `
+            --data-dir $data `
+            --solvers native-highs-lp `
+            --case windows_worker_smoke `
+            --repeat 1 `
+            --time-limit 1 `
+            --hard-timeout-grace 2 `
+            --max-nodes 20 `
+            --json $result
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $payload = Get-Content -Raw $result | ConvertFrom-Json
+          if (-not $payload.hard_deadline_enforced) { exit 1 }
+          if ($payload.results.Count -ne 1) { exit 1 }
+          if ($payload.native_concurrent_tree) { exit 1 }
+          if ($payload.results[0].status -like 'worker *') { exit 1 }
+          if ($payload.data_dir -ne $data) { exit 1 }
+          if (-not $payload.results[0].optimal) { exit 1 }
+          if (-not $payload.results[0].audit.passed) { exit 1 }
+          if ([Math]::Abs($payload.results[0].objective - 1.0) -gt 1e-6) { exit 1 }
       - name: Correctness gates
         run: >-
           python tools/run_with_hard_deadline.py --timeout 3000 --

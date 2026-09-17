@@ -130,6 +130,31 @@ python tools/run_netlib_isolated.py `
 版本，与 `miplib2017_benchmark.cpp`、`netlib_solver_benchmark.cpp` 中既有
 的守护方式一致），当前无目标过滤的全量构建可通过。
 
+### 3.5 CPLEX cross-platform integration (2026-09-13)
+
+The CPLEX-only capability from Windows commit `78939619` was ported onto main
+baseline `aef3be07` without its native MILP scheduling changes. The macOS
+Release build used AppleClang 21.0.0, arm64, CPLEX Studio 22.1.1, one CPLEX
+thread, Gurobi off and IPO off.
+
+Focused CPLEX coverage passed 3 cases and 15 assertions. Full
+`test_engine_api` passed 30/30 cases and 175 assertions; full
+`test_milp_solver` passed 55/55 cases and 2,049 assertions. `otool -L` confirms
+that the arm64 executable resolves `@rpath/libcplex2211.dylib`. Reconfiguring
+the same source with `MIPSOLVERS_USE_CPLEX=OFF` rebuilt successfully, and its
+negative registration test passed 1/1 assertion before the final ON rebuild.
+The explicit `static_pic/libcplex.a` fallback also linked and passed all 15
+focused assertions with the required `CoreFoundation` and `IOKit` frameworks.
+
+The fixed three-second `mas74`/`sct2` CPLEX pilot returned incumbents for both,
+and both passed the common original-model audit. Final gaps were 7.41084% and
+0.0224079%; maximum row violations were `0` and `4.17444e-14`. Adapter import
+was 0.100334 ms and 0.198709 ms, respectively 0.00334% and 0.00662% of import
+plus optimize time. Both are below the pre-registered 5% threshold. Results
+are in ignored local artifacts `reports/miplib_cplex_macos_pilot.{json,csv}`;
+the complete derivation and Windows comparison are in the
+[CPLEX Callable Library integration record](cplex_callable_library.md).
+
 ## 4. 推荐验证命令
 
 ```powershell

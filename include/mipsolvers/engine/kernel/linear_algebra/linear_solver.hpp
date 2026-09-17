@@ -26,8 +26,8 @@ class ScopedMklThreadLimit {
   ScopedMklThreadLimit& operator=(const ScopedMklThreadLimit&) = delete;
 
  private:
-  int previous_{0};
-  bool active_{false};
+  [[maybe_unused]] int previous_{0};
+  [[maybe_unused]] bool active_{false};
 };
 
 /// Abstract sparse linear solver interface (self-contained in solver module).

@@ -1739,7 +1739,17 @@
 	                   : strict_highs_eval_error);
 	  }
 
+	  // Root source separation scans the full sparse matrix and can generate
+	  // several O(nnz * binary) candidate families before the next deadline
+	  // poll. Keep it out of the short-budget path for the same large-model
+	  // regime excluded from non-cooperative HiGHS presolve; see
+	  // docs/archive/native_windows_experience_integration_2026-09-13.md.
+	  const bool root_source_size_supported =
+	      n <= kStrictPreflightMaxCols &&
+	      static_cast<int>(root_lp.A.nonZeros() + root_lp.Aeq.nonZeros()) <=
+	          kStrictPreflightMaxNnz;
 	  const bool run_highs_style_root_source_loop =
+	      root_source_size_supported &&
 	      !strict_highs_root_fixed_point &&
 	      opt.cuts != CutType::None &&
           root_highs_presolved_side_state_first_class &&
@@ -1750,6 +1760,13 @@
 	                                      declared_branchable_cols.end(), 1)),
 	                                      root_implied_integer_count,
 	                                      root.bound);
+	  if (!root_source_size_supported && trace_root_source_loop) {
+	    fmt::print(stderr,
+	               "[B&C ROOT-SOURCE-SKIP] reason=size_gate cols={} nnz={} "
+	               "limits={}/{}\n",
+	               n, static_cast<int>(root_lp.A.nonZeros() + root_lp.Aeq.nonZeros()),
+	               kStrictPreflightMaxCols, kStrictPreflightMaxNnz);
+	  }
       if (!run_highs_style_root_source_loop && opt.auto_highs_root_pipeline &&
           opt.cuts != CutType::None && strict_highs_root_fixed_point &&
           root_highs_presolved_side_state_first_class &&
@@ -2386,14 +2403,17 @@
       (presolved_m > opt.cut_budget_xlarge_row_threshold);
   const int resolved_threads = resolve_num_threads(opt);
   const bool par_mode = (resolved_threads > 1);
-  bool parallel_tree_allowed = par_mode;
-  std::string parallel_schedule_reason = par_mode ? "enabled" : "single_thread";
+  bool parallel_tree_allowed = par_mode && opt.enable_parallel_tree;
+  std::string parallel_schedule_reason =
+      !par_mode ? "single_thread"
+                : (opt.enable_parallel_tree ? "enabled"
+                                            : "disabled_by_policy");
   out.bc_stats.parallel_requested_threads = resolved_threads;
   out.bc_stats.parallel_effective_threads = 1;
   out.bc_stats.parallel_explorer_threads = 0;
   out.bc_stats.parallel_tree_launched = false;
   out.bc_stats.parallel_schedule_reason =
-      par_mode ? "pending" : "single_thread";
+      parallel_tree_allowed ? "pending" : parallel_schedule_reason;
   const bool force_root_cut_audit = opt.root_cut_audit_force_separation;
   if (!highs_root_pipeline_active &&
       !force_root_cut_audit && root_propagation_local_cutoff_tightened &&

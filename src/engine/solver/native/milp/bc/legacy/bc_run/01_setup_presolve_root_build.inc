@@ -87,12 +87,54 @@
   };
   const bool requested_highs_root_native_tree_contract =
       opt.highs_root_native_tree_contract;
+  // HiGHS presolve performs a full sparse-model import before its internal
+  // timeout checks become effective. For very large models that import is an
+  // O(rows + cols + nnz) non-cooperative interval, so strict preflight and the
+  // auxiliary VB-side pass share one conservative size gate. The threshold is
+  // fixed by the deadline mismatch cohort; see
+  // docs/archive/native_windows_experience_integration_2026-09-13.md.
+  constexpr int kStrictPreflightMaxRows = 100000;
+  constexpr int kStrictPreflightMaxCols = 100000;
+  constexpr int kStrictPreflightMaxNnz = 1000000;
+  const int strict_preflight_rows =
+      static_cast<int>(prob.linear_part.A.rows()) +
+      static_cast<int>(prob.linear_part.Aeq.rows());
+  const int strict_preflight_cols =
+      static_cast<int>(prob.linear_part.vars.size());
+  const int strict_preflight_nnz =
+      static_cast<int>(prob.linear_part.A.nonZeros()) +
+      static_cast<int>(prob.linear_part.Aeq.nonZeros());
+  const bool strict_preflight_size_supported =
+      strict_preflight_rows <= kStrictPreflightMaxRows &&
+      strict_preflight_cols <= kStrictPreflightMaxCols &&
+      strict_preflight_nnz <= kStrictPreflightMaxNnz;
+  const bool skip_noncooperative_highs_presolve =
+      requested_highs_root_native_tree_contract &&
+      !strict_preflight_size_supported;
   HiGHSPresolvedModelStats strict_highs_preflight;
   bool strict_highs_preflight_available = false;
   if (requested_highs_root_native_tree_contract) {
-    if (bc_remaining_sec() <= 0.0) {
+    if (bc_time_limit_expired()) {
       opt.highs_root_native_tree_contract = false;
     } else {
+    if (!strict_preflight_size_supported) {
+      opt.highs_root_native_tree_contract = false;
+      opt.auto_highs_root_pipeline = false;
+      if (bc_env_flag_enabled("MIPSOLVERS_BC_TIMELINE")) {
+        fmt::print(stderr,
+                   "[B&C-TL] phase=strict_preflight_skip reason=size_gate "
+                   "rows={} cols={} nnz={} limits={}/{}/{}\n",
+                   strict_preflight_rows, strict_preflight_cols,
+                   strict_preflight_nnz, kStrictPreflightMaxRows,
+                   kStrictPreflightMaxCols, kStrictPreflightMaxNnz);
+      }
+    } else {
+    const auto strict_preflight_start = std::chrono::steady_clock::now();
+    if (bc_env_flag_enabled("MIPSOLVERS_BC_TIMELINE")) {
+      fmt::print(stderr, "[B&C-TL] phase=strict_preflight_start time_ms={:.0f}\n",
+                 std::chrono::duration<double, std::milli>(
+                     strict_preflight_start - t0).count());
+    }
     // retain_postsolve: the same pass that defines the strict working space
     // must own the postsolve certificate for native tree incumbents. See
     // "Strict Tree-Incumbent Postsolve Ownership" in
@@ -102,6 +144,18 @@
         /*retain_postsolve=*/true);
     strict_highs_preflight = preflight;
     strict_highs_preflight_available = true;
+    const auto strict_preflight_end = std::chrono::steady_clock::now();
+    if (bc_env_flag_enabled("MIPSOLVERS_BC_TIMELINE")) {
+      fmt::print(stderr,
+                 "[B&C-TL] phase=strict_preflight_end time_ms={:.0f} "
+                 "duration_ms={:.0f} status={} presolve_ok={} remaining={:.3f}\n",
+                 std::chrono::duration<double, std::milli>(
+                     strict_preflight_end - t0).count(),
+                 std::chrono::duration<double, std::milli>(
+                     strict_preflight_end - strict_preflight_start).count(),
+                 preflight.highs_status, preflight.presolve_ok ? 1 : 0,
+                 bc_remaining_sec());
+    }
     // The compositional root contract requires a retained affine map into a
     // genuine HiGHS-reduced working model. Identity/not-reduced models stay on
     // the established native pipeline; derivation and p200 measurements are in
@@ -110,6 +164,7 @@
         preflight.presolve_ok && preflight.highs_status == "reduced" &&
         preflight.presolved_lp_available &&
         preflight.side_state_available;
+    }
     }
   }
   const auto highs_contract = apply_bc_strict_highs_contract(opt);
@@ -354,7 +409,7 @@
           static_cast<HighsInt>(opt.highs_mip_root_simplex_iteration_limit));
     }
     highs.setOptionValue("mip_rel_gap", opt.gap_tol);
-    highs.setOptionValue("time_limit", std::max(0.001, opt.time_limit_sec));
+    highs.setOptionValue("time_limit", std::max(0.001, bc_remaining_sec()));
     highs.setOptionValue("mip_max_nodes",
                          static_cast<HighsInt>(std::max(1, opt.max_nodes)));
     highs.setOptionValue("mip_feasibility_tolerance",
@@ -511,8 +566,10 @@
           opt.verbose || bc_env_flag_enabled("MIPSOLVERS_BC_TIMELINE");
         const auto t_seed0 = std::chrono::steady_clock::now();
         const double seed_time_limit = std::max(
-            0.001, std::min(opt.highs_strict_seed_native_ipm_basis_time_limit_sec,
-                            0.25 * opt.time_limit_sec));
+            0.001,
+            std::min({opt.highs_strict_seed_native_ipm_basis_time_limit_sec,
+                      0.25 * opt.time_limit_sec,
+                      bc_remaining_sec()}));
         if (seed_trace) {
           std::fprintf(stderr,
             "[STRICT_HIGHS] Native IPM crash-basis seed start "
@@ -1486,7 +1543,9 @@
     HighsLpPresolveConfig cfg;
     cfg.enabled = true;
     cfg.nnz_floor = 0;
-    cfg.nnz_cap = 0;
+    cfg.nnz_cap = skip_noncooperative_highs_presolve
+                      ? kStrictPreflightMaxNnz
+                      : 0;
     cfg.min_shrink = 1.0;
     cfg.time_limit_sec = std::max(
         0.001, bc_remaining_sec() - bc_post_root_finalize_reserve_sec);
@@ -1667,7 +1726,10 @@
       strict_highs_root_fixed_point ||
       bc_env_flag_enabled("MIPSOLVERS_REPLAY_HIGHS_PRESOLVE_VB") ||
       bc_env_flag_enabled("MIPSOLVERS_HIGHS_PRESOLVE_STATS");
-  if (highs_presolve_vb_source_requested) {
+  const bool highs_presolve_vb_source_allowed =
+      highs_presolve_vb_source_requested &&
+      !skip_noncooperative_highs_presolve;
+  if (highs_presolve_vb_source_allowed) {
     bool highs_presolve_cache_hit = false;
     if (highs_mip_ps.attempted) {
       // The retained production pass owns the exact postsolve stack and side

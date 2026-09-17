@@ -75,3 +75,11 @@ theory-guided 规则，所有算法/数值改动必须以这些推导文档为�
 - `demo_01`–`demo_05`：可运行的 Python 演示（见
   [第 3 章 快速上手](03-quickstart.md)）。
 - `slides.tex` + `build.sh`：Beamer 教程幻灯片源文件与编译脚本。
+
+
+## 11.4 2026-09 主线集成补充
+
+- [两阶段分解设计](../archive/two_stage_decomposition_design.md)：Benders、整数 L-shaped、Lagrangian cuts、有限场景和多面体 CCG。
+- [跨平台截止时间与取消集成](../archive/native_windows_experience_integration_2026-09-13.md)：主线导入 Windows 经验的历史推导与测量。
+- [CPLEX 跨平台接口记录](../archive/cplex_callable_library.md)：主线 CPLEX 装配、状态映射及 macOS 链接支持。
+- [Windows/main 同步验证](../archive/windows_main_sync_2026-09-17.md)：本次合并依据、冲突处理及验收证据。

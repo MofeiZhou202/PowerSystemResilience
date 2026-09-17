@@ -161,3 +161,8 @@ docs/modules/**/*.aux
 docs/modules/**/*.log
 docs/modules/**/*.out
 docs/modules/**/*.toc
+# Track the repository-local theory workflow for offline use.
+!/.github/
+!/.github/skills/
+/.github/skills/*
+!/.github/skills/theory-guided-coding/

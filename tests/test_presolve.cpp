@@ -3,12 +3,16 @@
 #include <catch2/catch_test_macros.hpp>
 #include <catch2/catch_approx.hpp>
 
+#include <cmath>
+#include <limits>
+
 #include <Eigen/Core>
 #include <Eigen/Sparse>
 
 #include "mipsolvers/engine/strategy/presolve_manager.hpp"
 #include "mipsolvers/engine/strategy/postsolve_manager.hpp"
 #include "mipsolvers/engine/api/options.hpp"
+#include "mipsolvers/engine/detail/bc_implied_bounds.hpp"
 #include "mipsolvers/engine/problem_types.hpp"
 #include "mipsolvers/engine/solver/native/milp/bc/milp_presolve.hpp"
 
@@ -694,4 +698,72 @@ TEST_CASE("compute_matrix_scaling_stats: empty model", "[presolve][scaling]") {
   CHECK(s.abs_max == 0.0);
   CHECK(s.dynamic_range == 1.0);
   CHECK(s.worst_row == -1);
+}
+
+TEST_CASE("Implied column bounds: residual removal uses the accumulated "
+          "contribution", "[presolve][implied-bounds][regression]") {
+  // Regression test for the native SCUC false-optimality defect.  In
+  // compute_implied_column_bounds_from_rows the residual for entry j of a
+  // two-sided row must subtract exactly the per-term contribution that was
+  // accumulated into the row activity (Savelsbergh 1994, §2 activity rule;
+  // Achterberg 2007, §3.2).  The buggy implementation recomputed the
+  // contribution at removal time; when the row's own rhs-side processing had
+  // just tightened the entry's bound, the self-reference guard returned the
+  // raw model bound, so the residual was off by a*(tightened - raw) and the
+  // implied lower bound became invalid (here: y >= +31.44 instead of the
+  // valid, vacuous y >= -95.47), eventually producing unsound
+  // variable-bound/conflict artifacts that cut off the MIP optimum.
+  //
+  // Layout mirrors the failing reduced SCUC model: row 0 tightens y's upper
+  // bound first (source row != row 1), then the two-sided row 1 tightens y
+  // again on its rhs side before the lhs side reuses the row activity.
+  LPModel lp;
+  lp.sense = Sense::Minimize;
+  lp.c = Eigen::VectorXd::Zero(4);
+  // z in [0,1], x, y, s in [0,25]
+  lp.vars.push_back({VarType::Continuous, 0.0, 1.0, "z"});
+  lp.vars.push_back({VarType::Continuous, -188.6716694, 235.9716694, "x"});
+  lp.vars.push_back({VarType::Continuous, -224.8955592, 261.2955592, "y"});
+  lp.vars.push_back({VarType::Continuous, 0.0, 25.0, "s"});
+
+  std::vector<Eigen::Triplet<double>> triplets;
+  // Row 0: -50 z - 0.5 x + 1.25 y - s <= -25  (tightens ub_y -> 134.39 first)
+  triplets.emplace_back(0, 0, -50.0);
+  triplets.emplace_back(0, 1, -0.5);
+  triplets.emplace_back(0, 2, 1.25);
+  triplets.emplace_back(0, 3, -1.0);
+  // Row 1 (two-sided): -0.5 x + 1.25 y - s = -25
+  triplets.emplace_back(1, 1, -0.5);
+  triplets.emplace_back(1, 2, 1.25);
+  triplets.emplace_back(1, 3, -1.0);
+  lp.A.resize(2, 4);
+  lp.A.setFromTriplets(triplets.begin(), triplets.end());
+  lp.A.makeCompressed();
+  lp.row_lhs.resize(2);
+  lp.row_lhs[0] = -std::numeric_limits<double>::infinity();
+  lp.row_lhs[1] = -25.0;
+  lp.b.resize(2);
+  lp.b[0] = -25.0;
+  lp.b[1] = -25.0;
+
+  const auto bounds = detail::compute_implied_column_bounds_from_rows(
+      lp, 16, 512, 1e-9);
+
+  // Every implied interval must remain consistent (the defect produced
+  // inverted intervals such as [175.63, -170.25] on this structure).
+  for (int j = 0; j < 4; ++j) {
+    const double lo = bounds.lower[static_cast<size_t>(j)];
+    const double hi = bounds.upper[static_cast<size_t>(j)];
+    if (std::isfinite(lo) && std::isfinite(hi)) {
+      CHECK(lo <= hi + 1e-9);
+    }
+  }
+  // The valid lhs-side derivation for row 1 is
+  //   y >= (lhs - (sum_upper - 1.25*ub_y)) / 1.25
+  //      = (-25 - 94.34) / 1.25 = -95.47 (vacuous, below the raw lower bound),
+  // so no lower tightening of y may be recorded.  The defective residual
+  // accounting claimed y >= +31.44, cutting the feasible point
+  // (z=0, x=50, y=0, s=0).
+  const double implied_lb_y = bounds.lower[2];
+  CHECK(implied_lb_y <= 0.0 + 1e-9);
 }

@@ -67,7 +67,7 @@ constexpr double kObjectiveTolerance = 1e-5;
 constexpr double kFeasibilityTolerance = 1e-7;
 // S1 measurement-contract schema version. Bump when the report field set or
 // aggregation semantics change so downstream comparisons stay well-defined.
-constexpr const char* kSchemaVersion = "s1-measurement-contract-2";
+constexpr const char* kSchemaVersion = "s1-measurement-contract-3";
 
 struct Config {
   fs::path data_dir{"tests/data"};
@@ -78,6 +78,7 @@ struct Config {
   std::vector<std::string> solvers;
   int repeats{1};
   int max_iterations{100000};
+  int threads{0};
   double time_limit_sec{30.0};
   bool warm_cohort{false};
   int warm_branch_vars{4};
@@ -104,6 +105,11 @@ struct RunResult {
   bool accurate{false};
   int iterations{0};
   double runtime_ms{0.0};
+  int thread_budget{0};
+  int portfolio_workers{0};
+  int worker_thread_limit{0};
+  double portfolio_first_result_sec{0.0};
+  double portfolio_cancel_wait_sec{0.0};
   bool native_telemetry{false};
   int dual_pivots{0};
   int dse_initialization_solves{0};
@@ -210,6 +216,9 @@ bool parse_args(int argc, char** argv, Config& cfg) {
     } else if (arg == "--max-iterations") {
       const char* v = value("--max-iterations"); if (!v) return false;
       cfg.max_iterations = std::max(1, std::atoi(v));
+    } else if (arg == "--threads") {
+      const char* v = value("--threads"); if (!v) return false;
+      cfg.threads = std::max(0, std::atoi(v));
     } else if (arg == "--warm-cohort") {
       cfg.warm_cohort = true;
     } else if (arg == "--warm-branch-vars") {
@@ -236,6 +245,7 @@ bool parse_args(int argc, char** argv, Config& cfg) {
           << "  --repeat N           repetitions per case/algorithm\n"
           << "  --time-limit SEC     supported backend wall limit\n"
           << "  --max-iterations N   iterative algorithm limit\n"
+          << "  --threads N          native-auto call-wide worker budget\n"
           << "  --warm-cohort        S5 warm node-reopt cohort (native kernel)\n"
           << "  --warm-branch-vars N vars to tighten per node (default 4)\n"
           << "  --warm-branch-frac F tighten to F*x* toward lb (default 0.5)\n"
@@ -718,10 +728,20 @@ RunResult run_adapter(const CaseInfo& kase, const std::string& solver,
                        ? "Native-IPM[centrality-step](+native-presolve)"
                        : "Native-IPM[legacy-step](+native-presolve)";
     }
-  } else if (solver == "native-auto") {
+  } else if (solver == "native-auto" ||
+             solver == "native-auto-latency" ||
+             solver == "native-auto-throughput") {
+    eng::SolveOptions options;
+    options.time_limit_sec = cfg.time_limit_sec;
+    options.threads = cfg.threads;
+    options.portfolio_mode = solver == "native-auto-throughput"
+                                 ? eng::PortfolioMode::Throughput
+                                 : eng::PortfolioMode::Latency;
     eng::NativeAutoLPAdapter adapter(cfg.time_limit_sec);
-    result = adapter.solve_lp(kase.lp);
-    row.solver = "Native-Auto[selector]";
+    result = adapter.solve_lp(kase.lp, eng::SolveContext(options));
+    row.solver = solver == "native-auto-throughput"
+                     ? "Native-Auto[throughput]"
+                     : "Native-Auto[latency]";
   } else if (solver == "native-pdlp") {
     eng::PDLPOptions opt;
     opt.max_iter = cfg.max_iterations;
@@ -759,6 +779,13 @@ RunResult run_adapter(const CaseInfo& kase, const std::string& solver,
     row.success = result.stats.success;
     row.status = result.stats.status;
     row.iterations = result.stats.iterations;
+    row.thread_budget = cfg.threads;
+    row.portfolio_workers = result.stats.portfolio_workers;
+    row.worker_thread_limit = result.stats.worker_thread_limit;
+    row.portfolio_first_result_sec =
+        result.stats.portfolio_first_result_sec;
+    row.portfolio_cancel_wait_sec =
+        result.stats.portfolio_cancel_wait_sec;
     row.native_telemetry = result.stats.native_dual_kernel_time_sec > 0.0;
     row.dual_pivots = result.stats.dual_phase_one_iterations +
                       result.stats.dual_phase_two_iterations;
@@ -961,6 +988,8 @@ void write_csv(const fs::path& path, const std::vector<RunResult>& rows) {
   std::ofstream out(path);
   out << "case,solver,repeat,rows,columns,nonzeros,available,success,accurate,"
          "runtime_ms,iterations,dual_pivots,dse_initialization_solves,"
+         "thread_budget,portfolio_workers,worker_thread_limit,"
+         "portfolio_first_result_sec,portfolio_cancel_wait_sec,"
          "dse_initialization_ms,certified_dse_btrans,"
          "certified_dse_candidates,certified_dse_rejections,"
          "certified_dse_ms,native_kernel_ms,"
@@ -974,7 +1003,10 @@ void write_csv(const fs::path& path, const std::vector<RunResult>& rows) {
         << r.rows << ',' << r.columns << ',' << r.nonzeros << ',' << r.available
         << ',' << r.success << ',' << r.accurate << ',' << r.runtime_ms << ','
         << r.iterations << ',' << r.dual_pivots << ','
-        << r.dse_initialization_solves << ',' << r.dse_initialization_ms << ','
+        << r.dse_initialization_solves << ',' << r.thread_budget << ','
+        << r.portfolio_workers << ',' << r.worker_thread_limit << ','
+        << r.portfolio_first_result_sec << ','
+        << r.portfolio_cancel_wait_sec << ',' << r.dse_initialization_ms << ','
         << r.certified_dse_btrans << ',' << r.certified_dse_candidates << ','
         << r.certified_dse_rejections << ',' << r.certified_dse_ms << ','
         << r.native_kernel_ms << ',' << r.native_kernel_ms_per_dual_pivot << ','
@@ -999,6 +1031,7 @@ void write_json(const fs::path& path, const Config& cfg,
   root["configuration"] = {{"data_dir", cfg.data_dir.string()},
                            {"repeats", cfg.repeats},
                            {"time_limit_sec", cfg.time_limit_sec},
+                           {"threads", cfg.threads},
                            {"max_iterations", cfg.max_iterations},
                            {"objective_tolerance", kObjectiveTolerance},
                            {"normalized_feasibility_tolerance", kFeasibilityTolerance},
@@ -1014,6 +1047,11 @@ void write_json(const fs::path& path, const Config& cfg,
         {"available", r.available}, {"success", r.success},
         {"accurate", r.accurate}, {"runtime_ms", r.runtime_ms},
         {"iterations", r.iterations}, {"dual_pivots", r.dual_pivots},
+        {"thread_budget", r.thread_budget},
+        {"portfolio_workers", r.portfolio_workers},
+        {"worker_thread_limit", r.worker_thread_limit},
+        {"portfolio_first_result_sec", r.portfolio_first_result_sec},
+        {"portfolio_cancel_wait_sec", r.portfolio_cancel_wait_sec},
         {"dse_initialization_solves", r.dse_initialization_solves},
         {"dse_initialization_ms", r.dse_initialization_ms},
         {"certified_dse_btrans", r.certified_dse_btrans},
