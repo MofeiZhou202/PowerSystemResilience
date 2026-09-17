@@ -1,6 +1,7 @@
 #include <catch2/catch_test_macros.hpp>
 
 #include <algorithm>
+#include <chrono>
 #include <cmath>
 #include <filesystem>
 #include <string>
@@ -11,8 +12,14 @@
 namespace {
 
 std::filesystem::path data_file(const std::string& name) {
-  return std::filesystem::path(__FILE__).parent_path().parent_path() / "data" /
-         name;
+  const auto path = std::filesystem::path(__FILE__).parent_path().parent_path() /
+                    "data" /
+                    std::filesystem::path(
+                        std::u8string(name.begin(), name.end()));
+  if (!std::filesystem::is_regular_file(path)) {
+    SKIP("optional distribution SVG fixture is unavailable: " + name);
+  }
+  return path;
 }
 
 void check_calculable(const hacdcpf::io::SvgDistributionImportResult& imported,
@@ -104,10 +111,42 @@ void check_calculable(const hacdcpf::io::SvgDistributionImportResult& imported,
 
 }  // namespace
 
+TEST_CASE("SVG file API preserves Unicode paths without optional feeder fixtures",
+          "[io][svg][distribution][unicode]") {
+  struct TemporaryDirectory {
+    std::filesystem::path path;
+    ~TemporaryDirectory() {
+      std::error_code ignored;
+      std::filesystem::remove_all(path, ignored);
+    }
+  } directory{std::filesystem::temp_directory_path() /
+      ("hysim-svg-" + std::to_string(
+          std::chrono::steady_clock::now().time_since_epoch().count()))};
+  REQUIRE(std::filesystem::create_directory(directory.path));
+  const auto file = directory.path / std::filesystem::path(u8"研究馈线-Δ.svg");
+  hacdcpf::HybridPowerSystem system;
+  hacdcpf::ACBus bus;
+  bus.index = 1;
+  bus.base_kv = 10.0;
+  system.ac.buses.push_back(bus);
+  const auto exported = hacdcpf::io::save_svg_distribution(system, file);
+  CHECK(exported.exported_buses == 1);
+  const auto loaded = hacdcpf::io::load_svg_distribution(file);
+  CHECK(loaded.system.name == "研究馈线-Δ");
+  CHECK_FALSE(loaded.report.has_errors());
+  CHECK(loaded.system.ac.buses.size() == 1);
+  const auto missing = directory.path / std::filesystem::path(u8"不存在-Δ.svg");
+  const auto missing_result = hacdcpf::io::load_svg_distribution(missing);
+  REQUIRE(missing_result.report.has_errors());
+  REQUIRE_FALSE(missing_result.report.records.empty());
+  const auto missing_utf8 = missing.u8string();
+  CHECK(missing_result.report.records.front().source_locator ==
+        std::string(missing_utf8.begin(), missing_utf8.end()));
+}
+
 TEST_CASE("IEC-CGE overhead feeder SVG imports and solves",
           "[io][svg][distribution][power-flow]") {
   const auto path = data_file("张庄C503线-架空-丽水市.svg");
-  REQUIRE(std::filesystem::is_regular_file(path));
   const auto imported = hacdcpf::io::load_svg_distribution(path);
   CHECK(imported.system.name == "张庄C503线-架空-丽水市");
   check_calculable(imported, 30, 11);
@@ -121,7 +160,6 @@ TEST_CASE("IEC-CGE overhead feeder SVG imports and solves",
 TEST_CASE("IEC-CGE mixed cable and overhead feeder SVG imports and solves",
           "[io][svg][distribution][power-flow]") {
   const auto path = data_file("新区B259线-混合.svg");
-  REQUIRE(std::filesystem::is_regular_file(path));
   const auto imported = hacdcpf::io::load_svg_distribution(path);
   CHECK(imported.system.name == "新区B259线-混合");
   check_calculable(imported, 69, 14);

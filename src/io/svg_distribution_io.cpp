@@ -29,6 +29,11 @@ namespace {
 constexpr std::size_t knpos = std::string::npos;
 constexpr double kPi = 3.14159265358979323846;
 
+std::string path_utf8(const std::filesystem::path& path) {
+  const auto utf8 = path.u8string();
+  return std::string(utf8.begin(), utf8.end());
+}
+
 std::string trim(const std::string& value) {
   std::size_t first = 0;
   std::size_t last = value.size();
@@ -1331,7 +1336,7 @@ SvgDistributionImportResult load_svg_distribution(
     result.report.unit_assertion = UnitAssertion::BestEffort;
     result.report.add(ImportDisposition::Rejected,
                       ImportReasonCode::ParseError,
-                      ImportSeverity::Error, path.string(),
+                      ImportSeverity::Error, path_utf8(path),
                       "Cannot open SVG distribution file");
     return result;
   }
@@ -1339,7 +1344,7 @@ SvgDistributionImportResult load_svg_distribution(
                   std::istreambuf_iterator<char>());
   auto options = opts;
   if (options.model_name == "SVG distribution feeder")
-    options.model_name = path.stem().string();
+    options.model_name = path_utf8(path.stem());
   return from_svg_distribution(svg, mode, options);
 }
 
@@ -1748,11 +1753,11 @@ SvgDistributionExportResult save_svg_distribution(
   std::ofstream output(path, std::ios::binary);
   if (!output)
     throw std::runtime_error("Cannot open SVG distribution export path: " +
-                             path.string());
+                             path_utf8(path));
   output.write(result.svg.data(), static_cast<std::streamsize>(result.svg.size()));
   if (!output)
     throw std::runtime_error("Failed to write SVG distribution export: " +
-                             path.string());
+                             path_utf8(path));
   return result;
 }
 

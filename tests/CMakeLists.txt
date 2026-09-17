@@ -217,6 +217,13 @@ hacdcpf_add_test(test_sppt_ablation        test_sppt_ablation.cpp)
 hacdcpf_add_test(test_sppt_benchmark       test_sppt_benchmark.cpp)
 
 find_package(Python3 COMPONENTS Interpreter QUIET)
+if(Python3_EXECUTABLE)
+  add_test(NAME windows_io_portability_contract
+    COMMAND "${Python3_EXECUTABLE}"
+            "${CMAKE_SOURCE_DIR}/tests/test_windows_io_portability_contract.py")
+  set_tests_properties(windows_io_portability_contract PROPERTIES
+    LABELS "io;windows;contract" TIMEOUT 30)
+endif()
 # Documentation source-anchor drift guard: every file:symbol anchor in the
 # manuals / design docs must still resolve against the source tree.  Pure
 # Python, no build artifacts required, so it runs on every ctest sweep and in

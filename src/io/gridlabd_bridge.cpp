@@ -684,12 +684,17 @@ int run_process_posix(const std::filesystem::path& executable,
                       const std::vector<std::pair<std::string, std::string>>& env,
                       int timeout_seconds) {
 #ifdef _WIN32
-  (void)env;
   (void)timeout_seconds;
-  const std::string command = "\"" + executable.string() + "\" \"" +
-                              glm_path.filename().string() + "\" > \"" +
-                              stdout_path.string() + "\" 2> \"" +
-                              stderr_path.string() + "\"";
+  // cmd.exe strips the first quote from a /C command that starts with a
+  // quoted executable. Wrap the complete command and keep every path quoted.
+  std::string command = "\"";
+  for (const auto& [name, value] : env) {
+    command += "set \"" + name + "=" + value + "\" && ";
+  }
+  command += "\"" + executable.string() + "\" \"" +
+             glm_path.filename().string() + "\" > \"" +
+             stdout_path.string() + "\" 2> \"" +
+             stderr_path.string() + "\"\"";
   const auto old = std::filesystem::current_path();
   std::filesystem::current_path(working_dir);
   const int code = std::system(command.c_str());

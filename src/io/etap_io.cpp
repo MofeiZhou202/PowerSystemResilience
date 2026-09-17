@@ -1,7 +1,9 @@
 #include "hacdcpf/io/etap_io.hpp"
 
 #include <algorithm>
+#include <atomic>
 #include <cctype>
+#include <chrono>
 #include <cmath>
 #include <cstdint>
 #include <cstdio>
@@ -9,6 +11,7 @@
 #include <fstream>
 #include <initializer_list>
 #include <queue>
+#include <random>
 #include <regex>
 #include <sstream>
 #include <string>
@@ -38,6 +41,30 @@ namespace {
 using OpenXLSX::XLDocument;
 using OpenXLSX::XLWorkbook;
 using OpenXLSX::XLWorksheet;
+
+std::filesystem::path unique_etap_fidelity_path() {
+  static std::atomic<std::uint64_t> sequence{0};
+  const auto ticks = std::chrono::steady_clock::now().time_since_epoch().count();
+  std::random_device random;
+  std::ostringstream name;
+  name << "hacdcpf_etap_fidelity_" << std::hex << ticks << '_'
+       << random() << '_' << sequence.fetch_add(1, std::memory_order_relaxed)
+       << ".xlsx";
+  return std::filesystem::temp_directory_path() / name.str();
+}
+
+class ScopedFileRemoval {
+ public:
+  explicit ScopedFileRemoval(std::filesystem::path path)
+      : path_(std::move(path)) {}
+  ~ScopedFileRemoval() {
+    std::error_code ignored;
+    std::filesystem::remove(path_, ignored);
+  }
+
+ private:
+  std::filesystem::path path_;
+};
 
 // ── small scalar / cell helpers ─────────────────────────────────────────
 std::string to_upper(std::string s) {
@@ -1609,14 +1636,11 @@ HybridPowerSystem load_etap(const std::string& path) {
 
 EtapFidelityReport etap_fidelity_check(const HybridPowerSystem& sys, double tol) {
   EtapFidelityReport rep;
-  namespace fs = std::filesystem;
-  const std::string tmp =
-      (fs::temp_directory_path() / "hacdcpf_etap_fidelity.xlsx").string();
+  const auto tmp = unique_etap_fidelity_path();
+  const ScopedFileRemoval cleanup(tmp);
   EtapIoReport io;
-  save_etap(sys, tmp, io);
-  const HybridPowerSystem rt = load_etap(tmp);
-  std::error_code ec;
-  fs::remove(tmp, ec);
+  save_etap(sys, tmp.string(), io);
+  const HybridPowerSystem rt = load_etap(tmp.string());
 
   auto fd = [&](const std::string& w, double a, double b) {
     ++rep.fields_checked;

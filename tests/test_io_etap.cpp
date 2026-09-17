@@ -11,6 +11,7 @@
 
 #include <filesystem>
 #include <fstream>
+#include <future>
 #include <string>
 #include <cmath>
 
@@ -840,6 +841,24 @@ TEST_CASE("ETAP fidelity check reports a lossless round-trip",
   CHECK(fr.fields_checked > 0);
   CHECK(fr.fields_mismatched == 0);
   CHECK(fr.lossless);
+}
+
+TEST_CASE("ETAP fidelity checks use independent temporary workbooks",
+          "[io][etap][excel][fidelity][concurrency]") {
+  const HybridPowerSystem sys = make_reference_system();
+  std::vector<std::future<EtapFidelityReport>> checks;
+  for (int i = 0; i < 4; ++i) {
+    checks.push_back(std::async(std::launch::async, [&sys] {
+      return etap_fidelity_check(sys);
+    }));
+  }
+  for (auto& check : checks) {
+    const auto report = check.get();
+    INFO(report.mismatches.size());
+    CHECK(report.fields_checked > 0);
+    CHECK(report.fields_mismatched == 0);
+    CHECK(report.lossless);
+  }
 }
 
 TEST_CASE("ETAP native XML import (Feeder.xml)", "[io][etap][xml][ingest]") {

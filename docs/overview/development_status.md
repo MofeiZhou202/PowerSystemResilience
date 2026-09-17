@@ -65,6 +65,26 @@ data root and is green; this branch does not rewrite the unrelated legacy
 fixture contract. Large-system performance, Windows MSVC runtime loading, and
 license redistribution remain unverified.
 
+## Windows I/O portability integration (2026-09-17)
+
+The integration branch isolates three Windows-facing I/O corrections from the
+release branch: ETAP fidelity checks use process/thread-unique temporary XLSX
+paths with exception-safe cleanup; GridLAB-D Windows launch commands preserve
+quoted executable/output paths and pass the computed runtime environment; SVG
+diagnostics and inferred model names use explicit UTF-8 path conversion while
+file streams retain native filesystem paths. No MATPOWER parsing semantics,
+solver behavior, packaging logic, or performance evidence is included.
+
+Tests cover four concurrent ETAP fidelity round trips, a self-contained
+Chinese/Delta SVG save/load/missing-file diagnostic, and a cross-platform
+static contract for the Windows GridLAB-D command. On macOS arm64, the focused
+targets rebuilt successfully: the ETAP fidelity filter passed 2 cases / 15
+assertions, the SVG Unicode filter passed 1 case / 8 assertions, and the
+registered `windows_io_portability_contract` CTest passed 1/1. Actual MSVC
+execution and a real GridLAB-D installation remain required before claiming
+Windows runtime validation; the Windows branch still has no enforced process
+timeout for this `std::system` path.
+
 ## MIPSolvers main upgrade full regression (2026-09-13)
 
 The clean sibling MIPSolvers `main` at
