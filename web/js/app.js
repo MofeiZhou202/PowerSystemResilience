@@ -3523,15 +3523,12 @@ const App = (() => {
         }
         setStatus('就绪');
 
-        // Auto-run power flow after import
-        log('自动运行潮流计算...', 'info');
-        await runPowerFlow();
         showModelIoStatus('MATPOWER 导入完成', [
           ['文件', filename],
           ['AC母线', data.counts?.ac_buses ?? data.ac_buses ?? ''],
           ['AC支路', data.counts?.ac_branches ?? data.ac_branches ?? ''],
           ['发电机', data.counts?.generators ?? data.generators ?? ''],
-        ], { subtitle: `已同步到后端并自动运行潮流${Canvas.isHeadless && Canvas.isHeadless() ? '（大规模系统：WebGL 全网总览）' : '（已同步到画布）'}` });
+        ], { subtitle: `已同步到后端，潮流尚未计算；请点击“运行潮流”${Canvas.isHeadless && Canvas.isHeadless() ? '（大规模系统：WebGL 全网总览）' : '（已同步到画布）'}` });
       } else {
         setStatus('加载失败', 'error');
       }

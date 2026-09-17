@@ -528,6 +528,8 @@ use the default `response_detail=full` contract.
 
 PF responses expose snapshot, setup, solve, presentation, finalization, and
 serialization durations through the JSON `timing` object and the HTTP
-`Server-Timing` header. Large MATPOWER loads use one structured `_system_json`
-model payload, avoiding a second escaped copy and an additional browser
-`JSON.parse`; smaller loads retain the legacy response for API compatibility.
+`Server-Timing` header. MATPOWER loads with at least 1,000 AC buses use one
+structured `_system_json` model payload, avoiding a second escaped copy and an
+additional browser `JSON.parse`; smaller loads retain the legacy response for
+API compatibility. Import synchronizes the model and invalidates stale results
+but does not run PF; the user starts PF explicitly after inspecting the model.

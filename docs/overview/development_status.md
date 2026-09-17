@@ -6,6 +6,19 @@ This is the living handoff for verified build state and active engineering work.
 Update it in place; do not create dated copies. Source, registered tests, and
 the current Git worktrees remain authoritative.
 
+## MATPOWER import contract integration (2026-09-17)
+
+MATPOWER import now only replaces the session model and refreshes the Canvas;
+it no longer invokes `/api/session/pf` implicitly. Imports with at least 1,000
+AC buses return one structured `_system_json` payload and omit the duplicate
+escaped `_raw_json` plus flattened component arrays. Smaller imports preserve
+the legacy response shape. The registered `matpower_import_contract_e2e`
+checks both boundaries in Chromium with `case14.m` and `case1354pegase.m`.
+On macOS arm64, a fresh Debug/minimal build against MIPSolvers `8fdea5a`
+rebuilt `run_gui_server`; the registered Chromium test passed, as did
+`node --check` for `web/js/app.js` and the E2E script. This focused run did not
+repeat the full CTest suite and does not constitute Windows runtime validation.
+
 ## MIPSolvers main upgrade full regression (2026-09-13)
 
 The clean sibling MIPSolvers `main` at

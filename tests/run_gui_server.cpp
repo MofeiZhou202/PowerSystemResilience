@@ -11694,7 +11694,12 @@ int main(int argc, char** argv) {
       // than doubles response size and forces an additional browser JSON parse.
       // Keep the legacy shape for smaller API clients that consume its flattened
       // component arrays directly.
-      const bool compact_load = g_session.current_system->ac.buses.size() >= 5000;
+      // Avoid serializing the full component arrays and then embedding a second
+      // escaped copy in `_raw_json` for medium/large MATPOWER imports.  The
+      // browser only needs one structured model payload to render the case;
+      // duplicating it caused multi-megabyte responses and long UI stalls for
+      // cases such as case1354pegase (1,354 buses).
+      const bool compact_load = g_session.current_system->ac.buses.size() >= 1000;
       auto summary = compact_load
                          ? system_summary(*g_session.current_system, false, true)
                          : system_summary(*g_session.current_system);

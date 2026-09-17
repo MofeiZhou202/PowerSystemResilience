@@ -395,6 +395,7 @@ rich-to-canonical 归因行。响应通过 `model_scope`、`model_limitations` �
 契约。
 
 潮流响应通过 JSON `timing` 对象和 HTTP `Server-Timing` 头暴露快照、装配、
-求解、呈现、收尾和序列化各阶段耗时。大型 MATPOWER 加载使用单个结构化
-`_system_json` 模型载荷，避免第二份转义副本和一次额外的浏览器
-`JSON.parse`；较小的加载保留旧版响应以保持 API 兼容性。
+求解、呈现、收尾和序列化各阶段耗时。至少含 1,000 条 AC 母线的 MATPOWER
+加载使用单个结构化 `_system_json` 模型载荷，避免第二份转义副本和一次
+额外的浏览器 `JSON.parse`；较小的加载保留旧版响应以保持 API 兼容性。
+导入会同步模型并使旧结果失效，但不运行潮流；用户检查模型后显式启动潮流。

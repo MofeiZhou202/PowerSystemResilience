@@ -821,6 +821,15 @@ if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/run_gui_server.cpp")
     set_tests_properties(top_toolbar_semantics_test PROPERTIES
       LABELS "gui;unit;layout;semantics")
 
+    add_test(NAME matpower_import_contract_e2e
+      COMMAND "${HACDCPF_NODE_EXECUTABLE}"
+              "${CMAKE_SOURCE_DIR}/tests/e2e/matpower_import_contract_e2e.mjs"
+              --server "$<TARGET_FILE:run_gui_server>"
+              --data-dir "${CMAKE_SOURCE_DIR}/data"
+              --matpower-dir "${CMAKE_SOURCE_DIR}/external_data/matpower")
+    set_tests_properties(matpower_import_contract_e2e PROPERTIES
+      LABELS "gui;api;e2e;browser;matpower" TIMEOUT 120)
+
     add_test(NAME pf_ncp_schur_gui_e2e
       COMMAND "${HACDCPF_NODE_EXECUTABLE}"
               "${CMAKE_SOURCE_DIR}/tests/e2e/pf_ncp_schur_gui_e2e.mjs"

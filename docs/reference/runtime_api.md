@@ -134,8 +134,13 @@ window route returns `409/no_cached_power_flow` until a current PF publishes.
 declare `result_matches_current_system`. `last_pf_result`/`last_pf_system` are
 shared snapshots, so result-serving routes read them with no copy.
 Load-path responses (`load_*`, `update_components`, parameter-library and
-design-handbook apply) embed `_raw_json` as the cached compact (un-indented)
-serialization; the frontend parses it with `JSON.parse`.
+design-handbook apply) normally embed `_raw_json` as the cached compact
+(un-indented) serialization; the frontend parses it with `JSON.parse`.
+`load_matpower` is the bounded exception: imports with at least 1,000 AC buses
+return one structured `_system_json` and omit `_raw_json` plus the duplicate
+top-level component arrays. Smaller imports retain the legacy response shape.
+Loading or replacing a model never runs PF implicitly; `/api/session/pf`
+remains a separate, explicit request.
 
 All 45 legacy analysis handlers that acquire `Session::busy` use an
 `AtomicFlagLease`: acquisition is compare-and-exchange, and cleanup releases
