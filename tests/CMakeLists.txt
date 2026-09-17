@@ -747,6 +747,12 @@ if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/run_gui_server.cpp")
 
   find_package(Python3 COMPONENTS Interpreter QUIET)
   if(Python3_Interpreter_FOUND)
+    add_test(NAME windows_packaging_contract
+      COMMAND "${Python3_EXECUTABLE}"
+              "${CMAKE_SOURCE_DIR}/tests/test_windows_packaging_contract.py")
+    set_tests_properties(windows_packaging_contract PROPERTIES
+      LABELS "windows;packaging;unit" TIMEOUT 30)
+
     add_test(NAME session_integrity_e2e
       COMMAND "${Python3_EXECUTABLE}"
               "${CMAKE_SOURCE_DIR}/tools/session_integrity_e2e.py"

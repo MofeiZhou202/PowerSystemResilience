@@ -131,6 +131,11 @@ MIPSolvers 提交必须与 CMake pin 一致：
 powershell -ExecutionPolicy Bypass -File tools/package_windows.ps1
 ```
 
+使用 `-SourceDependencies` 可选择 `windows-source-release` preset。该模式从兄弟
+MIPSolvers 检出中构建开源依赖，但仍要求显式 staging 的 sequential oneMKL
+和 zlib 根目录；它不会把机器全局 `C:/vcpkg` 前缀注入
+`CMAKE_PREFIX_PATH`，也不启用 CPLEX。
+
 脚本会配置并构建 `windows-msvc-release`，运行求解器能力打包准入测试，
 使用 `dumpbin /DEPENDENTS` 审计 `run_gui_server.exe`，并暂存
 `bin/`、`web/`、`data/`、`external_data/`、文档、第三方许可、启动脚本与
@@ -139,6 +144,17 @@ powershell -ExecutionPolicy Bypass -File tools/package_windows.ps1
 `dist/HySim-Windows-x64.zip` 及其 SHA-256 文件。解压后运行
 `Start-HySim.cmd`，运行时不需要源码仓库。打包准入有意小于完整 CTest
 范围；当前数值失败和外部夹具缺口以持续更新的开发状态文档为准。
+
+打包后用新的含空格目录和隔离 `PATH` 独立验证：
+
+```powershell
+powershell -ExecutionPolicy Bypass -File tools/verify_windows_release.ps1
+```
+
+验证器校验 ZIP 旁车哈希和清单中每个文件，然后仅使用解压包与 Windows
+系统 DLL 启动服务器，检查 GUI 资产、内置混合算例与 AC Newton 潮流。
+保留的解压目录包含 `verification.json` 和服务器日志。该门禁不替代完整
+Windows CTest。
 
 ## 封闭环境验证（Hermetic Verification）
 

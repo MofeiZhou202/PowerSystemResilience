@@ -2,11 +2,16 @@
 param(
   [string]$BuildDir = "build/windows-msvc-release",
   [string]$OutputDir = "dist/HySim-Windows-x64",
-  [switch]$SkipBuild
+  [switch]$SkipBuild,
+  [switch]$SourceDependencies
 )
 
 $ErrorActionPreference = "Stop"
 $repoRoot = (Resolve-Path (Join-Path $PSScriptRoot "..")).Path
+$defaultBuildDir = "build/windows-msvc-release"
+if ($SourceDependencies -and $BuildDir -eq $defaultBuildDir) {
+  $BuildDir = "build/windows-source-release"
+}
 $buildRoot = [System.IO.Path]::GetFullPath((Join-Path $repoRoot "build"))
 $distRoot = [System.IO.Path]::GetFullPath((Join-Path $repoRoot "dist"))
 $buildPath = [System.IO.Path]::GetFullPath((Join-Path $repoRoot $BuildDir))
@@ -32,7 +37,8 @@ function Assert-CleanGitCheckout([string]$Path, [string]$Name) {
 Assert-CleanGitCheckout $repoRoot "HySim"
 
 if (-not $SkipBuild) {
-  & cmake --preset windows-msvc-release
+  $preset = if ($SourceDependencies) { "windows-source-release" } else { "windows-msvc-release" }
+  & cmake --preset $preset -S $repoRoot -B $buildPath
   if ($LASTEXITCODE -ne 0) { throw "Windows CMake configure failed" }
 }
 
@@ -48,15 +54,20 @@ $requiredCache = @(
   'HACDCPF_USE_GUROBI:BOOL=OFF',
   'HACDCPF_USE_SUITESPARSE:BOOL=ON',
   'MIPSOLVERS_ENABLE_IPO:BOOL=OFF',
-  'MIPSOLVERS_IPOPT_LINEAR_SOLVER:UNINITIALIZED=pardisomkl',
   'MIPSOLVERS_MKL_THREADING:STRING=SEQUENTIAL',
-  'MIPSOLVERS_USE_GUROBI:BOOL=OFF',
-  'MIPSOLVERS_USE_PREBUILT_THIRD_PARTY:STRING=ON'
+  'MIPSOLVERS_USE_GUROBI:BOOL=OFF'
 )
 foreach ($entry in $requiredCache) {
   if (-not $cache.Contains($entry)) {
     throw "Windows release invariant missing: $entry"
   }
+}
+if ($cache -notmatch '(?m)^MIPSOLVERS_IPOPT_LINEAR_SOLVER:[^=]+=pardisomkl\r?$') {
+  throw "PardisoMKL is required"
+}
+$expectedPrebuilt = if ($SourceDependencies) { "OFF" } else { "ON" }
+if ($cache -notmatch "(?m)^MIPSOLVERS_USE_PREBUILT_THIRD_PARTY:[^=]+=$expectedPrebuilt\r?`$") {
+  throw "Dependency build mode mismatch: expected prebuilt=$expectedPrebuilt"
 }
 
 $mipSourceMatch = [regex]::Match($cache, '(?m)^MIPSOLVERS_SOURCE_DIR:PATH=(.+)$')
@@ -83,9 +94,10 @@ if (Test-Path (Join-Path $mipSolversDir ".git")) {
 }
 
 if (-not $SkipBuild) {
-  & cmake --build --preset windows-msvc-release
+  & cmake --build $buildPath --config Release --parallel 8
   if ($LASTEXITCODE -ne 0) { throw "Windows Release build failed" }
-  & ctest --preset windows-msvc-release -R 'solver_capabilities' --output-on-failure
+  & ctest --test-dir $buildPath -C Release -R '^SolverCapabilities:' `
+      --no-tests=error --output-on-failure
   if ($LASTEXITCODE -ne 0) { throw "Windows package acceptance tests failed" }
 }
 
@@ -114,10 +126,19 @@ Copy-Item -LiteralPath (Join-Path $repoRoot "third_party/OpenXLSX-master/LICENSE
   -Destination (Join-Path $outputPath "licenses/OpenXLSX-LICENSE.md")
 
 $mklLicenseRoot = Join-Path $mipSolversDir "third_party/install/share/mipsolvers-third-party/licenses/oneapi-mkl"
+if ($SourceDependencies) {
+  $mklLicenseRoot = Join-Path $mipSolversDir "third_party/oneapi-mkl/licensing"
+}
 if (-not (Test-Path $mklLicenseRoot)) { throw "Packaged oneMKL license material is missing" }
 Copy-Item -LiteralPath $mklLicenseRoot -Destination (Join-Path $outputPath "licenses/oneapi-mkl") -Recurse
 
 $dependencyLicenseSources = @(
+  "third_party/boost_papilo/LICENSE_1_0.txt",
+  "highs/io/filereaderlp/LICENSE",
+  "scip/amplmp/LICENSE.rst",
+  "scip/cppad/COPYING",
+  "scip/dejavu/LICENSE",
+  "scip/tclique/LICENSE",
   "third_party/eigen/COPYING.MPL2",
   "third_party/eigen/COPYING.BSD",
   "third_party/nlohmann_json/LICENSE.MIT",
@@ -135,6 +156,8 @@ foreach ($relative in $dependencyLicenseSources) {
   $safeName = $relative.Replace('/', '-').Replace('\', '-')
   Copy-Item -LiteralPath $source -Destination (Join-Path $outputPath "licenses/$safeName")
 }
+Copy-Item -Path (Join-Path $PSScriptRoot "windows_licenses/*") `
+  -Destination (Join-Path $outputPath "licenses")
 
 $vcRedistCandidates = @()
 if ($env:VCToolsRedistDir) { $vcRedistCandidates += $env:VCToolsRedistDir }
@@ -240,6 +263,7 @@ $buildInfo = @(
   "MKLThreading=SEQUENTIAL",
   "SuiteSparse=ON",
   "Gurobi=OFF",
+  "DependencyMode=$(if ($SourceDependencies) { 'source' } else { 'prebuilt' })",
   "PackageAcceptance=solver-capabilities+standalone-edition-and-frontend-smoke"
 )
 Set-Content -LiteralPath (Join-Path $outputPath "BUILD_INFO.txt") -Value $buildInfo -Encoding ascii

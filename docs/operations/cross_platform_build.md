@@ -134,6 +134,12 @@ checkouts whose dependency commit matches the CMake pin:
 powershell -ExecutionPolicy Bypass -File tools/package_windows.ps1
 ```
 
+Use `-SourceDependencies` to select the `windows-source-release` preset. This
+builds the open-source dependencies from the sibling MIPSolvers checkout while
+still requiring its explicitly staged sequential oneMKL and zlib roots; it does
+not prepend a machine-global `C:/vcpkg` prefix to `CMAKE_PREFIX_PATH` and it
+does not enable CPLEX.
+
 The script configures and builds `windows-msvc-release`, runs the solver
 capability package gate, audits `run_gui_server.exe` with
 `dumpbin /DEPENDENTS`, and stages `bin/`, `web/`, `data/`, `external_data/`,
@@ -144,6 +150,19 @@ creates `dist/HySim-Windows-x64.zip` plus its SHA-256 sidecar. Extract the ZIP
 and run `Start-HySim.cmd`; no source checkout is required at runtime. The
 package gate is deliberately narrower than the full CTest sweep; consult the
 living development status for current numerical and external-fixture failures.
+
+After packaging, independently verify the archive from a new path containing
+spaces and an isolated `PATH`:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File tools/verify_windows_release.ps1
+```
+
+The verifier checks the ZIP sidecar and every manifest entry, starts only the
+extracted executable plus Windows system DLLs, loads the full GUI asset set and
+an internal hybrid case, and runs AC Newton PF. The retained extraction folder
+contains `verification.json` and server logs for release inspection. This gate
+does not replace the complete Windows CTest run.
 
 ## Hermetic Verification
 

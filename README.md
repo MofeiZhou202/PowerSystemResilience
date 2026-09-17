@@ -208,10 +208,19 @@ ctest --preset windows-msvc-release
 powershell -ExecutionPolicy Bypass -File tools/package_windows.ps1
 ```
 
+如需从 MIPSolvers 的本地源码依赖构建，而不消费预编译第三方包：
+
+```powershell
+powershell -ExecutionPolicy Bypass -File tools/package_windows.ps1 -SourceDependencies
+```
+
 产物位于 `dist/HySim-Windows-x64.zip`。解压后运行
 `Start-HySim.cmd`；正式 Windows preset 固定使用 MIPSolvers 自带的
 HiGHS/SCIP、Ipopt、sequential oneMKL/PardisoMKL 和 SuiteSparse，不链接
 开发机上的 Gurobi DLL。
+发布前另行运行 `tools/verify_windows_release.ps1`；它校验 ZIP/清单哈希，
+在含空格的新解压目录和隔离的 `PATH` 中启动服务器，并检查 GUI、
+内置算例和混合潮流。
 
 Trial Windows 包使用独立 preset，并在打包前强制运行 Trial 验收测试：
 

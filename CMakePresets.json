@@ -52,12 +52,27 @@
         "HACDCPF_ENABLE_IPOPT": "ON",
         "HACDCPF_USE_GUROBI": "OFF",
         "MIPSOLVERS_IPOPT_LINEAR_SOLVER": "pardisomkl",
+        "MIPSOLVERS_USE_MKL": "ON",
+        "MIPSOLVERS_MKL_THREADING": "SEQUENTIAL",
+        "MIPSOLVERS_ENABLE_IPO": "OFF",
+        "HACDCPF_TRIAL_EDITION": "OFF",
         "MIPSOLVERS_USE_PREBUILT_THIRD_PARTY": "ON",
         "MIPSOLVERS_PREBUILT_THIRD_PARTY_PREFIX": "${sourceDir}/../MIPSolvers/third_party/install",
         "CMAKE_MSVC_RUNTIME_LIBRARY": "MultiThreaded$<$<CONFIG:Debug>:Debug>DLL"
       },
       "environment": {
         "HACDCPF_OPF_LINEAR_SOLVER": "auto"
+      }
+    },
+    {
+      "name": "windows-source-release",
+      "displayName": "Windows MSVC Release with source-built dependencies",
+      "inherits": "windows-msvc-release",
+      "binaryDir": "${sourceDir}/build/windows-source-release",
+      "cacheVariables": {
+        "MIPSOLVERS_USE_PREBUILT_THIRD_PARTY": "OFF",
+        "MIPSOLVERS_MKL_ROOT": "${sourceDir}/../MIPSolvers/third_party/oneapi-mkl",
+        "ZLIB_ROOT": "${sourceDir}/../MIPSolvers/third_party/zlib-install"
       }
     },
     {
@@ -117,6 +132,12 @@
       "jobs": 8
     },
     {
+      "name": "windows-source-release",
+      "configurePreset": "windows-source-release",
+      "configuration": "Release",
+      "jobs": 6
+    },
+    {
       "name": "windows-vcpkg-release",
       "configurePreset": "windows-vcpkg-release",
       "configuration": "Release",
@@ -152,6 +173,14 @@
     {
       "name": "windows-msvc-release",
       "configurePreset": "windows-msvc-release",
+      "configuration": "Release",
+      "output": {
+        "outputOnFailure": true
+      }
+    },
+    {
+      "name": "windows-source-release",
+      "configurePreset": "windows-source-release",
       "configuration": "Release",
       "output": {
         "outputOnFailure": true

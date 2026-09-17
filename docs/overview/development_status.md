@@ -19,6 +19,24 @@ rebuilt `run_gui_server`; the registered Chromium test passed, as did
 `node --check` for `web/js/app.js` and the E2E script. This focused run did not
 repeat the full CTest suite and does not constitute Windows runtime validation.
 
+## Windows packaging contract integration (2026-09-17)
+
+The Windows packaging path now has an explicit `windows-source-release` mode
+that disables the prebuilt third-party package while retaining explicit staged
+oneMKL/zlib roots. It does not enable or redistribute CPLEX and does not inject
+a default vcpkg location into `CMAKE_PREFIX_PATH`; the existing explicit SuiteSparse
+compatibility hints remain unchanged. `tools/package_windows.ps1` validates the
+selected dependency mode and stages the audited open-source notices.
+`tools/verify_windows_release.ps1` independently checks the ZIP and per-file
+manifest, then runs the extracted server from a path containing spaces with an
+isolated `PATH`, verifies the GUI/help assets, loads `ieee14_acdc`, and runs AC
+Newton PF. The cross-platform `windows_packaging_contract` test validates the
+preset/script invariants. On macOS arm64, a fresh Debug/minimal configure
+registered the test and it passed 1/1; `cmake --list-presets=all` also parsed
+all three `windows-source-release` preset entries. Actual MSVC compilation, DLL
+inspection, packaging, and extracted-binary execution remain pending on a
+Windows host.
+
 ## MIPSolvers main upgrade full regression (2026-09-13)
 
 The clean sibling MIPSolvers `main` at
