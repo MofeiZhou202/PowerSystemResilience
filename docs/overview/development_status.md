@@ -6,6 +6,25 @@ This is the living handoff for verified build state and active engineering work.
 Update it in place; do not create dated copies. Source, registered tests, and
 the current Git worktrees remain authoritative.
 
+## Main integration verification (2026-09-17)
+
+The MATPOWER import, Windows source packaging, CPLEX routing, Windows I/O
+portability, and performance-evidence tooling changes were integrated linearly
+into `main` and verified together. The macOS Release build completed for
+`run_gui_server`, both I/O tests, solver capabilities, UC routing, generic
+market, and Southern market targets. Focused runs passed: solver capabilities
+63 assertions, UC routing 35, generic market CPLEX fallback 6, Southern CPLEX
+unavailable routing 3, ETAP fidelity 15, and SVG Unicode paths 8. The four new
+registered gates passed 4/4, including the real-Chromium MATPOWER import E2E.
+Static Windows contracts, Python/JavaScript syntax, CMake preset parsing, and
+documentation anchors also passed.
+
+This combined run used local MIPSolvers `8fdea5a`, while the repository records
+pin `864b147`; it therefore validates the integrated Simulation changes but is
+not a reproducible pinned-dependency release baseline. CPLEX was disabled in
+this combined build, and no full CTest, Windows runtime, packaging execution,
+or complete performance matrix was run.
+
 ## MATPOWER import contract integration (2026-09-17)
 
 MATPOWER import now only replaces the session model and refreshes the Canvas;
