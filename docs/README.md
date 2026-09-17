@@ -148,6 +148,7 @@ Native固定整数LP修复、GAP退出条件及IEEE118恢复出清的证据见�
 | Python 客户端边界 | 契约 | [Python API](reference/python_api.md) |
 | 模块文档覆盖与缺口 | 状态 | [模块文档地图](overview/module_documentation_map.md) |
 | 代码审计深度与开放问题 | 状态 | [模块代码审计](testing/module_code_audit.md) |
+| 性能证据采集工具与口径 | 契约 | [性能工具契约](testing/performance_tooling.md) |
 | 混合 AC/DC OPF 两步原始对偶内点法论文稿件（可行性恢复 + 全状态延拓） | 研究资料 | [certified_warmstart_parity_ipm_opf](latex/paper/certified_warmstart_parity_ipm_opf/README.md) |
 | 上述论文的三页 PES Letter 浓缩初稿（2026-09-14） | 研究资料 | [pes_letter_two_step_ipm_opf](latex/paper/pes_letter_two_step_ipm_opf/README.md) |
 

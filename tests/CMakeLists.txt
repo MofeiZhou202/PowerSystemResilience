@@ -224,6 +224,15 @@ if(Python3_EXECUTABLE)
   set_tests_properties(windows_io_portability_contract PROPERTIES
     LABELS "io;windows;contract" TIMEOUT 30)
 endif()
+if(Python3_EXECUTABLE AND
+   EXISTS "${CMAKE_SOURCE_DIR}/tools/module_performance_audit_test.py")
+  add_test(NAME module_performance_audit_unit
+    COMMAND "${Python3_EXECUTABLE}"
+            "${CMAKE_SOURCE_DIR}/tools/module_performance_audit_test.py")
+  set_tests_properties(module_performance_audit_unit PROPERTIES
+    LABELS "performance;tooling;python"
+    TIMEOUT 30)
+endif()
 # Documentation source-anchor drift guard: every file:symbol anchor in the
 # manuals / design docs must still resolve against the source tree.  Pure
 # Python, no build artifacts required, so it runs on every ctest sweep and in

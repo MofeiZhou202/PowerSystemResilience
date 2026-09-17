@@ -85,6 +85,28 @@ execution and a real GridLAB-D installation remain required before claiming
 Windows runtime validation; the Windows branch still has no enforced process
 timeout for this `std::system` path.
 
+## Performance evidence tooling integration (2026-09-17)
+
+The integration branch adds lightweight, generated-output-free drivers for
+GUI API request timing, module test process timing, power-flow backend
+comparison, and the Windows module matrix. They record executable/source
+hashes, environment, raw API responses, numerical status, timeout status, and
+where available process-tree peak working set. Timings include harness and
+transport overhead as documented; no acceptance threshold or performance
+claim is introduced. `psutil` is optional: without it execution and timeout
+cleanup remain available while memory observations are explicitly null.
+
+The focused Python unit test covers failed-process evidence, descendant cleanup
+on timeout, replayable HTTP error evidence, and single-/multi-configuration
+CMake test lookup. It passed 4/4
+directly and 1/1 through its registered CTest entry on macOS arm64. All four
+driver `--help` paths parsed, all five Python files compiled to bytecode, the
+inventory-only path found 23 module directories, and the documentation anchor
+check reported zero failures. The CTest-only Debug configure used the local
+MIPSolvers checkout whose HEAD differed from the recorded pin; no C++ target or
+solver was built or exercised. Full benchmark matrices, Windows execution,
+solver comparisons, and generated JSON evidence are not part of this change.
+
 ## MIPSolvers main upgrade full regression (2026-09-13)
 
 The clean sibling MIPSolvers `main` at
