@@ -1,0 +1,424 @@
+% numerical_validation.tex —— engine 手册：数值验证与基准证据
+% 本文件为证据转写章：只复述仓库内真实存在的测试目标、基线文件、
+% 报告目录与归档记录；每个数字注明出处（文档/目录、日期、平台、构建）
+% 与验证层级。遵循 docs/modules/README.md「数值证据规范」与仓库
+% AGENTS.md 的诚实口径：未执行的交叉验证不得写成已完成。
+
+\section{数值验证与基准证据}
+
+\begin{boundarynote}
+本章不给出任何新的测量结果，也不对所列数字做超出原始记录的解读。每个
+性能/精度结论都注明四项出处要素：证据文件（手册章节、归档推导记录或
+\texttt{reports/} 原始数据）、测量日期、平台与构建配置、验证层级。
+历史快照只描述其对应提交与机器的状态，不能直接代替当前提交的验证；
+不同日期、不同机器、不同计时协议得到的绝对时间不可混算
+（口径与 \texttt{docs/manual/09-testing-benchmarks.md} §9.5 一致）。
+\end{boundarynote}
+
+\subsection{验证层级与证据口径}
+
+仓库的数值证据按验证层级由低到高分为四档：
+
+\begin{enumerate}
+  \item \textbf{CTest 单元/集成测试}（\texttt{unit}/\texttt{integration}
+        标签）：正确性门禁，断言级验证；其 wall time 不构成性能证据。
+  \item \textbf{冒烟基准}（\texttt{benchmark} 标签）：小样本、少重复的
+        结果一致性检查，只证明路径可用，不支持性能排名。
+  \item \textbf{数据集回归与协议化基准}：NETLIB 90 案例基准与
+        MIPLIB 2017 协议，固定数据、固定时限、带原模型审计，
+        结果以 \texttt{reports/} 下的机器可读 JSON/CSV 落盘。
+  \item \textbf{独立内核微基准}：\texttt{benchmark/} 下的
+        \texttt{native\_dual\_*} 等独立 harness，用于在改动进入生产路径
+        之前先证明逐位一致性与字节/指令数收益。
+\end{enumerate}
+
+三条判读纪律贯穿全章（出处：\texttt{docs/manual/09-testing-benchmarks.md}
+§9.5）：求解器的 \texttt{success}/\texttt{Optimal} 状态字符串不等于解正确，
+正确性以原模型审计为准；性能结论只能来自 Release 构建、固定数据、固定线程
+与固定重复次数，普通单元测试的 wall time 不能当作求解器性能基准；配对几何
+均值、全集几何均值与全量总时间回答三个不同问题，不能互相替代。
+
+\subsection{单元与集成测试矩阵}
+\label{sec:engine-nv-testmatrix}
+
+测试目标由根 \texttt{CMakeLists.txt} 中的宏
+\texttt{mipsolvers\_add\_test} 统一注册：源文件存在于 \texttt{tests/} 时
+生成同名可执行文件（输出目录为 \texttt{tests/}），链接 \texttt{mipsolvers}
+与 Catch2，并以 \texttt{TIER} 参数写入 CTest 标签。SCUC 相关目标
+（\texttt{test\_scuc\_module}、\texttt{test\_market\_simulation}）只在
+\texttt{MIPSOLVERS\_BUILD\_SCUC=ON} 时注册，不属于本手册范围；
+\texttt{regression\_nlp\_hs071} 为条件注册的集成测试（调用
+\srcpath{benchmark/nlp\_open\_benchmark.cpp:main}，参数 \texttt{1 1e-7}，
+环境固定 \texttt{OMP\_NUM\_THREADS=1;MKL\_NUM\_THREADS=1}）。
+实际注册数以\texttt{ctest -N} 在对应构建上的列举为准；下表为当前
+\texttt{CMakeLists.txt} 的注册快照（已逐一核对源文件存在性）。
+
+\begin{footnotesize}
+\begin{longtable}{@{}llp{6.6cm}@{}}
+\toprule
+CTest 目标 & 标签 & 覆盖面（源文件见 \texttt{tests/同名.cpp}）\\
+\midrule
+\endhead
+\bottomrule
+\endfoot
+\texttt{test\_engine\_api} & unit &
+  引擎公共 API、线性代数后端注册与行为；含 \texttt{EigenSparseLUSolver}
+  接受空 $0\times0$ 系统不崩溃的 Windows 回归（59 个 \texttt{TEST\_CASE}）\\
+\texttt{test\_adapter\_registry} & unit &
+  外部求解器适配器注册表（HiGHS/SCIP/Ipopt 等）的查找与能力声明（7 个用例）\\
+\texttt{test\_problem\_validation} & unit &
+  模型校验入口：维数、系数、边界等结构化错误的拒绝路径（9 个用例）\\
+\texttt{test\_presolve} & unit & 通用预求解变换与还原（19 个用例）\\
+\texttt{test\_lp\_presolve} & unit & LP 专用预求解（35 个用例）\\
+\texttt{test\_lp\_solver} & unit & LP 求解器门面与选项路由（6 个用例）\\
+\texttt{test\_dual\_simplex} & unit &
+  原生对偶单纯形内核（链接 \texttt{highs::highs} 以共用数据结构；
+  81 个用例，为引擎侧最大单元套件）\\
+\texttt{test\_ipm\_solver} & unit &
+  LP/QP/NLP 原始-对偶内点法：收敛、终止门、正则化路径（54 个用例）\\
+\texttt{test\_numerical\_stability} & unit &
+  病态缩放与近奇异模型的数值稳定性（27 个用例）\\
+\texttt{test\_conic\_ipm} & unit &
+  SOCP/SDP 锥内点法；\texttt{MIPSOLVERS\_USE\_OPENMP=1} 下额外编译
+  并行确定性区段（17 个用例）\\
+\texttt{test\_milp\_solver} & unit &
+  原生 MILP 求解器；含固定种子 \texttt{--rng-seed 1} 的可复现性回归
+  （55 个用例）\\
+\texttt{test\_branch\_and\_cut} & integration &
+  分支定切全流程集成：根节点流水线、割平面、树搜索（35 个用例）\\
+\texttt{test\_netlib\_regression} & integration &
+  NETLIB 子集回归：\srcpath{tests/test\_netlib\_regression.cpp:read\_mps\_as\_lp}
+  读取 \texttt{tests/data/netlib/} 下 afiro、adlittle、share2b、stocfor1、
+  kb2 五个有公布最优目标的案例，经注册的 LP 求解器与原生内核求解并比对
+  公布目标（3 个用例）\\
+\texttt{test\_ipopt\_parameter\_stability} & integration &
+  Ipopt 适配器参数稳定性（8 个用例）\\
+\texttt{milp\_benchmark} & benchmark &
+  \srcpath{benchmark/milp\_benchmark\_runner.cpp:main} 的
+  \texttt{--smoke --no-highs-adapter} 确定性 6 母线冒烟，JSON 写入构建树\\
+\texttt{milp\_benchmark\_regression} & benchmark &
+  \srcpath{benchmark/check\_perf\_regression.py} 将上一目标输出的 JSON
+  与已签入基线 \srcpath{benchmark/milp\_benchmark\_baseline.json} 按容差
+  0.25 比对；\texttt{DEPENDS milp\_benchmark}\\
+\texttt{native\_kernel\_comparison} & benchmark &
+  \srcpath{benchmark/native\_kernel\_comparison.cpp:main} 的
+  \texttt{--smoke --check --time-limit 60}：纯原生数值栈对 HiGHS 的
+  目标一致性冒烟（详见 \ref{sec:engine-nv-microbench} 节）\\
+\end{longtable}
+\end{footnotesize}
+
+\srcpath{tests/baselines/} 提供 JSON 基线加载工具
+\srcpath{tests/baselines/load\_baselines.hpp:baselines::load} 与
+\texttt{solver\_baselines.json}；当前由 CTest 实际消费的已签入回归基线是
+\texttt{benchmark/milp\_benchmark\_baseline.json}（见上表）。
+
+历史快照（均为 Windows Release 构建上的全量 CTest，出处：
+\texttt{docs/manual/09-testing-benchmarks.md}）：
+
+\begin{itemize}
+  \item 2026-08-18（\texttt{build/windows-msvc-release}，Ninja
+        Multi-Config/MSVC）：18/18 通过（unit 13 + integration 3 +
+        benchmark 2）；历史对照 2026-08-06 为 16/18，当时的两个失败项
+        （\texttt{test\_milp\_solver} 期望与数据不一致、
+        \texttt{test\_ipopt\_parameter\_stability} 逐变量 margin 未满足）
+        已不复现（§9.2.1）。
+  \item 2026-09-11 离线复评（修复前提交 \texttt{75c6e192}，Windows 11 /
+        i9-12900H / MSVC 19.44 Release，本地 sequential oneMKL，SCUC 与
+        Python 未启用）：19/19 通过，14 unit + 3 integration + 2 benchmark
+        （§9.6）。
+  \item 2026-09-11 修复分支 \texttt{9652ddb9}（INTEL/4 线程层、串行运行、
+        计时关闭）：20/20 通过（14 unit、4 integration、2 benchmark），
+        305.41 秒（§9.7.1）；合并提交 \texttt{1d31f0eb} 的验收为 20/20
+        通过、240.85 秒（§9.8）。这两个 wall time 与编译/其他负载并发，
+        不能用于求解器速度排名（§9.9 同口径）。
+\end{itemize}
+
+各快照的目标数不同，原因是配置选项（SCUC、本地 Ipopt、Python 是否启用）
+改变注册集合；引用时须连同日期与配置一起引用。
+
+\subsection{NETLIB 90 案例基准}
+\label{sec:engine-nv-netlib}
+
+\subsubsection{数据来源与基准契约}
+
+数据为 90 个解压后的标准 NETLIB 线性规划 MPS 算例，镜像自
+\texttt{coin-or-tools/Data-Netlib}（提交 \texttt{f1cc4230}），由
+\srcpath{tools/fetch\_netlib.py} 抓取；\texttt{tests/data/mps\_manifest.csv}
+保存每个文件的 SHA-256 与参考目标（参考目标取 NETLIB 官方 readme，修订表中
+有 CPLEX 双精度值的案例优先取 CPLEX 值）。出处与许可说明见
+\srcpath{tests/data/NETLIB\_PROVENANCE.md}；数据目录默认被
+\texttt{.gitignore} 排除，仅作本机测试数据。
+
+基准程序为 \srcpath{benchmark/netlib\_solver\_benchmark.cpp:main}（构建产物
+在 \texttt{tests/Release/} 下）。验收对象是\textbf{完全绕过 HiGHS
+presolve 的 Native IPM direct 路径}：预处理、IPM 迭代、Newton 系统选择、
+停止判定与解后审计全由原生路径完成；CHOLMOD/PARDISO 只是本地链接的数值
+线性代数内核。计时只含求解调用，不含 MPS 解析。2026-08-06 全量复验的
+契约（出处：\texttt{docs/manual/09-testing-benchmarks.md} §9.3.1）：
+Windows 11 Pro 64-bit（10.0.26200）、Intel Core Ultra 9 285H（16 核 /
+32 GiB）、MSVC 19.44、SuiteSparse/CHOLMOD + MKL PARDISO 后端、求解器时限
+15 s、每案例独立子进程隔离（进程硬时限 20 s）、迭代上限 100{,}000。
+
+正确性不依赖求解器状态字符串：基准在原始未 presolve 的 LP 上重算目标与
+可行性（\srcpath{benchmark/netlib\_solver\_benchmark.cpp:audit}），同时满足
+\texttt{success=true}、目标相对误差 $\le 10^{-5}$、归一化原始可行性违反
+$\le 10^{-7}$ 才记为 \texttt{accurate}；阈值对原生与对照求解器完全相同
+（§9.3.2）。
+
+\subsubsection{主要结论与已知例外}
+
+2026-08-06 全量复验（出处：§9.3.3）：Native IPM direct 为
+\textbf{90/90 success、90/90 accurate}；对照 HiGHS IPM 为 89/90 success、
+88/90 accurate。90 个原生解中最大目标相对误差 $1.250\times10^{-6}$、最大
+归一化原始违反 $8.689\times10^{-8}$，均在发布阈值内（§9.3.2）。典型性能
+以配对几何均值计：在 88 个双方都 accurate 的同名案例上 Native 11.7404 ms
+对 HiGHS 15.2844 ms，配对加速 1.302x；全集几何均值 12.5773 ms 对
+15.6772 ms。但\textbf{全量总时间}原生为 10{,}129.4127 ms，慢于 HiGHS 的
+5{,}300.4629 ms——长尾案例 dfl001、greenbea、maros-r7、pilot87 决定总时间
+差距（§9.3.4）。结论只能表述为「全部通过、配对典型性能更快且结果更准」，
+不能宣称全量总时间或尾延迟领先。同批数据上 SCIP direct MPS reader 的单进程
+对照为 90/90 success、89/90 accurate（唯一未过审计的是 forplan，其 MPS
+reader 对 BOUNDS 段报警并返回目标 0）；该轮与隔离 HiGHS 报告计时协议不同
+（单进程对独立子进程），两个表的绝对时间不能混合计算。
+
+HiGHS IPM 未通过原模型审计的两个案例（§9.3.4，说明 \texttt{Optimal} 状态
+不等于解正确）：ganges 目标相对误差 $1.801\times10^{-2}$；greenbea 返回
+\texttt{Unknown} 且归一化原始违反 $1.432\times10^{-2}$。
+
+2026-08-18 的 H1--H7 性能工作（推导记录：
+\texttt{docs/archive/lp\_tail\_elimination\_2026-08-18.md}；结论转述自
+§9.2.1）修复了 Windows 构建中 CHOLMOD 因缺 BLAS 降级为 simplicial 的缺陷
+（H1，回落到静态 MKL，supernodal 恢复），并完成 INTEL 线程层升级（H4）：
+dfl001 分解段 6.18 s 降至 1.64 s（16 线程 3.8x）；h7 轮最终口径为 Native
+IPM direct 90/90 success + 90/90 accurate，同日 ctest 18/18。固定线程数下
+迭代数逐位一致、目标值 run-to-run 相对差约 $4\times10^{-13}$；
+\texttt{MKL\_CBWR=AUTO/AVX2} 会使 PARDISO 求解段劣化 4--5 倍，明确不得
+启用。
+
+2026-09-11 离线复评（出处：§9.6 与
+\texttt{docs/archive/windows\_offline\_evaluation\_2026-09-11.md}；平台为
+Windows 11 / i9-12900H / MSVC 19.44 Release / 本地 sequential oneMKL，
+原始数据在 \texttt{reports/windows\_eval\_20260911/}）：NETLIB 90 案例
+$\times$ 3 次重复下，原生 IPM direct 与 HiGHS simplex 均 270/270 准确；
+关闭 crossover 的 HiGHS IPM 为 264/270（ganges、greenbea）。已知例外：
+Native-Auto 批次为 264/270——\textbf{greenbea 超时、tuff 返回不准确的
+Optimal}，且 tuff 在原生对偶单纯形加 HiGHS presolve 路径上复现。该记录
+明确要求：不能仅凭 CTest 通过或 \texttt{success} 字段发布自动求解结果。
+
+LP 分解计时与 INTEL 线程稳定性协议（出处：§9.7、
+\texttt{docs/archive/windows\_lp\_stability\_2026-09-11.md}；脚本
+\srcpath{tools/windows\_lp\_stability.py:main} 按 overhead/stability/gates
+三阶段执行，固定 \texttt{OMP\_NUM\_THREADS=1}、\texttt{MKL\_DYNAMIC=FALSE}
+并核对 \texttt{mkl\_max\_threads}）：对 dfl001、greenbea、maros-r7 各做
+20 组独立进程测量（奇数组 2/4 线程、偶数组 4/2，预热不计入样本），报告
+中位数、nearest-rank P95 与 IQR。修复分支 \texttt{9652ddb9} 上两档均
+60/60 准确；4 线程相对 2 线程的区组三例合计中位数降 18.50\%、P95 降
+17.72\%，通过预先固定的性能门（原预测 5--15\%，超出预测的调查已写回
+推导记录 R6）。合并验收（提交 \texttt{1d31f0eb}，§9.8 与
+\texttt{docs/archive/windows\_release\_merge\_2026-09-11.md}）中 NETLIB
+两档全集 1080/1080 准确，4 比 2 线程区组合计中位数降 24.60\%、P95 降
+22.41\%；但该批绝对耗时高于历史批次且波动明显，不能把 24.60\% 解释为
+合并相对旧版本的加速。greenbea 迭代轨迹仍不稳定，长尾未被宣称消除。
+P95 是本工作站的样本估计，不构成跨机器的尾延迟保证。
+
+\subsubsection{机器可读证据}
+
+\texttt{reports/}（默认被 Git 忽略）保存各轮原始结果：2026-08-06 基线轮
+为 90 个逐案例隔离 JSON（\texttt{baseline\_<案例>.json}），另有
+\texttt{h1\_*}--\texttt{h8\_*}、\texttt{p1\_*} 等后续轮次的同构序列；
+\srcpath{reports/aggregate.py} 按前缀聚合隔离 JSON，计算每个求解器的
+success/accurate 计数、总时间、中位数与两两配对几何均值。引用本章任何
+NETLIB 数字时，应能回溯到对应前缀的逐案例文件。
+
+\subsection{MIPLIB 2017 协议与 CPLEX 对照}
+\label{sec:engine-nv-miplib}
+
+\subsubsection{协议定义}
+
+可复现比较协议固定于
+\texttt{docs/archive/miplib2017\_benchmark\_protocol\_2026-08-25.md}：在
+240 实例的 MIPLIB 2017 benchmark 集上做截尾单线程运行；一次运行记为
+\texttt{solved} 当且仅当后端证明了参考状态且返回的 incumbent 通过原模型
+可行性、整数性与目标审计（参考不可行被证明亦计 solved）。固定指标：
+
+\begin{itemize}
+  \item \textbf{PAR-10}：solved 运行取实测求解时间，其余取 $10T$（$T$ 为
+        时限）；
+  \item \textbf{shifted geomean}（时间）：$\exp(\bar{\ell})-1000$ ms，其中
+        $\bar{\ell}$ 为 $\ln(t_i+1000)$ 的均值；
+  \item \textbf{shifted geomean}（节点数）：在 solved 且有节点数的运行上，
+        $\exp(\mathrm{mean}\ln(n_i+100))-100$；节点数只是描述量——各后端
+        presolve、割分离与节点定义不同，节点比只在共同 solved 运行上计算，
+        绝不替代 PAR-10；
+  \item 两两不确定度：先在实例内聚合重复，再做 10{,}000 次实例级
+        bootstrap 取 95\% 百分位区间。
+\end{itemize}
+
+协议同时记录了两处「测量与预测不符触发的再推导」（stability-gate 的
+\texttt{HVector} 陈旧基维数缺陷、gap-certificate 归一化），其诊断顺序
+（实现失真 → 机器/成本模型 → 假设违反 → 理论错误）即仓库 AGENTS.md 的
+mismatch 协议实例。其实测验证在 Apple M4 Max / macOS 上完成：ASan 与
+Release 的固定种子 100 次循环均 100/100，双调度 CTest 18/18；12 实例
+10 秒 pilot 求解数 native/HiGHS/SCIP 为 0/2/2，与修正后预测完全一致。
+该 pilot 累计仅 369.4 求解器秒、每后端 solved 0--2 例，协议文档明确将其
+定性为冒烟/稳定性实验；\textbf{240 实例正式campaign 尚未执行}，仍待明确
+的科学时限选择，不得把 pilot 数字当作求解器性能对比结论。
+
+基准程序 \srcpath{benchmark/miplib2017\_benchmark.cpp:main} 递归扫描
+\texttt{.mps[.gz]} 并用 \texttt{.solu} 参考文件审计；模型导入与优化分别
+计为 \texttt{read\_ms}/\texttt{solve\_ms}，\texttt{--time-limit} 在导入
+完成后才作用于优化阶段；审计驱动脚本为
+\srcpath{tools/run\_miplib2017\_audit.py}。
+
+\subsubsection{CPLEX 对照（2026-09-12，Windows/MSVC Release）}
+
+出处：\texttt{docs/manual/09-testing-benchmarks.md} §9.4.3 与
+\texttt{docs/archive/cplex\_callable\_library\_integration\_2026-09-12.md}；
+机器可读结果为 \texttt{reports/miplib\_cplex\_pilot.\{json,csv\}} 与
+\texttt{reports/miplib\_cplex\_12case.\{json,csv\}}。
+
+两实例 pilot（\texttt{mas74}、\texttt{sct2}，seed 0、3 秒时限、单线程）：
+CPLEX 最终 gap 10.3008\% 与 0.02690\%，HiGHS 17.4666\% 与 23.4491\%，
+Native/HiGHS-LP 39.6664\% 与 3.1466\%；六个 incumbent 均通过原模型审计，
+但\textbf{六次运行均未证明最优}，PAR-10 均为 30 秒；Native 在
+\texttt{sct2} 上还出现 3 秒配置运行 8.739 秒的 deadline 失真。该轮只能
+作为接口正确性与短时 gap pilot。
+
+随后对本机已有全部 12 个样本按相同 seed/gap/3 秒设置复跑，并修正了
+HiGHS 时限曾在 \texttt{readModel} 前生效的计时口径错误：CPLEX 为 1 个
+proven、8 个 feasible、0 个审计失败，HiGHS 为 0、5、0；双方都有
+incumbent 的 5 例中 CPLEX 最终 gap 较小 4 例。CPLEX 的 PAR-10 shifted
+geomean 为 23460.1 ms，HiGHS 为 30000.0 ms（12 例均打满时限，两者都接近
+上限 $10\times3000$ ms）；CPLEX 最大 import/(import+optimize) 为
+4.6122\%，通过预注册的 5\% 门。该扩展仍不是严格等墙钟排名：Windows
+runner 没有进程级 hard deadline（记录到 CPLEX 最大
+\texttt{solve\_ms=3712}、HiGHS 最大 \texttt{solve\_ms=10033}），只有一个
+seed，且本构建关闭 Gurobi——因此只能视为 CPLEX 的有利短预算信号，
+\textbf{不能证明通用 MILP 性能已与 Gurobi 比肩}。
+
+\subsection{微基准清单}
+\label{sec:engine-nv-microbench}
+
+\texttt{benchmark/} 下的基准目标均输出到 \texttt{tests/} 目录；是否注册为
+CTest 见 \ref{sec:engine-nv-testmatrix} 节。下表已按 CMakeLists 注册段与
+源文件头部注释逐一核对。
+
+\begin{footnotesize}
+\begin{longtable}{@{}p{4.6cm}p{9.6cm}@{}}
+\toprule
+目标（源文件） & 用途与运行方式 \\
+\midrule
+\endhead
+\bottomrule
+\endfoot
+\texttt{native\_dual\_bfrt\_simd\_benchmark}\newline
+\srcpath{benchmark/native\_dual\_bfrt\_simd\_benchmark.cpp:main} &
+  对偶单纯形 Phase-II BFRT 预滤波的独立实验（自带
+  \texttt{native\_dual\_bfrt\_simd\_kernel.cpp}）：先证明精确分类与更低的
+  指令/访存计数，再谈墙钟；不链接进求解器，非 CTest，手动运行。\\
+\texttt{native\_dual\_price\_resident\_benchmark}\newline
+\srcpath{benchmark/native\_dual\_price\_resident\_benchmark.cpp:main} &
+  S2 独立内核 harness：\texttt{row\_ep} 的 PRICE/dot-error-bound 消费者，
+  「物化后读」对「直接读分解后端稠密驻留视图」；在生产分布 fixtures 上
+  先证逐位一致，再报告解析字节模型与墙钟。非 CTest。\\
+\texttt{native\_dual\_colaq\_pivot\_benchmark}\newline
+  \srcpath{benchmark/native\_dual\_colaq\_pivot\_benchmark.cpp:main} &
+  S2 独立内核 harness：\texttt{col\_aq} 主元元素读取，
+  \texttt{IndexedVector::at()} 的 O(support) 建表对 O(1) 驻留稠密读；
+  逐 pivot 固定开销，无法摊销。非 CTest。\\
+\texttt{native\_dual\_price\_simd\_benchmark}\newline
+  \srcpath{benchmark/native\_dual\_price\_simd\_benchmark.cpp:main} &
+  S7 独立内核 harness：PRICE 步 $A^{\top} r_{EP}$ 的 SIMD 门检，在
+  d2q06c 形态 fixture 上比较行向 SPA 散射与列向 gather-dot（标量对
+  NEON），验收门为动态指令数与有效字节数同时下降，墙钟仅作次级信号。
+  非 CTest。\\
+\texttt{native\_dual\_workspace\_price\_benchmark}\newline
+  \srcpath{benchmark/native\_dual\_workspace\_price\_benchmark.cpp:main} &
+  P1+P2 独立内核 harness：整条 PRICE 数据通路两种形态对照（epoch 戳
+  稀疏累加器三流多趟 对 驻留稠密单行单流单趟），报告门检指标加墙钟。
+  非 CTest。\\
+\texttt{kkt\_reuse\_benchmark}\newline
+  \srcpath{benchmark/kkt\_reuse\_benchmark.cpp:main} &
+  固定模式 KKT 生命周期基准：一次符号分析、重复数值分解、每次分解多
+  右端项。非 CTest，手动运行。\\
+\texttt{klu\_refactor\_benchmark}\newline
+  \srcpath{benchmark/klu\_refactor\_benchmark.cpp:main} &
+  KLU 固定模式数值重分解基准；CMake 注释明确其墙钟只作发布证据记录，
+  不作机器相关的正确性门，故刻意不注册为 CTest。\\
+\texttt{netlib\_solver\_benchmark}\newline
+  \srcpath{benchmark/netlib\_solver\_benchmark.cpp:main} &
+  NETLIB 跨算法端到端基准（见 \ref{sec:engine-nv-netlib} 节）；完整矩阵
+  含一阶与通用 NLP 方法、耗时远超集成回归子集，刻意只做显式基准目标。
+  常用复现命令见 \texttt{docs/manual/09-testing-benchmarks.md} §9.4.2。\\
+\texttt{miplib2017\_benchmark}\newline
+  \srcpath{benchmark/miplib2017\_benchmark.cpp:main} &
+  MIPLIB 2017 标准 MILP 比较（见 \ref{sec:engine-nv-miplib} 节）；保留
+  MPS 整数性并审计每个 incumbent。非 CTest。\\
+\texttt{milp\_benchmark\_runner}\newline
+  \srcpath{benchmark/milp\_benchmark\_runner.cpp:main} &
+  StrictHiGHS 改进项（warm-start 注入、目标截断、stall 早停、根节点
+  IPM 等）在合成 SCUC 实例上的效果测量；CTest 只注册其
+  \texttt{--smoke} 形态（\texttt{milp\_benchmark}）。\\
+\texttt{native\_kernel\_comparison}\newline
+  \srcpath{benchmark/native\_kernel\_comparison.cpp:main} &
+  纯原生数值栈（原生 B\&C + 原生对偶单纯形/IPM 作 LP 内核）对裸 API
+  HiGHS 的 MILP/LP 双层对照，含对抗性缩放 LP 探针；CTest 注册
+  \texttt{--smoke --check --time-limit 60}，\texttt{--check} 把必过行
+  转为退出码。其单次样本太小、未重复，只作正确性烟雾测试，不能作性能
+  排名依据（§9.4.4）。\\
+\texttt{solver\_comparison}\newline
+  \srcpath{benchmark/solver\_comparison.cpp:main} &
+  同一合成 SCUC MIP 在 Native B\&C、StrictHiGHS、Gurobi（如有许可）、
+  HiGHS、SCIP（经 MINLP 重表达）上的并排比较；交互式诊断工具，
+  非 CTest。\\
+\texttt{nlp\_open\_benchmark}\newline
+  \srcpath{benchmark/nlp\_open\_benchmark.cpp:main} &
+  原生 Filter-IPM 对 Ipopt 的 HS071 对照（同回调、导数、起点与容差）；
+  条件注册为集成测试 \texttt{regression\_nlp\_hs071}。\\
+\texttt{conic\_benchmark}\newline
+  \srcpath{benchmark/conic\_benchmark.cpp:main} &
+  合成 SOCP/SDP 套件（植入自对偶解）的锥 IPM 驱动：逐案例计时与线程
+  伸缩表，可写 JSON；兼作冒烟（任一运行非 \texttt{optimal} 即非零
+  退出）。非 CTest 注册目标。\\
+\end{longtable}
+\end{footnotesize}
+
+另有 \texttt{opf\_scale\_probe}（\srcpath{benchmark/opf\_scale\_probe.cpp:main}），
+CMake 注释标注为临时 OPF 可伸缩性探针，用后即删，不构成长期证据链。
+
+\subsection{独立性声明与未覆盖边界}
+
+\begin{boundarynote}
+下列边界与 \texttt{docs/manual/09-testing-benchmarks.md} §9.5--§9.9 及
+各归档记录口径一致；超出边界的结论一概不成立。
+\end{boundarynote}
+
+\textbf{已验证的平台/后端组合。}本章全部 Windows 数字来自两台本机
+Windows 11 / MSVC 19.44 / Release 构建：Core Ultra 9 285H（2026-08 批次）
+与 i9-12900H（2026-09 批次）。稀疏线性代数的验证基线为本地
+\textbf{sequential oneMKL} 静态链接（§9.6 基线）；INTEL 线程层
+（2/4 线程）只在 LP direct 的 dfl001/greenbea/maros-r7 长尾与 NETLIB 全集
+上做过 20 组稳定性验收（§9.7--§9.8），Auto/混合负载没有对应验收，保守
+建议仍为 2 线程。MIPLIB 协议的稳定性与归一化验证在 Apple M4 Max / macOS
+上完成（见 \ref{sec:engine-nv-miplib} 节）。LP 分解计时诊断不覆盖 macOS
+Accelerate 内部分解细分，其验收范围仅为 Windows 后端（§9.7）。
+
+\textbf{未验证的组合。}以下情形没有任何已执行的交叉验证，不得外推：
+Linux 平台与 GCC/Clang 构建；macOS 上的 NETLIB 90 全量基准与 INTEL 线程
+协议；Gurobi 后端（Windows 各验证批次均在 configure 时关闭）；PaPILO
+并发预求解；\texttt{MKL\_CBWR} 开启下的任何性能或复现性结论（实测劣化
+4--5 倍，明确禁用）；SCUC 与 Python 目标在 2026-09-11 各批次中未启用，
+其最新状态须以相应配置的实际 CTest 列举为准。
+
+\textbf{结论强度的上限。}
+(1) 单元/集成测试的 wall time 与编译、其他负载并发，不构成求解器性能
+证据；(2) \texttt{success}/\texttt{Optimal} 状态字符串不构成正确性证据，
+发布以原模型审计为准，greenbea/tuff 个案（§9.6）是现成的反例；
+(3) 配对几何均值、全集几何均值、全量总时间回答三个不同问题，Native 的
+NETLIB 结论只在「配对典型性能」口径下领先，全量总时间与尾延迟不领先；
+(4) 隔离子进程与单进程计时协议的绝对时间不可混算；(5) MIPLIB 侧的
+CPLEX 对照是单 seed、短预算、无进程级 hard deadline 的 pilot 信号，
+且 240 实例正式协议campaign 尚未执行，不支持任何总体排名结论；
+(6) \texttt{reports/} 默认被 Git 忽略，跨机复现须按
+\texttt{docs/manual/09-testing-benchmarks.md} §9.4 的命令重新生成原始
+证据，而不是引用他机落盘的数字。

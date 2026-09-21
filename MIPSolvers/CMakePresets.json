@@ -1,0 +1,184 @@
+{
+  "version": 2,
+  "cmakeMinimumRequired": {
+    "major": 3,
+    "minor": 20,
+    "patch": 0
+  },
+  "configurePresets": [
+    {
+      "name": "base",
+      "hidden": true,
+      "binaryDir": "${sourceDir}/build/${presetName}",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Release",
+        "MIPSOLVERS_BUILD_TESTS": "ON",
+        "MIPSOLVERS_BUILD_SCUC": "OFF",
+        "MIPSOLVERS_BUILD_SCUC_CASE_BUILDER": "OFF",
+        "MIPSOLVERS_BUILD_PYTHON": "OFF",
+        "MIPSOLVERS_ENABLE_NATIVE_ARCH": "OFF",
+        "MIPSOLVERS_ENABLE_WERROR": "OFF",
+        "MIPSOLVERS_USE_SUITESPARSE": "ON",
+        "MIPSOLVERS_USE_SUPERLU": "ON",
+        "MIPSOLVERS_USE_MKL": "ON",
+        "MIPSOLVERS_USE_GUROBI": "OFF",
+        "MIPSOLVERS_USE_PAPILO": "ON"
+      }
+    },
+    {
+      "name": "macos-release",
+      "displayName": "macOS Release",
+      "inherits": "base",
+      "generator": "Unix Makefiles",
+      "cacheVariables": {
+        "MIPSOLVERS_BUILD_LOCAL_IPOPT": "ON"
+      }
+    },
+    {
+      "name": "linux-release",
+      "displayName": "Linux Release",
+      "inherits": "base",
+      "generator": "Unix Makefiles",
+      "cacheVariables": {
+        "MIPSOLVERS_BUILD_LOCAL_IPOPT": "ON"
+      }
+    },
+    {
+      "name": "windows-msvc-release",
+      "displayName": "Windows MSVC Release",
+      "inherits": "base",
+      "generator": "Ninja Multi-Config",
+      "cacheVariables": {
+        "MIPSOLVERS_BUILD_LOCAL_IPOPT": "ON",
+        "MIPSOLVERS_IPOPT_LINEAR_SOLVER": "pardisomkl",
+        "MIPSOLVERS_ENABLE_IPO": "OFF",
+        "CMAKE_MSVC_RUNTIME_LIBRARY": "MultiThreaded$<$<CONFIG:Debug>:Debug>DLL"
+      }
+    },
+    {
+      "name": "windows-offline-release",
+      "displayName": "Windows Offline Self-Contained Release",
+      "inherits": "windows-msvc-release",
+      "cacheVariables": {
+        "MIPSOLVERS_USE_PREBUILT_THIRD_PARTY": "ON",
+        "MIPSOLVERS_MKL_ROOT": "${sourceDir}/third_party/oneapi-mkl"
+      }
+    },
+    {
+      "name": "windows-vcpkg-release",
+      "displayName": "Windows MSVC Release with vcpkg",
+      "inherits": "windows-msvc-release",
+      "cacheVariables": {
+        "CMAKE_TOOLCHAIN_FILE": "$env{VCPKG_ROOT}/scripts/buildsystems/vcpkg.cmake",
+        "VCPKG_TARGET_TRIPLET": "x64-windows"
+      },
+      "environment": {
+        "SUITESPARSE_ROOT": "$env{VCPKG_ROOT}/installed/x64-windows",
+        "SUPERLU_ROOT": "$env{VCPKG_ROOT}/installed/x64-windows"
+      }
+    },
+    {
+      "name": "portable-no-suitesparse",
+      "displayName": "Portable Release without SuiteSparse",
+      "inherits": "base",
+      "generator": "Unix Makefiles",
+      "cacheVariables": {
+        "MIPSOLVERS_BUILD_LOCAL_IPOPT": "ON",
+        "MIPSOLVERS_USE_SUITESPARSE": "OFF",
+        "MIPSOLVERS_USE_SUPERLU": "OFF",
+        "MIPSOLVERS_USE_MKL": "OFF"
+      }
+    },
+    {
+      "name": "full-dev",
+      "displayName": "Full Developer Build",
+      "inherits": "base",
+      "generator": "Unix Makefiles",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "RelWithDebInfo",
+        "MIPSOLVERS_BUILD_SCUC": "ON",
+        "MIPSOLVERS_BUILD_SCUC_CASE_BUILDER": "ON"
+      }
+    }
+  ],
+  "buildPresets": [
+    {
+      "name": "macos-release",
+      "configurePreset": "macos-release",
+      "jobs": 8
+    },
+    {
+      "name": "linux-release",
+      "configurePreset": "linux-release",
+      "jobs": 8
+    },
+    {
+      "name": "windows-msvc-release",
+      "configurePreset": "windows-msvc-release",
+      "configuration": "Release",
+      "jobs": 8
+    },
+    {
+      "name": "windows-offline-release",
+      "configurePreset": "windows-offline-release",
+      "configuration": "Release",
+      "jobs": 8
+    },
+    {
+      "name": "windows-vcpkg-release",
+      "configurePreset": "windows-vcpkg-release",
+      "configuration": "Release",
+      "jobs": 8
+    },
+    {
+      "name": "portable-no-suitesparse",
+      "configurePreset": "portable-no-suitesparse",
+      "jobs": 8
+    },
+    {
+      "name": "full-dev",
+      "configurePreset": "full-dev",
+      "jobs": 8
+    }
+  ],
+  "testPresets": [
+    {
+      "name": "macos-release",
+      "configurePreset": "macos-release",
+      "output": {
+        "outputOnFailure": true
+      }
+    },
+    {
+      "name": "linux-release",
+      "configurePreset": "linux-release",
+      "output": {
+        "outputOnFailure": true
+      }
+    },
+    {
+      "name": "windows-msvc-release",
+      "configurePreset": "windows-msvc-release",
+      "configuration": "Release",
+      "output": {
+        "outputOnFailure": true
+      }
+    },
+    {
+      "name": "windows-offline-release",
+      "configurePreset": "windows-offline-release",
+      "configuration": "Release",
+      "output": {
+        "outputOnFailure": true
+      }
+    },
+    {
+      "name": "windows-vcpkg-release",
+      "configurePreset": "windows-vcpkg-release",
+      "configuration": "Release",
+      "output": {
+        "outputOnFailure": true
+      }
+    }
+  ]
+}

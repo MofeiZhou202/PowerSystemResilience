@@ -15,6 +15,7 @@ from .errors import ApiError, BusyError, JobFailedError, TransportError
 from .models import AnalysisResult, BusDomain, BusRef, OPFRequest, PowerFlowRequest
 from .resources import ResultFrameChunk, SubgraphView, TopologyChunk, ViolationChunk
 from .transport import Transport, TransportResponse, UrllibTransport
+from .v1_capabilities import V1Capabilities
 
 
 TERMINAL_JOB_STATES = frozenset({"succeeded", "failed", "cancelled"})
@@ -34,10 +35,22 @@ class HySimV1Client:
         self.transport = transport or UrllibTransport(base_url, timeout=timeout)
         self.timeout = timeout
         self.audit_hook = audit_hook
+        self._capabilities: V1Capabilities | None = None
 
-    def capabilities(self) -> Mapping[str, Any]:
+    def capabilities(self) -> V1Capabilities:
+        if self._capabilities is None:
+            self.refresh_capabilities()
+        assert self._capabilities is not None
+        return self._capabilities
+
+    def refresh_capabilities(self) -> V1Capabilities:
         body, _ = self._request("GET", "/api/v1")
-        return body
+        capabilities = V1Capabilities.parse(body)
+        self._capabilities = capabilities
+        return capabilities
+
+    def require_analysis(self, analysis: str) -> str:
+        return self.capabilities().require(analysis)
 
     def create_session(
         self,
@@ -315,10 +328,11 @@ class HySimV1Session:
         analysis: str,
         request: Mapping[str, Any] | None = None,
     ) -> "HySimJob":
+        canonical = self.client.require_analysis(analysis)
         body, _ = self.client._request(
             "POST",
             f"/api/v1/sessions/{self.session_id}/jobs",
-            payload={"analysis": analysis, "request": dict(request or {})},
+            payload={"analysis": canonical, "request": dict(request or {})},
             headers={"If-Match": self.etag},
         )
         job_id = body.get("job_id")

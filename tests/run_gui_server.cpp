@@ -30,7 +30,9 @@
 #include <vector>
 
 #include <httplib.h>
+#if !defined(_WIN32)
 #include <pthread.h>
+#endif
 #if defined(__GNUG__) || defined(__clang__)
 #include <cxxabi.h>  // abi::__cxa_current_exception_type for non-std diagnostics
 #endif
@@ -10578,6 +10580,8 @@ struct CaseInfo {
   const char* scale;  // 规模标注
   const char* blurb;  // 一句话用途/推荐演示路径
   bool featured = true;  // 旗舰案例：工具栏下拉只列 featured；其余归入模态框全量清单
+  const char* required_matpower_file = nullptr;
+  bool resilience_available = true;
 };
 
 const std::vector<CaseInfo>& case_catalog() {
@@ -10651,7 +10655,7 @@ std::vector<std::string> case_names() {
 hacdcpf::HybridPowerSystem build_case(const std::string& name) {
   using namespace hacdcpf::io;
   if (name == "market_ieee118") return hacdcpf::market::make_ieee118_market_system(
-    parse_matpower((fs::path(HACDCPF_PROJECT_ROOT)/"external_data"/"matpower"/"case118.m").string()));
+    parse_matpower(case_data_file_path("case118.m").string()));
   if (name == "ieee14_acdc") return build_ieee14_acdc();
   if (name == "ieee24_3area_acdc") return build_ieee24_3area_acdc();
   if (name == "ieee24_3area_acdc_expanded") return build_ieee24_3area_acdc_expanded();
@@ -10955,10 +10959,12 @@ static std::string current_exception_type_name() {
   return "unknown type";
 }
 
-// Worker threads with a large (16 MiB) stack. httplib's default ThreadPool uses
-// std::thread (~512 KiB stack on macOS), which several deep-recursion /
+// Worker threads with a large (16 MiB) stack. On POSIX platforms, httplib's
+// default std::thread stack can be too small for several deep-recursion /
 // large-stack-frame handlers (the dynamics catalog, reliability / topology
-// builders) can overflow. This drop-in TaskQueue gives every worker ample stack.
+// builders). Windows uses the executable's linker-configured stack size, so its
+// standard httplib pool is used below.
+#if !defined(_WIN32)
 class BigStackThreadPool : public httplib::TaskQueue {
 public:
   explicit BigStackThreadPool(size_t n, size_t stack_bytes = 16u * 1024u * 1024u)
@@ -11016,30 +11022,38 @@ private:
   std::mutex mutex_;
   std::condition_variable cond_;
 };
+#endif
 
 int main(int argc, char** argv) {
   Args args;
   if (!parse_args(argc, argv, args)) return 1;
 
   httplib::Server svr;
+#if !defined(_WIN32)
   svr.new_task_queue = [] { return new BigStackThreadPool(8); };
-  if (hacdcpf::server::trial_edition_enabled()) {
+#endif
+  if (hacdcpf::server::edition_gating_enabled()) {
     svr.set_pre_routing_handler([](const httplib::Request& req,
                                    httplib::Response& res) {
       const auto decision =
-          hacdcpf::server::classify_trial_route(req.method, req.path);
+          hacdcpf::server::classify_edition_route(req.method, req.path);
       if (decision.access ==
           hacdcpf::server::EditionRouteAccess::Retained) {
         return httplib::Server::HandlerResponse::Unhandled;
       }
+      const auto edition = hacdcpf::server::current_edition();
+      const bool trial = edition == hacdcpf::server::Edition::Trial;
       res.status = 403;
       res.set_header("Cache-Control", "no-store");
       res.set_content(
           json{{"error",
-                {{"code", "TRIAL_FEATURE_DISABLED"},
+                {{"code", trial ? "TRIAL_FEATURE_DISABLED"
+                                  : "EDITION_FEATURE_DISABLED"},
+                 {"edition", hacdcpf::server::edition_name(edition)},
                  {"feature", decision.feature},
-                 {"message",
-                  "This capability is not included in the Trial edition."}}}}
+                 {"message", trial
+                                 ? "This capability is not included in the Trial edition."
+                                 : "This capability is not included in the Resilience edition."}}}}
               .dump(),
           "application/json");
       return httplib::Server::HandlerResponse::Handled;
@@ -11132,6 +11146,7 @@ int main(int argc, char** argv) {
     }
     return p.string();
   }();
+  hacdcpf::io::set_case_data_root(fs::path(matpower_dir));
   std::cout << "MATPOWER directory: " << matpower_dir << "\n";
 
   svr.Get("/api/edition", [](const httplib::Request&, httplib::Response& res) {
@@ -11647,14 +11662,28 @@ int main(int argc, char** argv) {
 
   // ---- Session: load system ----
   svr.Post("/api/session/load_builtin",
-           [](const httplib::Request& req, httplib::Response& res) {
+           [&matpower_dir](const httplib::Request& req, httplib::Response& res) {
     try {
       const auto j = json::parse(req.body.empty() ? "{}" : req.body);
       std::string name = j.value("case", "ieee24_3area_acdc_expanded");
+      if (hacdcpf::server::resilience_edition_enabled() &&
+          name == "market_ieee118") {
+        res.status = 403;
+        res.set_content(
+            json{{"error",
+                  {{"code", "EDITION_FEATURE_DISABLED"},
+                   {"edition", "resilience"},
+                   {"feature", "market"},
+                   {"message", "This built-in case is not included in the Resilience edition."}}}}
+                .dump(),
+            "application/json");
+        return;
+      }
+      hacdcpf::io::set_case_data_root(fs::path(matpower_dir));
       auto sys = build_case(name);
 	      std::optional<json> market_boundary;
 	      if (name == "market_ieee118") market_boundary = hacdcpf::market::make_southern_market_ieee118_mixed(
-	        hacdcpf::io::parse_matpower((fs::path(HACDCPF_PROJECT_ROOT)/"external_data"/"matpower"/"case118.m").string()));
+	        hacdcpf::io::parse_matpower((fs::path(matpower_dir)/"case118.m").string()));
 	      std::lock_guard<std::mutex> lk(g_session.mu);
 	      session_replace_system(g_session, std::move(sys));
 	      if (market_boundary) g_session.southern_boundary = std::move(*market_boundary);
@@ -11719,13 +11748,19 @@ int main(int argc, char** argv) {
   });
 
   // ---- Session: import a browser-uploaded PSD-BPA / DSP .dat card file ----
-  // The request body is intentionally raw binary: legacy files can be GBK and
-  // decoding them as browser text would corrupt both names and fixed columns.
+  // Accept either raw bytes (including GBK) or JSON {"dat_string":"..."}.
   svr.Post("/api/session/load_bpa_dat",
            [](const httplib::Request& req, httplib::Response& res) {
     try {
-      if (req.body.empty()) throw std::runtime_error("Empty BPA/DSP DAT upload");
-      auto imported = hacdcpf::io::parse_bpa_dat_string(req.body);
+      std::string dat;
+      if (!req.body.empty() && req.body.front() == '{') {
+        const auto request = json::parse(req.body);
+        dat = request.value("dat_string", "");
+      } else {
+        dat = req.body;
+      }
+      if (dat.empty()) throw std::runtime_error("Empty BPA/DSP DAT upload");
+      auto imported = hacdcpf::io::parse_bpa_dat_string(dat);
       if (imported.report.has_errors()) {
         std::string message = "BPA/DSP DAT import failed";
         for (const auto& record : imported.report.records) {
@@ -11768,6 +11803,13 @@ int main(int argc, char** argv) {
           {"rejected", imported.report.summary.rejected},
           {"skipped", imported.report.summary.skipped},
           {"records", std::move(records)}};
+      json notes = json::array();
+      for (const auto& record : imported.report.records) {
+        if (record.severity != hacdcpf::io::ImportSeverity::Info) {
+          notes.push_back(record.source_locator + ": " + record.message);
+        }
+      }
+      summary["_import_notes"] = std::move(notes);
       res.set_content(summary.dump(), "application/json");
     } catch (const std::exception& e) {
       res.status = 400;
@@ -11801,57 +11843,6 @@ int main(int argc, char** argv) {
       clear_cached_analysis(g_session);
       auto summary = system_summary(*g_session.current_system);
       summary["_raw_json"] = session_raw_json(g_session);
-      res.set_content(summary.dump(), "application/json");
-    } catch (const std::exception& e) {
-      res.status = 400;
-      res.set_content(json{{"error", e.what()}}.dump(), "application/json");
-    }
-  });
-
-  svr.Post("/api/session/load_bpa_dat",
-           [](const httplib::Request& req, httplib::Response& res) {
-    try {
-      // Two body forms: JSON {"dat_string": "..."} (UTF-8 text) or the raw
-      // .dat bytes (octet-stream; may be GBK-encoded — the importer converts
-      // bus names to UTF-8).
-      std::string dat;
-      if (!req.body.empty() && req.body.front() == '{') {
-        const auto j = json::parse(req.body);
-        dat = j.value("dat_string", "");
-      } else {
-        dat = req.body;
-      }
-      if (dat.empty()) throw std::runtime_error("Empty DAT content");
-      auto imported = hacdcpf::io::parse_bpa_dat_string(dat);
-      if (imported.report.has_errors()) {
-        std::string msg = "BPA DAT import failed:";
-        for (const auto& rec : imported.report.records)
-          if (rec.severity == hacdcpf::io::ImportSeverity::Error)
-            msg += " " + rec.message;
-        throw std::runtime_error(msg);
-      }
-      auto sys = std::move(imported.system);
-
-      std::lock_guard<std::mutex> lk(g_session.mu);
-      if (!sys.three_phase_ac.has_value() && g_session.preserved_three_phase_ac.has_value()) {
-        sys.three_phase_ac = g_session.preserved_three_phase_ac;
-      } else if (sys.three_phase_ac.has_value()) {
-        g_session.preserved_three_phase_ac = sys.three_phase_ac;
-      } else {
-        clear_preserved_three_phase(g_session);
-      }
-      session_replace_system(g_session, std::move(sys));
-      g_session.current_name = g_session.current_system->name;
-      g_session.reliability_configuration = {};
-      g_session.external_grid_carbon_profiles.clear();
-      clear_cached_analysis(g_session);
-      auto summary = system_summary(*g_session.current_system);
-      summary["_raw_json"] = session_raw_json(g_session);
-      json notes = json::array();
-      for (const auto& rec : imported.report.records)
-        if (rec.severity != hacdcpf::io::ImportSeverity::Info)
-          notes.push_back(rec.source_locator + ": " + rec.message);
-      summary["_import_notes"] = std::move(notes);
       res.set_content(summary.dump(), "application/json");
     } catch (const std::exception& e) {
       res.status = 400;
@@ -22273,7 +22264,7 @@ int main(int argc, char** argv) {
         {"baseline", g_session.southern_baseline.value_or(json(nullptr))},
         {"latest", g_session.southern_latest.value_or(json(nullptr))}}.dump(), "application/json");
     });
-    svr.Post("/api/session/southern_market", [](const httplib::Request& req, httplib::Response& res) {
+    svr.Post("/api/session/southern_market", [&matpower_dir, &data_dir](const httplib::Request& req, httplib::Response& res) {
       try {
         const json body = json::parse(req.body);
         for (auto it = body.begin(); it != body.end(); ++it)
@@ -22289,14 +22280,14 @@ int main(int argc, char** argv) {
         if (action == "example") candidate = hacdcpf::market::make_southern_market_example();
         else if (action == "demo") candidate = hacdcpf::market::make_southern_market_demo();
         else if (action == "ieee118" || action == "ieee118_mixed") {
-          const auto path = fs::path(HACDCPF_PROJECT_ROOT) / "external_data" / "matpower" / "case118.m";
+          const auto path = fs::path(matpower_dir) / "case118.m";
           if (!fs::exists(path)) throw std::invalid_argument("Missing external_data/matpower/case118.m");
           const auto network = hacdcpf::io::parse_matpower(path.string());
           candidate = action == "ieee118_mixed" ? hacdcpf::market::make_southern_market_ieee118_mixed(network)
             : hacdcpf::market::make_southern_market_ieee118(network);
         }
         else if (action == "activsg2000" || action == "activsg2000_hydro") {
-          const auto path = fs::path(HACDCPF_PROJECT_ROOT) / "data" / "case_ACTIVSg2000.m";
+          const auto path = fs::path(data_dir) / "case_ACTIVSg2000.m";
           if (!fs::exists(path)) throw std::invalid_argument("Missing data/case_ACTIVSg2000.m");
           if (action == "activsg2000_hydro" && body.contains("thermal_limit") && !body.at("thermal_limit").is_number_integer())
             throw std::invalid_argument("thermal_limit must be an integer");
@@ -26146,6 +26137,11 @@ int main(int argc, char** argv) {
         }
         const auto j = json::parse(req.body.empty() ? "{}" : req.body);
         auto options = hacdcpf::analysis::scenario_generation_options_from_json(j);
+        if (hacdcpf::server::resilience_edition_enabled()) {
+          options.regular.enabled = false;
+          options.reliability.enabled = false;
+          options.resilience.enabled = true;
+        }
 
         options.regular.num_steps = 8760;
         options.reliability.num_steps = 1;

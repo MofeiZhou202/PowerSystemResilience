@@ -1,0 +1,395 @@
+% scuc_manual.tex —— MIPSolvers SCUC 模块技术手册（工程参考级）
+% 规范：docs/modules/README.md 与 docs/modules/THEORY_WRITING_GUIDE.md。
+% 编译（本目录下，XeLaTeX 两遍）：
+%   xelatex -interaction=nonstopmode scuc_manual.tex
+%   xelatex -interaction=nonstopmode scuc_manual.tex
+\documentclass{ctexart}
+\usepackage{../../_manual_common/mipsolvers_manual}
+
+\title{MIPSolvers SCUC 模块技术手册}
+\author{MIPSolvers 文档组}
+\date{2026 年 9 月 13 日}
+
+\begin{document}
+\maketitle
+
+\begin{abstract}
+本手册是 MIPSolvers 安全约束机组组合（Security-Constrained Unit Commitment, SCUC）
+模块的工程参考级技术文档。模块源码位于 \srcpath{src/scuc/}，公共头文件位于
+\srcpath{include/mipsolvers/scuc/}；它以 JSON 为交换格式，实现《南方区域电力市场
+现货交易规则（2025 V1.0）》§2.6 的日前出清三阶段流水线：SCUC（MILP）→
+SCED（固定组合的 LP）→ LMP（节点边际电价，由 SCED 对偶提取），并附带合成算例
+构造器（case\_builder）与两个命令行工具（\texttt{scuc\_solve}、
+\texttt{scuc\_case\_builder}）。
+
+手册分两层：第 3 章为通用理论层（标准模型、MILP 松弛、LMP 原理，非代码转写）；
+第 4 章为源码等价转写层（JSON→MILP 的每个约束族、系数与索引集均按当前源码
+如实转写）；第 5 章给出数值验证证据，第 6 章列出 JSON 接口字段，第 7 章声明
+验证状态与边界局限，第 8 章为跨模块共享的工业级评价基线。所有
+\srcpath{文件:函数名} 锚点均为仓库相对路径、禁止行号，由
+\texttt{tools/doc\_anchor\_check.py} 回归校验。
+\end{abstract}
+
+\tableofcontents
+\newpage
+
+\section{阅读指南与约定}
+
+\subsection{数据来源与诚实口径}
+
+本手册实现层（第 4 章）的唯一事实来源是下列源码文件，转写前已逐函数通读；
+凡代码未消费的输入字段、回退路径、硬编码阈值均在相邻正文明确声明：
+
+\begin{center}
+\begin{footnotesize}
+\begin{tabular}{@{}ll@{}}
+\toprule
+\textbf{文件} & \textbf{内容}\\
+\midrule
+\srcpath{include/mipsolvers/scuc/scuc.hpp} & 数据结构、配置与公共 API 声明\\
+\srcpath{include/mipsolvers/scuc/case\_builder.hpp} & 算例构造器声明\\
+\srcpath{src/scuc/scuc.cpp} & JSON 解析、MILP 装配、三阶段求解、结果序列化\\
+\srcpath{src/scuc/case\_builder.cpp} & 合成算例（3bus/6bus/ieee39/ieee118）生成\\
+\srcpath{src/scuc/main.cpp} & \texttt{scuc\_solve} 命令行入口\\
+\srcpath{src/scuc/case\_builder\_main.cpp} & \texttt{scuc\_case\_builder} 命令行入口\\
+\bottomrule
+\end{tabular}
+\end{footnotesize}
+\end{center}
+
+诚实口径约定：
+\begin{itemize}
+  \item 公式按\textbf{代码实际执行}转写；代码与《南方区域电力市场现货交易规则
+        （2025 V1.0）》§2.6 条文存在简化差异之处，以"部分实现"或 gapnote 标注，
+        不暗示代码即规则完整模型；
+  \item 数值结论只引用第 5 章所列真实测试目标与可复现命令；
+  \item 锚点一律为 \texttt{文件:函数名}（匿名命名空间内函数以源文件名加函数名
+        引用，lambda 记作 \texttt{文件名:lambda名（lambda）}），禁止行号。
+\end{itemize}
+
+\subsection{索引空间与单位制}
+
+\begin{itemize}
+  \item \textbf{索引}：母线、支路、机组、负荷、风电、光伏、储能、直流线、断面
+        一律为 \textbf{0 起始}整数索引；\texttt{num\_buses} 缺省时由所有元件
+        母线编号最大值加 1 推断（\srcpath{src/scuc/scuc.cpp:scuc\_from\_json}）。
+  \item \textbf{时间}：调度时段数 $T=$ \fld{num\_periods}，时段长
+        $\Delta t=$ \fld{period\_length\_hr}（小时）；每小时调度区间数
+        $\mathrm{iph}=\mathrm{round}(1/\Delta t)\ge 1$，组合时段数
+        $T_c=\max(1,\lfloor T/\mathrm{iph}\rfloor)$。启停类二进制变量按组合
+        时段索引 $h=0,\dots,T_c-1$，出力类变量按调度时段 $t=0,\dots,T-1$，
+        二者经 $h=\lfloor t/\mathrm{iph}\rfloor$ 耦合
+        （\srcpath{src/scuc/scuc.cpp:setup\_var\_index}）。
+  \item \textbf{单位}：功率 MW，能量 MWh，电抗 pu（100 MVA 基准口径由算例
+        数据自带），价格与成本以货币单位（记 \$）/MWh、\$/h 或 \$/次 计；
+        爬坡率为 MW/min；最小启停时间为小时。
+  \item \textbf{松弛母线}：直流潮流灵敏度（PTDF）计算固定取母线 0 为平衡
+        母线（\srcpath{src/scuc/scuc.cpp:compute\_ptdf}）。
+\end{itemize}
+
+\subsection{排版宏}
+
+参数表使用 \texttt{paramtable} 环境（字段名|符号|单位|典型范围|默认值|说明）；
+字段名以 \verb|\fld{}| 排版；源码锚点以 \verb|\srcpath{}| 排版；结构体元信息以
+\verb|\compmeta{名称}{头文件}| 排版；理论章三要素（theorynote、与实现的对应表、
+gapnote）按 \texttt{docs/modules/THEORY\_WRITING\_GUIDE.md} 执行。
+
+\section{功能定位与架构}
+
+\subsection{功能定位}
+
+scuc 模块是面向电力市场日前出清的\textbf{应用层}模块：它把一份描述电网、机组、
+负荷、可再生、储能与市场参数的 JSON 文档装配成一个混合整数线性规划（MILP），
+调用 \texttt{mipsolvers::engine} 注册的任一 MILP 后端求解，再依次执行固定组合
+的经济调度（SCED，LP）与节点电价（LMP）计算，最终把三阶段结果序列化为 JSON。
+模块自身不实现任何 LP/MILP 算法；全部求解能力来自 engine 模块（见 engine 手册）。
+
+\subsection{入口一览}
+
+\begin{footnotesize}
+\begin{longtable}{@{}L{3.4cm}L{4.6cm}L{6.2cm}@{}}
+\toprule
+\textbf{入口} & \textbf{锚点} & \textbf{说明}\\
+\midrule
+\endhead
+CLI \texttt{scuc\_solve} & \srcpath{src/scuc/main.cpp:main} &
+读入 JSON → 三阶段求解 → 写出 JSON；支持 \texttt{--solver}、\texttt{--no-sced}、
+\texttt{--no-lmp}、\texttt{--indent}；SCUC 未收敛时返回非零退出码\\
+CLI \texttt{scuc\_case\_builder} & \srcpath{src/scuc/case\_builder\_main.cpp:main} &
+生成内置算例 JSON；支持 \texttt{--case 3bus|6bus|ieee39|ieee118}、\texttt{--T}、
+\texttt{--dt}、\texttt{--wind}、\texttt{--solar}、\texttt{--storage}、
+\texttt{--output}、\texttt{--compact}\\
+库 API：解析 & \srcpath{src/scuc/scuc.cpp:scuc\_from\_json} &
+JSON 字符串 → \texttt{SCUCInput}；语法错误抛 \texttt{json::parse\_error}，
+类型不匹配抛 \texttt{json::type\_error}\\
+库 API：求解 & \srcpath{src/scuc/scuc.cpp:scuc\_solve} &
+\texttt{SCUCInput} → 三阶段流水线 → \texttt{SCUCOutput}\\
+库 API：序列化 & \srcpath{src/scuc/scuc.cpp:scuc\_output\_to\_json} &
+\texttt{SCUCOutput} → JSON 字符串（\texttt{indent=0} 紧凑、\texttt{2} 可读）\\
+库 API：裸模型 & \srcpath{src/scuc/scuc.cpp:build\_scuc\_mip} &
+只装配不求解，返回 \texttt{engine::MIPModel}，供基准程序注入自定义
+\texttt{BCOptions}\\
+算例构造 & \srcpath{src/scuc/case\_builder.cpp:build\_3bus\_case} 等 &
+\texttt{build\_3bus\_case}/\texttt{build\_6bus\_case}/\texttt{build\_ieee39\_case}/\texttt{build\_ieee118\_case} 返回预填 \texttt{SCUCInput}；
+\texttt{scuc\_input\_to\_json} 导出 JSON\\
+\bottomrule
+\end{longtable}
+\end{footnotesize}
+
+构建开关：\texttt{MIPSOLVERS\_BUILD\_SCUC}（默认 ON）控制 \texttt{scuc\_solve}
+与相关测试，\texttt{MIPSOLVERS\_BUILD\_SCUC\_CASE\_BUILDER}（默认 ON）控制
+\texttt{scuc\_case\_builder}（根 \texttt{CMakeLists.txt}）。
+
+\subsection{关键数据结构}
+
+\compmeta{SCUCInput}{include/mipsolvers/scuc/scuc.hpp}
+完整问题输入：\texttt{config}（求解配置）、\texttt{num\_buses} 与七个元件数组
+（\texttt{generators/branches/loads/wind/solar/storage/dc\_lines}）、
+\texttt{generator\_groups}、\texttt{sections}、\texttt{profiles}、
+\texttt{initial\_status}。
+
+\compmeta{SCUCConfig}{include/mipsolvers/scuc/scuc.hpp}
+求解配置：求解器选择与回退、时段结构、MIP 间隙与时限、备用需求系数、
+惩罚价格（VOLL/VOCC/M1/M2）、输电费、市场割平面与原始修复开关、
+SCED/LMP 阶段开关与 LMP 邻域因子。
+
+\compmeta{Generator}{include/mipsolvers/scuc/scuc.hpp}
+可调度机组：出力上下限、爬坡率、最小启停时间、must-run、启停次数上限、
+分段报价 \texttt{bid\_segments}、启动成本（含热/温/冷三态字段，当前实现只用
+\texttt{startup\_cost}，见第 4 章声明）、空载成本、备用报价、一次调频系数
+\texttt{pfr\_alpha}、群标识 \texttt{group\_id}。
+
+\compmeta{Branch}{include/mipsolvers/scuc/scuc.hpp}
+交流支路：\texttt{from/to}（0 起始）、电抗（pu）、热稳定限额（MW）、
+\texttt{in\_service}。
+
+\compmeta{StorageUnit}{include/mipsolvers/scuc/scuc.hpp}
+储能/抽蓄：充放功率上下限、能量容量、效率（单效率或充/放分效率）、
+SOC 初值/下限/末值要求、充放电报价、日循环上限、二进制模式指示开关。
+
+\compmeta{Section}{include/mipsolvers/scuc/scuc.hpp}
+监视断面：成员线路与权重的线性组合构成断面 PTDF，正/反向限额分别给定。
+
+\compmeta{SCUCSolveResult}{include/mipsolvers/scuc/scuc.hpp}
+单阶段结果：收敛标志、目标值、求解器名、用时、MIP 间隙、割平面数，
+以及组合/启停、出力、备用、分段出力、可再生出力与弃电、储能充放与 SOC、
+线路与断面潮流、系统级切负荷/弃电、成本分解等矩阵。
+
+\compmeta{SCUCLMPResult}{include/mipsolvers/scuc/scuc.hpp}
+LMP 结果：节点电价及其能量/阻塞分量 \texttt{[nb][T]}，时空汇总统计
+（avg/max/min）。
+
+\compmeta{SCUCOutput}{include/mipsolvers/scuc/scuc.hpp}
+流水线总输出：\texttt{scuc}（MILP）、\texttt{sced}（LP，仅当
+\fld{solve\_sced}）、\texttt{lmp}（仅当 \fld{solve\_lmp}）。
+
+\subsection{三阶段流水线}
+
+\begin{enumerate}
+  \item \textbf{SCUC（MILP）}：\srcpath{src/scuc/scuc.cpp:solve\_scuc\_stage}
+        → 装配（\srcpath{src/scuc/scuc.cpp:build\_formulation}）→
+        MILP 求解（\srcpath{src/scuc/scuc.cpp:run\_milp}）→
+        结果提取（\srcpath{src/scuc/scuc.cpp:extract\_result}）；
+  \item \textbf{SCED（LP）}：\srcpath{src/scuc/scuc.cpp:solve\_sced\_stage}
+        重新装配并把全部启停/组合二进制固定为 SCUC 解（四舍五入），作为 LP 重解；
+        仅当 \fld{solve\_sced}\,=\,true 且 SCUC 收敛；
+  \item \textbf{LMP}：\srcpath{src/scuc/scuc.cpp:solve\_lmp\_stage}
+        在 SCED（或 SCUC，若 SCED 未运行）组合之上加 $\delta$ 邻域出力限幅
+        重解 LP 并提取约束对偶；仅当 \fld{solve\_lmp}\,=\,true 且参考阶段收敛。
+\end{enumerate}
+
+\input{chapters/theory_unit_commitment}
+
+\input{chapters/source_equivalent_scuc}
+
+\input{chapters/numerical_validation}
+
+\section{接口与参数}
+
+本章列出 \srcpath{src/scuc/scuc.cpp:scuc\_from\_json} 实际解析的全部 JSON 输入
+字段与 \srcpath{src/scuc/scuc.cpp:scuc\_output\_to\_json} 实际写出的输出字段。
+未列出即未消费；"默认值"指字段缺失时 C++ 结构体的初始化值。
+
+\subsection{顶层结构}
+
+\begin{paramtable}
+\fld{config} & — & — & — & 见下表 & 求解配置块（可整体缺省）\\
+\fld{num\_buses} & $n_b$ & 个 & $\ge 1$ & 自动推断 & 缺省时取所有元件 bus 最大值 +1\\
+\fld{generators} & — & — & — & 空 & 机组数组，见 \ref{sec:par-gen} 节\\
+\fld{branches} & — & — & — & 空 & 交流支路数组\\
+\fld{loads} / \fld{wind} / \fld{solar} & — & — & — & 空 & 负荷/风电/光伏数组\\
+\fld{storage} & — & — & — & 空 & 储能数组\\
+\fld{dc\_lines} & — & — & — & 空 & 直流线路数组\\
+\fld{generator\_groups} & — & — & — & 空 & 机组群数组\\
+\fld{sections} & — & — & — & 空 & 监视断面数组\\
+\fld{profiles} & — & — & — & 空 & 时序曲线块（load/wind/solar 三个矩阵）\\
+\fld{initial\_status} & — & — & — & 空 & 初始状态块\\
+\end{paramtable}
+
+\subsection{\fld{config} 求解配置}
+
+\begin{paramtable}
+\fld{solver} & — & — & Auto/StrictHiGHS/ HiGHS/SCIP/ Native\-Branch\-And\-Cut & Auto & MILP 后端选择；大小写敏感\\
+\fld{allow\_fallback} & — & — & true/false & true & 首选求解器失败时回退下一可用后端\\
+\fld{num\_periods} & $T$ & 个 & 1--8760（CLI 校验） & 24 & 调度时段数\\
+\fld{period\_length\_hr} & $\Delta t$ & h & $(0,24]$（CLI 校验） & 1.0 & 每时段小时数\\
+\fld{n\_segments} & $K$ & 段 & $\ge 1$ & 3 & 每机组分段报价段数（取 $\max(1,\cdot)$）\\
+\fld{mip\_gap} & $\varepsilon_{\mathrm{gap}}$ & — & $10^{-4}$--$10^{-2}$ & 0.001 & 相对 MIP 最优间隙容差\\
+\fld{time\_limit\_sec} & — & s & — & 300 & 求解时限\\
+\fld{verbose} & — & — & — & false & 后端日志开关\\
+\fld{spinning\_reserve\_req} & $r^{\mathrm{spin}}$ & pu & 0--0.2 & 0.10 & 旋转备用需求（系统负荷比例）\\
+\fld{regulation\_up\_req} & $r^{\mathrm{up}}$ & pu & 0--0.1 & 0.05 & 上调调节备用比例\\
+\fld{regulation\_down\_req} & $r^{\mathrm{dn}}$ & pu & 0--0.1 & 0.05 & 下调调节备用比例\\
+\fld{neg\_reserve\_req} & $r^{\mathrm{neg}}$ & pu & 0--0.2 & 0.0 & 负备用需求比例；0 = 不加该约束\\
+\fld{pfr\_reserve\_req\_mw} & $R^{\mathrm{pfr}}$ & MW & 0--数百 & 0.0 & 一次调频备用需求；0 = 不加该约束\\
+\fld{voll} & $c^{\mathrm{shed}}$ & \$/MWh & $10^3$--$10^5$ & 10000 & 切负荷惩罚（失负荷价值）\\
+\fld{vocc} & $c^{\mathrm{curt}}$ & \$/MWh & $10^2$--$10^3$ & 1000 & 系统级发电过剩惩罚\\
+\fld{renewable\_min\_output\_coeff} & $\alpha_n$ & pu & 0--1 & 0.0 & 可再生最低出力系数（预测比例）\\
+\fld{M1\_line\_slack\_penalty} & $M_1$ & \$/MW & $10^4$--$10^6$ & $10^5$ & 线路/断面潮流松弛罚系数\\
+\fld{M2\_renewable\_curtail\_penalty} & $M_2$ & \$/MWh & 0--$10^2$ & 0.0 & 弃风/弃光惩罚；$>0$ 才启用弃电变量\\
+\fld{wheeling\_fee\_per\_mwh} & $c^{\mathrm{wf}}$ & \$/MWh & 0--数十 & 0.0 & 输电费（加在全部机组出力上）；0 = 停用\\
+\fld{enable\_market\_cuts} & — & — & — & true & 预构型市场割平面开关（第 4 章割平面族）\\
+\fld{enable\_primal\_repair} & — & — & — & true & UC 承诺种子 + 连续修复启发式开关\\
+\fld{solve\_sced} & — & — & — & true & SCUC 后是否执行 SCED 阶段\\
+\fld{solve\_lmp} & — & — & — & true & 是否执行 LMP 阶段\\
+\fld{lmp\_delta} & $\delta$ & pu & 0.05--0.2 & 0.10 & LMP 重调度邻域因子\\
+\end{paramtable}
+
+\subsection{\fld{generators} 机组字段}
+\label{sec:par-gen}
+
+\begin{paramtable}
+\fld{name} & — & — & — & 空串 & 机组名（仅标识用）\\
+\fld{bus} & $b_g$ & — & $[0,n_b)$ & 0 & 接入母线（0 起始）\\
+\fld{pmin} / \fld{pmax} & $\underline P_g,\bar P_g$ & MW & — & 0 & 最小/最大技术出力\\
+\fld{ramp\_up\_mw\_min} & $R^{+}_g$ & MW/min & — & 0 & 上爬坡率（装配时乘 $60\Delta t$）\\
+\fld{ramp\_dn\_mw\_min} & $R^{-}_g$ & MW/min & — & 0 & 下爬坡率\\
+\fld{min\_up\_time\_hr} & $T^{U}_g$ & h & — & 0 & 最小开机时间（装配时向上取整）\\
+\fld{min\_dn\_time\_hr} & $T^{D}_g$ & h & — & 0 & 最小停机时间\\
+\fld{must\_run} & — & — & — & false & 必开机组（组合变量固定为 1）\\
+\fld{max\_startups} & — & 次 & — & 0 & 日内启动次数上限；0 = 不限\\
+\fld{max\_shutdowns} & — & 次 & — & 0 & 日内停机次数上限；0 = 不限\\
+\fld{bid\_segments} & $(q_k,c_k)$ & MW, \$/MWh & — & 空 & 分段报价（Pmin 之上逐段容量与边际价）\\
+\fld{startup\_cost} & $C^{U}_g$ & \$/次 & — & 0 & 启动成本（当前实现对所有启动状态均用此值）\\
+\fld{startup\_cost\_warm} / \fld{startup\_cost\_cold} & — & \$/次 & — & 0 & \textbf{已解析未消费}：温/冷启动成本未进入模型\\
+\fld{hot\_start\_threshold\_hr} / \fld{warm\_start\_threshold\_hr} & — & h & — & 4 / 8 & \textbf{已解析未消费}：热/温启动判定时长\\
+\fld{no\_load\_cost} & $C^{NL}_g$ & \$/h & — & 0 & 空载成本（目标中乘 $1/\mathrm{iph}$）\\
+\fld{spinning\_reserve\_price} & $c^{\mathrm{spin}}_g$ & \$/MWh & — & 0 & 旋转备用报价\\
+\fld{regulation\_up\_price} / \fld{regulation\_down\_price} & $c^{\mathrm{up}}_g,c^{\mathrm{dn}}_g$ & \$/MWh & — & 0 & 调节备用报价\\
+\fld{pfr\_alpha} & $\alpha^{\mathrm{pfr}}_g$ & pu & 0--0.1 & 0 & 一次调频系数；0 = 不参与\\
+\fld{ud\_periods} / \fld{dd\_periods} & — & 时段 & — & 0 & \textbf{已解析未消费}：启动/停机过程时长未建模\\
+\fld{group\_id} & — & — & — & $-1$ & \textbf{已解析未消费}：群约束以 \fld{generator\_groups} 为准\\
+\end{paramtable}
+
+\subsection{网络、负荷与可再生字段}
+
+\begin{paramtable}
+\fld{branches[].from}/\fld{branches[].to} & — & — & $[0,n_b)$ & 0 & 支路端点（0 起始）\\
+\fld{branches[].reactance} & $x_l$ & pu & $10^{-3}$--1 & 0.05 & 电抗；$|x|<10^{-6}$ 时按 $10^{-3}$ 兜底\\
+\fld{branches[].rating\_mw} & $\bar F_l$ & MW & — & $10^6$ & 热稳定限额；$>10^5$ 的支路不加潮流约束\\
+\fld{branches[].in\_service} & — & — & — & true & 退出运行的支路不进 Bbus 与潮流约束\\
+\fld{loads[].bus} / \fld{loads[].p\_mw} & $D_d$ & MW & — & 0 / 0 & 基准负荷；实际负荷 = 基准 × 负荷曲线 pu\\
+\fld{wind[].bus} / \fld{wind[].pmax} & $\bar W_w$ & MW & — & 0 / 0 & 风电场；曲线缺省时预测取 pmax\\
+\fld{solar[].bus} / \fld{solar[].pmax} & $\bar S_s$ & MW & — & 0 / 0 & 光伏场；同上\\
+\fld{dc\_lines[].from}/\fld{dc\_lines[].to} & — & — & — & 0 & 直流线注入/受端母线\\
+\fld{dc\_lines[].pmin}/\fld{dc\_lines[].pmax} & — & MW & — & $\mp 10^6$ & 直流功率上下限（可负，表示反向送电）\\
+\fld{dc\_lines[].ramp\_up}/\fld{dc\_lines[].ramp\_dn} & — & MW/时段 & — & $10^6$ & 相邻时段功率变化限（首时段相对 0）\\
+\end{paramtable}
+
+\subsection{\fld{storage} 储能字段}
+
+\begin{paramtable}
+\fld{bus} & — & — & — & 0 & 接入母线\\
+\fld{pmax\_charge} / \fld{pmax\_discharge} & $\bar P^{ch},\bar P^{dis}$ & MW & — & 0 & 充/放功率上限\\
+\fld{pmin\_charge} / \fld{pmin\_discharge} & $\underline P^{ch},\underline P^{dis}$ & MW & — & 0 & 充/放最小功率（仅二进制模式下生效）\\
+\fld{energy\_capacity\_mwh} & $\bar E$ & MWh & — & 0 & 能量容量\\
+\fld{efficiency} & $\eta$ & — & 0.8--0.95 & 0.9 & 往返效率（钳到 $[0.1,1]$）\\
+\fld{eta\_charge} / \fld{eta\_discharge} & $\eta^{ch},\eta^{dis}$ & — & — & $-1$ & 充/放分效率；$<0$ 时取 $\sqrt{\eta}$\\
+\fld{soc\_init} & $E_0$ & pu 或 MWh & 0--1 & 0.5 & 初始 SOC；$>1$ 时按 MWh 解释\\
+\fld{soc\_min} & $\underline E$ & pu & 0--1 & $-1$ & SOC 下限；$<0$ 时取 0.10\\
+\fld{soc\_final} & $E^{fin}$ & pu & 0--1 & $-1$ & 末时段 SOC 要求；$<0$ 时取初始 SOC\\
+\fld{charge\_bid\_price} / \fld{discharge\_bid\_price} & $\lambda^{ch},\lambda^{dis}$ & \$/MWh & — & 0 & 充/放电报价（目标中乘 $\Delta t$；绝对值 $>\varepsilon$ 才写入）\\
+\fld{cycle\_limit} & $N^{cycle}$ & 次 & 0--2 & 0 & 日等效全循环上限；0 = 不限\\
+\fld{use\_binary\_indicators} & — & — & — & false & 启用 $\xi^+/\xi^-$ 二进制充放模式（严格互斥）\\
+\end{paramtable}
+
+\subsection{\fld{generator\_groups}、\fld{sections}、\fld{profiles}、\fld{initial\_status}}
+
+\begin{paramtable}
+\fld{generator\_groups[].gen\_indices} & — & — & — & 空 & 成员机组索引（0 起始）\\
+\fld{generator\_groups[].pmin\_t}/\fld{pmax\_t} & — & MW & — & 空 & 群出力逐时段上下限；长度 1 时全时段共用；空 = 不约束\\
+\fld{generator\_groups[].emin}/\fld{emax} & — & MWh & — & 0 & 群全时段电量上下限；0 = 不约束\\
+\fld{sections[].line\_weights} & $w_l$ & — & — & 空 & 成员（线路号， 权重）；接受 \texttt{[line,weight]} 或 \texttt{\{line,weight\}} 两种 JSON 形态\\
+\fld{sections[].rating\_fwd\_mw}/\fld{rating\_rev\_mw} & — & MW & — & $10^6$ & 断面正/反向限额\\
+\fld{profiles.load} & — & pu & 0.5--1.2 & 空 & $\mathrm{load}[d][t]$：负荷 $d$ 在时段 $t$ 的 pu 倍率；缺行/缺列回退基准值\\
+\fld{profiles.wind} / \fld{profiles.solar} & — & MW & — & 空 & 风/光\textbf{绝对}预测出力；缺省时回退 pmax\\
+\fld{initial\_status.commitment} & $u_{g,0}$ & 0/1 & — & 空 & 时段 0 之前在/离网状态\\
+\fld{initial\_status.dispatch} & $P_{g,0}$ & MW & — & 空 & 时段 0 之前出力（首时段爬坡基准）\\
+\fld{initial\_status.storage\_soc} & — & pu/MWh & — & 空 & 储能初始 SOC（覆盖 \fld{soc\_init}）\\
+\fld{initial\_status.time\_in\_state} & — & h & — & 空 & 当前状态已持续时间（正=开机，负=停机）；\textbf{仅原始修复启发式消费}，不进 MILP 约束\\
+\end{paramtable}
+
+\subsection{输出 JSON 字段}
+
+由 \srcpath{src/scuc/scuc.cpp:scuc\_output\_to\_json} 与匿名命名空间内的
+\srcpath{src/scuc/scuc.cpp:solve\_result\_to\_json} 写出。注意：
+\texttt{SCUCSolveResult} 中的 \texttt{segment\_dispatch}、
+\texttt{wind\_curtailment}、\texttt{solar\_curtailment}、\texttt{section\_flows}
+四个矩阵\textbf{不进入} JSON 输出（仅 C++ 层可见）。
+
+\begin{paramtable}
+\fld{meta.solver} 等 & — & — & — & — & 输入元信息回显（solver、num\_periods、num\_buses、num\_generators、num\_branches）\\
+\fld{scuc.converged} / \fld{sced.converged} & — & — & — & — & 阶段收敛标志；false 时矩阵为空、标量为 0\\
+\fld{scuc.objective} & $z$ & \$ & — & — & 求解器返回的目标值（含全部罚项）\\
+\fld{scuc.solver\_name} & — & — & — & — & 实际使用的后端名；SCED 阶段追加 \texttt{" (SCED-LP)"}\\
+\fld{scuc.solve\_time\_sec} & — & s & — & — & 阶段墙钟用时\\
+\fld{scuc.mip\_gap} & — & — & — & — & MIP 间隙（SCED/LMP 为 LP，无此口径）\\
+\fld{scuc.n\_cuts\_added} & — & 行 & — & — & 预构型割平面行数\\
+\fld{scuc.commitment}/\fld{startup}/\fld{shutdown} & $u,y,z$ & 0/1 & $[n_g][T_c]$ & — & 组合/启动/停机矩阵\\
+\fld{scuc.dispatch} & $P_{g,t}$ & MW & $[n_g][T]$ & — & 机组出力\\
+\fld{scuc.spinning\_reserve} 等 & $R$ & MW & $[n_g][T]$ & — & 三类备用（spinning/regulation\_up/regulation\_down）\\
+\fld{scuc.wind\_generation}/\fld{solar\_generation} & — & MW & $[n_w][T]$ 等 & — & 可再生出力\\
+\fld{scuc.storage\_charging}/\fld{storage\_discharging}/\fld{storage\_soc} & — & MW/MWh & $[n_s][T]$ & — & 储能充放功率与 SOC\\
+\fld{scuc.line\_flows} & $F_{l,t}$ & MW & $[n_l][T]$ & — & 由 PTDF × 节点注入重算的支路潮流\\
+\fld{scuc.load\_shedding}/\fld{gen\_curtailment} & — & MW & $[T]$ & — & 系统级切负荷/过剩\\
+\fld{scuc.cost.*} & — & \$ & — & — & 成本分解：energy/startup/no\_load/reserve/penalty/total（口径见第 4 章）\\
+\fld{lmp.nodal}/\fld{energy}/\fld{congestion} & $\lambda$ & \$/MWh & $[n_b][T]$ & — & 节点电价及能量/阻塞分量\\
+\fld{lmp.avg\_lmp}/\fld{max\_lmp}/\fld{min\_lmp} & — & \$/MWh & — & — & 时空汇总\\
+\end{paramtable}
+
+\section{验证与边界局限}
+
+\subsection{验证状态}
+
+模块的数值验证证据集中在第 5 章：JSON 往返、2 母线 3 时段收敛与功率平衡、
+SCED 组合一致性、LMP 物理合理性、备用约束、多求解器基准与 StrictHiGHS
+根节点 IPM 正确性均有注册测试覆盖；IEEE 118 母线规模有 benchmark 族算例
+（\srcpath{benchmark/}，见第 5 章边界声明）。
+
+\subsection{边界与局限}
+
+\begin{boundarynote}
+\begin{itemize}
+  \item \textbf{网络模型}：直流潮流近似（无损、电压幅值恒定、小相角），平衡母线
+        固定为 0 号；额定 $>10^5$ MW 的支路不加潮流约束（视为不阻塞）；无 N-1
+        预想事故集、无交流潮流校验；
+  \item \textbf{时间耦合}：最小启停约束在时界起点截断（$\tau\ge 0$），初始
+        在/离网历史（\fld{time\_in\_state}）不进 MILP 约束，仅原始修复启发式
+        使用；
+  \item \textbf{启动成本}：热/温/冷三态字段已解析但未消费，所有启动均按
+        \fld{startup\_cost} 计费；启停过程出力曲线（\fld{ud\_periods}/
+        \fld{dd\_periods}）未建模；
+  \item \textbf{LMP}：取自固定组合 LP 的对偶，含 $\delta$ 邻域限幅的再调度
+        口径；MILP 本身不返回有意义的行对偶，不要从 SCUC 阶段直接取价；
+  \item \textbf{规模}：割平面族 T/H/R/P/Q 在 $n_g \times T_c > 800$ 时自动关闭
+        （行开销大于收紧收益，见第 4 章）；PTDF 为稠密 $n_l \times n_b$ 矩阵，
+        超大系统内存随其平方增长；
+  \item \textbf{异常}：输入 JSON 语法/类型错误抛 nlohmann 异常；求解失败沿
+        \texttt{converged=false} 如实上报，输出矩阵为空、标量为 0，不得以零值
+        误读为可行解。
+\end{itemize}
+\end{boundarynote}
+
+\input{../../_manual_common/industrial_evaluation}
+
+\end{document}

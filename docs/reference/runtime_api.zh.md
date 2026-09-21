@@ -2,7 +2,7 @@
 
 # 运行时 API 契约
 
-更新日期：2026-08-18（result_window 新增可选的 lod 0/1 聚合结果）
+更新日期：2026-09-19（补充 edition 发现、分析目录与 fail-closed 边界）
 
 GUI 服务器实现于 `tests/run_gui_server.cpp`。会话端点作用于一个已加载的
 `HybridPowerSystem`；改变模型的请求会清除缓存的分析结果。
@@ -16,6 +16,45 @@ markdown 文件（例如 `/xjtu/docs/README.md`、
 （`web/js/core/help_center.js`，清单文件 `web/help_docs.json`，schema 为
 `hysim_help_docs_v1`）会在应用内渲染这些文档；前端契约见
 [GUI Canvas 运行时](../developer/gui_canvas_runtime.zh.md)。
+
+## Edition 发现与失败关闭路由
+
+`GET /api/edition` 是 GUI 与旧式 `/api/session/*` 客户端使用的产品版本和
+进程全局能力来源，其 profile schema 为 `hacdcpf.edition-profile.v1`。
+`POST /api/edition/analysis_plan` 把所选指标 ID 映射为后端排序、仍需用户确认的
+分析步骤，不会自动执行求解。两者与 `GET /api/v1` 不同；后者只描述隔离的异步
+运行时及其可执行任务 ID。
+
+profile 内的 `analysis_catalog` 是旧式会话分析目录。其对象字段精确为
+`schema` 和 `entries`，schema 为
+`hacdcpf.edition-analysis-catalog.v1`；每个 entry 的字段精确为 `name`、
+`route`、`method` 和布尔型 `enabled`。`name` 来自 69 个规范
+`AnalysisSpec.name` ID；`resilience` -> `distribution_resilience` 等便利名称只是
+客户端 alias，不是服务器 ID。profile 顶层 `analyses` 仍是较小的 PF/OPF
+v1 兼容清单，不得与该目录或独立的 `/api/v1` 发现文档混用。
+
+Full Edition 的 `enabled_modules`、`frontend_modules` 与
+`enabled_io_formats` 必须精确为单元素通配数组 `["*"]`。受限 edition 必须逐项
+枚举，禁止通配符。其路由策略失败关闭：保留的方法/路径进入正常 handler；已知禁用
+路由与未分类的新 API 路由均返回 HTTP 403，后者报告
+`feature: "unclassified_api"`。Resilience 使用以下嵌套错误；Trial 改用
+`TRIAL_FEATURE_DISABLED`。
+
+```json
+{
+  "error": {
+    "code": "EDITION_FEATURE_DISABLED",
+    "edition": "resilience",
+    "feature": "market",
+    "message": "This capability is not included in the Resilience edition."
+  }
+}
+```
+
+GUI 在开放应用 shell 前验证精确的 edition profile envelope 和嵌套目录 schema；
+Python 客户端还会把完整目录与 SDK 已知的名称、路由和方法逐项对齐。缺失、畸形或
+相互矛盾的能力声明会失败关闭，不会退回 Full。完整客户端、构建和打包边界见
+[Resilience Edition 契约](../operations/resilience_edition_design.md)。
 
 ## 第 1 版多会话 API
 
@@ -55,7 +94,11 @@ markdown 文件（例如 `/xjtu/docs/README.md`、
 第 1 版目前接受 `power_flow`（`method=ac_newton`）与
 `optimal_power_flow`（`network_model=balanced_aggregate`，后端可选 parity、
 Ipopt、auto、经济调度或 DC）。其他生产级分析仍保留在旧路由上，直到其
-结果契约完成迁移。
+结果契约完成迁移。`GET /api/v1` 的 `analyses` 只列出这两个可执行 v1 ID，
+`known_disabled_analyses` 则列出服务器已知、但不能通过 v1 执行的规范旧式
+`AnalysisSpec.name` ID。任务提交采用三态判定：可执行 ID 被接受；已知禁用 ID
+返回扁平 HTTP 403 `edition_feature_disabled`；规范目录之外的名称返回扁平
+HTTP 400 `unsupported_analysis`。worker 在执行前会再次分类，作为纵深防御。
 
 Parity/auto 最优潮流接受 `request.options` 下有界的 Phase-I 控制项：
 `enable_phase_one`，时间/迭代/分解/回溯预算，barrier、admission、
@@ -209,8 +252,9 @@ LOD0 按电气域聚合。空间坐标是 API 布局空间，不是图索引，�
 求解期间装配的所选广义雅可比元素，而不是 B-次微分的每一个元素。
 
 弹性、承载力、园区综合能源系统（IES）、EV 交通、生命周期、场景生成与
-SPPT 的专用生产路由仍可在服务器源码中发现。旧的嵌入式 UI 路由不属于
-本契约。
+SPPT 的专用生产路由均以规范条目出现在 `/api/edition.analysis_catalog` 中；其
+edition 可用性由对应 entry 的 `enabled` 决定，`/api/v1.analyses` 不是完整旧式
+路由清单。旧的嵌入式 UI 路由不属于本契约。
 
 ## 可靠性与保护配置
 

@@ -1,0 +1,35 @@
+{
+  "_comment": "Regression baselines for MILP/LP solver results. Consumed by test_branch_and_cut, test_dual_simplex, and test_unit_commitment.",
+  "milp": {
+    "knapsack_5": {
+      "optimal_objective": -29.0,
+      "tolerance": 1e-6
+    },
+    "mixed_int_4": {
+      "optimal_objective": -10.0,
+      "tolerance": 1e-6
+    },
+    "knapsack_20": {
+      "optimal_objective": -129.62711599,
+      "tolerance": 1e-4,
+      "unit_commitment_tolerance": 1e-2
+    }
+  },
+  "lp": {
+    "root_2var": {
+      "expected_x": [2.5, 1.5],
+      "expected_objective": -10.5,
+      "tolerance": 1e-8
+    },
+    "child_2var": {
+      "expected_x": [1.5, 2.5],
+      "expected_objective": -9.5,
+      "tolerance": 1e-8
+    },
+    "negative_rhs": {
+      "expected_objective": 1.0,
+      "expected_sum_x": 1.0,
+      "tolerance": 1e-8
+    }
+  }
+}

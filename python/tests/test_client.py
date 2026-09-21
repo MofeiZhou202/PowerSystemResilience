@@ -15,6 +15,7 @@ from hysim import (
     PowerFlowRequest,
     TransportResponse,
 )
+from test_edition_capabilities import edition_payload
 
 
 class FakeTransport:
@@ -32,6 +33,7 @@ class ClientTests(unittest.TestCase):
     def test_load_and_power_flow_preserve_revision_and_payload(self) -> None:
         transport = FakeTransport(
             [
+                (200, edition_payload()),
                 (200, {"name": "ieee14_acdc", "counts": {"ac_buses": 14}}),
                 (
                     200,
@@ -53,13 +55,15 @@ class ClientTests(unittest.TestCase):
             PowerFlowRequest(options=PowerFlowOptions(max_iter=80, tol=1e-9))
         )
 
+        self.assertEqual(transport.calls[0]["path"], "/api/edition")
+        self.assertEqual(transport.calls[1]["path"], "/api/session/load_builtin")
         self.assertEqual(client.model_revision, 1)
         self.assertEqual(result.model_revision, 1)
         self.assertEqual(result.scientific_status, "qualified")
         self.assertEqual(result.summary()["result_sizes"]["vm"], 2)
         self.assertEqual(result.limitations, ("balanced aggregate",))
         self.assertEqual(
-            transport.calls[1]["json_body"],
+            transport.calls[2]["json_body"],
             {
                 "method": "ac_newton",
                 "options": {

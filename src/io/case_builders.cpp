@@ -1,6 +1,7 @@
 #include "hacdcpf/io/case_builders.hpp"
 
 #include <algorithm>
+#include <array>
 #include <cmath>
 #include <filesystem>
 #include <limits>
@@ -16,6 +17,8 @@
 namespace hacdcpf::io {
 
 namespace {
+
+std::filesystem::path g_case_data_root;
 
 ACBus make_ac_bus(int index,
                   BusType type,
@@ -127,32 +130,23 @@ int find_slack_bus(const HybridPowerSystem& sys) {
 }
 
 std::filesystem::path data_file_path(const std::string& name) {
-  // Search a list of candidate locations and return the first that exists.
-  // The MATPOWER `.m` library ships under <root>/external_data/matpower; the
-  // legacy sibling "HybridACDCPowerFlow/data" layout is kept as a fallback.
   namespace fs = std::filesystem;
-  std::vector<fs::path> candidates;
+  if (!g_case_data_root.empty()) {
+    return g_case_data_root / name;
+  }
 #ifdef HACDCPF_PROJECT_ROOT
   const fs::path root(HACDCPF_PROJECT_ROOT);
-  candidates.push_back(root / "external_data" / "matpower" / name);
-  candidates.push_back(root / "data" / name);
-  candidates.push_back(root.parent_path() / "HybridACDCPowerFlow" / "data" / name);
-#endif
-  const fs::path cwd = fs::current_path();
-  candidates.push_back(cwd / "external_data" / "matpower" / name);
-  candidates.push_back(cwd / ".." / "external_data" / "matpower" / name);
-  candidates.push_back(cwd / "data" / name);
-  candidates.push_back(cwd / ".." / "data" / name);
-  for (const auto& c : candidates) {
+  const std::array candidates{
+      root / "external_data" / "matpower" / name,
+      root / "data" / name,
+  };
+  for (const auto& candidate : candidates) {
     std::error_code ec;
-    if (fs::exists(c, ec)) return c;
+    if (fs::exists(candidate, ec) && !ec) return candidate;
   }
-  // None found: fall back to the legacy path so the error message is familiar.
-#ifdef HACDCPF_PROJECT_ROOT
-  return root.parent_path() / "HybridACDCPowerFlow" / "data" / name;
-#else
-  return fs::path("../HybridACDCPowerFlow/data") / name;
 #endif
+  throw std::runtime_error(
+      "No MATPOWER resource root is configured for built-in case file: " + name);
 }
 
 void attach_two_terminal_dc(HybridPowerSystem& sys,
@@ -874,6 +868,14 @@ HybridPowerSystem build_ieee14_ac_base() {
 double pu_to_mw(double p) { return p * 100.0; }
 
 }  // namespace
+
+void set_case_data_root(std::filesystem::path root) {
+  g_case_data_root = std::move(root);
+}
+
+std::filesystem::path case_data_file_path(const std::string& name) {
+  return data_file_path(name);
+}
 
 HybridPowerSystem build_ieee14_acdc() {
   HybridPowerSystem sys = build_ieee14_ac_base();

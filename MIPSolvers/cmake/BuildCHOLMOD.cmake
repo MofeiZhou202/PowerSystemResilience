@@ -1,0 +1,183 @@
+# cmake/BuildCHOLMOD.cmake
+# Builds CHOLMOD 5.3.4 (from SuiteSparse 7.12.2) out of the VENDORED sources
+# in suitesparse/ — no network access is required at configure/build/deploy
+# time.  The sources are compiled directly (same approach as BuildMUMPS.cmake)
+# rather than via the upstream umbrella CMake, which is not usable standalone.
+#
+# Components compiled (all that CHOLMOD needs):
+#   SuiteSparse_config, AMD, CAMD, COLAMD, CCOLAMD, and CHOLMOD's
+#   Check/Cholesky/Utility(Core)/Supernodal modules — double precision,
+#   both int32 (cholmod_*) and int64 (cholmod_l_*) entry points.
+#   Excluded: Partition/Modify/MatrixOps (NPARTITION/NMODIFY/NMATRIXOPS),
+#   GPU/CUDA, and the Fortran-only AMD helpers.
+#
+# BLAS/LAPACK (supernodal kernels): consumed via MIPSOLVERS_BLAS_LIBRARIES,
+# resolved once in cmake/Dependencies.cmake (Accelerate on macOS, system
+# BLAS/LAPACK elsewhere, vendored reference LAPACK as fallback).
+#
+# Targets/vars created:
+#   cholmod_vendored           — static library
+#   MIPSOLVERS_HAVE_CHOLMOD    — set ON when the vendored build is enabled
+#   MIPSOLVERS_CHOLMOD_INCLUDE_DIRS — public header dirs (cholmod.h)
+
+option(MIPSOLVERS_USE_VENDORED_CHOLMOD
+  "Build vendored CHOLMOD from in-tree SuiteSparse sources (offline)" ON)
+
+set(MIPSOLVERS_HAVE_CHOLMOD OFF)
+set(MIPSOLVERS_CHOLMOD_INCLUDE_DIRS "")
+
+if(NOT MIPSOLVERS_USE_VENDORED_CHOLMOD)
+  message(STATUS "mipsolvers: vendored CHOLMOD disabled (MIPSOLVERS_USE_VENDORED_CHOLMOD=OFF)")
+  return()
+endif()
+
+set(_SS_ROOT "${CMAKE_CURRENT_SOURCE_DIR}/suitesparse")
+if(NOT EXISTS "${_SS_ROOT}/CHOLMOD/Include/cholmod.h")
+  message(STATUS "mipsolvers: vendored SuiteSparse not found at ${_SS_ROOT}; CHOLMOD disabled")
+  return()
+endif()
+
+# ── Sources ───────────────────────────────────────────────────────────────────
+file(GLOB _SSCONFIG_SOURCES "${_SS_ROOT}/SuiteSparse_config/SuiteSparse_config.c")
+file(GLOB _AMD_SOURCES      "${_SS_ROOT}/AMD/Source/amd_*.c")
+file(GLOB _CAMD_SOURCES     "${_SS_ROOT}/CAMD/Source/camd_*.c")
+file(GLOB _COLAMD_SOURCES   "${_SS_ROOT}/COLAMD/Source/colamd*.c")
+file(GLOB _CCOLAMD_SOURCES  "${_SS_ROOT}/CCOLAMD/Source/ccolamd*.c")
+file(GLOB _CHOLMOD_SOURCES
+  "${_SS_ROOT}/CHOLMOD/Check/cholmod_*.c"
+  "${_SS_ROOT}/CHOLMOD/Cholesky/cholmod_*.c"
+  "${_SS_ROOT}/CHOLMOD/Utility/cholmod_*.c"
+  "${_SS_ROOT}/CHOLMOD/Supernodal/cholmod_*.c")
+
+add_library(cholmod_vendored STATIC
+  ${_SSCONFIG_SOURCES}
+  ${_AMD_SOURCES}
+  ${_CAMD_SOURCES}
+  ${_COLAMD_SOURCES}
+  ${_CCOLAMD_SOURCES}
+  ${_CHOLMOD_SOURCES})
+
+set_target_properties(cholmod_vendored PROPERTIES
+  C_STANDARD 11
+  C_STANDARD_REQUIRED ON
+  POSITION_INDEPENDENT_CODE ON)
+
+target_include_directories(cholmod_vendored PRIVATE
+  "${_SS_ROOT}/SuiteSparse_config"
+  "${_SS_ROOT}/AMD/Include"
+  "${_SS_ROOT}/CAMD/Include"
+  "${_SS_ROOT}/COLAMD/Include"
+  "${_SS_ROOT}/CCOLAMD/Include"
+  "${_SS_ROOT}/CHOLMOD/Include"
+  "${_SS_ROOT}/CHOLMOD/Utility")
+
+# Build without METIS (Partition) and without the Modify/MatrixOps modules —
+# their sources are not compiled above; these defines keep internal headers
+# consistent with that.
+target_compile_definitions(cholmod_vendored PRIVATE
+  NPARTITION NMODIFY NMATRIXOPS)
+
+# The vendored generated SuiteSparse_config header enables the POSIX
+# clock_gettime timer unconditionally. MSVC has no CLOCK_MONOTONIC, and the
+# timer is optional, so disable it for the native Windows build.
+if(WIN32)
+  target_compile_definitions(cholmod_vendored PRIVATE NTIMER)
+endif()
+
+# ── BLAS/LAPACK for the supernodal kernels ────────────────────────────────────
+# Unified resolution lives in cmake/Dependencies.cmake (Accelerate on macOS,
+# system BLAS/LAPACK elsewhere, vendored reference LAPACK as fallback) and is
+# consumed here via MIPSOLVERS_BLAS_LIBRARIES.
+if(MIPSOLVERS_BLAS_LIBRARIES)
+  # Concrete BLAS paths belong to the build tree.  The installed SDK restores
+  # its static oneMKL closure from package-relative paths in
+  # mipsolversConfig.cmake; exporting host paths would make the package
+  # non-relocatable.  Target names are kept build-only for the same reason.
+  foreach(_SS_BLAS_LIBRARY IN LISTS MIPSOLVERS_BLAS_LIBRARIES)
+    target_link_libraries(cholmod_vendored PRIVATE
+      "$<BUILD_INTERFACE:${_SS_BLAS_LIBRARY}>")
+  endforeach()
+  unset(_SS_BLAS_LIBRARY)
+else()
+  # Degrade gracefully to the simplicial method (no BLAS) — CHOLMOD stays
+  # usable, just without the supernodal BLAS-3 kernels.
+  message(STATUS "mipsolvers: BLAS/LAPACK not found — CHOLMOD supernodal module disabled")
+  target_compile_definitions(cholmod_vendored PRIVATE NSUPERNODAL)
+endif()
+if(UNIX AND NOT APPLE)
+  target_link_libraries(cholmod_vendored PRIVATE m)
+endif()
+
+# ── UMFPACK (unsymmetric LU — the dual-simplex basis backend) ────────────────
+# Built from the same vendored SuiteSparse sources; links cholmod_vendored for
+# AMD/CHOLMOD/SuiteSparse_config dependencies.  Offline — replaces the system
+# SuiteSparse UMFPACK.
+# UMFPACK's di (int32) and dl (int64) interfaces are generated by compiling
+# the Source2 wrapper files, which #define DINT/DLONG and include the shared
+# Source/*.c cores — glob Source2 (not Source) to get both interfaces.
+file(GLOB _UMFPACK_SOURCES "${_SS_ROOT}/UMFPACK/Source2/*.c")
+add_library(umfpack_vendored STATIC ${_UMFPACK_SOURCES})
+set_target_properties(umfpack_vendored PROPERTIES
+  C_STANDARD 11
+  C_STANDARD_REQUIRED ON
+  POSITION_INDEPENDENT_CODE ON)
+target_include_directories(umfpack_vendored PUBLIC
+  "$<BUILD_INTERFACE:${_SS_ROOT}/SuiteSparse_config>"
+  "$<BUILD_INTERFACE:${_SS_ROOT}/AMD/Include>"
+  "$<BUILD_INTERFACE:${_SS_ROOT}/CHOLMOD/Include>"
+  "$<BUILD_INTERFACE:${_SS_ROOT}/UMFPACK/Include>"
+  "$<BUILD_INTERFACE:${_SS_ROOT}/UMFPACK/Source>")
+# UMFPACK otherwise emits unconditional Fortran-BLAS references even though
+# its sources contain equivalent scalar update loops.  Keep the no-BLAS
+# production profile internally consistent with CHOLMOD's NSUPERNODAL mode.
+# See docs/archive/lp_tail_elimination_2026-08-18.md, section 14, and Davis
+# 2004, Algorithm 832 (UMFPACK's BLAS-independent numeric factorization).
+if(NOT MIPSOLVERS_BLAS_LIBRARIES)
+  target_compile_definitions(umfpack_vendored PRIVATE NBLAS)
+endif()
+target_link_libraries(umfpack_vendored PRIVATE cholmod_vendored)
+add_library(mipsolvers::umfpack_vendored ALIAS umfpack_vendored)
+
+# ── KLU + BTF (sparse LU for circuit-type systems) ───────────────────────────
+# KLU depends on AMD, BTF, COLAMD, CAMD, CCOLAMD, SuiteSparse_config — all in
+# cholmod_vendored except BTF, which is compiled in here.
+file(GLOB _KLU_SOURCES "${_SS_ROOT}/KLU/Source/klu*.c")
+file(GLOB _BTF_SOURCES "${_SS_ROOT}/BTF/Source/btf*.c")
+add_library(klu_vendored STATIC ${_KLU_SOURCES} ${_BTF_SOURCES})
+set_target_properties(klu_vendored PROPERTIES
+  C_STANDARD 11
+  C_STANDARD_REQUIRED ON
+  POSITION_INDEPENDENT_CODE ON)
+target_include_directories(klu_vendored PUBLIC
+  "$<BUILD_INTERFACE:${_SS_ROOT}/SuiteSparse_config>"
+  "$<BUILD_INTERFACE:${_SS_ROOT}/AMD/Include>"
+  "$<BUILD_INTERFACE:${_SS_ROOT}/BTF/Include>"
+  "$<BUILD_INTERFACE:${_SS_ROOT}/COLAMD/Include>"
+  "$<BUILD_INTERFACE:${_SS_ROOT}/CAMD/Include>"
+  "$<BUILD_INTERFACE:${_SS_ROOT}/CCOLAMD/Include>"
+  "$<BUILD_INTERFACE:${_SS_ROOT}/KLU/Include>")
+target_link_libraries(klu_vendored PRIVATE cholmod_vendored)
+add_library(mipsolvers::klu_vendored ALIAS klu_vendored)
+
+set(MIPSOLVERS_HAVE_UMFPACK ON)
+set(MIPSOLVERS_HAVE_KLU ON)
+set(MIPSOLVERS_UMFPACK_INCLUDE_DIRS "${_SS_ROOT}/UMFPACK/Include")
+set(MIPSOLVERS_KLU_INCLUDE_DIRS "${_SS_ROOT}/KLU/Include")
+
+set(MIPSOLVERS_HAVE_CHOLMOD ON)
+set(MIPSOLVERS_CHOLMOD_INCLUDE_DIRS "${_SS_ROOT}/CHOLMOD/Include")
+
+# Combined include set for SuiteSparse consumers (umfpack.h needs amd.h;
+# klu.h needs btf.h and colamd.h; everything needs SuiteSparse_config.h).
+set(MIPSOLVERS_SUITESPARSE_INCLUDE_DIRS
+  "${_SS_ROOT}/SuiteSparse_config"
+  "${_SS_ROOT}/AMD/Include"
+  "${_SS_ROOT}/CAMD/Include"
+  "${_SS_ROOT}/COLAMD/Include"
+  "${_SS_ROOT}/CCOLAMD/Include"
+  "${_SS_ROOT}/CHOLMOD/Include"
+  "${_SS_ROOT}/UMFPACK/Include"
+  "${_SS_ROOT}/KLU/Include"
+  "${_SS_ROOT}/BTF/Include")
+
+message(STATUS "mipsolvers: building vendored CHOLMOD/UMFPACK/KLU (SuiteSparse 7.12.2) from suitesparse/")

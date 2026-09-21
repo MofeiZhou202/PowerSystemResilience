@@ -96,8 +96,54 @@ body {
   background: var(--bg);
   overflow: hidden;
   height: 100vh;
+}
+.app-shell {
+  width: 100%;
+  height: 100%;
+  min-width: 0;
   display: flex;
   flex-direction: column;
+  overflow: hidden;
+}
+.app-shell[hidden] { display: none !important; }
+.startup-status {
+  position: fixed;
+  inset: 0;
+  z-index: 2000;
+  display: grid;
+  place-items: center;
+  padding: 20px;
+  overflow: auto;
+  background:
+    radial-gradient(circle at 50% 32%, color-mix(in srgb, var(--accent) 12%, transparent), transparent 48%),
+    var(--bg);
+}
+.startup-status[hidden] { display: none; }
+.startup-status-card {
+  width: min(520px, 100%);
+  padding: 24px;
+  border: 1px solid var(--border2);
+  border-radius: 10px;
+  background: var(--surface-raised);
+  box-shadow: 0 16px 48px var(--shadow);
+  text-align: center;
+  overflow-wrap: anywhere;
+}
+.startup-status-card strong {
+  display: block;
+  color: var(--accent);
+  font-size: 18px;
+}
+.startup-status-card p {
+  margin-top: 10px;
+  color: var(--ink2);
+  line-height: 1.6;
+}
+.startup-status[data-state="unavailable"] .startup-status-card {
+  border-color: color-mix(in srgb, var(--status-danger) 65%, var(--border));
+}
+.startup-status[data-state="unavailable"] .startup-status-card strong {
+  color: var(--status-danger);
 }
 
 .skip-link {
@@ -986,7 +1032,10 @@ body[data-active-result-group="parameterLibrary"] #rightPanel {
   overflow: auto;
 }
 #resilienceResults.topo-table-wrap,
-#reliabilityResults.topo-table-wrap {
+#reliabilityResults.topo-table-wrap,
+#proactiveDefenseResults.topo-table-wrap,
+#rapidRecoveryResults.topo-table-wrap,
+#resilienceMetricsResults.topo-table-wrap {
   max-height: none;
   overflow: visible;
 }
@@ -1156,6 +1205,50 @@ body[data-active-result-group="parameterLibrary"] #rightPanel {
   grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
   gap: 10px;
 }
+/* The four resilience result groups fill the full results-area height:
+   stretch the whole chain from #resultsContent down to the chart grid. */
+#resultsContent[data-active-group="resilience"],
+#resultsContent[data-active-group="proactiveDefense"],
+#resultsContent[data-active-group="rapidRecovery"],
+#resultsContent[data-active-group="resilienceMetrics"] {
+  display: flex;
+  flex-direction: column;
+  min-height: 100%;
+}
+#resultsContent[data-active-group="resilience"] .result-group[data-result-group="resilience"],
+#resultsContent[data-active-group="proactiveDefense"] .result-group[data-result-group="proactiveDefense"],
+#resultsContent[data-active-group="rapidRecovery"] .result-group[data-result-group="rapidRecovery"],
+#resultsContent[data-active-group="resilienceMetrics"] .result-group[data-result-group="resilienceMetrics"] {
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  min-height: 0;
+}
+.result-group[data-result-group="resilience"] > .topo-section,
+.result-group[data-result-group="proactiveDefense"] > .topo-section,
+.result-group[data-result-group="rapidRecovery"] > .topo-section,
+.result-group[data-result-group="resilienceMetrics"] > .topo-section {
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  min-height: 0;
+}
+#resilienceResults,
+#proactiveDefenseResults,
+#rapidRecoveryResults,
+#resilienceMetricsResults {
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  min-height: 0;
+}
+.resilience-result-layout { flex: 1; }
+.resilience-chart-pane {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+}
+.resilience-charts-grid { flex: 1; }
 .compact-hint {
   padding: 6px 8px;
   text-align: left;
@@ -1401,6 +1494,9 @@ body[data-active-result-group="parameterLibrary"] #rightPanel {
 #resultsContent[data-active-group="reliability"]  .result-group[data-result-group="reliability"],
 #resultsContent[data-active-group="scenarioGeneration"] .result-group[data-result-group="scenarioGeneration"],
 #resultsContent[data-active-group="resilience"]   .result-group[data-result-group="resilience"],
+#resultsContent[data-active-group="proactiveDefense"] .result-group[data-result-group="proactiveDefense"],
+#resultsContent[data-active-group="rapidRecovery"] .result-group[data-result-group="rapidRecovery"],
+#resultsContent[data-active-group="resilienceMetrics"] .result-group[data-result-group="resilienceMetrics"],
 #resultsContent[data-active-group="indicatorDesign"] .result-group[data-result-group="indicatorDesign"],
 #resultsContent[data-active-group="weakLinks"]    .result-group[data-result-group="weakLinks"] {
   display: block;
@@ -3870,6 +3966,20 @@ tr.topo-clickable:focus-visible {
 }
 .module-btn.active:hover { filter: brightness(1.08); }
 .module-btn.workflow-hidden { display: none; }
+.module-btn.module-btn-disabled,
+.module-btn:disabled {
+  opacity: 0.55;
+  border-style: dashed;
+  cursor: not-allowed;
+}
+.module-btn.module-btn-disabled:hover,
+.module-btn:disabled:hover {
+  background: var(--tb-bg);
+  border-color: var(--tb-border-hover);
+  filter: none;
+}
+.module-btn.module-btn-disabled:active,
+.module-btn:disabled:active { transform: none; }
 
 /* ===== Bar 2c: Dependency Strip ===== */
 .dependency-strip {

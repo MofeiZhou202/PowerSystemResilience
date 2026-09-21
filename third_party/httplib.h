@@ -6828,6 +6828,12 @@ inline bool Server::listen_internal() {
 inline bool Server::routing(Request &req, Response &res, Stream &strm) {
   if (pre_routing_handler_ &&
       pre_routing_handler_(req, res) == HandlerResponse::Handled) {
+    // A pre-routing handler can reject a request before the normal routing path
+    // reads its payload. Drain the declared body so HTTP keep-alive stays
+    // synchronized and clients can read the rejection response reliably.
+    if (detail::expect_content(req) && !read_content(strm, req, res)) {
+      return false;
+    }
     return true;
   }
 

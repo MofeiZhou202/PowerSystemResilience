@@ -38,8 +38,10 @@ from .analyses import (
     TransientRequest,
     UnitCommitmentRequest,
 )
-from .client import ANALYSIS_ROUTES, ApiCallEvent, HySimClient
+from .client import ANALYSIS_ALIASES, ANALYSIS_ROUTES, ApiCallEvent, HySimClient
+from .edition import AnalysisCapability, EditionProfile
 from .errors import (
+    AnalysisDisabledError,
     ApiError,
     BusyError,
     HySimError,
@@ -47,6 +49,7 @@ from .errors import (
     JobFailedError,
     ToolPolicyError,
     TransportError,
+    UnknownAnalysisError,
 )
 from .models import (
     AnalysisResult,
@@ -106,13 +109,17 @@ from .resources import ResultFrameChunk, SubgraphView, TopologyChunk, ViolationC
 from .server import LocalHySimServer
 from .transport import Transport, TransportResponse, UrllibTransport
 from .v1 import HySimJob, HySimV1Client, HySimV1Session, TERMINAL_JOB_STATES
+from .v1_capabilities import V1Capabilities
 
 __all__ = [
+    "ANALYSIS_ALIASES",
     "ANALYSIS_ROUTES",
     "ANALYSIS_CATALOG",
     "AcOpfRequest",
+    "AnalysisCapability",
     "AnalysisCatalog",
     "AnalysisCategory",
+    "AnalysisDisabledError",
     "AnalysisEffect",
     "AnalysisResult",
     "AnalysisSpec",
@@ -131,6 +138,7 @@ __all__ = [
     "DcShortCircuitRequest",
     "DynamicCarbonRequest",
     "DynamicsApi",
+    "EditionProfile",
     "EtapXmlLoadRequest",
     "EvTrafficApi",
     "EvTrafficRequest",
@@ -209,8 +217,10 @@ __all__ = [
     "TransportError",
     "TransportResponse",
     "TyphoonFaultsRequest",
+    "UnknownAnalysisError",
     "UnitCommitmentRequest",
     "UrllibTransport",
+    "V1Capabilities",
     "ViolationChunk",
     "WeakLinksRequest",
 ]

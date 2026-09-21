@@ -7,7 +7,7 @@
 
 - **HySim-XJTU-HRPES**：交直流混合高弹性能源电力系统仿真分析平台（西安交通大学 HRPES 团队）。
 - 核心是 C++20 静态库 `hacdcpf`（`src/` + `include/hacdcpf/`），外加独立 HTTP 后端可执行 `run_gui_server`（`tests/run_gui_server.cpp`，约 2.1 万行）与原生 JS 单页 GUI（`web/`，挂载于 `/xjtu/`）。
-- 唯一必需外部依赖是**兄弟仓库 `../MIPSolvers`**（本地源码，非系统安装；提供 Eigen3、fmt、nlohmann_json、HiGHS、Ipopt/SCIP 与 AML 建模层）。路径可用 `MIPSOLVERS_SOURCE_DIR` 覆盖。
+- 唯一必需外部依赖是仓库内锁定导入的 **`MIPSolvers/`**（上游 `windows` 分支提交 `c6f77f297350b357ff30cc96d9234b2031fd316c`；提供 Eigen3、fmt、nlohmann_json、HiGHS、Ipopt/SCIP 与 AML 建模层）。路径可用 `MIPSOLVERS_SOURCE_DIR` 显式覆盖；正式发布只接受锁定的仓库内导入。
 
 ## AI 快速入口
 
@@ -79,7 +79,7 @@ cmake --build --preset macos-release
 ctest --preset macos-release
 ```
 
-- CMake 选项：`HACDCPF_DEPENDENCY_PROFILE`（portable/full/minimal）、`HACDCPF_ENABLE_ETAP`（**默认 ON**，需 OpenXLSX，找不到则 FATAL_ERROR）、`HACDCPF_ENABLE_OPENDSS(_COMPARE)`（OFF）、`HACDCPF_ENABLE_IPOPT`（macOS/Windows 默认 ON；Windows 默认使用 MIPSolvers 自带的静态 sequential oneMKL/PardisoMKL）、`HACDCPF_USE_SUITESPARSE`（ON，缺失回退 Eigen SparseLU）。
+- CMake 选项：`HACDCPF_DEPENDENCY_PROFILE`（portable/full/minimal）、`HACDCPF_TRIAL_EDITION`、`HACDCPF_RESILIENCE_EDITION`（二者互斥）、`HACDCPF_ENABLE_ETAP`（**默认 ON**，需 OpenXLSX，找不到则 FATAL_ERROR）、`HACDCPF_ENABLE_OPENDSS(_COMPARE)`（OFF）、`HACDCPF_ENABLE_IPOPT`（macOS/Windows 默认 ON；Windows 从 `build/windows-dependencies/` 消费显式 staging 的 sequential oneMKL/PardisoMKL）、`HACDCPF_USE_SUITESPARSE`（ON，缺失回退 Eigen SparseLU）。
 - 测试：100+ C++ 目标（约 1250 个 Catch2 用例）+ Node/Playwright/Python E2E。外部依赖（gridlabd、Julia、OpenDSS、chromium）缺失时自动 skip。浏览器 E2E 需 `npm i -D playwright && npx playwright install chromium`。
 - GUI E2E：`ctest -R gui_api_e2e`（Python 全链路冒烟）。
 

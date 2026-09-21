@@ -1,6 +1,6 @@
 # Runtime API Contract
 
-Updated: 2026-08-21
+Updated: 2026-09-19
 
 The GUI server is implemented in `tests/run_gui_server.cpp`. Session endpoints
 operate on one loaded `HybridPowerSystem`; a model-changing request clears
@@ -16,6 +16,51 @@ rejected with 404. The GUI documentation help center
 `hysim_help_docs_v1`) renders these documents in-app; see
 [GUI Canvas runtime](../developer/gui_canvas_runtime.md) for the front-end
 contract.
+
+## Edition discovery and fail-closed routing
+
+`GET /api/edition` is the product and process-global capability source used by
+the GUI and legacy `/api/session/*` clients. Its profile schema is
+`hacdcpf.edition-profile.v1`. `POST /api/edition/analysis_plan` maps selected
+indicator IDs to backend-ordered, user-confirmable analysis steps; it does not
+execute a solver. These routes are distinct from `GET /api/v1`, which describes
+the isolated asynchronous runtime and its executable job IDs.
+
+The profile's `analysis_catalog` is the legacy-session analysis catalog. Its
+object has exactly `schema` and `entries`, with schema
+`hacdcpf.edition-analysis-catalog.v1`; each entry has exactly `name`, `route`,
+`method`, and boolean `enabled`. `name` is one of the 69 canonical
+`AnalysisSpec.name` IDs. Client conveniences such as `resilience` ->
+`distribution_resilience` are aliases, not server IDs. The top-level profile
+`analyses` field remains the small PF/OPF v1-compatible list and must not be
+confused with this catalog or with the independent `/api/v1` document.
+
+Full Edition emits the exact singleton wildcard `["*"]` in
+`enabled_modules`, `frontend_modules`, and `enabled_io_formats`. Restricted
+editions must enumerate explicit values and cannot use a wildcard. Their route
+policy is fail closed: retained method/path pairs reach their handlers; known
+disabled routes and unclassified future API routes return HTTP 403. An
+unclassified route reports `feature: "unclassified_api"`. Resilience denials
+use the nested shape below; Trial uses `TRIAL_FEATURE_DISABLED` instead.
+
+```json
+{
+  "error": {
+    "code": "EDITION_FEATURE_DISABLED",
+    "edition": "resilience",
+    "feature": "market",
+    "message": "This capability is not included in the Resilience edition."
+  }
+}
+```
+
+The GUI validates the exact edition-profile envelope and nested catalog schema
+before exposing the shell; the Python client additionally reconciles the full
+catalog against its SDK-known names, routes, and methods. Malformed, incomplete,
+or contradictory discovery fails closed rather than falling back to Full. See
+the
+[Resilience Edition contract](../operations/resilience_edition_design.md) for
+the complete client, build, and packaging boundary.
 
 ## Version 1 multi-session API
 
@@ -56,7 +101,22 @@ across server restarts.
 Version 1 currently accepts `power_flow` with `method=ac_newton` and
 `optimal_power_flow` with `network_model=balanced_aggregate` using parity,
 Ipopt, auto, economic dispatch, or DC. Other production analyses remain on the
-legacy routes until their result contracts are migrated.
+legacy routes until their result contracts are migrated. `GET /api/v1` keeps
+`analyses` limited to those two executable v1 IDs and separately publishes
+`known_disabled_analyses`, the canonical legacy `AnalysisSpec.name` IDs that are
+known but not executable through v1. Job submission is tri-state: executable IDs
+are accepted, known-disabled IDs return flat HTTP 403
+`edition_feature_disabled`, and names outside the canonical catalog return flat
+HTTP 400 `unsupported_analysis`. The worker repeats the classification before
+execution as defense in depth.
+
+`GET /api/edition` retains `schema: hacdcpf.edition-profile.v1` and embeds a
+separate `analysis_catalog` object with schema
+`hacdcpf.edition-analysis-catalog.v1`. As defined above, that catalog has
+exactly `schema` and `entries`; every legacy/session entry has exactly `name`,
+`route`, `method`, and boolean `enabled`. Names are canonical IDs from
+`python/src/hysim/analyses.py` (client aliases are not server IDs), and all
+catalog methods are currently `POST`.
 
 Parity/auto OPF accepts bounded Phase-I controls under `request.options`:
 `enable_phase_one`, time/iteration/factorization/backtrack budgets, barrier,
@@ -305,8 +365,10 @@ was admitted. These runtime values certify the selected generalized-Jacobian
 element assembled during the solve, not every element of the B-subdifferential.
 
 Specialized production routes for resilience, hosting capacity, campus IES,
-EV traffic, lifecycle, scenario generation, and SPPT remain discoverable in
-the server source. Legacy embedded-UI routes are not part of this contract.
+EV traffic, lifecycle, scenario generation, and SPPT are represented by their
+canonical entries in `/api/edition.analysis_catalog`. Availability is the
+entry's edition-specific `enabled` value; `/api/v1.analyses` is not a complete
+legacy-route list. Legacy embedded-UI routes are not part of this contract.
 
 ## Reliability and protection configuration
 

@@ -2,127 +2,128 @@
 #
 # Resolves all external dependencies for hacdcdss.
 #
-# Primary dependency: MIPSolvers (local sibling directory ../MIPSolvers).
-# MIPSolvers transitively provides Eigen3, fmt, nlohmann_json, HiGHS, and
-# optional Ipopt/SCIP — all compiled from local vendored sources.
+# Primary dependency: the reviewed MIPSolvers import in ./MIPSolvers. An
+# explicit MIPSOLVERS_SOURCE_DIR may select a developer checkout, but there is
+# no implicit sibling-directory fallback. MIPSolvers transitively provides
+# Eigen3, fmt, nlohmann_json, HiGHS, and optional Ipopt/SCIP from local sources.
 # No Homebrew or system-installed solver library is required or searched.
 
 # ── MIPSolvers ────────────────────────────────────────────────────────────────
-# MIPSolvers is consumed as a local sibling directory rather than through a
-# package manager or network fetch.  To keep the build reproducible:
-#
-#   * Record the expected commit hash below.  Update it whenever MIPSolvers is
-#     intentionally upgraded so reviewers can see the dependency version bump.
-#   * If the working tree does not match, CMake emits a FATAL_ERROR that halts
-#     the configure step.  Update the pin below whenever MIPSolvers is upgraded.
-#   * Override the default sibling path by setting MIPSOLVERS_SOURCE_DIR
-#     (e.g. cmake -DMIPSOLVERS_SOURCE_DIR=/opt/MIPSolvers ..) — useful for CI
-#     environments where the tree layout differs from the default.
-#
-# Last verified compatible commit (update when upgrading MIPSolvers):
-set(_HACDCDSS_MIPSOLVERS_EXPECTED_COMMIT "864b1479d35e3258281986b5c376b603b6598568"
-  CACHE STRING "Expected MIPSolvers HEAD commit (empty = skip check)" FORCE)
+# The lock records both the upstream commit and the imported Git tree. CMake
+# validates stable source files for both vendored trees and source archives;
+# release tooling additionally validates the complete committed subtree.
+include("${CMAKE_CURRENT_LIST_DIR}/MIPSolversProvenance.cmake")
 
 set(MIPSOLVERS_SOURCE_DIR "" CACHE PATH
-    "Explicit path to the MIPSolvers source tree. \
-When empty, auto-detects ./MIPSolvers (in-repo) then ../MIPSolvers (sibling).")
+    "Explicit MIPSolvers source tree (default: ./MIPSolvers).")
 if(NOT MIPSOLVERS_SOURCE_DIR STREQUAL "")
-  set(_HACDCDSS_MIPSOLVERS_DIR "${MIPSOLVERS_SOURCE_DIR}")
-elseif(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/MIPSolvers/CMakeLists.txt")
-  # MIPSolvers deployed inside the repo (./MIPSolvers).
-  set(_HACDCDSS_MIPSOLVERS_DIR "${CMAKE_CURRENT_SOURCE_DIR}/MIPSolvers")
+  get_filename_component(_HACDCDSS_MIPSOLVERS_DIR
+    "${MIPSOLVERS_SOURCE_DIR}" ABSOLUTE
+    BASE_DIR "${CMAKE_CURRENT_SOURCE_DIR}")
+  set(_HACDCDSS_MIPSOLVERS_EXPLICIT_SOURCE ON)
 else()
-  # Legacy layout: sibling directory next to this project.
-  set(_HACDCDSS_MIPSOLVERS_DIR "${CMAKE_CURRENT_SOURCE_DIR}/../MIPSolvers")
+  set(_HACDCDSS_MIPSOLVERS_DIR
+      "${CMAKE_CURRENT_SOURCE_DIR}/MIPSolvers")
+  set(_HACDCDSS_MIPSOLVERS_EXPLICIT_SOURCE OFF)
 endif()
 
 if(NOT EXISTS "${_HACDCDSS_MIPSOLVERS_DIR}/CMakeLists.txt")
   message(FATAL_ERROR
     "MIPSolvers source not found at ${_HACDCDSS_MIPSOLVERS_DIR}.\n"
-    "Clone or symlink the MIPSolvers repository alongside this project so that\n"
-    "  ${_HACDCDSS_MIPSOLVERS_DIR}/CMakeLists.txt  exists.")
+    "Restore the reviewed in-repository MIPSolvers/ import, or explicitly set\n"
+    "  -DMIPSOLVERS_SOURCE_DIR=/absolute/path/to/MIPSolvers\n"
+    "for a developer checkout. Sibling directories are never selected "
+    "implicitly.")
 endif()
 
-# Optionally verify the MIPSolvers commit matches the recorded pin.
-if(_HACDCDSS_MIPSOLVERS_EXPECTED_COMMIT)
-  find_package(Git QUIET)
-  if(Git_FOUND AND EXISTS "${_HACDCDSS_MIPSOLVERS_DIR}/.git")
-    option(HACDCDSS_SKIP_MIPSOLVERS_DIRTY_CHECK
-           "Suppress the local dirty-workspace warning for MIPSolvers in non-release builds"
-           OFF)
+_hacdcpf_verify_mipsolvers_lock("${_HACDCDSS_MIPSOLVERS_DIR}")
 
-    set(_HACDCDSS_MIPSOLVERS_STRICT_REPRO OFF)
-    if(CMAKE_BUILD_TYPE)
-      string(TOUPPER "${CMAKE_BUILD_TYPE}" _HACDCDSS_BUILD_TYPE_UPPER)
-      if(_HACDCDSS_BUILD_TYPE_UPPER STREQUAL "RELEASE" OR
-         _HACDCDSS_BUILD_TYPE_UPPER STREQUAL "RELWITHDEBINFO" OR
-         _HACDCDSS_BUILD_TYPE_UPPER STREQUAL "MINSIZEREL")
-        set(_HACDCDSS_MIPSOLVERS_STRICT_REPRO ON)
-      endif()
+# A standalone checkout has Git metadata and can additionally prove its commit
+# and cleanliness. A prefixed import intentionally has no nested .git; its
+# provenance is established by the lock above and the release subtree check.
+find_package(Git QUIET)
+if(Git_FOUND AND EXISTS "${_HACDCDSS_MIPSOLVERS_DIR}/.git")
+  option(HACDCDSS_SKIP_MIPSOLVERS_DIRTY_CHECK
+         "Suppress the local dirty-workspace warning for MIPSolvers in non-release builds"
+         OFF)
+
+  set(_HACDCDSS_MIPSOLVERS_STRICT_REPRO OFF)
+  if(CMAKE_BUILD_TYPE)
+    string(TOUPPER "${CMAKE_BUILD_TYPE}" _HACDCDSS_BUILD_TYPE_UPPER)
+    if(_HACDCDSS_BUILD_TYPE_UPPER STREQUAL "RELEASE" OR
+       _HACDCDSS_BUILD_TYPE_UPPER STREQUAL "RELWITHDEBINFO" OR
+       _HACDCDSS_BUILD_TYPE_UPPER STREQUAL "MINSIZEREL")
+      set(_HACDCDSS_MIPSOLVERS_STRICT_REPRO ON)
     endif()
-    if(DEFINED ENV{CI})
-      string(TOLOWER "$ENV{CI}" _HACDCDSS_CI_VALUE)
-      if(NOT _HACDCDSS_CI_VALUE STREQUAL "" AND
-         NOT _HACDCDSS_CI_VALUE STREQUAL "0" AND
-         NOT _HACDCDSS_CI_VALUE STREQUAL "false" AND
-         NOT _HACDCDSS_CI_VALUE STREQUAL "off")
-        set(_HACDCDSS_MIPSOLVERS_STRICT_REPRO ON)
-      endif()
+  endif()
+  if(DEFINED ENV{CI})
+    string(TOLOWER "$ENV{CI}" _HACDCDSS_CI_VALUE)
+    if(NOT _HACDCDSS_CI_VALUE STREQUAL "" AND
+       NOT _HACDCDSS_CI_VALUE STREQUAL "0" AND
+       NOT _HACDCDSS_CI_VALUE STREQUAL "false" AND
+       NOT _HACDCDSS_CI_VALUE STREQUAL "off")
+      set(_HACDCDSS_MIPSOLVERS_STRICT_REPRO ON)
     endif()
-    if(HACDCDSS_SKIP_MIPSOLVERS_DIRTY_CHECK AND
-       _HACDCDSS_MIPSOLVERS_STRICT_REPRO)
-      message(FATAL_ERROR
-        "HACDCDSS_SKIP_MIPSOLVERS_DIRTY_CHECK cannot be enabled for Release/CI "
-        "builds.  Dirty MIPSolvers sources make the pinned dependency "
-        "non-reproducible.")
-    endif()
+  endif()
+  if(HACDCDSS_SKIP_MIPSOLVERS_DIRTY_CHECK AND
+     _HACDCDSS_MIPSOLVERS_STRICT_REPRO)
+    message(FATAL_ERROR
+      "HACDCDSS_SKIP_MIPSOLVERS_DIRTY_CHECK cannot be enabled for Release/CI "
+      "builds. Dirty MIPSolvers sources make the pinned dependency "
+      "non-reproducible.")
+  endif()
+
+  execute_process(
+    COMMAND "${GIT_EXECUTABLE}" -C "${_HACDCDSS_MIPSOLVERS_DIR}"
+            rev-parse --verify HEAD
+    RESULT_VARIABLE _MIPSOLVERS_REV_PARSE_RESULT
+    OUTPUT_VARIABLE _MIPSOLVERS_ACTUAL_COMMIT
+    ERROR_QUIET OUTPUT_STRIP_TRAILING_WHITESPACE)
+  if(NOT _MIPSOLVERS_REV_PARSE_RESULT EQUAL 0 OR
+     NOT _MIPSOLVERS_ACTUAL_COMMIT STREQUAL
+         _HACDCDSS_MIPSOLVERS_EXPECTED_COMMIT)
+    message(FATAL_ERROR
+      "MIPSolvers HEAD (${_MIPSOLVERS_ACTUAL_COMMIT}) does not match the "
+      "locked commit (${_HACDCDSS_MIPSOLVERS_EXPECTED_COMMIT}).")
+  endif()
+
+  if(NOT HACDCDSS_SKIP_MIPSOLVERS_DIRTY_CHECK)
     execute_process(
       COMMAND "${GIT_EXECUTABLE}" -C "${_HACDCDSS_MIPSOLVERS_DIR}"
-              rev-parse --verify HEAD
-      OUTPUT_VARIABLE _MIPSOLVERS_ACTUAL_COMMIT
+              status --porcelain
+      RESULT_VARIABLE _MIPSOLVERS_STATUS_RESULT
+      OUTPUT_VARIABLE _MIPSOLVERS_DIRTY
       ERROR_QUIET OUTPUT_STRIP_TRAILING_WHITESPACE)
-    if(NOT _MIPSOLVERS_ACTUAL_COMMIT STREQUAL _HACDCDSS_MIPSOLVERS_EXPECTED_COMMIT)
-      # Non-fatal: a mismatch is flagged but never blocks the build, so a local
-      # MIPSolvers checkout that differs from the recorded pin still compiles.
-      # Update _HACDCDSS_MIPSOLVERS_EXPECTED_COMMIT to silence this once the new
-      # MIPSolvers revision is intentionally adopted.
-      message(WARNING
-        "MIPSolvers HEAD (${_MIPSOLVERS_ACTUAL_COMMIT}) does not match the "
-        "recorded pin (${_HACDCDSS_MIPSOLVERS_EXPECTED_COMMIT}).  Building "
-        "against the local checkout anyway; update the pin to record an "
-        "intentional upgrade.")
+    if(NOT _MIPSOLVERS_STATUS_RESULT EQUAL 0)
+      message(FATAL_ERROR
+        "Unable to inspect the MIPSolvers working tree at "
+        "${_HACDCDSS_MIPSOLVERS_DIR}.")
     endif()
-
-    # Detect a dirty working tree — uncommitted local changes in MIPSolvers
-    # would cause builds to diverge from the pinned commit even if HEAD matches.
-    if(NOT HACDCDSS_SKIP_MIPSOLVERS_DIRTY_CHECK)
-      execute_process(
-        COMMAND "${GIT_EXECUTABLE}" -C "${_HACDCDSS_MIPSOLVERS_DIR}"
-                status --porcelain
-        OUTPUT_VARIABLE _MIPSOLVERS_DIRTY
-        ERROR_QUIET OUTPUT_STRIP_TRAILING_WHITESPACE)
-      if(_MIPSOLVERS_DIRTY)
-        string(CONCAT _HACDCDSS_MIPSOLVERS_DIRTY_MESSAGE
-          "MIPSolvers working tree at ${_HACDCDSS_MIPSOLVERS_DIR} has "
-          "uncommitted changes:\n${_MIPSOLVERS_DIRTY}\n"
-          "The build is NOT reproducible from the pinned commit.  Commit, "
-          "stash, or discard the MIPSolvers changes before producing a release "
-          "artefact.")
-        if(_HACDCDSS_MIPSOLVERS_STRICT_REPRO)
-          message(FATAL_ERROR "${_HACDCDSS_MIPSOLVERS_DIRTY_MESSAGE}")
-        else()
-          message(WARNING
-            "${_HACDCDSS_MIPSOLVERS_DIRTY_MESSAGE}  Set "
-            "HACDCDSS_SKIP_MIPSOLVERS_DIRTY_CHECK=ON to suppress this warning "
-            "in non-release local builds.")
-        endif()
+    if(_MIPSOLVERS_DIRTY)
+      string(CONCAT _HACDCDSS_MIPSOLVERS_DIRTY_MESSAGE
+        "MIPSolvers working tree at ${_HACDCDSS_MIPSOLVERS_DIR} has "
+        "uncommitted changes:\n${_MIPSOLVERS_DIRTY}\n"
+        "The build is NOT reproducible from the locked commit. Commit, "
+        "stash, or discard the MIPSolvers changes before producing a release "
+        "artefact.")
+      if(_HACDCDSS_MIPSOLVERS_STRICT_REPRO)
+        message(FATAL_ERROR "${_HACDCDSS_MIPSOLVERS_DIRTY_MESSAGE}")
+      else()
+        message(WARNING
+          "${_HACDCDSS_MIPSOLVERS_DIRTY_MESSAGE} Set "
+          "HACDCDSS_SKIP_MIPSOLVERS_DIRTY_CHECK=ON to suppress this warning "
+          "in non-release local builds.")
       endif()
     endif()
-  elseif(NOT EXISTS "${_HACDCDSS_MIPSOLVERS_DIR}/.git")
-    message(STATUS
-      "MIPSolvers source archive has no Git metadata; commit and dirty-tree "
-      "checks are skipped.")
   endif()
+elseif(_HACDCDSS_MIPSOLVERS_EXPLICIT_SOURCE)
+  message(STATUS
+    "MIPSolvers explicit source archive has no Git metadata; provenance-file "
+    "checks passed, while commit and dirty-tree checks are unavailable.")
+else()
+  message(STATUS
+    "hacdcdss: using locked in-repository MIPSolvers import "
+    "(${_HACDCDSS_MIPSOLVERS_EXPECTED_COMMIT})")
 endif()
 
 # MIPSolvers subproject knobs are set by the top-level dependency profile before

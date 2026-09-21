@@ -1,6 +1,6 @@
 # Comprehensive Python API Design
 
-Last verified: 2026-09-16
+Last verified: 2026-09-19
 
 Status: design document. It defines the target surface for one comprehensive
 Python API over the whole `hacdcpf` C++ platform. Sections marked **Implemented**
@@ -76,7 +76,7 @@ number, because line numbers drift with the file.
 | Transport | `Transport`, `UrllibTransport` | Replaceable request execution; no unsafe automatic retry. | Implemented |
 | SDK v1 | `HySimV1Client`, `HySimV1Session`, `HySimJob` | Isolated model lifecycle, optimistic concurrency, asynchronous PF/OPF, typed topology and result chunks. | Implemented |
 | SDK legacy | `HySimClient` | Process-global lifecycle; typed PF/OPF; generic `run_analysis`. | Implemented |
-| **Catalog** | `AnalysisSpec`, `AnalysisCatalog`, `AnalysisEffect`, `AnalysisCategory` | One authoritative registry of every production analysis: route, HTTP method, effect class, model-mutation flag, category, brief. | **Implemented** |
+| **Catalog** | `AnalysisSpec`, `AnalysisCatalog`, `AnalysisEffect`, `AnalysisCategory` | SDK-known universe of every production analysis: canonical name, route, HTTP method, effect class, model-mutation flag, category, brief. Connected-edition enablement comes separately from `/api/edition`. | **Implemented** |
 | **Families** | `PowerFlowApi`, `OptimalPowerFlowApi`, `ReactivePowerApi`, `ShortCircuitApi`, `HarmonicsApi`, `DynamicsApi`, `TimeSeriesApi`, `CarbonApi`, `MarketApi`, `ReliabilityApi`, `ResilienceApi`, `ReconfigurationApi`, `HostingCapacityApi`, `IntegratedEnergyApi`, `EvTrafficApi`, `PlanningApi`, `ScenarioApi`, `ModelIoApi` | Namespaced, typed methods per analysis family, each returning an honest `AnalysisResult`. | **Implemented** |
 | **Requests** | `UnitCommitmentRequest`, `MarketClearingRequest`, `ReliabilityRequest`, `TransientRequest`, `RpoRequest`, `ShortCircuitRequest`, `ResilienceRequest`, `CampusIesRequest`, `ScenarioGenerationRequest`, `CimLoadRequest`, `SvgImportRequest`, `HarmonicsStateSpaceRequest`, ... (44 models) | Typed request builders that transcribe the current handler fields; long-tail fields flow through `extra`. | **Implemented** |
 | Resources | `TopologyChunk`, `SubgraphView`, `ResultFrameChunk`, `ViolationChunk` | Validate schemas/counts, expose stable bus references, retain raw payloads. | Implemented |
@@ -92,10 +92,12 @@ model is updated.
 
 ## 4. Analysis catalog
 
-The catalog is the single source of truth in Python for which analyses exist,
-where they live, and how dangerous they are. Every family method resolves its
-route through the catalog rather than hard-coding a path string, so the route
-table is defined once.
+The local catalog is the single source of truth in Python for the SDK-known
+analysis universe: which canonical names the installed SDK understands, their
+routes, and their effect metadata. It is not a promise that the connected
+runtime edition enables every entry. Every family method resolves its route
+through the catalog rather than hard-coding a path string, so the route table is
+defined once; connected-edition admission is a separate fail-closed step.
 
 ### 4.1 `AnalysisSpec`
 
@@ -124,7 +126,25 @@ revision. Every model load has `mutates_model = True`; a session-config write
 such as `set_ts_config` has `effect == MODIFY` but `mutates_model == False`, so
 it does not advance the model revision.
 
-### 4.2 Catalog coverage by category
+### 4.2 Connected-edition catalog
+
+`GET /api/edition` embeds the independent legacy-session capability object
+`analysis_catalog`. Its exact top-level fields are `schema` and `entries`, with
+schema `hacdcpf.edition-analysis-catalog.v1`; every entry has exactly `name`,
+`route`, `method`, and boolean `enabled`. The server emits all 69 canonical
+`AnalysisSpec.name` entries. `HySimClient` rejects a malformed or incomplete
+catalog, verifies exact route/method agreement with the installed SDK, and
+exposes an edition-filtered catalog. A known disabled name raises
+`AnalysisDisabledError`; an unknown name raises `UnknownAnalysisError`.
+
+The server catalog contains canonical names only. The current client aliases
+`resilience` -> `distribution_resilience` and `integrated_energy` ->
+`campus_ies` are local conveniences resolved before admission. They are not
+catalog entries. `/api/edition.analysis_catalog` must also not be confused with
+profile `analyses` or `GET /api/v1`: the latter two describe the smaller
+isolated asynchronous job set (currently PF/OPF) and its known-disabled names.
+
+### 4.3 Catalog coverage by category
 
 Every route below is a production route in `run_gui_server.cpp`. The catalog
 registers 69 analyses across 18 families; the "Typed" column marks families with
@@ -255,12 +275,15 @@ pass a result that is failed, stale, invalid, or unqualified.
 
 The default policy permits `READ` and `ANALYZE` effects. `MODIFY` (model
 replacement or component edits) is disabled unless a deployment opts in, and
-each mutating call still requires explicit approval. The catalog's per-analysis
-`AnalysisEffect` lets the policy gate a call without parsing the payload, so an
-agent cannot reach a `MODIFY` route through a family method while only `ANALYZE`
-is allowed. Tool results stay compact: scalar status and diagnostics are kept,
-large vectors are represented by their sizes; direct SDK calls retain the full
-raw result for NumPy/pandas/PyTorch post-processing.
+each mutating call still requires explicit approval. This effect/approval gate
+is orthogonal to connected-edition capability admission: allowing an effect
+cannot enable an analysis whose `/api/edition` catalog entry is disabled, while
+an enabled analysis still cannot bypass `ToolPolicy`. The catalog's
+per-analysis `AnalysisEffect` lets the policy gate a call without parsing the
+payload, so an agent cannot reach a `MODIFY` route through a family method while
+only `ANALYZE` is allowed. Tool results stay compact: scalar status and
+diagnostics are kept, large vectors are represented by their sizes; direct SDK
+calls retain the full raw result for NumPy/pandas/PyTorch post-processing.
 
 `HySimToolRegistry.register_family_tools()` opts a deployment into one bounded
 tool per catalog analysis (`hysim_<name>`). Each tool inherits the analysis'
@@ -276,7 +299,9 @@ returns the same compact honest record as a direct call. Names already curated
 | Process-global lifecycle + typed PF/OPF | Implemented | `HySimClient` |
 | Honest `AnalysisResult`, effect-aware audit | Implemented | `models.py`, `client.py` |
 | Scalable topology / frame / violation chunks | Implemented | `resources.py` |
-| Analysis catalog (69 production routes) | Implemented | `analyses.py` |
+| Analysis catalog (69 SDK-known production routes) | Implemented | `analyses.py`; this is the local known universe, not connected-edition availability. |
+| Strict `/api/edition` discovery and legacy capability admission | Implemented | Exact 69-entry schema, route/method reconciliation, alias canonicalization, typed unknown/disabled failures. |
+| Strict `/api/v1` job discovery and tri-state admission | Implemented | Independent PF/OPF job domain; known-disabled and unknown names remain distinct. |
 | Namespaced family facade (18 families) | Implemented | `analyses.py`, `HySim` |
 | Typed requests: UC, market clearing, reliability, transient, RPO | Implemented | `analyses.py` |
 | Typed requests: SC, harmonics, OPF-AC, TS/lifecycle, carbon, reliability FMEA/FD/3-stage, resilience, market RT/repeated/southern/PTDF, IES, EV, reconfig, hosting, planning, scenario | Implemented | `requests.py` |
@@ -296,7 +321,9 @@ registered and green.
 1. `/api/v1` isolated sessions currently accept only balanced aggregate PF/OPF
    jobs. All other families run on the process-global routes; concurrency
    across families therefore requires independent server processes, not
-   independent v1 sessions.
+   independent v1 sessions. The 69-entry `/api/edition.analysis_catalog` is the
+   process-global legacy-route capability source and cannot be substituted by
+   the v1 job list.
 2. Results are only as honest as the handler. When a handler returns a
    fallback, time-limit, or reduced `model_scope`, the API surfaces it verbatim;
    it never upgrades scope or hides a limitation.

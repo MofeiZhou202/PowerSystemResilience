@@ -1,6 +1,6 @@
 ---
 name: manage-codebase-context
-description: Maintain and consume HySim's AI-facing codebase documentation. Use for repository onboarding, current implementation or test-status questions, architecture handoffs, dependency upgrades, documentation drift checks, and updates to AGENTS.md, CLAUDE.md, README.md, docs/README.md, or docs/development_status.md.
+description: Maintain and consume HySim's AI-facing codebase documentation. Use for repository onboarding, current implementation or test-status questions, architecture handoffs, dependency upgrades, documentation drift checks, and updates to AGENTS.md, CLAUDE.md, README.md, docs/README.md, or docs/overview/development_status.md.
 ---
 
 # Manage Codebase Context
@@ -13,7 +13,7 @@ development is in progress.
 Read, in order:
 
 1. `AGENTS.md` for architecture, invariants, commands, and project conventions.
-2. `docs/development_status.md` for the last verified baseline and active work.
+2. `docs/overview/development_status.md` for the last verified baseline and active work.
 3. `docs/README.md` for canonical implementation and theory documentation.
 4. `cmake/Dependencies.cmake` for the required MIPSolvers revision.
 
@@ -21,7 +21,7 @@ Then verify transient state instead of trusting prose:
 
 ```bash
 git status --short --branch
-git -C ../MIPSolvers status --short --branch
+git status --short -- MIPSolvers cmake/MIPSolvers.lock.json
 git diff --check
 ```
 
@@ -32,7 +32,7 @@ describing behavior. Treat them as authoritative when documentation disagrees.
 
 | Change | Update |
 |---|---|
-| Active work, last verified build, sanitizer boundary | `docs/development_status.md` |
+| Active work, last verified build, sanitizer boundary | `docs/overview/development_status.md` |
 | Stable architecture, invariants, commands, recurring pitfalls | `AGENTS.md` |
 | User-visible capabilities or dependency baseline | `README.md` |
 | Documentation navigation or policy | `docs/README.md` |
@@ -47,7 +47,7 @@ Do not duplicate detailed contracts in root context files.
 - Separate Release/full-dev regression results from sanitizer results.
 - Name the build preset, exact test scope, failures, and skips.
 - Mark a claim as pending when the relevant target was not rebuilt after a change.
-- Distinguish committed baselines from dirty-worktree experiments in both repos.
+- Distinguish committed baselines from dirty-worktree experiments in the root repository and locked `MIPSolvers/` import.
 - Record fallback, approximation, time-limit, and unsupported model coverage.
 - Never convert a roadmap, hypothesis, or partial test into current behavior.
 - Remove obsolete active-work entries once the replacement result is verified.
@@ -55,7 +55,7 @@ Do not duplicate detailed contracts in root context files.
 ## Keep Context Efficient
 
 - Keep `AGENTS.md` focused on facts needed in most tasks.
-- Put volatile status only in `docs/development_status.md`.
+- Put volatile status only in `docs/overview/development_status.md`.
 - Link to existing contracts instead of restating them.
 - Prefer exact paths, symbols, presets, and test targets over narrative history.
 - Preserve unrelated worktree changes and verify dates only when content changes.

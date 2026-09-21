@@ -1,0 +1,572 @@
+% theory_conic.tex —— engine 通用理论：锥规划（conic programming）
+% 本文件为理论层章节，遵循 docs/modules/THEORY_WRITING_GUIDE.md。
+
+\section{锥规划通用理论}
+
+\begin{theorynote}
+本章为通用数学理论，按锥规划领域的标准模型与文献体系撰写，覆盖锥与对偶锥、
+自和谐障碍函数（self-concordant barrier）、Nesterov--Todd（NT）缩放、
+SOCP/SDP 的 svec/smat 打包、稀疏 SDP 的弦分解（chordal decomposition）原理，
+以及原始/对偶不可行证书。本章公式不要求逐式对应代码；与平台实现
+（\texttt{src/engine/kernel/ipm/}、\texttt{src/engine/solver/native/}）的对应关系
+见本章末"与实现的对应"表，超出实现的内容以"未实现扩展说明"框就地标记。
+\end{theorynote}
+
+\subsection{记号与约定}
+
+\begin{itemize}
+  \item $\mathbb{R}^n$：$n$ 维欧氏空间；$\mathbb{R}^l_+ = \{u \in \mathbb{R}^l : u \ge 0\}$ 为非负象限。
+  \item $\mathcal{Q}^k = \{u \in \mathbb{R}^k : u_0 \ge \|u_1\|_2\}$：$k$ 维二阶锥
+        （second-order cone, SOC；亦称 Lorentz cone 或 ice-cream cone），
+        其中 $u = (u_0, u_1)$，$u_0 \in \mathbb{R}$，$u_1 \in \mathbb{R}^{k-1}$。
+  \item $\mathcal{S}^p$：$p \times p$ 实对称矩阵空间；
+        $\mathcal{S}^p_+ \subset \mathcal{S}^p$ 为半定锥（positive-semidefinite cone）。
+  \item $\langle X, Y \rangle_F = \operatorname{tr}(X^\top Y)$：Frobenius 内积；
+        对 $X, Y \in \mathcal{S}^p$ 有 $\langle X, Y \rangle_F = \operatorname{tr}(XY)$。
+  \item $\mathcal{K}$：本章总指三类锥的笛卡尔积
+        $\mathbb{R}^l_+ \times \prod_i \mathcal{Q}^{q_i} \times \prod_j \mathcal{S}^{s_j}_+$。
+  \item $u \succeq_{\mathcal{K}} 0$（$u \succ_{\mathcal{K}} 0$）：$u$ 属于 $\mathcal{K}$
+        （属于其内部 $\operatorname{int}\mathcal{K}$）。
+  \item $\operatorname{int}$、$\operatorname{cl}$：拓扑内部与闭包；$I$：单位阵；$e$：Jordan 代数单位元。
+\end{itemize}
+
+\subsection{锥与对偶锥}
+
+\begin{definition}[锥与真锥]
+集合 $\mathcal{C} \subseteq \mathbb{E}$（$\mathbb{E}$ 为有限维欧氏空间）称为\textbf{锥}（cone），
+若 $u \in \mathcal{C}$ 且 $\alpha \ge 0$ 蕴含 $\alpha u \in \mathcal{C}$。若 $\mathcal{C}$ 还是
+闭的、凸的、有非空内部（solid）且不含直线（pointed，即
+$\mathcal{C} \cap (-\mathcal{C}) = \{0\}$），则称为\textbf{真锥}（proper cone）。
+真锥在 $\mathbb{E}$ 上诱导偏序 $u \succeq_{\mathcal{C}} v \iff u - v \in \mathcal{C}$。
+\end{definition}
+
+\begin{definition}[对偶锥]
+锥 $\mathcal{C}$ 的\textbf{对偶锥}（dual cone）为
+\[
+\mathcal{C}^* = \{ z \in \mathbb{E} : \langle z, u \rangle \ge 0 \;\; \forall\, u \in \mathcal{C} \}.
+\]
+若 $\mathcal{C}^* = \mathcal{C}$，则称 $\mathcal{C}$ \textbf{自对偶}（self-dual）。
+\end{definition}
+
+对偶锥总是闭凸锥；当真锥 $\mathcal{C}$ 为闭凸锥时 $\mathcal{C}^{**} = \mathcal{C}$
+（双极定理，见 \cite{boyd2004} 第 2.6 节）。笛卡尔积的对偶为各因子对偶的笛卡尔积。
+
+\begin{proposition}[三类锥的自对偶性]
+\label{prop:conic-self-dual}
+非负象限 $\mathbb{R}^l_+$、二阶锥 $\mathcal{Q}^k$ 与半定锥 $\mathcal{S}^p_+$ 均为自对偶真锥。
+\end{proposition}
+\begin{proof}
+逐锥验证 $\mathcal{C} \subseteq \mathcal{C}^*$ 与 $\mathcal{C}^* \subseteq \mathcal{C}$。
+
+（i）$\mathbb{R}^l_+$：$z \ge 0$ 时显然 $z^\top s \ge 0$ 对一切 $s \ge 0$ 成立；
+反之若某分量 $z_i < 0$，取 $s = e_i \ge 0$ 得 $z^\top s = z_i < 0$，故 $z \notin (\mathbb{R}^l_+)^*$。
+
+（ii）$\mathcal{Q}^k$：设 $z, s \in \mathcal{Q}^k$。由 Cauchy--Schwarz，
+\[
+z^\top s = z_0 s_0 + z_1^\top s_1 \;\ge\; z_0 s_0 - \|z_1\|\,\|s_1\| \;\ge\; 0,
+\]
+故 $\mathcal{Q}^k \subseteq (\mathcal{Q}^k)^*$。反之，若 $z_0 < \|z_1\|$，
+取 $s = (\|z_1\|, -z_1)$，则 $s \in \mathcal{Q}^k$ 而
+$z^\top s = z_0 \|z_1\| - \|z_1\|^2 < 0$；若 $z_0 < 0 \le \|z_1\|$ 类似构造，
+故 $(\mathcal{Q}^k)^* \subseteq \mathcal{Q}^k$。
+
+（iii）$\mathcal{S}^p_+$：$S, Z \succeq 0$ 时
+$\langle S, Z \rangle_F = \operatorname{tr}(Z^{1/2} S Z^{1/2}) \ge 0$，
+其中 $Z^{1/2} S Z^{1/2} \succeq 0$。反之若 $S$ 有负特征值
+$\lambda(v) = v^\top S v < 0$（$\|v\| = 1$），取 $Z = vv^\top \succeq 0$
+得 $\operatorname{tr}(SZ) = v^\top S v < 0$。
+\end{proof}
+
+\begin{remark}
+自对偶性意味着原始与对偶松弛向量可以落在\textbf{同一个}锥中，
+这是统一内点框架同时跟踪 $s$ 与 $z$ 的代数前提。进一步地，这三类锥还是
+\textbf{自尺度}（self-scaled，即齐性对称）锥：对任意内点 $u$ 存在自同构把
+$\mathcal{K}$ 映到自身并将 $u$ 映到单位元。自对偶加自尺度正是
+Nesterov--Todd 缩放（\ref{subsec:nt-scaling} 小节）存在的充要理论背景
+\cite{nesterov1997}。
+\end{remark}
+
+\subsection{锥规划标准型与对偶性}
+
+本章采用与 CVXOPT \cite{vandenberghe2010} 一致的原始-对偶标准型：
+\begin{equation}
+\label{eq:conic-primal-dual}
+\begin{aligned}
+\text{(P)}\quad & \min_{x \in \mathbb{R}^n}\; c^\top x
+  && \text{(D)}\quad & \max_{y, z}\; -h^\top z - b^\top y \\
+\text{s.t.}\quad & Gx + s = h,\; Ax = b,\; s \in \mathcal{K}
+  && \text{s.t.}\quad & G^\top z + A^\top y + c = 0,\; z \in \mathcal{K},
+\end{aligned}
+\end{equation}
+其中 $G \in \mathbb{R}^{m \times n}$、$A \in \mathbb{R}^{m_{eq} \times n}$，
+$\mathcal{K}$ 为三类锥的笛卡尔积。注意 (D) 中 $z$ 与原始松弛 $s$ 同锥——
+这依赖命题 \ref{prop:conic-self-dual} 的自对偶性。
+
+\begin{theorem}[弱对偶]
+\label{thm:conic-weak-duality}
+对 \eqref{eq:conic-primal-dual} 的任意原始可行 $(x, s)$ 与对偶可行 $(y, z)$，
+\[
+c^\top x - \big(-h^\top z - b^\top y\big) = s^\top z \ge 0.
+\]
+等号（最优性）当且仅当互补松弛 $s^\top z = 0$ 成立。
+\end{theorem}
+\begin{proof}
+利用 $Gx + s = h$ 与 $Ax = b$ 作恒等变形：
+\[
+c^\top x = -\big(G^\top z + A^\top y\big)^\top x
+ = -z^\top (h - s) - y^\top b = -h^\top z - b^\top y + s^\top z.
+\]
+$s, z \in \mathcal{K}$ 且 $\mathcal{K}$ 自对偶，故 $s^\top z \ge 0$。
+\end{proof}
+
+量 $s^\top z$ 称为\textbf{对偶间隙}（duality gap），它是内点法实际跟踪的收敛度量。
+
+\begin{theorem}[强对偶，条件性结论]
+\label{thm:conic-strong-duality}
+若 (P) 与 (D) 均\textbf{严格可行}（Slater 条件：存在原始可行点使
+$s \in \operatorname{int}\mathcal{K}$，且存在对偶可行点使 $z \in \operatorname{int}\mathcal{K}$），
+则两者最优值相等且均可达到，存在最优对 $(x^*, s^*)$、$(y^*, z^*)$ 满足
+$(s^*)^\top z^* = 0$。
+\end{theorem}
+\begin{proof}
+证明略；见 \cite{nesterov1994} 或 \cite{boyd2004} 第 5 章。
+条件缺一不可：仅单侧严格可行时可能只保证单侧可达，两侧都不严格可行时
+间隙可以为正（锥规划的固有困难，LP 中不出现的病态）。
+\end{proof}
+
+\subsection{自和谐障碍函数与中心路径}
+
+\begin{definition}[自和谐障碍]
+设 $\mathcal{C}$ 为真锥。凸函数 $f : \operatorname{int}\mathcal{C} \to \mathbb{R}$
+称为 $\mathcal{C}$ 上参数为 $\nu_f$ 的\textbf{自和谐障碍}
+（self-concordant barrier），若：
+\begin{enumerate}
+  \item $f$ 三阶连续可微，且当 $u$ 趋近边界时 $f(u) \to +\infty$；
+  \item 自和谐性：对一切 $u \in \operatorname{int}\mathcal{C}$ 与方向 $d$，
+        \[
+        \big| D^3 f(u)[d,d,d] \big| \le 2 \big( D^2 f(u)[d,d] \big)^{3/2};
+        \]
+  \item 对数齐次性（logarithmic homogeneity）：对一切 $u \in \operatorname{int}\mathcal{C}$、$t > 0$，
+        \[
+        f(tu) = f(u) - \nu_f \ln t.
+        \]
+\end{enumerate}
+常数 $\nu_f$ 称为\textbf{障碍参数}（barrier parameter），也称锥度。
+\end{definition}
+
+对数齐次性蕴含两个在算法中反复使用的恒等式（对 $t$ 求导并取 $t = 1$）：
+\[
+\langle \nabla f(u), u \rangle = -\nu_f, \qquad
+\nabla^2 f(u)\, u = -\nabla f(u).
+\]
+
+三类锥的标准障碍与障碍参数为
+\begin{equation}
+\label{eq:conic-barriers}
+\begin{array}{lll}
+\mathbb{R}^l_+: & f(u) = -\sum_{i=1}^{l} \ln u_i, & \nu_f = l;\\[2pt]
+\mathcal{Q}^k: & f(u) = -\ln\big(u_0^2 - \|u_1\|_2^2\big), & \nu_f = 2;\\[2pt]
+\mathcal{S}^p_+: & f(U) = -\ln\det U, & \nu_f = p.
+\end{array}
+\end{equation}
+其自和谐性证明见 \cite{nesterov1994}（第 2 章、第 5 章）。
+笛卡尔积的障碍为各块障碍之和，障碍参数相加。注意：SOC 障碍的参数为 $2$，
+但与 Jordan 代数框架一致的算法约定常按\textbf{每锥计 1} 归一
+（见 \ref{subsec:nt-scaling} 小节末），二者只差全局缩放约定，不影响理论。
+
+\begin{definition}[中心路径]
+以 $\mu > 0$ 为障碍参数，对 \eqref{eq:conic-primal-dual} 定义扰动 KKT 系统
+\[
+Gx + s = h, \qquad Ax = b, \qquad G^\top z + A^\top y + c = 0, \qquad
+s \circ z = \mu e, \qquad s, z \succ_{\mathcal{K}} 0,
+\]
+其中 $\circ$ 为各锥对应的 Euclidean Jordan 代数乘积
+（象限为逐分量乘积；SOC 见 \ref{subsec:nt-scaling} 小节；
+半定锥为对称积 $S \circ Z = \tfrac12(SZ + ZS)$），$e$ 为单位元。
+其解曲线 $\{(x(\mu), y(\mu), z(\mu)) : \mu > 0\}$ 称为\textbf{中心路径}
+（central path）。
+\end{definition}
+
+\begin{theorem}[中心路径的存在性与收敛性，条件性结论]
+在定理 \ref{thm:conic-strong-duality} 的严格可行条件下，中心路径对每个
+$\mu > 0$ 唯一存在，且 $\mu \to 0$ 时收敛到一对严格互补的原始-对偶最优解。
+以障碍参数 $\nu$ 归一的短步原始-对偶路径跟踪算法具有迭代复杂度
+$O\!\big(\sqrt{\nu}\, \ln(1/\varepsilon)\big)$。
+\end{theorem}
+\begin{proof}
+证明略；存在唯一性见 \cite{nesterov1994} 第 3 章，多项式复杂度见
+\cite{nesterov1994} 与 \cite{nesterov1998}。核心机制：自和谐性给出
+Newton 步的二次收敛邻域，对数齐次性把每次 $\mu$ 缩减所需的 Newton 步数
+控制在 $O(\sqrt{\nu}\, \delta)$（$\delta$ 为缩减因子）。
+\end{proof}
+
+\subsection{Nesterov--Todd 缩放方向}
+\label{subsec:nt-scaling}
+
+原始-对偶内点法每次迭代对扰动 KKT 系统取 Newton 方向。对自尺度锥，
+Nesterov 与 Todd \cite{nesterov1997,nesterov1998} 证明：对任意严格内部对
+$(s, z)$，存在\textbf{唯一}的缩放元素（scaling point）$w \succ_{\mathcal{K}} 0$，
+其二次表示（quadratic representation）$P(w)$ 满足
+\begin{equation}
+\label{eq:nt-scaling}
+P(w)\, z = \lambda, \qquad P(w)^{-1} s = \lambda,
+\end{equation}
+即原始点与对偶点被映到\textbf{同一个}缩放点 $\lambda$。在缩放纵标中，
+互补条件线性化后的 Newton 方程对 $ds$、$dz$ 对称，方向由组合算子
+$H = P^{-1} D$（$P$ 原始缩放、$D$ 对偶缩放）决定。以下逐锥给出显式构造。
+
+\paragraph{非负象限。}逐分量取
+\[
+d_i = \sqrt{s_i / z_i}, \qquad \lambda_i = \sqrt{s_i z_i}, \qquad W = \operatorname{diag}(d),
+\]
+则 $\lambda = W z = W^{-1} s$，组合算子为对角阵
+$H = W^\top W = \operatorname{diag}(s_i / z_i)$。
+
+\paragraph{二阶锥。}取 Minkowski 符号阵 $J = \operatorname{diag}(1, -1, \ldots, -1)$，
+定义 Jordan 代数
+\[
+\det(u) = u_0^2 - \|u_1\|^2, \qquad
+u \circ v = \big(u^\top v,\; u_0 v_1 + v_0 u_1\big), \qquad
+u^{-1} = \frac{Ju}{\det(u)}, \qquad e = (1, 0).
+\]
+$u \succ_{\mathcal{Q}} 0 \iff u_0 > 0 \land \det(u) > 0$。记
+$\rho(u) = \sqrt{\det(u)}$ 并归一化 $\bar s = s/\rho(s)$、$\bar z = z/\rho(z)$，
+则归一化 NT 点为
+\begin{equation}
+\label{eq:nt-soc}
+\gamma = \sqrt{\frac{1 + \bar s^\top \bar z}{2}}, \qquad
+\bar w = \frac{\bar s + J \bar z}{2\gamma}, \qquad
+v = \sqrt[\circ]{\bar w}, \qquad
+\beta = \sqrt{\frac{\rho(s)}{\rho(z)}},
+\end{equation}
+其中 $\sqrt[\circ]{\cdot}$ 为 Jordan 平方根（
+$v \circ v = u$ 当 $v_0 = \sqrt{(u_0 + \rho(u))/2}$、$v_1 = u_1/(2v_0)$）。
+缩放算子为 $v$ 的二次表示
+$Wx = \beta\big(2v(v^\top x) - Jx\big)$，满足定义恒等式
+$\lambda = Wz = W^{-1}s$。组合算子有闭式
+\begin{equation}
+\label{eq:nt-soc-h}
+H = \beta^2\big(2\bar w \bar w^\top - J\big), \qquad
+H^{-1} = \beta^{-2}\big(2(J\bar w)(J\bar w)^\top - J\big),
+\end{equation}
+两者都是"$J$ 的秩-1 修正"，作用一次只需 $O(k)$。
+推导与恒等式验证见 \cite{vandenberghe2010} 与内部推导文档
+\srcpath{docs/archive/conic\_sdp.md}（第 4.2 节；已对照当前代码核验一致）。
+
+\paragraph{半定锥。}设 $S = L_s L_s^\top$、$Z = L_z L_z^\top$ 为 Cholesky 分解，
+对 $L_z^\top L_s$ 做奇异值分解 $L_z^\top L_s = U\Sigma V^\top$（$\sigma_i > 0$），定义
+\begin{equation}
+\label{eq:nt-sdp-r}
+R = L_s V \Sigma^{-1/2}, \qquad R^{-T} = L_s^{-T} V \Sigma^{1/2}.
+\end{equation}
+
+\begin{proposition}[NT 合同恒等式]
+\label{prop:nt-sdp}
+式 \eqref{eq:nt-sdp-r} 定义的合同变换同时对角化 $S$ 与 $Z$：
+$R^\top Z R = R^{-1} S R^{-T} = \Sigma$。
+\end{proposition}
+\begin{proof}
+由 $L_s^\top L_z = V\Sigma U^\top$（SVD 转置），
+\[
+R^\top Z R = \Sigma^{-1/2} V^\top (L_s^\top L_z)(L_z^\top L_s) V \Sigma^{-1/2}
+= \Sigma^{-1/2} V^\top (V\Sigma U^\top)(U\Sigma V^\top) V \Sigma^{-1/2} = \Sigma.
+\]
+同理
+$R^{-1} S R^{-T} = \Sigma^{1/2} V^\top L_s^{-1} L_s L_s^\top L_s^{-T} V \Sigma^{1/2}
+= \Sigma$。
+\end{proof}
+
+于是缩放点为对角阵 $\lambda = \operatorname{svec}(\operatorname{diag}(\Sigma))$；
+组合算子作用为两次合同乘，$H : X \mapsto (RR^\top) X (RR^\top)$，
+$H^{-1} : X \mapsto MXM$ 且 $M = (RR^\top)^{-1}$，故从不显式成形
+$\mathbb{R}^{p(p+1)/2}$ 上的稠密矩阵。
+
+\paragraph{锥度与步长参数。}中心路径参数按
+$\nu = l + N_q + \sum_j p_j$（$N_q$ 为 SOC 块数）归一，并令
+$\mu = s^\top z / \nu$。每个 SOC 块不论尺寸均计 1——这是 Jordan 代数约定
+（$\mathcal{Q}^k$ 的秩为 2 但障碍参数约定按块计），与式
+\eqref{eq:conic-barriers} 的教科书参数相差常数倍，不影响中心路径本身。
+
+\subsection{svec/smat 打包与 Frobenius 内积}
+
+半定块以 \textbf{svec}（symmetric vectorization）打包为向量以纳入统一框架：
+$p \times p$ 对称矩阵按列主序下三角展开为长度 $p(p+1)/2$ 的向量，
+且\textbf{非对角元乘以 $\sqrt 2$}：
+\begin{equation}
+\label{eq:svec}
+\operatorname{svec}(X) = \big(X_{11}, \sqrt2 X_{21}, \ldots, \sqrt2 X_{p1},
+X_{22}, \sqrt2 X_{32}, \ldots, X_{pp}\big)^\top .
+\end{equation}
+逆变换 $\operatorname{smat}$ 把打包向量还原为对称矩阵（非对角除以 $\sqrt 2$）。
+
+\begin{proposition}[svec 的等距性]
+\label{prop:svec-isometry}
+对任意 $S, Z \in \mathcal{S}^p$，
+\[
+\operatorname{svec}(S)^\top \operatorname{svec}(Z) = \operatorname{tr}(SZ)
+= \langle S, Z \rangle_F .
+\]
+\end{proposition}
+\begin{proof}
+展开左边：
+\[
+\operatorname{svec}(S)^\top \operatorname{svec}(Z)
+= \sum_{i} S_{ii} Z_{ii} + \sum_{i > j} (\sqrt2 S_{ij})(\sqrt2 Z_{ij})
+= \sum_i S_{ii}Z_{ii} + 2\sum_{i>j} S_{ij}Z_{ij}
+= \operatorname{tr}(SZ),
+\]
+末步利用 $S, Z$ 对称把 Frobenius 内积的对角项与成对非对角项分开计数。
+\end{proof}
+
+\begin{remark}
+等距性的实用后果：锥成员性（$S \succeq 0$ 等价于打包向量属于打包锥）、
+障碍梯度/Hessian、NT 合同算子都可以直接在打包向量上表达；
+Schur 补元素因此可写成
+$\operatorname{svec}(X_i)^\top H^{-1} \operatorname{svec}(X_j)
+= \operatorname{tr}(X_i M X_j M)$，完全在矩阵空间计算而无需成形
+$H^{-1} \in \mathbb{R}^{p(p+1)/2 \times p(p+1)/2}$。这正是实现
+\srcpath{src/engine/kernel/ipm/cones.cpp:svec} 与
+\srcpath{src/engine/kernel/ipm/cones.cpp:smat} 所固化的约定。
+\end{remark}
+
+\subsection{Newton 方向与 Schur 补结构}
+
+在当前 NT 缩放下线性化互补条件 $\lambda \circ \lambda = \mu e$，得每次迭代
+要求解的 $3 \times 3$ 系统
+\begin{equation}
+\label{eq:conic-newton}
+\begin{bmatrix} 0 & A^\top & G^\top \\ A & 0 & 0 \\ G & 0 & -H \end{bmatrix}
+\begin{bmatrix} dx \\ dy \\ dz \end{bmatrix}
+=
+\begin{bmatrix} -r_c \\ -r_x \\ -r_s - W r_\lambda \end{bmatrix},
+\qquad
+\begin{aligned}
+r_c &= G^\top z + A^\top y + c,\\
+r_x &= Ax - b,\\
+r_s &= Gx + s - h,
+\end{aligned}
+\end{equation}
+其中 $r_\lambda$ 为缩放空间右端（仿射步 $r_\lambda = -\lambda$；Mehrotra
+校正步含二阶项 $-L(\lambda)^{-1}(d\lambda_s \circ d\lambda_z) + \sigma\mu\,\lambda^{-1}$，
+见 \cite{vandenberghe2010}）。消去 $dz$ 得对称拟定（quasidefinite）系统
+\begin{equation}
+\label{eq:conic-schur}
+\begin{bmatrix} G^\top H^{-1} G + \delta I & A^\top \\ A & -\delta I \end{bmatrix}
+\begin{bmatrix} dx \\ dy \end{bmatrix}
+=
+\begin{bmatrix} -r_c + G^\top H^{-1} t \\ -r_x \end{bmatrix},
+\qquad
+dz = H^{-1}(G\,dx - t),\quad ds = -r_s - G\,dx ,
+\end{equation}
+其中 $t = -r_s - W r_\lambda$，$\delta > 0$ 为正则化参数。
+
+\begin{proposition}[拟定正则化的可分解性，条件性结论]
+\label{prop:quasidefinite}
+设 $H^{-1} \succ 0$（三类锥的 NT 组合算子均满足）且 $\delta > 0$。
+则无等式时 \eqref{eq:conic-schur} 的系数阵对称正定，可做 $LL^\top$ 分解；
+有等式时系数阵为拟定鞍点阵：对任意对称排列都存在无主元交换的
+$LDL^\top$ 分解，且负主元恰好出现在等式块。
+\end{proposition}
+\begin{proof}
+正定性：$G^\top H^{-1}G \succeq 0$（$H^{-1} \succ 0$ 的合同保持），加
+$\delta I$ 得严格正定。拟定阵的无主元分解存在性是 Vanderbei 定理，
+见 \cite{vanderbei1995}。
+\end{proof}
+
+按锥块分解 $B = G^\top H^{-1} G$：象限行贡献对角加权的稀疏外积
+$\sum_r d_r^{-2} g_r g_r^\top$；由式 \eqref{eq:nt-soc-h}，SOC 块贡献
+"稀疏部分 $-\beta^{-2} G_q^\top J G_q$ 加秩-1 修正 $2\beta^{-2} uu^\top$
+（$u = G_q^\top J\bar w$）"；由命题 \ref{prop:svec-isometry}，半定块贡献
+稠密团 $(B_s)_{ij} = \operatorname{tr}(X_i M X_j M)$。同一半定块触及的所有
+变量在 $B$ 中构成稠密团，这是 SDP 每迭代装配与分解成本的结构来源，
+也是下节弦分解的动机。
+
+\subsection{稀疏 SDP 的 Chordal 分解原理}
+
+\begin{definition}[聚合稀疏图]
+设 SDP 松弛矩阵 $S(x) = S_0 + \sum_j x_j S_j \in \mathcal{S}^p$。
+其\textbf{聚合稀疏图}（aggregate sparsity graph）为无向图
+$G_{agg} = (V, E)$，$V = \{1,\ldots,p\}$，
+$\{i,j\} \in E$ 当且仅当某个 $S_j$ 或 $S_0$ 在 $(i,j)$ 处非零。
+图 $G$ 为\textbf{弦图}（chordal graph），若每个长度 $\ge 4$ 的环都有一条弦。
+\end{definition}
+
+\begin{theorem}[Grone--Johnson--S\'a--Wolkowicz，条件性结论]
+\label{thm:psd-completion}
+设 $G = (V, E)$ 为弦图。定义于 $E$ 与对角上的部分对称矩阵 $X$
+可取为半定完备（PSD completable）当且仅当 $X$ 在 $G$ 的每个\textbf{最大团}
+（maximal clique）$C_k$ 上的主子阵半定：$X[C_k, C_k] \succeq 0$。
+\end{theorem}
+\begin{proof}
+证明略；见 \cite{grone1984}。非弦图结论不成立——这是必须先做弦扩展
+（chordal extension，添加填充边使图成为弦图）的理论原因。最小度等
+消元序启发式生成小填充的弦扩展与对应的完美消元序列（perfect
+elimination ordering）。
+\end{proof}
+
+\begin{theorem}[Agler 分解，条件性结论]
+\label{thm:agler}
+对弦扩展 $E^+$ 的最大团族 $\{C_k\}$，$S \in \mathcal{S}^p$ 属于
+"在 $E^+$ 上可半定完备的锥"当且仅当存在 $S_k \succeq 0$（$S_k$ 为
+$|C_k|$ 阶矩阵）使
+\begin{equation}
+\label{eq:agler}
+S = \sum_k E_{C_k}^\top S_k E_{C_k},
+\end{equation}
+其中 $E_{C_k}$ 为选取团 $C_k$ 坐标行的 0-1 提取矩阵。
+\end{theorem}
+\begin{proof}
+证明略；见 \cite{agler1988} 与 \cite{fukuda2001}。方向"$\Leftarrow$"：
+半定矩阵之和半定。方向"$\Rightarrow$"依赖定理 \ref{thm:psd-completion}
+沿完美消元序列的递归完备构造。
+\end{proof}
+
+\paragraph{精确转换与近似松弛的区别。}把 $S(x)$ 替换为式 \eqref{eq:agler}
+右端并补上\textbf{一致性等式}（consistency equalities：和式在每条弦边
+——含填充边——上等于原仿射矩阵的对应项），得到与原问题\textbf{精确等价}
+的锥规划，其 SDP 块为若干小团块。若仅要求各团主子阵半定而不加一致性等式，
+得到的是定理 \ref{thm:psd-completion} 的\textbf{完备化松弛}：填充边上的值
+自由，松弛一般严格。实现采用前者（见"与实现的对应"表）；求解后沿完美消元
+序列对偶完备（dual completion）恢复原模型的对偶矩阵
+\cite{fukuda2001}。弦分解把单个 $p$ 阶稠密块换成若干 $|C_k|$ 阶块，
+Schur 装配与分解成本由最大团阶而非 $p$ 决定，代价是新增的团变量与一致性
+等式；因此对"最大团接近原阶"的近稠密 SDP 无收益，需结构性门控。
+
+\subsection{原始/对偶不可行检测与证书}
+
+锥规划可能原始不可行或对偶不可行（原始无界）。内点法通过对偶间隙的
+发散方向构造渐近 Farkas 型证书。
+
+\begin{theorem}[原始不可行证书]
+\label{thm:conic-primal-infeas}
+若存在 $(y, z)$ 满足
+\[
+G^\top z + A^\top y = 0, \qquad z \in \mathcal{K}, \qquad h^\top z + b^\top y < 0,
+\]
+则 \eqref{eq:conic-primal-dual}(P) 不可行。
+\end{theorem}
+\begin{proof}
+反设存在原始可行 $(x, s)$：$Gx + s = h$、$Ax = b$、$s \in \mathcal{K}$。则
+\[
+0 < -\big(h^\top z + b^\top y\big)
+= -(Gx + s)^\top z - (Ax)^\top y
+= -x^\top(G^\top z + A^\top y) - s^\top z = -s^\top z \le 0,
+\]
+末步用 $s, z \in \mathcal{K}$ 的自对偶非负性，矛盾。
+\end{proof}
+
+\begin{theorem}[对偶不可行（原始无界）证书]
+\label{thm:conic-dual-infeas}
+若存在 $(x, s)$ 满足
+\[
+Ax = 0, \qquad Gx + s = 0, \qquad s \in \mathcal{K}, \qquad c^\top x < 0,
+\]
+则 (P) 若可行即无界，从而 (D) 不可行。
+\end{theorem}
+\begin{proof}
+$(x, s)$ 是 (P) 的下降射线：任取原始可行 $(x_0, s_0)$，则对一切
+$t \ge 0$，$(x_0 + tx, s_0 + ts)$ 仍可行且目标值
+$c^\top x_0 + t\, c^\top x \to -\infty$。故 (P) 无界；由定理
+\ref{thm:conic-weak-duality}，(D) 的任何可行点都会给出下界，故 (D) 不可行。
+\end{proof}
+
+实践中内点迭代只渐近满足齐次等式，因此实现用\textbf{归一化残差}判据：
+当 $h^\top z + b^\top y < 0$ 且
+$\|G^\top z + A^\top y\|_\infty / \big(-(h^\top z + b^\top y)\big) \le \varepsilon_{\mathrm{feas}}$
+时认定近似原始不可行证书（对偶情形对称，分母为 $-c^\top x$）。
+归一化使判据尺度不变：证书射线乘以任意正常数仍满足同一不等式。
+
+\begin{gapnote}
+本章证书定理针对精确算术。实现
+（\srcpath{src/engine/kernel/ipm/conic\_ipm\_solver.cpp:ConicIPMSolver::solve}）
+采用上述 $\infty$-范数归一化近似判据，其"证书"是数值意义下的近似证书，
+不构成严格算术下的不可行性证明；需要严格证明时应配合有理算术或
+事后验证流程，当前代码未提供该层。
+\end{gapnote}
+
+\subsection{与实现的对应}
+
+\begin{longtable}{p{0.42\textwidth} p{0.50\textwidth}}
+\toprule
+理论条目 & 实现状态与锚点 \\
+\midrule
+\endhead
+三类锥的笛卡尔积标准型 \eqref{eq:conic-primal-dual} &
+\implfull{src/engine/kernel/ipm/conic\_ipm\_solver.cpp:ConicIPMSolver::solve}；
+问题描述 \srcpath{include/mipsolvers/engine/problem\_types.hpp:ConicModel} \\
+锥块布局与锥度 $\nu = l + N_q + \sum p_j$ &
+\implfull{src/engine/kernel/ipm/cones.cpp:ConeLayout::build} \\
+自对偶性（命题 \ref{prop:conic-self-dual}）&
+\implpart{自对偶是算法的代数前提，不作为运行期检查；代码直接假定三锥自对偶} \\
+svec/smat 等距打包（命题 \ref{prop:svec-isometry}）&
+\implfull{src/engine/kernel/ipm/cones.cpp:svec}、
+\srcpath{src/engine/kernel/ipm/cones.cpp:smat} \\
+象限 NT 缩放 $H = \operatorname{diag}(s_i/z_i)$ &
+\implfull{src/engine/kernel/ipm/cones.cpp:ConeNtScaling::compute}；
+尺寸-1 SOC 折叠为象限行 \\
+SOC Jordan 代数与 NT 点 \eqref{eq:nt-soc}、$H/H^{-1}$ 闭式 \eqref{eq:nt-soc-h} &
+\implfull{src/engine/kernel/ipm/cones.cpp:q\_jordan\_sqrt}、
+\srcpath{src/engine/kernel/ipm/cones.cpp:q\_jordan\_solve}、
+\srcpath{src/engine/kernel/ipm/cones.cpp:ConeNtScaling::apply\_h}、
+\srcpath{src/engine/kernel/ipm/cones.cpp:ConeNtScaling::apply\_h\_inv} \\
+半定 NT 合同 \eqref{eq:nt-sdp-r}（命题 \ref{prop:nt-sdp}）&
+\implfull{src/engine/kernel/ipm/cones.cpp:ConeNtScaling::compute}；
+算子经 \srcpath{src/engine/kernel/ipm/cones.cpp:ConeNtScaling::apply\_w} 等
+六个合同成员实现，从不显式成形 $H$ \\
+Newton $3\times3$ 系统 \eqref{eq:conic-newton} 与拟定消元
+\eqref{eq:conic-schur} & \implfull{src/engine/kernel/ipm/conic\_ipm\_solver.cpp:ConicIPMSolver::solve}
+内部的 \texttt{solve\_direction} lambda 与
+\srcpath{src/engine/kernel/ipm/conic\_ipm\_solver.cpp:KktAssembler::assemble} \\
+拟定正则化与 SPD/LDL$^\top$ 路径（命题 \ref{prop:quasidefinite}）&
+\implfull{src/engine/kernel/ipm/conic\_ipm\_solver.cpp:KktAssembler::apply\_delta}、
+\srcpath{src/engine/kernel/ipm/conic\_ipm\_solver.cpp:KktBackend}
+（CHOLMOD 超节点 $LL^\top$ / simplicial $LDL^\top$ / MUMPS 回退） \\
+Mehrotra 预测-校正、步长与最大步公式 &
+\implfull{src/engine/kernel/ipm/conic\_ipm\_solver.cpp:ConicIPMSolver::solve}；
+逐锥最大步 \srcpath{src/engine/kernel/ipm/cones.cpp:l\_max\_step}、
+\srcpath{src/engine/kernel/ipm/cones.cpp:q\_max\_step}、
+\srcpath{src/engine/kernel/ipm/cones.cpp:s\_max\_step}；
+校正右端 \srcpath{src/engine/kernel/ipm/conic\_ipm\_solver.cpp:combined\_lambda\_rhs} \\
+弦分解：定理 \ref{thm:psd-completion}、\ref{thm:agler} 与一致性等式精确转换 &
+\implfull{src/engine/kernel/ipm/chordal\_decomposition.cpp:chordal\_decompose}、
+\srcpath{src/engine/kernel/ipm/chordal\_decomposition.cpp:chordal\_recover}
+（含对偶完备 \srcpath{src/engine/kernel/ipm/chordal\_decomposition.cpp:complete\_dual}）；
+未采用完备化松弛路径 \\
+不可行证书（定理 \ref{thm:conic-primal-infeas}、\ref{thm:conic-dual-infeas}）&
+\implpart{实现为 $\infty$-范数归一化的数值近似判据，见本章 gapnote；
+锚点 \srcpath{src/engine/kernel/ipm/conic\_ipm\_solver.cpp:ConicIPMSolver::solve}} \\
+指数锥、幂锥等其他自尺度锥 & \implnone \\
+适配器层对偶布局 $[z \mid y]$ &
+\implfull{src/engine/solver/native/conic\_ipm\_adapter.cpp:NativeConicIPMAdapter::solve\_conic} \\
+\bottomrule
+\end{longtable}
+
+\subsection{参考文献}
+
+\begin{thebibliography}{9}\small
+\bibitem{nesterov1994} Yu. Nesterov, A. Nemirovskii,
+\emph{Interior-Point Polynomial Algorithms in Convex Programming}, SIAM, 1994.
+\bibitem{nesterov1997} Yu. Nesterov, M. J. Todd,
+Self-scaled barriers and interior-point methods for convex programming,
+\emph{Mathematics of Operations Research} 22(1):1--42, 1997.
+\bibitem{nesterov1998} Yu. Nesterov, M. J. Todd,
+Primal-dual interior-point methods for self-scaled cones,
+\emph{SIAM Journal on Optimization} 8(2):324--364, 1998.
+\bibitem{vandenberghe2010} L. Vandenberghe,
+\emph{The CVXOPT linear and quadratic cone program solvers},
+技术报告, 2010.
+\bibitem{boyd2004} S. Boyd, L. Vandenberghe,
+\emph{Convex Optimization}, Cambridge University Press, 2004.
+\bibitem{vanderbei1995} R. J. Vanderbei,
+Symmetric quasidefinite matrices,
+\emph{SIAM Journal on Optimization} 5(1):100--113, 1995.
+\bibitem{grone1984} R. Grone, C. R. Johnson, E. M. S\'a, H. Wolkowicz,
+Positive definite completions of partial Hermitian matrices,
+\emph{Linear Algebra and its Applications} 58:109--124, 1984.
+\bibitem{agler1988} J. Agler, J. W. Helton, S. McCullough, L. Rodman,
+Positive semidefinite matrices with a given sparsity pattern,
+\emph{Linear Algebra and its Applications} 107:101--149, 1988.
+\bibitem{fukuda2001} M. Fukuda, M. Kojima, K. Murota, K. Nakata,
+Exploiting sparsity in semidefinite programming via matrix completion I:
+General framework, \emph{SIAM Journal on Optimization} 11(3):647--674, 2001.
+\end{thebibliography}

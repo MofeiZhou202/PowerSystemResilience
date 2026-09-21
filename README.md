@@ -104,27 +104,32 @@
   L/T 小电抗策略、BQ 来源限定 active-set、DC/LCC 来源字段和 JSON 往返。
   BM/LM 三端 DSP fixture 未入库，故该外部数值对拍仍明确标为未闭环；当前
   macOS Release 完整重链后为 1675 passed、4 conditional skips、0 failed。
-- `main` 提供统一 Trial 能力清单、后端 fail-closed 403 防绕过、五阶段
+- 当前 `main` 提供统一 Trial 能力清单、后端 fail-closed 403 防绕过、五阶段
   GUI、后端指标分析计划、Trial 专属验收测试和白名单 Windows 打包；
-  维护边界见 `docs/trial_edition_design.md`。
+  维护边界见 `docs/operations/trial_edition_design.md`。
+- 当前工作树还提供独立的 Resilience Edition：`/api/edition` 描述进程全局/旧式
+  会话能力，`/api/v1` 独立描述异步作业能力；GUI 与 Python 均失败关闭，普通恢复
+  可行不等同于动态安全认证。完整契约见
+  `docs/operations/resilience_edition_design.md`。
 - 历史审计、理论提案与旧技术总笔记已迁入 `docs/archive/`；受版本控制的
   PDF/LaTeX 中间产物已移除，活动索引不再直接导航到归档材料。
 - `AGENTS.md`、`CLAUDE.md` 与项目级 `manage-codebase-context` skill
   为不同编码代理提供统一入口；动态验证基线和未闭环调试集中维护在
-  `docs/development_status.md`，不再依赖按日期堆积的审计快照。
+  `docs/overview/development_status.md`，不再依赖按日期堆积的审计快照。
 - 平衡 Newton 潮流默认使用固定 PV/PQ superset Jacobian、KLU 后向误差守卫的
   numeric refactor，以及“直接 Newton -> 半光滑 NCP -> DC 相角种子活动集 ->
   DC 种子 NCP -> 同伦”的数值升级梯级；五个困难平启动 MATPOWER 算例均已
   收敛并通过 Q 证书。重复求解可使用 `PreparedPowerFlowSession` 复用 projection、
-  assembly、固定 pattern 与 symbolic analysis。依赖侧 KLU adapter 已提交至
-  `../MIPSolvers` 的 `3bf1e66`；当前依赖 pin 已推进至包含后续线性代数更新的
-  `864b1479`。
+  assembly、固定 pattern 与 symbolic analysis。该阶段依赖侧 KLU adapter 曾提交至
+  当时的 sibling MIPSolvers `3bf1e66`，随后依赖 pin 曾推进至包含后续线性代数更新的
+  `864b1479`；这两项是历史集成记录，不是当前依赖来源。当前锁定导入见
+  `cmake/MIPSolvers.lock.json`。
 - 2026-08-08 将 MIPSolvers 固定到 `60f8bc4`：纳入系统更新后的 native
   dual simplex（分区 PRICE、驻留 pivot workspace、warm re-optimization）、
   LP IPM Gondzio multiple centrality correctors、MILP B&C 拆分与跨平台构建修复。
   `full-dev` 同时构建两仓库完整测试树；该历史升级回归 1429/1429 个已注册
-  测试通过，3 个缺少外部运行时或条件不满足的用例明确跳过。当前 Trial
-  Trial 集成先将依赖 pin 更新到 MIPSolvers `7b4cba8`；当前 pin 为
+  测试通过，3 个缺少外部运行时或条件不满足的用例明确跳过。之后的 Trial
+  集成曾将依赖 pin 更新到 MIPSolvers `7b4cba8`，再推进到
   `864b1479`，加入 Native IPM 的原坐标可行起点审计、方向性变量界契约、
   central warm-start 审计与 NativeLCQP 协作式墙钟截止，并包含后续 CPLEX
   adapter、统一 deadline telemetry 与 LP cancellation 接口。有限预算
@@ -176,13 +181,13 @@
   配置和构建过程不再下载依赖。
 - 已删除被实现取代的阶段计划、一次性代码审查和重复暂态设计稿；不再用历史 roadmap 描述当前行为。
 - 本次同步（2026-07-24）补入 2026 年 5–7 月新增能力域，并核实 BPA/DSP BD/LD/T 到原生 `LCCConverter` 的接口链：统一 Newton PF 消费 LCC 的 AC P/Q、DC 注入和交叉 Jacobian；平衡聚合 OPF 的 Parity/Ipopt 路径复用同一准稳态特性，不能保持物理闭合的后端显式拒绝。
-- 2026-07-19 增加 `/api/v1` 多会话、模型 revision/ETag、异步 PF/OPF 作业，以及对应 Python SDK 与 AI 工具层；设计边界见 `docs/python_api.md`。
+- 2026-07-19 增加 `/api/v1` 多会话、模型 revision/ETag、异步 PF/OPF 作业，以及对应 Python SDK 与 AI 工具层；设计边界见 `docs/reference/python_api.md`。
 - 同步依据为当前 `CMakeLists.txt`、`CMakePresets.json`、`tests/CMakeLists.txt`、`src/`、`include/`、GUI 路由和 E2E 验证。
 - 如文档描述与代码行为冲突，以仓库实现为准：`src/`、`include/`、`tests/`、`CMake` 配置优先。
 
 ## 快速构建与验证（基于当前实现）
 
-推荐使用 CMake preset（与 `docs/cross_platform_build.md` 保持一致）：
+推荐使用 CMake preset（与 `docs/operations/cross_platform_build.md` 保持一致）：
 
 ```bash
 cmake --preset macos-release
@@ -202,6 +207,14 @@ cmake --build --preset windows-msvc-release
 ctest --preset windows-msvc-release
 ```
 
+正式 Windows x64 分发前，先在 Visual Studio 2022 Developer PowerShell 中准备本机依赖。脚本从锁定的 `MIPSolvers/third_party/zlib-1.3.1` 构建 zlib，并把 oneMKL staging 到被 Git 忽略的 `build/windows-dependencies/`；不会修改锁定的 MIPSolvers 源码树：
+
+```powershell
+powershell -ExecutionPolicy Bypass -File tools/prepare_windows_dependencies.ps1
+```
+
+默认准备 `windows-source-release` 所需的 zlib/oneMKL；如要运行使用完整预编译第三方包的 `windows-msvc-release`，加 `-BuildPrebuiltPackage`。
+
 正式 Windows x64 分发包在完整构建后生成，并自动执行运行时依赖审计、
 解压目录独立启动检查、逐文件清单和 ZIP SHA-256：
 
@@ -209,7 +222,7 @@ ctest --preset windows-msvc-release
 powershell -ExecutionPolicy Bypass -File tools/package_windows.ps1
 ```
 
-如需从 MIPSolvers 的本地源码依赖构建，而不消费预编译第三方包：
+如需从仓库内 MIPSolvers 源码构建依赖，而不消费预编译第三方包：
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File tools/package_windows.ps1 -SourceDependencies
@@ -222,6 +235,18 @@ HiGHS/SCIP、Ipopt、sequential oneMKL/PardisoMKL 和 SuiteSparse，不链接
 发布前另行运行 `tools/verify_windows_release.ps1`；它校验 ZIP/清单哈希，
 在含空格的新解压目录和隔离的 `PATH` 中启动服务器，并检查 GUI、
 内置算例和混合潮流。
+
+Resilience Windows 构建与专用白名单打包使用独立的 `windows-resilience-release` preset。它继承源码依赖模式并启用 fail-closed 弹性能力边界；脚本落盘不等于运行验收已通过，最终证据见持续更新的开发状态：
+
+```powershell
+cmake --preset windows-resilience-release
+cmake --build --preset windows-resilience-release --target run_gui_server
+ctest --preset windows-resilience-release -L edition --output-on-failure
+powershell -ExecutionPolicy Bypass -File tools/package_resilience_windows.ps1
+```
+
+详细能力发现、GUI/Python 门控、动态安全边界和打包验收契约见
+[`docs/operations/resilience_edition_design.md`](docs/operations/resilience_edition_design.md)。
 
 Trial Windows 包使用独立 preset，并在打包前强制运行 Trial 验收测试：
 
@@ -258,8 +283,8 @@ powershell -ExecutionPolicy Bypass -File tools/package_trial_windows.ps1
 | 场景生成与台风弹性 | 已实现并完成声明范围文档/数值闭环 | 16 专章/56 页手册覆盖三族条件概率、二元 AR(1)、风险边界锚点、Holland 风雨--易损--故障/修复--交通链与全字段契约；4096 步统计、128→12 聚类和固定公式由独立 Python 复算，hybrid 的尾部收益与运输/regime 退化同时披露。气象预报、易损现场校准及外部引擎等价认证不在声明范围。 |
 | 碳流追踪 | 已实现并持续回归 | 比例/矩阵碳流追踪、年度碳核算（含储能碳库存动态）与用户/节点绿电证书（GEC）核算。 |
 | EV-电力-交通耦合 | 已实现（持续扩展） | CTM/LTM 传播、Formulation A–H 联合优化家族、选址定容 MILP 与滚动时域 MPC；结果按“可证伪证书”口径区分全局最优/局部驻点/启发式。 |
-| SPPT 可执行理论层 | 已实现（研究验证性质） | MR1–MR8 证伪套件、MR3 证书语料（CSV/LaTeX）、准入守卫与 agent 循环；当前缺少受版本控制的独立理论/运行契约，见 `docs/module_documentation_map.md`。 |
-| Web GUI 服务 | 已集成可运行 | `run_gui_server` 为独立可执行服务，上述能力均经 HTTP API 暴露；前端为原生 JS 单页应用。 |
+| SPPT 可执行理论层 | 已实现（研究验证性质） | MR1–MR8 证伪套件、MR3 证书语料（CSV/LaTeX）、准入守卫与 agent 循环；当前缺少受版本控制的独立理论/运行契约，见 `docs/overview/module_documentation_map.md`。 |
+| Web GUI 服务 | 已集成可运行 | `run_gui_server` 为独立可执行服务；Full Edition 暴露完整 HTTP 能力面，受限 edition 按 `/api/edition` 的 fail-closed 清单裁剪。前端为原生 JS 单页应用。 |
 | Python SDK 与 AI 工具层 | v1 已实现 | `/api/v1` 独立会话、模型 revision/ETag、异步 PF/OPF 作业；Python 提供类型化客户端、结果诚实性检查、工具 Schema、影响分级与显式变更批准。 |
 
 ### 2) 依赖与功能开关状态（当前默认）
@@ -303,7 +328,7 @@ powershell -ExecutionPolicy Bypass -File tools/package_trial_windows.ps1
 - 主动配电网：PV、风电等可再生电源，静态发电机、柔性负荷、可控负荷、移动储能、微电网和虚拟电厂。
 - 故障恢复和运行优化：N-1 故障枚举、三阶段故障恢复、网络重构、弹性恢复、多时段生产模拟、OPF 和碳流追踪。
 - 标准算例和工程导入：MATPOWER、JPC JSON、CIM/CGMES 3.0 与配电 CIM XML、IEC-CGE 注释配电 SVG、GridLAB-D GLM、PowerSimulationsDynamics.jl snapshot、Excel(ETAP)/OpenDSS 可选接口，以及项目内部 rich component schema。
-- 内置案例目录：能力导向的两级内置案例体系——旗舰 13 个（GUI「模型IO → 内置/算例」工具栏下拉）+ 扩展 8 个（「加载算例」模态框"更多算例"组，`GET /api/cases` 全量 21 个结构化目录均含 `featured` 标记）；每个案例的规模、数据亮点与推荐演示路径见 [docs/case_catalog.md](docs/case_catalog.md)，19 个能力域 × 案例 × 断言的覆盖矩阵由 `tools/validate_case_capabilities.py` 一键验证（输出 `output/capability_coverage.md`）。
+- 内置案例目录：能力导向的两级内置案例体系——旗舰 13 个（GUI「模型IO → 内置/算例」工具栏下拉）+ 扩展 8 个（「加载算例」模态框"更多算例"组，`GET /api/cases` 全量 21 个结构化目录均含 `featured` 标记）；每个案例的规模、数据亮点与推荐演示路径见 [docs/overview/case_catalog.md](docs/overview/case_catalog.md)，19 个能力域 × 案例 × 断言的覆盖矩阵由 `tools/validate_case_capabilities.py` 一键验证（输出 `output/capability_coverage.md`）。
 
 工程上，本项目不直接把所有复杂设备塞进一个求解器模型，而是采用分层流程：
 
@@ -424,20 +449,20 @@ Canonical 层的一个重要设计原则是：求解器只看到必要的数学�
 | EV-交通耦合 | `simulate_ev_power_traffic`（A）、`_ctm_due`（B+）、`_ctm_joint`（C）、`solve_joint_optimizer`（D）、`solve_ctm_so_lp`/`solve_ltm_so_lp`（E）、`solve_ctm_due_vi`（F）、`solve_infra_design_milp`（G）、`solve_ltm_mpc`（H） | CTM/LTM 交通传播 + DC-OPF/LMP 联合优化 | 耦合仿真结果与最优性证书（区分全局/局部/启发式） |
 | SPPT 验证层 | `sppt::run_core_metamorphic_suite`, `certify_corpus`, `guard_system`, `run_agent_loop` | MR1–MR8 蜕变关系、独立残差证书、三道准入守卫 | 证伪/认证产物（CSV/LaTeX，研究验证性质） |
 
-优化和 MILP 模块依赖 sibling directory `../MIPSolvers`。该源码树自带完整
+优化和 MILP 模块默认依赖仓库内锁定导入的 `MIPSolvers/`。该源码树自带完整
 Eigen 3.4.1（包括 `unsupported/Eigen/MatrixFunctions`）、fmt、nlohmann/json、
 HiGHS、SCIP、MUMPS、Ipopt、SuiteSparse、PaPILO 与所需 Boost 头；项目默认从本地源码解析这些依赖，
-无需系统 Eigen 或网络包管理器。封闭环境须同时交付两个源码目录，也可通过
-`MIPSOLVERS_SOURCE_DIR` 指向包内其他位置。
+无需系统 Eigen 或网络包管理器。封闭环境须保留完整的仓库内 `MIPSolvers/` 子树；开发者可通过
+`MIPSOLVERS_SOURCE_DIR` 显式指向另一份经过来源锁关键文件校验的检出，但正式打包只接受仓库内导入。
 
-Windows 的嵌入式 Ipopt 使用 MIPSolvers 中预先 staging 的 sequential 静态 oneMKL
-依赖包。联网准备机运行 `third_party/stage_onemkl.ps1` 和
-`third_party/build_third_party.ps1` 后，封闭环境只消费带 manifest、SHA-256 与许可
-材料的 `MIPSolvers/third_party/install`，不依赖机器级 oneAPI 安装。
+Windows 的嵌入式 Ipopt 使用生成于 `build/windows-dependencies/` 的 sequential 静态 oneMKL
+和 zlib。联网准备机从仓库根运行 `tools/prepare_windows_dependencies.ps1`；加
+`-BuildPrebuiltPackage` 会同时生成完整 MIPSolvers 预编译第三方包。`.lib`、`.dll` 和安装目录
+不受 Git 跟踪，也不能写回锁定的 `MIPSolvers/` 子树。
 
 跨平台构建建议使用仓库内的 CMake presets；macOS/Linux/Windows 的依赖安装、
 `MIPSolvers` 源码路径、SuiteSparse 稀疏求解器和 Windows OPF 后端选择见
-[`docs/cross_platform_build.md`](docs/cross_platform_build.md)。
+[`docs/operations/cross_platform_build.md`](docs/operations/cross_platform_build.md)。
 
 ## 6. Validation 与诊断
 
@@ -469,9 +494,9 @@ import/load system
 
 潮流结果的 `SolverDiagnostics` 还会携带 `converter_coordination`、结构闭合扫描、自动提升的 VSC 索引和 `effective_converters`。下游报告应优先解释这些最终生效的换流器状态，而不是只看输入 JSON 中的原始控制模式。
 
-平衡 Newton 潮流将 PV/PQ 转换作为有界活动集过程：在固定活动集收敛后批量钳位全部 Q 越限 PV 节点，只执行一次带保持时间和电压方向死区的 PQ→PV 恢复审计，并返回 `reactive_limits.certified`、重复活动集和外层预算诊断。GUI 默认关闭该校核以进行快速筛查；需要工程 Q 限值结论时必须显式启用并检查证书。理论与性能边界见 [PV/PQ 无功限值切换契约](docs/pv_pq_switching_contract.md)。
+平衡 Newton 潮流将 PV/PQ 转换作为有界活动集过程：在固定活动集收敛后批量钳位全部 Q 越限 PV 节点，只执行一次带保持时间和电压方向死区的 PQ→PV 恢复审计，并返回 `reactive_limits.certified`、重复活动集和外层预算诊断。GUI 默认关闭该校核以进行快速筛查；需要工程 Q 限值结论时必须显式启用并检查证书。理论与性能边界见 [PV/PQ 无功限值切换契约](docs/theory/pv_pq_switching_contract.md)。
 
-换流器调制比、DC 电流和 DC/DC 占空比默认仍采用收敛后物理审计；启用 `PowerFlowOptions::enforce_converter_physical_limits` 后，超限根会被硬性拒绝。平衡正序 `PQ_MODE` / `VDC_Q` / `AC_GRID_FORMING` VSC 可通过设备级 `enable_limit_ncp` 与正 `i_ac_max_pu` 启用固定六变量局部块，在统一 Newton 内求解电流圆、P/Q priority、Vdc droop 饱和及 GFM 内部电势—虚拟阻抗 Norton 端口，而非事后改写结果。目标方程使用精确 Fischer–Burmeister/中值 NCP；困难退化工况可选择固定结构的光滑 FB/CHKS `mu` 延拓，最终结果重新按精确方程认证。无 terminal SLACK 的 AC 岛保留全部母线 `Vm/θ` 与 P/Q 平衡，由 authored GFM 内部相量消除全局旋转零模；多个 Norton GFM 可共存，但严格协调要求 DC 侧有物理电压/功率支撑。该半光滑 Newton 是局部方法，远初值可能进入低压数学根。平衡 OPF 本体不含 GFM priority-NCP KKT 约束，最终由保留控制模式的 `post_pf` 回放认证。数学、接口和验证门槛见 [VSC 电流限值 NCP 潮流契约](docs/vsc_limit_ncp_power_flow_contract.md)。
+换流器调制比、DC 电流和 DC/DC 占空比默认仍采用收敛后物理审计；启用 `PowerFlowOptions::enforce_converter_physical_limits` 后，超限根会被硬性拒绝。平衡正序 `PQ_MODE` / `VDC_Q` / `AC_GRID_FORMING` VSC 可通过设备级 `enable_limit_ncp` 与正 `i_ac_max_pu` 启用固定六变量局部块，在统一 Newton 内求解电流圆、P/Q priority、Vdc droop 饱和及 GFM 内部电势—虚拟阻抗 Norton 端口，而非事后改写结果。目标方程使用精确 Fischer–Burmeister/中值 NCP；困难退化工况可选择固定结构的光滑 FB/CHKS `mu` 延拓，最终结果重新按精确方程认证。无 terminal SLACK 的 AC 岛保留全部母线 `Vm/θ` 与 P/Q 平衡，由 authored GFM 内部相量消除全局旋转零模；多个 Norton GFM 可共存，但严格协调要求 DC 侧有物理电压/功率支撑。该半光滑 Newton 是局部方法，远初值可能进入低压数学根。平衡 OPF 本体不含 GFM priority-NCP KKT 约束，最终由保留控制模式的 `post_pf` 回放认证。数学、接口和验证门槛见 [VSC 电流限值 NCP 潮流契约](docs/theory/vsc_limit_ncp_power_flow_contract.md)。
 
 ## 7. Projection Back 与结果归因
 
@@ -673,7 +698,7 @@ fixtures 见 `data/etap_sample.xlsx`、`data/etap_feeder.xml`。GUI 后端端到
 | 高级潮流求解器 | `include/hacdcpf/power_flow/solvers/`, `include/hacdcpf/power_flow/globalization/`（HELM、同伦、Newton-Krylov、LM 信赖域等） |
 | 电压稳定 CPF | `include/hacdcpf/power_flow/voltage_stability.hpp`, `src/power_flow/voltage_stability.cpp` |
 | AML 代数建模层 | `include/hacdcpf/power_models/`, `src/power_models/`（ACOPF/ACDCOPF/DCOPF/LinDistFlow/SCUC builder） |
-| MIPSolvers 转发层 | `include/hacdcpf/aml/`, `include/hacdcpf/engine/`, `include/hacdcpf/solver/`（header-only 转发；实现在兄弟仓库 `../MIPSolvers`） |
+| MIPSolvers 转发层 | `include/hacdcpf/aml/`, `include/hacdcpf/engine/`, `include/hacdcpf/solver/`（header-only 转发；实现来自仓库内锁定导入的 `MIPSolvers/`） |
 | 暂态动力学 | `include/hacdcpf/dynamics/`, `src/dynamics/` |
 | 谐波潮流与 HSS | 逐阶/三相/非线性 HPF；一等 DC 电容、电抗器和 AC/DC 滤波器；两电平 VSC、MMC、LCC、DC/DC 开关函数频率耦合；`include/hacdcpf/analysis/harmonics_power_flow.hpp`, `src/harmonics_power_flow/` |
 | 短路分析 | `include/hacdcpf/analysis/short_circuit.hpp`, `include/hacdcpf/analysis/dc_short_circuit.hpp`, `src/short_circuit/` |
@@ -685,7 +710,7 @@ fixtures 见 `data/etap_sample.xlsx`、`data/etap_feeder.xml`。GUI 后端端到
 | 园区综合能源 | `include/hacdcpf/integrated_energy/`, `src/integrated_energy/` |
 | 承载力/薄弱环节/反事实 | `include/hacdcpf/analysis/hosting_capacity.hpp` 等, `src/analysis/` |
 | 场景生成/台风 | `include/hacdcpf/analysis/scenario_generation.hpp`, `include/hacdcpf/analysis/typhoon_resilience.hpp`, `src/scenario_generation/` |
-| SPPT 验证层 | `include/hacdcpf/sppt/`, `src/sppt/`（文档覆盖：`docs/module_documentation_map.md`） |
+| SPPT 验证层 | `include/hacdcpf/sppt/`, `src/sppt/`（文档覆盖：`docs/overview/module_documentation_map.md`） |
 | 网络重构 | `include/hacdcpf/network_reconfiguration/`, `src/network_reconfiguration/` |
 | 可靠性 | `include/hacdcpf/reliability/`, `include/hacdcpf/analysis/three_stage_reliability.hpp`, `src/reliability/` |
 | 弹性恢复 | `include/hacdcpf/resilience/resilience_assessment.hpp`, `src/resilience/` |

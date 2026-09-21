@@ -1,0 +1,37 @@
+{
+  "schema": "hacdcpf.dependency-lock.v1",
+  "dependency": "MIPSolvers",
+  "upstream": {
+    "repository": "https://github.com/Matrixeigs/MIPSolvers.git",
+    "branch": "windows",
+    "commit": "c6f77f297350b357ff30cc96d9234b2031fd316c"
+  },
+  "import": {
+    "prefix": "MIPSolvers",
+    "git_tree": "782f8745b7e3d39754d02999eeccfe11c04528dc",
+    "file_count": 13855,
+    "tracked_generated_and_third_party_artifacts_preserved": true
+  },
+  "verification_files": [
+    {
+      "path": "CMakeLists.txt",
+      "sha256": "e6b2c3677bcc8c9be89c93c807b85284cd6e09ba4273c1c0c715e0f6233a1fda"
+    },
+    {
+      "path": "cmake/Dependencies.cmake",
+      "sha256": "9b4d0bccf1d734a556bc0bd16c171b9efc78778df806dcaed5ecd2940ff31317"
+    },
+    {
+      "path": "include/mipsolvers/engine/api/solver.hpp",
+      "sha256": "89e10012a94376229b1d53681dfbad8b1464e6708ab3da4014f8ebd2e107a814"
+    },
+    {
+      "path": "include/mipsolvers/aml/model.hpp",
+      "sha256": "a3759f1dff4aea3760e6b475a14eb1a63795fbc8a6fc2dfcaa2a5730967e2efb"
+    },
+    {
+      "path": "src/aml/model.cpp",
+      "sha256": "9ac0226507da54bb8df9d10ae43377c6543720bbd7d9b21db50d1ab93b48a4c4"
+    }
+  ]
+}

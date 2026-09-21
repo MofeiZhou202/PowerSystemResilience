@@ -195,7 +195,10 @@
             "MESS"
           ],
           "modules": [
-            "resilience"
+            "resilience",
+            "proactiveDefense",
+            "rapidRecovery",
+            "resilienceMetrics"
           ]
         },
         {

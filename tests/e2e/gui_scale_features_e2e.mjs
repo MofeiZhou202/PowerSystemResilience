@@ -238,9 +238,10 @@ async function main() {
           cancellationScheduler.settling === false &&
           cancellationScheduler.secondAccepted,
       'cancelled task polls through backend settlement and releases the next task');
+    const resilienceEdition = await page.evaluate(() => document.body.dataset.edition === 'resilience');
     const resilienceLabel = await page.locator('#moduleResilience').textContent();
-    check(resilienceLabel?.trim() === '弹性分析',
-      'resilience module uses the 弹性分析 label');
+    check(resilienceLabel?.trim() === (resilienceEdition ? '完整弹性分析' : '弹性分析'),
+      'resilience module label does not match the active edition');
 
     // ---- Phase 5: semantic navigation, keyboard operation, and focus ----
     const accessibilityAudit = await page.evaluate(() => App.getAccessibilityAudit());

@@ -1,0 +1,83 @@
+% mipsolvers_manual.sty —— MIPSolvers 模块技术手册共享排版样式
+% 规范来源：移植自 HybridACDCDistributionSystemsSimulation/docs/_manual_common/hysim_manual.sty。
+% 编译：XeLaTeX（ctexart）。docs/modules/ 各部模块手册共享本文件。
+% 本文件是唯一样式副本，模块目录不得复制同名文件。
+\NeedsTeXFormat{LaTeX2e}
+\ProvidesPackage{mipsolvers_manual}[2026/09/13 MIPSolvers module manual shared style]
+
+\RequirePackage[margin=2.2cm]{geometry}
+\RequirePackage{amsmath,amssymb}
+\RequirePackage{booktabs,longtable,array}
+\RequirePackage{graphicx}
+\RequirePackage{xcolor}
+\RequirePackage{float}
+\RequirePackage{tikz}
+\usetikzlibrary{arrows.meta,positioning,shapes.geometric,calc}
+\RequirePackage{hyperref}
+\hypersetup{colorlinks=true,linkcolor=black,urlcolor=blue}
+
+% ── 统一参数表环境 ────────────────────────────────────────────────
+% 六列：字段名 | 符号 | 单位 | 典型范围 | 默认值 | 说明
+\emergencystretch=3em
+\newcolumntype{L}[1]{>{\raggedright\arraybackslash}p{#1}}
+\newenvironment{paramtable}{%
+  \begin{footnotesize}
+  \begin{longtable}{@{}L{3.2cm}L{1.3cm}L{1.6cm}L{2.3cm}L{1.5cm}L{4.3cm}@{}}
+  \toprule
+  \textbf{字段名} & \textbf{符号} & \textbf{单位} & \textbf{典型范围} & \textbf{默认值} & \textbf{说明}\\
+  \midrule
+  \endfirsthead
+  \multicolumn{6}{@{}l}{\footnotesize（续表）}\\
+  \toprule
+  \textbf{字段名} & \textbf{符号} & \textbf{单位} & \textbf{典型范围} & \textbf{默认值} & \textbf{说明}\\
+  \midrule
+  \endhead
+  \midrule
+  \multicolumn{6}{r@{}}{\footnotesize（接下页）}\\
+  \endfoot
+  \bottomrule
+  \endlastfoot
+}{%
+  \end{longtable}
+  \end{footnotesize}
+}
+
+% 字段名排版（下划线需转义后传入；\_ 处允许换行以防超长字段名溢出版心）
+\makeatletter
+\newcommand{\fld}[1]{\texttt{\fld@scan#1\fld@stop}}
+\def\fld@scan#1{%
+  \ifx#1\fld@stop
+  \else
+    \ifx#1\_\_\allowbreak\else
+    \ifx#1.#1\allowbreak\else#1\fi\fi
+    \expandafter\fld@scan
+  \fi}
+\makeatother
+
+% 模块元信息行：#1=求解器/结构体/类名  #2=头文件路径
+\newcommand{\compmeta}[2]{\noindent\textbf{代码结构体：}\texttt{#1}\hfill
+  \textbf{定义位置：}\srcpath{#2}\par\smallskip}
+
+% 可断行的源码路径/函数名（/、: 与 \_ 处允许换行）
+\makeatletter
+\newcommand{\srcpath}[1]{\texttt{\src@scan#1\src@stop}}
+\def\src@scan#1{%
+  \ifx#1\src@stop
+  \else
+    \ifx#1\_\_\allowbreak\else
+    \ifx#1/#1\allowbreak\else
+    \ifx#1:#1\allowbreak\else
+    \ifx#1.#1\allowbreak\else
+    \ifx#1-#1\allowbreak\else
+    \ifx#1+#1\allowbreak\else
+    #1\fi\fi\fi\fi\fi\fi
+    \expandafter\src@scan
+  \fi}
+\makeatother
+
+% ── 通用理论层环境（theorynote/gapnote/定理族/实现状态标签）─────────
+% 规范见 docs/modules/THEORY_WRITING_GUIDE.md。
+% 路径相对于引用手册（docs/modules/<mod>/），与 \usepackage{../../_manual_common/mipsolvers_manual} 同基准。
+\input{../../_manual_common/theory_environments.tex}
+
+\endinput

@@ -1,0 +1,10 @@
+Vendored dependency — Eigen 3.4.1 (header-only)
+Origin:     https://gitlab.com/libeigen/eigen/-/archive/3.4.1/eigen-3.4.1.tar.gz
+Version:    3.4.1
+Fetched:    2026-07-25
+License:    MPL2 (see COPYING.MPL2; other COPYING.* files cover optional modules)
+
+Pruned for size: bench/, blas/, ci/, debug/, demos/, doc/, failtest/, lapack/,
+scripts/, test/, unsupported/ (the project does not use <unsupported/Eigen/...>).
+Kept: Eigen/ headers, top-level CMakeLists.txt, cmake/, signature file,
+COPYING.*, README.md.

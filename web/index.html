@@ -5,9 +5,38 @@
 <meta name="viewport" content="width=device-width,initial-scale=1.0"/>
 <title>HySim-XJTU-HRPES</title>
 <link rel="stylesheet" href="css/style.css?v=20260910-uc-threads"/>
-<script src="https://cdn.plot.ly/plotly-2.27.0.min.js"></script>
+<script src="https://cdn.plot.ly/plotly-2.27.0.min.js" defer></script>
 </head>
-<body>
+<body data-startup-state="loading">
+<script>
+  // Market feature scripts register direct load/hashchange handlers. Quarantine the
+  // initial hash before those scripts load; app.js restores only a validated hash.
+  const capabilityHashModules = {
+    '#market-operation': 'marketOperation', '#southern-market': 'marketBoundary',
+    '#market-study': 'marketStudy', '#market-ancillary': 'marketAncillary',
+    '#market-realtime': 'marketRealtime', '#market-behavior': 'marketBehavior',
+    '#market-inputs': 'marketInputs', '#market-clearing': 'market',
+    '#market-security': 'marketSecurity', '#market-settlement': 'marketSettlement'
+  };
+  window.__HACDCPF_INITIAL_HASH = location.hash;
+  if (location.hash) history.replaceState(null, '', `${location.pathname}${location.search}`);
+  window.addEventListener('hashchange', event => {
+    const module = capabilityHashModules[location.hash];
+    if (!module) return;
+    const enabled = document.body.dataset.startupState === 'ready' &&
+      document.querySelector(`.module-btn[data-module="${module}"]`);
+    if (enabled) return;
+    history.replaceState(null, '', `${location.pathname}${location.search}`);
+    event.stopImmediatePropagation();
+  });
+</script>
+<div id="startupStatus" class="startup-status" data-state="loading" role="status" aria-live="assertive" aria-atomic="true">
+  <div class="startup-status-card">
+    <strong id="startupStatusTitle">正在验证产品能力</strong>
+    <p id="startupStatusDetail">正在从本机服务读取能力配置。验证完成前工作区保持锁定。</p>
+  </div>
+</div>
+<div id="appShell" class="app-shell" hidden inert aria-hidden="true">
 <a class="skip-link" href="#main">跳到主工作区</a>
 
 <!-- ===== Bar 1: Canvas Tools (Top Toolbar) ===== -->
@@ -4242,6 +4271,7 @@
 
 <!-- ===== Toast notifications (mounted top-right; see app.js App.toast) ===== -->
 <div id="toastContainer" class="toast-container" aria-live="polite" aria-label="通知"></div>
+</div><!-- /appShell -->
 
   <script src="js/components.js?v=20260712-cb-source-flow-v2"></script>
   <script src="js/search_registry.js?v=20260709-phase5"></script>
@@ -4262,17 +4292,23 @@
   <script src="js/core/runtime_diagnostics.js?v=20260712-hysim-phase6-v1"></script>
   <script src="vendor/sql-wasm.js?v=1.10.3"></script>
   <script src="js/app.js?v=20260910-uc-threads"></script>
-  <script src="js/core/market_navigation.js?v=20260907-market-guide"></script>
-  <script src="js/core/market_activity.js?v=20260907-market-activity"></script>
-  <script src="js/core/market_canvas.js?v=20260907-market-guide"></script>
-  <script src="js/core/southern_market.js?v=20260907-market-activity"></script>
-  <script src="js/core/market_weekly_plan.js?v=20260907-market-activity"></script>
-  <script src="js/core/market_operation.js?v=20260907-market-performance"></script>
-  <script src="js/core/market_boundary_controls.js?v=20260905-lookahead2"></script>
-  <script src="js/core/market_forecast.js?v=20260907-market-activity"></script>
-  <script src="js/core/market_study.js?v=20260907-market-activity"></script>
-  <script src="js/core/market_ancillary.js?v=20260907-market-activity"></script>
-  <script src="js/core/market_realtime.js?v=20260907-market-activity"></script>
+  <script>
+    // Load market-only extensions after a strict Full-edition profile succeeds.
+    // Restricted/unavailable startup therefore cannot execute eager market code.
+    window.__HACDCPF_MARKET_SCRIPTS = [
+      'js/core/market_navigation.js?v=20260907-market-guide',
+      'js/core/market_activity.js?v=20260907-market-activity',
+      'js/core/market_canvas.js?v=20260907-market-guide',
+      'js/core/southern_market.js?v=20260907-market-activity',
+      'js/core/market_weekly_plan.js?v=20260907-market-activity',
+      'js/core/market_operation.js?v=20260907-market-performance',
+      'js/core/market_boundary_controls.js?v=20260905-lookahead2',
+      'js/core/market_forecast.js?v=20260907-market-activity',
+      'js/core/market_study.js?v=20260907-market-activity',
+      'js/core/market_ancillary.js?v=20260907-market-activity',
+      'js/core/market_realtime.js?v=20260907-market-activity'
+    ];
+  </script>
   <script src="js/core/help_panel.js?v=20260817-help-panel-v1"></script>
   <script src="vendor/marked.min.js?v=15.0.12"></script>
   <script src="js/core/help_center.js?v=20260907-market-guide"></script>

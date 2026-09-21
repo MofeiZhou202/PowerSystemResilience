@@ -1,0 +1,707 @@
+#include "factor.hpp"
+
+#include <algorithm>
+#include <cmath>
+#include <limits>
+#include <iomanip>
+#include <sstream>
+#include <utility>
+
+namespace mipsolvers::engine::native_dual::detail {
+namespace {
+
+constexpr double kBackwardErrorMultiplier = 256.0;
+
+}  // namespace
+
+std::vector<int> logical_columns(const StandardFormLP& sf) {
+  std::vector<int> logical(static_cast<std::size_t>(sf.A.rows()), -1);
+  for (int row = 0; row < sf.A.rows(); ++row) {
+    if (row < static_cast<int>(sf.row_to_slack_col.size()) &&
+        sf.row_to_slack_col[static_cast<std::size_t>(row)] >= 0) {
+      logical[static_cast<std::size_t>(row)] =
+          sf.row_to_slack_col[static_cast<std::size_t>(row)];
+    } else if (row < static_cast<int>(sf.row_to_artificial_col.size()) &&
+               sf.row_to_artificial_col[static_cast<std::size_t>(row)] >= 0) {
+      logical[static_cast<std::size_t>(row)] =
+          sf.row_to_artificial_col[static_cast<std::size_t>(row)];
+    }
+  }
+  return logical;
+}
+
+BasisFactor::BasisFactor(const StandardFormLP& sf,
+                         std::vector<int> logical_by_row)
+    : A_(&sf.A), logical_by_row_(std::move(logical_by_row)) {}
+
+bool BasisFactor::rebuild(std::vector<int>& basis, int& rank_repairs,
+                          std::string& failure) {
+  if (A_ == nullptr || static_cast<int>(basis.size()) != A_->rows()) {
+    failure = "basis dimension does not match A";
+    return false;
+  }
+  std::vector<char> seen(static_cast<std::size_t>(A_->cols()), 0);
+  for (int col : basis) {
+    if (col < 0 || col >= A_->cols()) {
+      failure = "basis contains an out-of-range column";
+      return false;
+    }
+    if (seen[static_cast<std::size_t>(col)]) {
+      failure = "basis contains a duplicate column";
+      return false;
+    }
+    seen[static_cast<std::size_t>(col)] = 1;
+  }
+
+  std::vector<int> repaired;
+  const std::vector<int> requested_basis = basis;
+  if (!rank_factor_.factorize_with_logicals(
+          *A_, basis.data(), static_cast<int>(basis.size()), logical_by_row_,
+          repaired)) {
+    failure = "rank-revealing factorization could not repair the basis";
+    return false;
+  }
+  if (rank_factor_.rank_deficiency == 0 && repaired != requested_basis) {
+    failure = "rank factor changed basis order without repairing a column";
+    return false;
+  }
+  rank_repairs += rank_factor_.rank_deficiency;
+  basis = std::move(repaired);
+  basis_ = basis;
+
+  rebuild_norms();
+  ++generation_;
+  ++rebuild_count_;
+  return true;
+}
+
+bool BasisFactor::update(int pivot_row, int entering_col,
+                         const Eigen::VectorXd& direction,
+                         const Eigen::VectorXd& row_ep,
+                         std::string& failure) {
+  if (A_ == nullptr || pivot_row < 0 || pivot_row >= A_->rows() ||
+      entering_col < 0 || entering_col >= A_->cols() ||
+      direction.size() != A_->rows() || row_ep.size() != A_->rows() ||
+      !direction.allFinite() || !row_ep.allFinite()) {
+    failure = "basis update dimensions are invalid";
+    return false;
+  }
+  const int leaving_col = basis_[static_cast<std::size_t>(pivot_row)];
+  if (!rank_factor_.update(pivot_row, entering_col, direction.data(),
+                           row_ep.data())) {
+    failure = "Forrest-Tomlin basis update rejected a non-invertible exchange";
+    return false;
+  }
+  update_norms_after_exchange(pivot_row, leaving_col, entering_col);
+  basis_[static_cast<std::size_t>(pivot_row)] = entering_col;
+  ++generation_;
+  return true;
+}
+
+bool BasisFactor::update_indexed(int pivot_row, int entering_col,
+                                 std::string& failure) {
+  if (A_ == nullptr || pivot_row < 0 || pivot_row >= A_->rows() ||
+      entering_col < 0 || entering_col >= A_->cols() ||
+      !rank_factor_.update_captured(pivot_row, entering_col)) {
+    failure = "Forrest-Tomlin basis update rejected the packed exchange";
+    return false;
+  }
+  const int leaving_col = basis_[static_cast<std::size_t>(pivot_row)];
+  update_norms_after_exchange(pivot_row, leaving_col, entering_col);
+  basis_[static_cast<std::size_t>(pivot_row)] = entering_col;
+  ++generation_;
+  return true;
+}
+
+double BasisFactor::residual_norm(const Eigen::VectorXd& rhs,
+                                  const Eigen::VectorXd& solution,
+                                  bool transpose) const {
+  // Guard against an inconsistent basis/matrix binding (e.g. after rebind_A to a
+  // differently-shaped matrix): indexing residual[pos]/solution[pos] or a stale
+  // basis_ column into A_ would read out of bounds.  Returning a large residual
+  // makes backward_error_acceptable reject the solve instead of crashing.
+  if (A_ == nullptr || rhs.size() != A_->rows() ||
+      solution.size() != A_->rows() ||
+      static_cast<int>(basis_.size()) != A_->rows()) {
+    return std::numeric_limits<double>::infinity();
+  }
+  for (const int col : basis_) {
+    if (col < 0 || col >= A_->cols()) {
+      return std::numeric_limits<double>::infinity();
+    }
+  }
+  Eigen::VectorXd residual = rhs;
+  if (transpose) {
+    for (int pos = 0; pos < static_cast<int>(basis_.size()); ++pos) {
+      double product = 0.0;
+      for (StandardColumnMatrix::InnerIterator it(
+               *A_, basis_[static_cast<std::size_t>(pos)]);
+           it; ++it) {
+        product += it.value() * solution[it.row()];
+      }
+      residual[pos] -= product;
+    }
+  } else {
+    for (int pos = 0; pos < static_cast<int>(basis_.size()); ++pos) {
+      const double value = solution[pos];
+      if (value == 0.0) continue;
+      for (StandardColumnMatrix::InnerIterator it(
+               *A_, basis_[static_cast<std::size_t>(pos)]);
+           it; ++it) {
+        residual[it.row()] -= it.value() * value;
+      }
+    }
+  }
+  return residual.lpNorm<Eigen::Infinity>();
+}
+
+Eigen::VectorXd BasisFactor::residual_vector(
+    const Eigen::VectorXd& rhs, const Eigen::VectorXd& solution,
+    bool transpose) const {
+  if (A_ == nullptr || rhs.size() != A_->rows() ||
+      solution.size() != A_->rows() ||
+      static_cast<int>(basis_.size()) != A_->rows()) {
+    return {};
+  }
+  for (const int col : basis_) {
+    if (col < 0 || col >= A_->cols()) {
+      return {};
+    }
+  }
+  Eigen::VectorXd residual(rhs.size());
+  if (transpose) {
+    for (int position = 0; position < static_cast<int>(basis_.size());
+         ++position) {
+      long double value = static_cast<long double>(rhs[position]);
+      for (StandardColumnMatrix::InnerIterator it(
+               *A_, basis_[static_cast<std::size_t>(position)]);
+           it; ++it) {
+        value -= static_cast<long double>(it.value()) *
+                 static_cast<long double>(solution[it.row()]);
+      }
+      residual[position] = static_cast<double>(value);
+    }
+  } else {
+    std::vector<long double> values(static_cast<std::size_t>(rhs.size()));
+    for (int row = 0; row < rhs.size(); ++row) {
+      values[static_cast<std::size_t>(row)] =
+          static_cast<long double>(rhs[row]);
+    }
+    for (int position = 0; position < static_cast<int>(basis_.size());
+         ++position) {
+      const long double x = static_cast<long double>(solution[position]);
+      for (StandardColumnMatrix::InnerIterator it(
+               *A_, basis_[static_cast<std::size_t>(position)]);
+           it; ++it) {
+        values[static_cast<std::size_t>(it.row())] -=
+            static_cast<long double>(it.value()) * x;
+      }
+    }
+    for (int row = 0; row < rhs.size(); ++row) {
+      residual[row] = static_cast<double>(values[static_cast<std::size_t>(row)]);
+    }
+  }
+  return residual;
+}
+
+void BasisFactor::rebuild_norms() {
+  if (A_ == nullptr) return;
+  row_abs_sum_.assign(static_cast<std::size_t>(A_->rows()), 0.0);
+  col_abs_sum_.assign(basis_.size(), 0.0);
+  for (int pos = 0; pos < static_cast<int>(basis_.size()); ++pos) {
+    double col_sum = 0.0;
+    for (StandardColumnMatrix::InnerIterator it(
+             *A_, basis_[static_cast<std::size_t>(pos)]);
+         it; ++it) {
+      const double magnitude = std::abs(it.value());
+      row_abs_sum_[static_cast<std::size_t>(it.row())] += magnitude;
+      col_sum += magnitude;
+    }
+    col_abs_sum_[static_cast<std::size_t>(pos)] = col_sum;
+  }
+  norm_B_inf_ = row_abs_sum_.empty()
+                    ? 0.0
+                    : *std::max_element(row_abs_sum_.begin(), row_abs_sum_.end());
+  norm_Bt_inf_ = col_abs_sum_.empty()
+                     ? 0.0
+                     : *std::max_element(col_abs_sum_.begin(), col_abs_sum_.end());
+}
+
+void BasisFactor::update_norms_after_exchange(int pivot_row, int leaving_col,
+                                              int entering_col) {
+  if (A_ == nullptr || pivot_row < 0 ||
+      pivot_row >= static_cast<int>(col_abs_sum_.size()) ||
+      row_abs_sum_.size() != static_cast<std::size_t>(A_->rows())) {
+    return;
+  }
+  for (StandardColumnMatrix::InnerIterator it(*A_, leaving_col); it;
+       ++it) {
+    double& row_sum = row_abs_sum_[static_cast<std::size_t>(it.row())];
+    row_sum = std::max(0.0, row_sum - std::abs(it.value()));
+  }
+  double entering_col_sum = 0.0;
+  for (StandardColumnMatrix::InnerIterator it(*A_, entering_col); it;
+       ++it) {
+    const double magnitude = std::abs(it.value());
+    double& row_sum = row_abs_sum_[static_cast<std::size_t>(it.row())];
+    row_sum += magnitude;
+    norm_B_inf_ = std::max(norm_B_inf_, row_sum);
+    entering_col_sum += magnitude;
+  }
+  col_abs_sum_[static_cast<std::size_t>(pivot_row)] = entering_col_sum;
+  norm_Bt_inf_ = std::max(norm_Bt_inf_, entering_col_sum);
+  // Both norms deliberately remain conservative upper bounds until INVERT.
+  // Recomputing their exact maxima would add two O(m) scans to every pivot;
+  // retaining an old larger maximum only loosens the backward-error limit and
+  // can never recreate the stale-underestimate bug.
+}
+
+SolveEvidence BasisFactor::solve_checked(const Eigen::VectorXd& rhs,
+                                         bool transpose,
+                                         bool capture_update,
+                                         bool verify,
+                                         const std::vector<int>* rhs_pattern) const {
+  SolveEvidence evidence;
+  if (A_ == nullptr || rhs.size() != A_->rows() || !rhs.allFinite()) {
+    return evidence;
+  }
+  auto solve_current_factor = [&]() {
+    Eigen::VectorXd solution(rhs.size());
+    std::vector<int> pattern;
+    if (transpose) {
+      if (capture_update) {
+        rank_factor_.btran_for_update(rhs.data(), solution.data(), rhs_pattern,
+                                      &pattern);
+      } else {
+        rank_factor_.btran(rhs.data(), solution.data(), rhs_pattern, &pattern);
+      }
+    } else {
+      if (capture_update) {
+        rank_factor_.ftran_for_update(rhs.data(), solution.data(), rhs_pattern,
+                                      &pattern);
+      } else {
+        rank_factor_.ftran(rhs.data(), solution.data(), rhs_pattern, &pattern);
+      }
+    }
+    return std::make_pair(std::move(solution), std::move(pattern));
+  };
+  if (!rank_factor_.valid) return evidence;
+  last_solve_transpose_ = transpose;
+  last_solve_refined_ = false;
+  auto [solution, pattern] = solve_current_factor();
+  if (solution.allFinite()) {
+    if (!verify) {
+      evidence.solution = std::move(solution);
+      evidence.pattern = std::move(pattern);
+      evidence.pattern_known = true;
+      evidence.accepted = true;
+      return evidence;
+    }
+    if (backward_error_acceptable(rhs, solution, transpose)) {
+      evidence.solution = std::move(solution);
+      evidence.pattern = std::move(pattern);
+      evidence.pattern_known = true;
+      evidence.accepted = true;
+      evidence.residual = last_residual_;
+      evidence.error_limit = last_error_limit_;
+      return evidence;
+    }
+  }
+
+  return refine_checked(rhs, solution, transpose);
+}
+
+SolveEvidence BasisFactor::refine_checked(const Eigen::VectorXd& rhs,
+                                          const Eigen::VectorXd& initial,
+                                          bool transpose) const {
+  SolveEvidence evidence;
+  evidence.needs_rebuild = true;
+  evidence.refined = true;
+  last_solve_transpose_ = transpose;
+  last_solve_refined_ = true;
+  last_initial_residual_ = last_residual_;
+  last_refinement_rhs_residual_ = 0.0;
+  last_refinement_correction_norm_ = 0.0;
+  if (A_ == nullptr || rhs.size() != A_->rows() ||
+      initial.size() != A_->rows() || !rhs.allFinite() ||
+      !initial.allFinite() || !rank_factor_.valid) {
+    return evidence;
+  }
+
+  // Refinement reuses the current factor and never changes the basis
+  // representation. If this is a pivotal solve, the driver must not use the
+  // raw captured FT pack: it commits the exchange and INVERTs the new basis.
+  Eigen::VectorXd solution = initial;
+  const Eigen::VectorXd residual = residual_vector(rhs, solution, transpose);
+  if (residual.size() != rhs.size() || !residual.allFinite()) return evidence;
+  last_refinement_rhs_residual_ = residual.lpNorm<Eigen::Infinity>();
+  Eigen::VectorXd correction(rhs.size());
+  if (transpose) {
+    rank_factor_.btran(residual.data(), correction.data());
+  } else {
+    rank_factor_.ftran(residual.data(), correction.data());
+  }
+  if (!correction.allFinite()) return evidence;
+  last_refinement_correction_norm_ =
+      correction.lpNorm<Eigen::Infinity>();
+  solution += correction;
+  if (!solution.allFinite() ||
+      !backward_error_acceptable(rhs, solution, transpose)) {
+    evidence.residual = last_residual_;
+    evidence.error_limit = last_error_limit_;
+    return evidence;
+  }
+  evidence.solution = std::move(solution);
+  evidence.pattern.reserve(static_cast<std::size_t>(evidence.solution.size()));
+  for (int row = 0; row < evidence.solution.size(); ++row) {
+    if (evidence.solution[row] != 0.0) evidence.pattern.push_back(row);
+  }
+  evidence.pattern_known = true;
+  evidence.accepted = true;
+  evidence.needs_rebuild = false;
+  evidence.residual = last_residual_;
+  evidence.error_limit = last_error_limit_;
+  return evidence;
+}
+
+bool BasisFactor::backward_error_acceptable(
+    const Eigen::VectorXd& rhs, const Eigen::VectorXd& solution,
+    bool transpose) const {
+  const double matrix_norm = transpose ? norm_Bt_inf_ : norm_B_inf_;
+  const double scale = matrix_norm * solution.lpNorm<Eigen::Infinity>() +
+                       rhs.lpNorm<Eigen::Infinity>();
+  const double limit =
+      kBackwardErrorMultiplier * std::numeric_limits<double>::epsilon() *
+      std::max(1.0, scale);
+  const double residual = residual_norm(rhs, solution, transpose);
+  last_residual_ = residual;
+  last_error_limit_ = limit;
+  last_matrix_norm_ = matrix_norm;
+  last_solution_norm_ = solution.lpNorm<Eigen::Infinity>();
+  last_rhs_norm_ = rhs.lpNorm<Eigen::Infinity>();
+  return residual <= limit;
+}
+
+std::string BasisFactor::last_solve_diagnostics() const {
+  std::ostringstream message;
+  message << std::setprecision(17)
+          << "solve=" << (last_solve_transpose_ ? "BTRAN" : "FTRAN")
+          << ", initial_residual_inf=" << last_initial_residual_
+          << ", refinement_rhs_residual_inf="
+          << last_refinement_rhs_residual_
+          << ", residual_inf=" << last_residual_
+          << ", correction_inf=" << last_refinement_correction_norm_
+          << ", limit=" << last_error_limit_
+          << ", norm_B=" << last_matrix_norm_
+          << ", norm_solution_inf=" << last_solution_norm_
+          << ", norm_rhs_inf=" << last_rhs_norm_
+          << ", ft_updates=" << rank_factor_.n_updates
+          << ", refined=" << (last_solve_refined_ ? 1 : 0)
+          << ", generation=" << generation_;
+  return message.str();
+}
+
+Eigen::VectorXd BasisFactor::ftran(const Eigen::VectorXd& rhs) const {
+  return checked_ftran(rhs).solution;
+}
+
+Eigen::VectorXd BasisFactor::btran(const Eigen::VectorXd& rhs) const {
+  return checked_btran(rhs).solution;
+}
+
+Eigen::VectorXd BasisFactor::ftran_for_update(
+    const Eigen::VectorXd& rhs) const {
+  return checked_ftran(rhs, true).solution;
+}
+
+Eigen::VectorXd BasisFactor::btran_for_update(
+    const Eigen::VectorXd& rhs) const {
+  return checked_btran(rhs, true).solution;
+}
+
+SolveEvidence BasisFactor::checked_ftran(const Eigen::VectorXd& rhs,
+                                         bool capture_update,
+                                         bool verify,
+                                         const std::vector<int>* rhs_pattern) const {
+  return solve_checked(rhs, false, capture_update, verify, rhs_pattern);
+}
+
+SolveEvidence BasisFactor::checked_btran(const Eigen::VectorXd& rhs,
+                                         bool capture_update,
+                                         bool verify,
+                                         const std::vector<int>* rhs_pattern) const {
+  return solve_checked(rhs, true, capture_update, verify, rhs_pattern);
+}
+
+IndexedSolveEvidence BasisFactor::indexed_ftran(const IndexedVector& rhs,
+                                                bool capture_update) const {
+  IndexedSolveEvidence evidence;
+  evidence.solution.clear(rhs.dimension);
+  if (A_ == nullptr || rhs.dimension != A_->rows() || !rhs.finite() ||
+      !rank_factor_.valid) {
+    return evidence;
+  }
+  // The backend rejects non-finite results during export, so an accepted
+  // solve is already known finite.
+  evidence.accepted = rank_factor_.ftran_indexed(
+      rhs.index, rhs.value, evidence.solution.index, evidence.solution.value,
+      evidence.solution.lookup_slot, capture_update);
+  return evidence;
+}
+
+bool BasisFactor::indexed_ftran_into(const IndexedVector& rhs,
+                                     IndexedVector& out,
+                                     bool capture_update) const {
+  out.clear(rhs.dimension);
+  if (A_ == nullptr || rhs.dimension != A_->rows() || !rhs.finite() ||
+      !rank_factor_.valid) {
+    return false;
+  }
+  // Identical solve to indexed_ftran; only the result buffers are caller-owned
+  // and reused, so the produced values and lookup_slot are the same.
+  return rank_factor_.ftran_indexed(rhs.index, rhs.value, out.index, out.value,
+                                    out.lookup_slot, capture_update);
+}
+
+ResidentSolveEvidence BasisFactor::resident_ftran(
+    const IndexedVector& rhs) const {
+  ResidentSolveEvidence evidence;
+  if (A_ == nullptr || rhs.dimension != A_->rows() || !rhs.finite() ||
+      !rank_factor_.valid) {
+    return evidence;
+  }
+  evidence.accepted = rank_factor_.ftran_indexed_resident(
+      rhs.index, rhs.value, evidence.solution);
+  return evidence;
+}
+
+ResidentSolveEvidence BasisFactor::resident_scratch_ftran(
+    const IndexedVector& rhs) const {
+  ResidentSolveEvidence evidence;
+  if (A_ == nullptr || rhs.dimension != A_->rows() || !rhs.finite() ||
+      !rank_factor_.valid) {
+    return evidence;
+  }
+  evidence.accepted = rank_factor_.ftran_indexed_scratch_resident(
+      rhs.index, rhs.value, evidence.solution);
+  return evidence;
+}
+
+bool BasisFactor::indexed_ftran_at_captured_pattern(
+    const IndexedVector& rhs, std::vector<double>& result_value) const {
+  result_value.clear();
+  if (A_ == nullptr || rhs.dimension != A_->rows() || !rhs.finite() ||
+      !rank_factor_.valid) {
+    return false;
+  }
+  return rank_factor_.ftran_indexed_at_captured_pattern(
+      rhs.index, rhs.value, result_value);
+}
+
+bool BasisFactor::resident_ftran_at_captured_pattern(
+    const HFactorBackend::ResidentVectorView& rhs,
+    std::vector<double>& result_value) const {
+  result_value.clear();
+  if (A_ == nullptr || rhs.dimension() != A_->rows() || !rhs.finite() ||
+      !rank_factor_.valid) {
+    return false;
+  }
+  return rank_factor_.ftran_resident_ep_at_captured_aq_pattern(
+      rhs, result_value);
+}
+
+bool BasisFactor::resident_ftran_at_captured_pattern(
+    const HFactorBackend::ResidentVectorView& rhs,
+    HFactorBackend::ResidentVectorView& result) const {
+  result = {};
+  if (A_ == nullptr || rhs.dimension() != A_->rows() || !rhs.finite() ||
+      !rank_factor_.valid) {
+    return false;
+  }
+  return rank_factor_.ftran_resident_ep_at_captured_aq_pattern(rhs, result);
+}
+
+bool BasisFactor::captured_aq_value(int external_row, double& out) const {
+  return rank_factor_.captured_aq_value(external_row, out);
+}
+
+IndexedSolveEvidence BasisFactor::indexed_btran(const IndexedVector& rhs,
+                                                bool capture_update) const {
+  IndexedSolveEvidence evidence;
+  evidence.solution.clear(rhs.dimension);
+  if (A_ == nullptr || rhs.dimension != A_->rows() || !rhs.finite() ||
+      !rank_factor_.valid) {
+    return evidence;
+  }
+  // The backend rejects non-finite results during export, so an accepted
+  // solve is already known finite.
+  evidence.accepted = rank_factor_.btran_indexed(
+      rhs.index, rhs.value, evidence.solution.index, evidence.solution.value,
+      evidence.solution.lookup_slot, capture_update);
+  return evidence;
+}
+
+ResidentSolveEvidence BasisFactor::resident_btran(
+    const IndexedVector& rhs) const {
+  ResidentSolveEvidence evidence;
+  if (A_ == nullptr || rhs.dimension != A_->rows() || !rhs.finite() ||
+      !rank_factor_.valid) {
+    return evidence;
+  }
+  evidence.accepted = rank_factor_.btran_indexed_resident(
+      rhs.index, rhs.value, evidence.solution);
+  return evidence;
+}
+
+EdgeWeightEvidence BasisFactor::compute_exact_edge_weights() const {
+  EdgeWeightEvidence batch;
+  if (A_ == nullptr || !rank_factor_.valid || A_->rows() <= 0) return batch;
+
+  const int order = A_->rows();
+  batch.weights.resize(static_cast<std::size_t>(order));
+  Eigen::VectorXd unit = Eigen::VectorXd::Zero(order);
+  for (int row = 0; row < order; ++row) {
+    unit[row] = 1.0;
+    SolveEvidence solve = checked_btran(unit);
+    unit[row] = 0.0;
+    batch.max_residual = std::max(batch.max_residual, solve.residual);
+    batch.max_error_limit =
+        std::max(batch.max_error_limit, solve.error_limit);
+    if (!solve.accepted) {
+      batch.needs_rebuild = solve.needs_rebuild;
+      batch.weights.clear();
+      return batch;
+    }
+    if (solve.refined) ++batch.refinements;
+    const double weight = solve.solution.squaredNorm();
+    if (!(weight > 0.0) || !std::isfinite(weight)) {
+      batch.weights.clear();
+      return batch;
+    }
+    batch.weights[static_cast<std::size_t>(row)] = weight;
+  }
+  batch.accepted = true;
+  return batch;
+}
+
+bool BasisFactor::basis_inverse_row(int row, Eigen::VectorXd& out) const {
+  std::vector<std::pair<int, double>> sparse;
+  if (!basis_inverse_row_sparse_entries(row, sparse) || A_ == nullptr) {
+    return false;
+  }
+  out = Eigen::VectorXd::Zero(A_->rows());
+  for (const auto& [index, value] : sparse) out[index] = value;
+  return true;
+}
+
+bool BasisFactor::basis_inverse_row_sparse_entries(
+    int row, std::vector<std::pair<int, double>>& out) const {
+  out.clear();
+  if (A_ == nullptr || row < 0 || row >= A_->rows() ||
+      static_cast<int>(basis_.size()) != A_->rows()) {
+    return false;
+  }
+  IndexedVector unit;
+  unit.clear(A_->rows());
+  unit.index.push_back(row);
+  unit.value.push_back(1.0);
+  const IndexedSolveEvidence solve = indexed_btran(unit);
+  if (!solve.accepted || !solve.solution.finite()) return false;
+
+  double residual = 0.0;
+  for (int position = 0; position < static_cast<int>(basis_.size());
+       ++position) {
+    double product = 0.0;
+    for (StandardColumnMatrix::InnerIterator it(
+             *A_, basis_[static_cast<std::size_t>(position)]);
+         it; ++it) {
+      product += it.value() * solve.solution.at(it.row());
+    }
+    residual = std::max(
+        residual, std::abs((position == row ? 1.0 : 0.0) - product));
+  }
+  double solution_norm = 0.0;
+  for (double value : solve.solution.value) {
+    solution_norm = std::max(solution_norm, std::abs(value));
+  }
+  const double limit =
+      kBackwardErrorMultiplier * std::numeric_limits<double>::epsilon() *
+      std::max(1.0, norm_Bt_inf_ * solution_norm + 1.0);
+  if (!std::isfinite(residual) || residual > limit) return false;
+
+  out.clear();
+  out.reserve(solve.solution.index.size());
+  for (std::size_t k = 0; k < solve.solution.index.size(); ++k) {
+    out.emplace_back(solve.solution.index[k], solve.solution.value[k]);
+  }
+  return true;
+}
+
+bool BasisFactor::tableau_row(int row, Eigen::RowVectorXd& out) const {
+  std::vector<std::pair<int, double>> sparse_row_ep;
+  if (!basis_inverse_row_sparse_entries(row, sparse_row_ep) || A_ == nullptr) {
+    return false;
+  }
+  IndexedVector row_ep;
+  row_ep.clear(A_->rows());
+  row_ep.index.reserve(sparse_row_ep.size());
+  row_ep.value.reserve(sparse_row_ep.size());
+  for (const auto& [index, value] : sparse_row_ep) {
+    row_ep.index.push_back(index);
+    row_ep.value.push_back(value);
+  }
+  out = Eigen::RowVectorXd::Zero(A_->cols());
+  for (int col = 0; col < A_->cols(); ++col) {
+    double value = 0.0;
+    for (StandardColumnMatrix::InnerIterator it(*A_, col); it; ++it) {
+      value += it.value() * row_ep.at(it.row());
+    }
+    out[col] = value;
+  }
+  return out.allFinite();
+}
+
+SparseFactorTelemetry BasisFactor::factor_telemetry() const {
+  SparseFactorTelemetry telemetry;
+  telemetry.ft_valid = false;
+  telemetry.ft_updates = rank_factor_.n_updates;
+  telemetry.matrix_copies = rank_factor_.matrix_copy_count();
+  telemetry.dense_solves = rank_factor_.dense_solve_count();
+  telemetry.indexed_solves = rank_factor_.indexed_solve_count();
+  return telemetry;
+}
+
+void BasisFactor::rebind_A(const StandardColumnMatrix& A) {
+  A_ = &A;
+  // Only treat the factor as usable if the stored basis is dimensionally
+  // compatible with the newly bound matrix.  rebuild() enforces the same
+  // invariants (basis.size()==A.rows() and every basis column in range); a
+  // rebind to a differently-shaped matrix would otherwise leave basis_ indexing
+  // out of range and crash the next solve/residual/norm.  On mismatch, drop the
+  // factor's validity so solves return empty evidence (a rejected dual proof)
+  // instead of reading out of bounds.
+  if (static_cast<int>(basis_.size()) != A.rows()) {
+    rank_factor_.valid = false;
+    return;
+  }
+  for (const int col : basis_) {
+    if (col < 0 || col >= A.cols()) {
+      rank_factor_.valid = false;
+      return;
+    }
+  }
+  rebuild_norms();
+}
+
+bool BasisFactor::bound_to_A(const StandardColumnMatrix& A) const {
+  return A_ == &A;
+}
+
+bool BasisFactor::reusable_for(const StandardFormLP& sf,
+                               const std::vector<int>& basis,
+                               int persisted_eta_count) const {
+  return rank_factor_.valid && A_ == &sf.A && basis_ == basis &&
+         persisted_eta_count == update_count();
+}
+
+}  // namespace mipsolvers::engine::native_dual::detail

@@ -1,10 +1,136 @@
 # Development Status
 
-Updated: 2026-09-17
+Updated: 2026-09-20
 
 This is the living handoff for verified build state and active engineering work.
 Update it in place; do not create dated copies. Source, registered tests, and
-the current Git worktrees remain authoritative.
+the current Git worktree remains authoritative.
+
+## Current Resilience Edition handoff
+
+The dirty worktree defines a mutually exclusive Resilience build profile,
+fail-closed legacy and v1 capability discovery, strict GUI/Python consumers, and
+an explicit-allowlist Windows package path. The stable living contract is
+[Resilience Edition Contract](../operations/resilience_edition_design.md).
+This is current-worktree state, not a committed release baseline.
+
+Current source facts:
+
+- The Resilience GUI navigation is reshaped at runtime by
+  `applyResilienceNavigation()` (`web/js/app.js`, gated on
+  `edition === 'resilience'`; Full/Trial markup and labels are untouched):
+  规划与运行 becomes 场景生成 with 台风致灾场景生成 plus a disabled
+  更多极端灾害场景模拟（制作中…）placeholder, and 低碳与弹性 becomes
+  弹性分析 with 完整弹性分析 (the former resilience module), 主动防御
+  (`proactiveDefense`, during-disaster isolation/reconfiguration evidence),
+  快速恢复 (`rapidRecovery`, post-disaster restoration process), 弹性指标
+  (`resilienceMetrics`, KPI/comparison view), and a disabled
+  薄弱环节（制作中…）placeholder. The three view modules share the single
+  `/api/session/run_distribution_resilience` run cached in
+  `_lastResilienceData`; parameters are edited only in 完整弹性分析. The
+  resilience `frontend_modules` profile list now contains ten entries and must
+  stay order-equal across `src/server/edition_profile.cpp`,
+  `EDITION_FRONTEND_MODULES` in `web/js/app.js`, and the e2e fixture. On
+  2026-09-20 a Resilience-configured `test_edition_profile` passed 6/6
+  (1,440 assertions) in `build/resilience-verify`, and the mocked Chromium
+  edition matrix (desktop/mobile, Full/Trial/Resilience) passed with the new
+  navigation assertions, including disabled-placeholder inertness and the
+  presence of the three view-module sub-sections and result groups. Two
+  integration defects were then caught and fixed against a real
+  `run_gui_server` (built in `build/resilience-verify` with Ipopt/MKL off and
+  the local zlib): the view-module run buttons referenced `runResilience()`
+  across a nested-scope boundary and now delegate to the canonical
+  `#btnRunResilience` click, and the three new `data-result-group` names were
+  missing from the explicit visibility selector list in `web/css/style.css`,
+  which had kept populated panels hidden. A scripted Chromium run on IEEE14
+  with two AC faults confirmed one run populates all four views (tables and
+  Plotly charts) and that switching modules displays each view directly with
+  no console or page errors; the mocked e2e now also asserts per-module
+  result-group visibility. After layout and content review, the three view
+  modules were redesigned to fill the whole result area (the same
+  `.resilience-result-layout` grid as 完整弹性分析) and to render only
+  dedicated, non-duplicated charts: 主动防御 shows only during-disaster
+  withstand evidence — the supply-gap curve with disaster-stage bands, a
+  fault lifecycle Gantt, the critical/high-priority unserved-load timeline,
+  and a priority-shedding donut (switch-action/topology-reconfiguration
+  content is excluded by design); 快速恢复
+  shows the repair-annotated recovery trajectory, cumulative repair progress,
+  cumulative unserved energy, and MESS energy/position charts when MESS data
+  exists; 弹性指标 shows a resilience radar, an energy-balance waterfall,
+  and a recent-run comparison chart. All four resilience result groups widen
+  the right results panel automatically (they are part of the
+  `setActiveResultGroup` wide-group list), so charts are not squeezed into the
+  default 340px column. Resilience Edition also defaults the built-in case
+  selector to the resilience flagship case `dist33_microgrid_der` and the
+  resilience MIP solver to HiGHS. The scripted real-server run verified
+  every chart plots (`.js-plotly-plot`) and that SVG sizes track the
+  containers after module switches. A full Ipopt/MKL-enabled server rebuild
+  was not
+  rerun: the staged Windows oneMKL/Ipopt dependencies are absent from this
+  worktree, the profile contract is covered by the unit test, and the GUI run
+  path is covered by the real-server scripted verification above.
+- Resilience scenario requests are forced to skip regular and reliability
+  families at both the GUI and HTTP handler. Generated resilience JSON import
+  separates the pure system payload from retained fault/time-series metadata,
+  rejects a non-resilience family, and formats nested backend errors without
+  `[object Object]` (verified 2026-09-19 against the then-current build).
+- `GET /api/edition` serves the process-global/legacy capability profile. Its
+  exact `analysis_catalog` schema is
+  `hacdcpf.edition-analysis-catalog.v1`, with top-level `{schema, entries}` and
+  entries `{name, route, method, enabled}` for the 69 canonical
+  `AnalysisSpec.name` IDs. The profile's top-level `analyses` field and the
+  independent `GET /api/v1` discovery remain the PF/OPF v1 job domain and must
+  not be treated as the legacy catalog.
+- restricted routes, unknown API routes, GUI profile validation, and Python
+  analysis admission fail closed. Client aliases are resolved to canonical
+  server names. AI capability admission is separate from `ToolPolicy` effect
+  and explicit-approval checks.
+- ordinary restoration feasibility is explicitly not a certified dynamic-safety
+  result; dynamic certification is not exposed in the first release.
+- `windows-resilience-release` inherits the source-dependency preset and uses
+  the locked in-repository `MIPSolvers/` import. Windows zlib/oneMKL outputs are
+  staged under `build/windows-dependencies/` rather than the imported tree.
+- `tools/package_resilience_windows.ps1` and
+  `tools/verify_resilience_windows_release.ps1` encode the dedicated resource,
+  DLL, manifest, hash, isolated-path, route, and v1 smoke contract. Their
+  presence and test registration are not execution evidence.
+
+Verified in the current Windows worktree on 2026-09-19:
+
+- MSVC Release built `run_gui_server` and `test_edition_profile` for Full,
+  Trial, and Resilience. The edition unit contracts passed Full 6/6, Trial 6/6,
+  and Resilience 6/6.
+- Trial HTTP acceptance passed 1/1. The focused Resilience set passed 8/8:
+  six edition unit tests, one HTTP acceptance test, and one registered mocked
+  Chromium contract. The HTTP test covers the 69-entry legacy catalog, v1
+  known-disabled 403 versus unknown 400, session/model ETags and revision
+  conflicts, PF/OPF, topology/chunks, cancellation, stale-result metadata,
+  cleanup, and complete Windows error bodies after pre-routing rejection.
+- The registered Resilience Chromium contract passed 1/1 across desktop and
+  mobile using mocked profiles. Its matrix covers strict
+  loading/ready/unavailable startup, delayed and hung profiles, malformed
+  profiles, wildcard/module failures, hash
+  quarantine, DOM ownership pruning, zero restricted-edition dynamics requests,
+  horizontal overflow, and nested dynamic-model round-trip preservation.
+- CMake registered exactly the focused edition sets: Full six unit tests; Trial
+  six unit tests plus its HTTP and GUI tests; Resilience six unit tests plus its
+  HTTP and GUI tests. All CMake presets parse.
+- The static Windows packaging contract passes, and Windows PowerShell 5.1 parses
+  all five release/dependency scripts. JavaScript and Python E2E syntax plus
+  `git diff --check` pass.
+
+The complete Python SDK/AI runtime suite is still being finalized in this dirty
+worktree. Resilience archive creation and clean extracted-package execution
+remain pending: `build/windows-dependencies/` and the formal Resilience build
+are absent, and the provenance gate correctly rejects packaging because the
+staged `MIPSolvers/` import is not yet present at `HEAD:MIPSolvers`. No broader
+full-repository pass or package success is implied.
+
+Historical records below may refer to the former sibling `../MIPSolvers`
+workflow. Current builds default to the locked in-repository `MIPSolvers/`
+import at upstream commit `c6f77f297350b357ff30cc96d9234b2031fd316c` and tree
+`782f8745b7e3d39754d02999eeccfe11c04528dc`; those dated references are retained
+to describe the environments in which the historical evidence was collected.
 
 ## Main integration verification (2026-09-17)
 
@@ -4599,6 +4725,29 @@ execution views plus additive bus/component demand. This audit found and fixed
 loss of `StaticGeneratorDC.cost_c1` in both SolverData construction paths. The
 existing component I/O registry also passes 14 cases and 373 assertions.
 
+## Edition capability reconciliation
+
+The current working tree now centralizes Trial and Resilience method/path policy
+in one `EditionRouteRule` manifest. Literal routes match exactly; the 16 v1
+resource templates use strict identifier/decimal segment matching. Full remains
+ungated, while both restricted editions fail closed. `GET /api/edition` embeds
+the schema-versioned 69-entry legacy/session analysis catalog whose canonical
+names match Python `AnalysisSpec.name`; its existing `analyses` field remains the
+two executable v1 IDs. V1 submission distinguishes enabled, known-disabled
+(HTTP 403), and unknown (HTTP 400), and workers recheck access before execution.
+The duplicate `POST /api/session/load_bpa_dat` registration was consolidated
+without dropping raw/JSON payload support or `_io_warnings`, `_import_notes`,
+and `_bpa_import_report` response fields.
+
+Windows Release focused verification rebuilt and passed `test_edition_profile`
+in Full (6 cases / 1346 assertions), Trial (6 / 1358), and Resilience (6 / 1363).
+All three `run_gui_server` targets rebuilt successfully after one transient
+parallel MSVC object-file permission failure was retried serially. A Trial HTTP
+smoke confirmed 69 catalog entries, 67 known-disabled v1 IDs, flat 403 for
+`carbon_flow`, and flat 400 for an unknown ID. A source registration scan found
+121 registrations and no duplicate method/path pair. Broader CTest and package
+verification were not rerun.
+
 ## Trial edition integration
 
 Current `main` reimplements the two `trial_design` commits on top of the newer
@@ -5633,16 +5782,16 @@ long-identifier box and font-substitution warnings remain.
 
 ```bash
 git status --short --branch
-git -C ../MIPSolvers status --short --branch
+git status --short -- MIPSolvers cmake/MIPSolvers.lock.json
 cmake --build --preset full-dev
 ctest --preset full-dev
 cmake --build --preset macos-release
 ctest --preset macos-release
 ```
 
-Use [README.md](../README.md) for the user-facing capability baseline,
+Use [README.md](../../README.md) for the user-facing capability baseline,
 [AGENTS.md](../../AGENTS.md) for architecture and invariants, and
-[docs/README.md](README.md) for topic documentation.
+[docs/README.md](../README.md) for topic documentation.
 
 ## Market recovery worker scaling and concurrent deterministic pricing (2026-09-12)
 

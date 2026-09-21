@@ -1,0 +1,11 @@
+# Bundled PaPILO
+
+- Upstream: https://github.com/scipopt/papilo
+- Version: 3.0.0
+- Source archive: `papilo/archive/refs/tags/v3.0.0.tar.gz`
+- SHA-256: `04e2437c41404782fa31cd74a881b475d75a6e692e4c88a24bf48cf5d263a93d`
+- License: Apache-2.0 (`LICENSE`)
+
+MIPSolvers consumes PaPILO's template implementation directly and defines
+`PAPILO_NO_CMAKE_CONFIG`. Optional GMP, Quadmath, TBB, LUSOL, and command-line
+components are intentionally not enabled, keeping the offline build portable.

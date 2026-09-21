@@ -14,7 +14,10 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import Any, Mapping
+from types import MappingProxyType
+from typing import Any, Iterator, Mapping
+
+from .errors import UnknownAnalysisError
 
 from .client import HySimClient
 from .models import AnalysisResult, OPFRequest, PowerFlowRequest
@@ -292,12 +295,12 @@ class AnalysisCatalog:
             if spec.name in by_name:
                 raise ValueError(f"duplicate analysis name: {spec.name}")
             by_name[spec.name] = spec
-        self._by_name = by_name
+        self._by_name: Mapping[str, AnalysisSpec] = MappingProxyType(by_name)
 
     def __contains__(self, name: object) -> bool:
         return name in self._by_name
 
-    def __iter__(self):
+    def __iter__(self) -> Iterator[AnalysisSpec]:
         return iter(self._by_name.values())
 
     def __len__(self) -> int:
@@ -312,9 +315,16 @@ class AnalysisCatalog:
     def require(self, name: str) -> AnalysisSpec:
         spec = self._by_name.get(name)
         if spec is None:
-            choices = ", ".join(self.names())
-            raise ValueError(f"unknown analysis {name!r}; choose one of: {choices}")
+            raise UnknownAnalysisError(name)
         return spec
+
+    def filtered(self, names: frozenset[str]) -> "AnalysisCatalog":
+        """Return a new immutable view containing only the selected known names."""
+
+        unknown = names - set(self._by_name)
+        if unknown:
+            raise UnknownAnalysisError(sorted(unknown)[0])
+        return AnalysisCatalog(tuple(spec for spec in self if spec.name in names))
 
     def by_category(self, category: AnalysisCategory) -> tuple[AnalysisSpec, ...]:
         return tuple(s for s in self._by_name.values() if s.category is category)
@@ -565,7 +575,7 @@ class _FamilyApi:
         *,
         timeout: float | None = None,
     ) -> AnalysisResult:
-        spec = self._catalog.require(name)
+        spec = self._client.require_analysis(name)
         return self._client.execute(
             name=spec.name,
             route=spec.route,
@@ -1095,25 +1105,26 @@ class HySim:
             audit_hook=audit_hook,
             serialize_model_access=serialize_model_access,
         )
-        self.catalog = ANALYSIS_CATALOG
-        self.pf = PowerFlowApi(self.client, self.catalog)
-        self.opf = OptimalPowerFlowApi(self.client, self.catalog)
-        self.reactive_power = ReactivePowerApi(self.client, self.catalog)
-        self.short_circuit = ShortCircuitApi(self.client, self.catalog)
-        self.harmonics = HarmonicsApi(self.client, self.catalog)
-        self.dynamics = DynamicsApi(self.client, self.catalog)
-        self.time_series = TimeSeriesApi(self.client, self.catalog)
-        self.carbon = CarbonApi(self.client, self.catalog)
-        self.market = MarketApi(self.client, self.catalog)
-        self.reliability = ReliabilityApi(self.client, self.catalog)
-        self.resilience = ResilienceApi(self.client, self.catalog)
-        self.reconfiguration = ReconfigurationApi(self.client, self.catalog)
-        self.hosting_capacity = HostingCapacityApi(self.client, self.catalog)
-        self.integrated_energy = IntegratedEnergyApi(self.client, self.catalog)
-        self.ev_traffic = EvTrafficApi(self.client, self.catalog)
-        self.planning = PlanningApi(self.client, self.catalog)
-        self.scenario = ScenarioApi(self.client, self.catalog)
-        self.model_io = ModelIoApi(self.client, self.catalog)
+        self.catalog = self.client.analysis_catalog
+        family_catalog = ANALYSIS_CATALOG
+        self.pf = PowerFlowApi(self.client, family_catalog)
+        self.opf = OptimalPowerFlowApi(self.client, family_catalog)
+        self.reactive_power = ReactivePowerApi(self.client, family_catalog)
+        self.short_circuit = ShortCircuitApi(self.client, family_catalog)
+        self.harmonics = HarmonicsApi(self.client, family_catalog)
+        self.dynamics = DynamicsApi(self.client, family_catalog)
+        self.time_series = TimeSeriesApi(self.client, family_catalog)
+        self.carbon = CarbonApi(self.client, family_catalog)
+        self.market = MarketApi(self.client, family_catalog)
+        self.reliability = ReliabilityApi(self.client, family_catalog)
+        self.resilience = ResilienceApi(self.client, family_catalog)
+        self.reconfiguration = ReconfigurationApi(self.client, family_catalog)
+        self.hosting_capacity = HostingCapacityApi(self.client, family_catalog)
+        self.integrated_energy = IntegratedEnergyApi(self.client, family_catalog)
+        self.ev_traffic = EvTrafficApi(self.client, family_catalog)
+        self.planning = PlanningApi(self.client, family_catalog)
+        self.scenario = ScenarioApi(self.client, family_catalog)
+        self.model_io = ModelIoApi(self.client, family_catalog)
 
     # Model lifecycle passthroughs (mutations increment the model revision).
     def load_builtin(self, case: str) -> Mapping[str, Any]:
@@ -1151,9 +1162,9 @@ class HySim:
         *,
         timeout: float | None = None,
     ) -> AnalysisResult:
-        """Run any catalog analysis by name and return an honest result."""
+        """Run any SDK-known analysis by canonical name or supported alias."""
 
-        spec = self.catalog.require(analysis)
+        spec = self.client.require_analysis(analysis)
         return self.client.execute(
             name=spec.name,
             route=spec.route,

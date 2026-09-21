@@ -1,41 +1,42 @@
-> 本文档为 [cross_platform_build.md](cross_platform_build.md) 的中文译文，供 GUI 帮助中心使用；两者冲突时以原文与代码为准。
-
-> 文档同步（2026-07-26）
-> 范围：macOS、Linux 与 Windows 上的离线源码构建。
-> 状态：有实现支撑的参考文档。
-> 事实来源：若本文档与 `CMakeLists.txt`、`CMakePresets.json` 及
-> `cmake/Dependencies.cmake` 发生分歧，以这些文件为准。
+> 本文档为 [cross_platform_build.md](cross_platform_build.md) 的中文译文，供 GUI
+> 帮助中心使用；两者冲突时以原文与代码为准。
+>
+> 文档同步：2026-09-19。事实来源为 `CMakeLists.txt`、`CMakePresets.json`、
+> `cmake/Dependencies.cmake` 与 `cmake/MIPSolvers.lock.json`。
 
 # 跨平台离线构建
 
-常规构建不会下载依赖。`MIPSolvers` 提供以下组件的完整本地源码副本：
-Eigen 3.4.1、fmt、nlohmann/json、HiGHS、SCIP、MUMPS、Ipopt、SuiteSparse、
-Catch2、PaPILO 3.0.0，以及 PaPILO 所需的 Boost 头文件。本仓库自带
-OpenXLSX，用于 ETAP Excel 读写。Eigen 同时包含核心源码树与 `unsupported/`，
-其中包括 `unsupported/Eigen/MatrixFunctions`。
+常规构建不会下载依赖。仓库内锁定导入的 `MIPSolvers/` 提供 Eigen 3.4.1、
+fmt、nlohmann/json、HiGHS、SCIP、MUMPS、Ipopt、SuiteSparse、Catch2、
+PaPILO 3.0.0 及其所需 Boost 头文件的完整本地源码。本仓库自带用于 ETAP
+Excel 读写的 OpenXLSX。Eigen 同时包含核心树和 `unsupported/`。
 
-## 源码包目录布局
+## 锁定的源码布局
 
-默认布局为：
+默认和正式发布使用：
 
 ```text
-package/
-  HybridACDCDistributionSystemsSimulation/
+PowerSystemResilience/
   MIPSolvers/
+  cmake/MIPSolvers.lock.json
 ```
 
-也可以将 `MIPSolvers` 目录放在主仓库内部，或显式指定其位置：
+当前导入锁定到 `Matrixeigs/MIPSolvers` 的 `windows` 分支提交
+`c6f77f297350b357ff30cc96d9234b2031fd316c`，完整导入 Git tree 也记录在 lock
+中。前缀导入没有嵌套 `.git`，因此 CMake 仍会校验关键源码 SHA-256；正式打包
+还会校验已提交的 `HEAD:MIPSolvers` 完整树，并拒绝该目录下的待提交改动。
+
+开发者可以显式指定另一份检出：
 
 ```bash
 cmake -S . -B build/release \
   -DMIPSOLVERS_SOURCE_DIR=/absolute/path/to/MIPSolvers
 ```
 
-Release 与 CI 构建会拒绝处于脏状态（dirty）的 MIPSolvers Git 检出。不含
-`.git` 元数据的分发源码归档包可以接受，并会被如实报告为此类情形；归档
-包的制作方负责保证所固定内容的完整性。
+独立 Git 检出必须位于锁定提交；Release/CI 还要求工作树干净。系统不再隐式
+回退到 `../MIPSolvers`，避免机器上的兄弟目录悄悄改变构建内容。
 
-离线包中不得遗漏以下路径：
+离线源码包不得遗漏：
 
 ```text
 MIPSolvers/third_party/eigen/
@@ -46,25 +47,25 @@ MIPSolvers/third_party/papilo/
 MIPSolvers/third_party/boost_papilo/
 MIPSolvers/highs/  MIPSolvers/scip/  MIPSolvers/mumps/
 MIPSolvers/ipopt/  MIPSolvers/suitesparse/
-MIPSolvers/third_party/install/
-HybridACDCDistributionSystemsSimulation/third_party/OpenXLSX-master/
+MIPSolvers/third_party/zlib-1.3.1/
+third_party/OpenXLSX-master/
 ```
 
-在 Windows 上，`MIPSolvers/third_party/install` 由预制的 oneMKL 静态捆绑包
-生成，且与 ABI（应用二进制接口）绑定。它必须与其清单文件及 oneMKL 许可
-声明一并保留；不得跨 MSVC 工具集、处理器架构、运行时库模式或
-Release/Debug 配置复用。
+Git 源码树对于源码消费是完整的，但 Windows 生成的 `.lib`、`.dll` 不受版本
+控制。目录中存在 oneMKL 头文件、manifest 和哈希清单，不代表已经存在可链接的
+oneMKL 包。机器相关产物统一生成到已忽略的 `build/windows-dependencies/`；不得
+写回锁定的 `MIPSolvers/` 子树。
 
 ## 工具链前置条件
 
-前置条件仅包括构建工具与平台运行时。每个平台都需要 CMake 3.20 或更高
-版本以及支持 C++20 的编译器。
+每个平台都需要 CMake 3.20 或更高版本以及支持 C++20 的编译器。GridLAB-D、
+Julia、OpenDSS、Chromium 与 Playwright 属于运行时测试集成，不是核心 C++ 构建
+依赖。
 
 ### macOS
 
-使用 Xcode Command Line Tools。默认的嵌入式 Ipopt/MUMPS 配置档还需要一个
-Fortran 编译器，例如 `gfortran`。Homebrew 安装的库不是构建依赖；但仍可用
-Homebrew 安装 CMake 或编译器。
+使用 Xcode Command Line Tools。启用嵌入式 Ipopt/MUMPS 时还需 `gfortran` 等
+Fortran 编译器。
 
 ```bash
 cmake --preset macos-release
@@ -74,8 +75,8 @@ ctest --preset macos-release
 
 ### Linux
 
-使用 GCC 或 Clang 配合标准 C/C++ 构建工具。Linux 主配置档默认关闭嵌入式
-Ipopt，因此默认配置档不需要 Fortran 编译器。
+使用 GCC 或 Clang。Linux preset 默认关闭嵌入式 Ipopt，因此默认路径不需要
+Fortran 编译器。
 
 ```bash
 cmake --preset linux-release
@@ -83,138 +84,145 @@ cmake --build --preset linux-release
 ctest --preset linux-release
 ```
 
-### Windows
+### Windows 依赖准备
 
-使用 Visual Studio 2022 的 x64 Native Tools 命令提示符或 Developer
-PowerShell。先在一台联网的 Windows 预制作（staging）机器上一次性准备
-MIPSolvers：
+使用 Visual Studio 2022 的 x64 Native Tools Prompt 或 Developer PowerShell。
+安装 oneMKL 或先初始化 `MKLROOT`，然后在仓库根目录运行：
 
 ```powershell
-cd ..\MIPSolvers
-.\third_party\stage_onemkl.ps1 -SourceRoot $env:MKLROOT -Force
-.\third_party\build_third_party.ps1 -Jobs 8 -BuildType Release -Fresh
-cd ..\HybridACDCDistributionSystemsSimulation
+powershell -ExecutionPolicy Bypass -File tools/prepare_windows_dependencies.ps1
 ```
 
-然后将两个仓库整体转移到隔离（sealed）环境中，包括被 git 忽略的
-`MIPSolvers/third_party/install` 产物。预制作脚本会记录 SHA-256 哈希值与
-许可材料；该预构建包导出 Ipopt 以及一个可重定位的静态 `MIPSolvers::MKL`
-目标。其安装后消费方检查仅执行 configure（配置）阶段，因此无需再次编译
-或链接即可验证目标的作用域与路径。`build_third_party.ps1` 与 Windows 主
-构建配置档将并行度上限设为 8，并保持 IPO（跨过程优化）关闭。
+该脚本会：
+
+1. 从 `MIPSolvers/third_party/zlib-1.3.1` 构建 zlib；
+2. 使用 MIPSolvers 的 manifest/hash 逻辑从 `MKLROOT` staging sequential oneMKL；
+3. 将全部产物留在 `build/windows-dependencies/`。
+
+完成后可使用源码依赖 preset：
 
 ```powershell
+cmake --preset windows-source-release
+cmake --build --preset windows-source-release
+ctest --preset windows-source-release
+```
+
+若要准备 `windows-msvc-release` 所需、与 ABI 绑定的完整预编译第三方包，加
+`-BuildPrebuiltPackage`：
+
+```powershell
+powershell -ExecutionPolicy Bypass -File tools/prepare_windows_dependencies.ps1 `
+  -BuildPrebuiltPackage
 cmake --preset windows-msvc-release
 cmake --build --preset windows-msvc-release
 ctest --preset windows-msvc-release
 ```
 
-该配置档使用 MSVC 动态运行时（Release 下为 `/MD`），要求使用与之兼容的
-MIPSolvers 预构建包，并启用嵌入式 Ipopt 以及顺序执行的静态 PardisoMKL
-后端。它会关闭 Gurobi 探测，避免可执行文件获得不可随包分发的
-`gurobi*.dll` 启动依赖；随包的 HiGHS 与 SCIP 仍然可用。打包脚本会从当前
-Visual Studio 安装中复制可再分发的 VC++/OpenMP 运行库 DLL。
-`windows-vcpkg-release` 仍是面向刻意提供额外软件包的站点的兼容
-配置档；它继承相同的 Ipopt/预构建包契约。
+生成目录为：
 
-顶层 CMake 的 Windows 裸配置也默认 `HACDCPF_ENABLE_IPOPT=ON`。
-MIPSolvers 在 Windows 上默认选择
-`MIPSOLVERS_IPOPT_LINEAR_SOLVER=pardisomkl`；若本地 oneMKL 打包界面不完整，
-受支持的 Windows 配置会直接失败，而不会静默关闭 Ipopt 或 MKL。
+```text
+build/windows-dependencies/zlib/
+build/windows-dependencies/oneapi-mkl/
+build/windows-dependencies/mipsolvers-third-party/
+```
 
-### Windows 二进制分发包
+`windows-source-release` 从锁定源码构建其他开源依赖，只消费 staging 的 zlib 和
+oneMKL；`windows-msvc-release` 消费完整预编译第三方包。两者在 Release 使用
+`/MD`，正式分发关闭 Gurobi 和 IPO，并在启用 Ipopt 时要求 sequential
+PardisoMKL。生成包不可跨 MSVC 工具集、架构、运行库模式或 Release/Debug 复用。
 
-只允许从干净的 HySim 与 MIPSolvers 检出创建正式 Windows x64 包，且
-MIPSolvers 提交必须与 CMake pin 一致：
+### Resilience 与 Trial 版本
+
+两个 edition 开关互斥。Resilience preset 继承源码依赖路径并启用 fail-closed
+能力边界：
+
+```powershell
+cmake --preset windows-resilience-release
+cmake --build --preset windows-resilience-release --target run_gui_server
+ctest --preset windows-resilience-release -L edition --output-on-failure
+```
+
+Resilience 专用包使用显式的资源与运行时 DLL 允许清单，并提供干净解压验证器：
+
+```powershell
+powershell -ExecutionPolicy Bypass -File tools/package_resilience_windows.ps1
+```
+
+该脚本强制使用仓库内锁定源码依赖，构建并运行 edition 单元/API 门禁，拒绝仅服务于
+禁用能力的资源和非允许清单 DLL，写入逐文件清单与 ZIP SHA-256，并在隔离 `PATH`
+下调用 `tools/verify_resilience_windows_release.ps1`。脚本定义的是打包契约；成功配置
+或脚本已经落盘本身不能证明 Windows 压缩包已通过。已执行证据见
+[Resilience Edition 契约](resilience_edition_design.md)与持续更新的开发状态。现有
+Trial 路径保持为：
+
+```powershell
+cmake --preset windows-trial-release
+cmake --build --preset windows-trial-release --target run_gui_server
+ctest --preset windows-trial-release -L trial --output-on-failure
+```
+
+### Full Edition Windows 二进制包
+
+以下通用命令生成 Full Edition 包，不是 Resilience 打包路径。正式包只能从干净仓库生成，且已提交的 `MIPSolvers/` 子树必须与 lock 一致：
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File tools/package_windows.ps1
 ```
 
-使用 `-SourceDependencies` 可选择 `windows-source-release` preset。该模式从兄弟
-MIPSolvers 检出中构建开源依赖，但仍要求显式 staging 的 sequential oneMKL
-和 zlib 根目录；它不会把机器全局 `C:/vcpkg` 前缀注入
-`CMAKE_PREFIX_PATH`，也不启用 CPLEX。
+加 `-SourceDependencies` 可选择 `windows-source-release`。脚本会验证 lock、已提交
+子树、依赖模式和发布不变量，构建并测试服务器，用 `dumpbin /DEPENDENTS` 审计
+运行时依赖，复制数据、GUI、文档、DLL 与许可，从暂存目录独立启动服务器，并生成
+逐文件清单和 ZIP SHA-256。
 
-脚本会配置并构建 `windows-msvc-release`，运行求解器能力打包准入测试，
-使用 `dumpbin /DEPENDENTS` 审计 `run_gui_server.exe`，并暂存
-`bin/`、`web/`、`data/`、`external_data/`、文档、第三方许可、启动脚本与
-`BUILD_INFO.txt`。随后它会从暂存目录启动可执行文件，验证正式版 API 与
-`/xjtu/` 前端，生成逐文件 SHA-256 清单，最后创建
-`dist/HySim-Windows-x64.zip` 及其 SHA-256 文件。解压后运行
-`Start-HySim.cmd`，运行时不需要源码仓库。打包准入有意小于完整 CTest
-范围；当前数值失败和外部夹具缺口以持续更新的开发状态文档为准。
-
-打包后用新的含空格目录和隔离 `PATH` 独立验证：
+打包后在新的含空格目录和隔离 `PATH` 中复核：
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File tools/verify_windows_release.ps1
 ```
 
-验证器校验 ZIP 旁车哈希和清单中每个文件，然后仅使用解压包与 Windows
-系统 DLL 启动服务器，检查 GUI 资产、内置混合算例与 AC Newton 潮流。
-保留的解压目录包含 `verification.json` 和服务器日志。该门禁不替代完整
-Windows CTest。
+该门禁小于完整 Windows CTest；发布结论必须同时参考持续更新的开发状态。
 
-## 封闭环境验证（Hermetic Verification）
+## 封闭环境验证
 
-请从一个全新的构建目录和一份不含 `.git` 元数据的 MIPSolvers 源码副本出发
-验证发布版本。下面的开关可以杜绝任何意外的 FetchContent 网络操作；不加
-该开关时，构建同样应当成功。
+不含嵌套 MIPSolvers Git 元数据的源码归档仍可通过来源锁中的源码哈希验证：
 
 ```bash
 cmake -S . -B build/offline \
   -DCMAKE_BUILD_TYPE=Release \
-  -DMIPSOLVERS_SOURCE_DIR=/path/to/MIPSolvers-source-archive \
   -DFETCHCONTENT_FULLY_DISCONNECTED=ON
 cmake --build build/offline --parallel
 ctest --test-dir build/offline --output-on-failure --parallel 4
 ```
 
-configure 日志必须将 Eigen、fmt、nlohmann/json、Catch2、OpenXLSX、HiGHS、
-SCIP、PaPILO、启用时的 MUMPS/Ipopt 以及 SuiteSparse 标识为 vendored（随包
-内置）源码。缺少任何必需的源码树时，必须在 configure 阶段直接失败，而
-不得触发下载。
+配置日志必须标识锁定的仓库内导入及本地 vendored 依赖。关键文件缺失或被修改时
+必须直接失败，不得触发网络下载。
 
-顶层裸配置默认探测 Gurobi，但它始终可选且不会随包捆绑。正式 Windows
-分发 preset 显式关闭它，避免 Windows 加载器依赖站点本地 DLL。自定义源码
-构建可以设置 `GUROBI_HOME` 并启用 Gurobi；一旦链接，目标机器必须按其许可
-安装相应运行库。求解器环境初始化或求解失败可以回退到随包 HiGHS 与原生
-求解器，但 DLL 缺失导致的 Windows 加载失败发生在程序启动前，无法回退。
-实际产生结果的后端由求解器名称与 DC OPF 的 `solver_chain` 字段标识。
+## OPF 线性求解器选择
 
-GridLAB-D、Julia、OpenDSS、Chromium 与 Playwright 等外部对比工具属于运行
-时测试集成，而非 C++ 构建依赖。当对应可执行文件缺失时，相关测试会自动
-跳过。如需启用 OpenDSS 桥接，请提供本地的 DSS C-API 捆绑包并设置
-`HACDCPF_ENABLE_OPENDSS=ON`。
-
-## 最优潮流线性求解器选择
-
-parity 最优潮流内点法（OPF IPM）支持：
+Parity OPF IPM 支持：
 
 ```text
 HACDCPF_OPF_LINEAR_SOLVER=auto|dense|mumps|umfpack|klu|eigen
 ```
 
-`auto` 对小型 KKT 系统使用带主元的稠密 LU 分解，对较大系统使用本地稀疏
-后端。`umfpack` 与 `klu` 使用 MIPSolvers 随包内置的 SuiteSparse 目标；
-`eigen` 强制使用随包内置的 Eigen SparseLU 回退方案。该环境开关仅供诊断
-使用，不是稳定的应用层 API。
+`auto` 对小型 KKT 使用带主元稠密 LU，对大系统使用本地稀疏后端；`umfpack`、
+`klu` 来自 MIPSolvers 的 SuiteSparse，`eigen` 强制使用 Eigen SparseLU。该环境
+变量是诊断开关，不是稳定应用 API。
 
 ## 项目选项
 
 | 选项 | 默认值 | 含义 |
 |---|---:|---|
-| `HACDCPF_DEPENDENCY_PROFILE` | `portable` | 构建应用所需的求解器子集；`full` 还会构建 MIPSolvers 的开发者目标。 |
-| `HACDCPF_USE_SUITESPARSE` | `ON` | 使用随包内置的 UMFPACK/KLU；`OFF` 选择 Eigen SparseLU 回退方案。 |
-| `HACDCPF_ENABLE_IPOPT` | macOS/Windows 默认及配置档 `ON`，Linux 配置档 `OFF` | 启用嵌入式 Ipopt；Windows 要求本地 sequential oneMKL/PardisoMKL 预构建包。 |
-| `HACDCPF_ENABLE_ETAP` | `ON` | 基于随包内置的 OpenXLSX 构建。 |
-| `HACDCPF_ENABLE_OPENDSS` | `OFF` | 需要另行提供的本地 DSS C-API。 |
-| `HACDCPF_ENABLE_NATIVE_ARCH` | `OFF` | 启用针对宿主机的 CPU 指令；要产出可移植二进制请保持 `OFF`。 |
-| `HACDCPF_USE_GUROBI` | 裸配置默认 `ON`；Windows 分发 preset `OFF` | 自定义构建可探测并优先使用已授权的 Gurobi；分发 preset 排除其运行库 DLL 依赖。 |
-| `HACDCPF_USE_PAPILO` | `ON` | 使用 MIPSolvers 捆绑的 header-only PaPILO；`minimal` 配置档或 `OFF` 时使用原生预处理（presolve）。 |
+| `HACDCPF_DEPENDENCY_PROFILE` | `portable` | 构建应用所需求解器子集；`full` 还构建 MIPSolvers 开发者目标。 |
+| `HACDCPF_TRIAL_EDITION` | `OFF` | 启用 Trial 能力配置；与 Resilience 互斥。 |
+| `HACDCPF_RESILIENCE_EDITION` | `OFF` | 启用 Resilience 能力配置；与 Trial 互斥。 |
+| `HACDCPF_USE_SUITESPARSE` | `ON` | 使用 vendored UMFPACK/KLU；关闭时使用 Eigen SparseLU。 |
+| `HACDCPF_ENABLE_IPOPT` | macOS/Windows 默认 `ON`，Linux preset `OFF` | 启用 Ipopt；Windows 支持路径要求 staging 的 sequential oneMKL/PardisoMKL。 |
+| `HACDCPF_ENABLE_ETAP` | `ON` | 使用 vendored OpenXLSX。 |
+| `HACDCPF_ENABLE_OPENDSS` | `OFF` | 需显式提供本地 DSS C-API。 |
+| `HACDCPF_ENABLE_NATIVE_ARCH` | `OFF` | 启用宿主 CPU 指令；便携二进制应保持关闭。 |
+| `HACDCPF_USE_GUROBI` | 裸配置默认 `ON`；Windows 发布 preset `OFF` | 自定义构建可使用本机授权 Gurobi；正式包不分发它。 |
+| `HACDCPF_USE_PAPILO` | `ON` | 使用 MIPSolvers 的 header-only PaPILO；关闭时用原生 presolve。 |
 
-发布前仍必须在全部三个目标操作系统上执行原生构建：在 macOS 上配置
-Windows 配置档并不能验证 MSVC ABI 或运行时打包。请使用 `otool -L`、
-`ldd` 或 `dumpbin /DEPENDENTS` 检查最终可执行文件，以确定部署时必须一并
-携带的编译器与平台运行时库。
+发布前仍需在各目标操作系统上执行原生构建，并用 `otool -L`、`ldd` 或
+`dumpbin /DEPENDENTS` 审计最终运行时依赖。

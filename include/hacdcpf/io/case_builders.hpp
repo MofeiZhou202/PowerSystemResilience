@@ -1,4 +1,5 @@
 #pragma once
+#include <filesystem>
 #include <string>
 #include <vector>
 
@@ -7,6 +8,12 @@
 namespace hacdcpf::io {
 
 // ── Pre-built test cases ──────────────────────────────────────────────────────
+
+/// Sets the explicit directory used by file-backed case builders. Passing an
+/// empty path clears it. Restricted runtimes must configure this before exposing
+/// file-backed built-in cases; the library never discovers a source checkout.
+void set_case_data_root(std::filesystem::path root);
+std::filesystem::path case_data_file_path(const std::string& name);
 
 HybridPowerSystem build_ieee14_acdc();
 HybridPowerSystem build_ieee24_3area_acdc();

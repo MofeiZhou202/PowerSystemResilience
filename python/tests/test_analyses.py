@@ -26,7 +26,9 @@ from hysim import (
     TransientRequest,
     TransportResponse,
     UnitCommitmentRequest,
+    UnknownAnalysisError,
 )
+from test_edition_capabilities import edition_payload
 
 
 class FakeTransport:
@@ -44,6 +46,10 @@ def _ok(payload: Mapping[str, Any]) -> tuple[int, Mapping[str, Any]]:
     return (200, payload)
 
 
+def _profile() -> tuple[int, Mapping[str, Any]]:
+    return _ok(edition_payload())
+
+
 class CatalogTests(unittest.TestCase):
     def test_catalog_is_consistent(self) -> None:
         seen_routes: set[str] = set()
@@ -55,7 +61,7 @@ class CatalogTests(unittest.TestCase):
             seen_routes.add(spec.route)
 
     def test_require_rejects_unknown_analysis(self) -> None:
-        with self.assertRaises(ValueError):
+        with self.assertRaises(UnknownAnalysisError):
             ANALYSIS_CATALOG.require("does_not_exist")
 
     def test_effect_and_category_filters(self) -> None:
@@ -99,52 +105,52 @@ class RequestModelTests(unittest.TestCase):
 
 class FamilyFacadeTests(unittest.TestCase):
     def test_unit_commitment_routes_and_serializes(self) -> None:
-        transport = FakeTransport([_ok({"feasible": True, "total_cost": 1000.0})])
+        transport = FakeTransport([_profile(), _ok({"feasible": True, "total_cost": 1000.0})])
         sim = HySim(transport=transport)
 
         result = sim.time_series.unit_commitment(UnitCommitmentRequest(num_steps=24))
 
-        self.assertEqual(transport.calls[0]["path"], "/api/session/run_uc")
-        self.assertEqual(transport.calls[0]["method"], "POST")
-        self.assertEqual(transport.calls[0]["json_body"], {"num_steps": 24})
+        self.assertEqual(transport.calls[1]["path"], "/api/session/run_uc")
+        self.assertEqual(transport.calls[1]["method"], "POST")
+        self.assertEqual(transport.calls[1]["json_body"], {"num_steps": 24})
         self.assertEqual(result.analysis, "unit_commitment")
         self.assertEqual(result.route, "/api/session/run_uc")
         self.assertEqual(result.scientific_status, "qualified")
 
     def test_market_clearing_accepts_raw_mapping(self) -> None:
-        transport = FakeTransport([_ok({"converged": True})])
+        transport = FakeTransport([_profile(), _ok({"converged": True})])
         sim = HySim(transport=transport)
 
         sim.market.clearing({"num_steps": 6, "offer_segments": 4})
 
-        self.assertEqual(transport.calls[0]["path"], "/api/session/run_market_clearing")
+        self.assertEqual(transport.calls[1]["path"], "/api/session/run_market_clearing")
         self.assertEqual(
-            transport.calls[0]["json_body"], {"num_steps": 6, "offer_segments": 4}
+            transport.calls[1]["json_body"], {"num_steps": 6, "offer_segments": 4}
         )
 
     def test_reliability_family_reaches_both_routes(self) -> None:
         transport = FakeTransport(
-            [_ok({"converged": True}), _ok({"converged": True})]
+            [_profile(), _ok({"converged": True}), _ok({"converged": True})]
         )
         sim = HySim(transport=transport)
 
         sim.reliability.nonsequential(ReliabilityRequest(seed=3))
         sim.reliability.sequential(ReliabilityRequest(seed=3))
 
-        self.assertEqual(transport.calls[0]["path"], "/api/session/run_reliability_nsq")
-        self.assertEqual(transport.calls[1]["path"], "/api/session/run_reliability_seq")
+        self.assertEqual(transport.calls[1]["path"], "/api/session/run_reliability_nsq")
+        self.assertEqual(transport.calls[2]["path"], "/api/session/run_reliability_seq")
 
     def test_run_by_name_dispatches_through_catalog(self) -> None:
-        transport = FakeTransport([_ok({"converged": True})])
+        transport = FakeTransport([_profile(), _ok({"converged": True})])
         sim = HySim(transport=transport)
 
         result = sim.run("small_signal", {"foo": 1})
 
-        self.assertEqual(transport.calls[0]["path"], "/api/session/small_signal")
+        self.assertEqual(transport.calls[1]["path"], "/api/session/small_signal")
         self.assertEqual(result.analysis, "small_signal")
 
     def test_modify_effect_increments_revision(self) -> None:
-        transport = FakeTransport([_ok({"ok": True}), _ok({"converged": True})])
+        transport = FakeTransport([_profile(), _ok({"ok": True}), _ok({"converged": True})])
         sim = HySim(transport=transport)
 
         self.assertEqual(sim.model_revision, 0)
@@ -157,7 +163,7 @@ class FamilyFacadeTests(unittest.TestCase):
         self.assertEqual(pf.model_revision, 1)
 
     def test_invalid_result_is_not_silently_usable(self) -> None:
-        transport = FakeTransport([_ok({"feasible": False, "warnings": ["infeasible"]})])
+        transport = FakeTransport([_profile(), _ok({"feasible": False, "warnings": ["infeasible"]})])
         sim = HySim(transport=transport)
 
         result = sim.market.clearing(MarketClearingRequest(num_steps=24))
@@ -218,7 +224,7 @@ class Phase2RequestTests(unittest.TestCase):
 
 class Phase2FacadeTests(unittest.TestCase):
     def _sim(self, n: int = 1) -> tuple[HySim, FakeTransport]:
-        transport = FakeTransport([_ok({"converged": True}) for _ in range(n)])
+        transport = FakeTransport([_profile()] + [_ok({"converged": True}) for _ in range(n)])
         return HySim(transport=transport), transport
 
     def test_every_new_family_hits_its_route(self) -> None:
@@ -250,7 +256,7 @@ class Phase2FacadeTests(unittest.TestCase):
         for call, route in cases:
             sim, transport = self._sim()
             call(sim)
-            self.assertEqual(transport.calls[0]["path"], route, route)
+            self.assertEqual(transport.calls[1]["path"], route, route)
 
     def test_ts_config_write_does_not_advance_model_revision(self) -> None:
         sim, _ = self._sim()
@@ -259,14 +265,14 @@ class Phase2FacadeTests(unittest.TestCase):
         self.assertEqual(sim.model_revision, 0)
 
     def test_model_io_load_mutates_export_does_not(self) -> None:
-        transport = FakeTransport([_ok({"ok": True}), _ok({"json_string": "{}"})])
+        transport = FakeTransport([_profile(), _ok({"ok": True}), _ok({"json_string": "{}"})])
         sim = HySim(transport=transport)
         sim.model_io.load("matpower", {"filename": "case14.m"})
         self.assertEqual(sim.model_revision, 1)
         sim.model_io.export("json")
         self.assertEqual(sim.model_revision, 1)
-        self.assertEqual(transport.calls[0]["path"], "/api/session/load_matpower")
-        self.assertEqual(transport.calls[1]["path"], "/api/session/export_json")
+        self.assertEqual(transport.calls[1]["path"], "/api/session/load_matpower")
+        self.assertEqual(transport.calls[2]["path"], "/api/session/export_json")
 
     def test_model_io_rejects_unknown_format(self) -> None:
         sim, _ = self._sim(0)
@@ -278,7 +284,7 @@ class Phase2FacadeTests(unittest.TestCase):
 
 class FamilyToolTests(unittest.TestCase):
     def test_catalog_tools_are_effect_gated_and_bounded(self) -> None:
-        transport = FakeTransport([_ok({"converged": True})])
+        transport = FakeTransport([_profile(), _ok({"converged": True})])
         sim = HySim(transport=transport)
         registry = HySimToolRegistry(sim.client)
 
@@ -291,7 +297,7 @@ class FamilyToolTests(unittest.TestCase):
         # An ANALYZE family tool runs and returns a compact honest record.
         record = registry.call("hysim_market_clearing", {"request": {"num_steps": 4}})
         self.assertEqual(record["route"], "/api/session/run_market_clearing")
-        self.assertEqual(transport.calls[0]["json_body"], {"num_steps": 4})
+        self.assertEqual(transport.calls[1]["json_body"], {"num_steps": 4})
 
         # A MODIFY family tool is disabled under the default policy.
         with self.assertRaises(ToolPolicyError):
@@ -314,19 +320,19 @@ class Phase3IoTests(unittest.TestCase):
         )
 
     def test_model_io_accepts_typed_load_request(self) -> None:
-        transport = FakeTransport([_ok({"ok": True})])
+        transport = FakeTransport([_profile(), _ok({"ok": True})])
         sim = HySim(transport=transport)
         sim.model_io.load("cim_dist", CimLoadRequest(xml_strings=["<x/>"]))
-        self.assertEqual(transport.calls[0]["path"], "/api/session/load_cim_dist")
-        self.assertEqual(transport.calls[0]["json_body"], {"xml_strings": ["<x/>"]})
+        self.assertEqual(transport.calls[1]["path"], "/api/session/load_cim_dist")
+        self.assertEqual(transport.calls[1]["json_body"], {"xml_strings": ["<x/>"]})
         self.assertEqual(sim.model_revision, 1)
 
     def test_harmonics_state_space_is_typed(self) -> None:
-        transport = FakeTransport([_ok({"converged": True})])
+        transport = FakeTransport([_profile(), _ok({"converged": True})])
         sim = HySim(transport=transport)
         sim.harmonics.state_space(HarmonicsStateSpaceRequest(options={"orders": [1]}))
-        self.assertEqual(transport.calls[0]["path"], "/api/session/harmonics_hss")
-        self.assertEqual(transport.calls[0]["json_body"], {"options": {"orders": [1]}})
+        self.assertEqual(transport.calls[1]["path"], "/api/session/harmonics_hss")
+        self.assertEqual(transport.calls[1]["json_body"], {"options": {"orders": [1]}})
 
 
 if __name__ == "__main__":

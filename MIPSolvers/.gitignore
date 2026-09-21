@@ -1,0 +1,168 @@
+# Prerequisites
+*.d
+
+# Compiled Object files
+*.slo
+*.lo
+*.o
+*.obj
+
+# Precompiled Headers
+*.gch
+*.pch
+
+# Linker files
+*.ilk
+
+# Debugger Files
+*.pdb
+
+# Compiled Dynamic libraries
+*.so
+*.dylib
+*.dll
+
+# Fortran module files
+*.mod
+*.smod
+
+# Compiled Static libraries
+*.lai
+*.la
+*.a
+*.lib
+
+# Executables
+*.exe
+*.out
+*.app
+
+# debug information files
+*.dwo
+
+# 
+DistributionPowerFlow/
+
+# CMake build directory
+build/
+build_*/
+build-*/
+build_asan/
+build_noss/
+build_release/
+build_warnings/
+build_opendss_release/
+# CMake cache files
+CMakeCache.txt
+CMakeFiles/
+cmake_install.cmake
+
+# Qt Creator files
+*.user
+*.pro.user
+# IDE files
+*.sublime-project
+*.sublime-workspace
+
+# AGI
+.claude/
+
+.github/
+
+.cache/
+
+reports/
+
+tests/
+!.github/
+/.github/*
+!.github/workflows/
+/.github/workflows/*
+!.github/workflows/release-gate.yml
+!reports/
+reports/*
+!reports/study_contracts/
+reports/study_contracts/*
+!reports/study_contracts/inputs/
+reports/study_contracts/inputs/*
+!reports/study_contracts/inputs/market_res_penetration_sweep.inputs.json
+!reports/study_contracts/inputs/planning_case3_lp_validation.inputs.json
+!reports/study_contracts/inputs/three_stage_stochastic_dispatch.inputs.json
+!reports/study_contracts/results/
+reports/study_contracts/results/*
+!reports/study_contracts/results/market_res_penetration_sweep.reference.json
+!reports/study_contracts/results/planning_case3_lp_validation.reference.json
+!reports/study_contracts/results/three_stage_stochastic_dispatch.reference.json
+!reports/study_contracts/paper_studies.json
+!tests/
+# LaTeX build artifacts
+*.aux
+*.log
+*.toc
+*.fls
+*.fdb_latexmk
+*.synctex.gz
+*.synctex(busy)
+
+.venv38/
+.venv/
+.github/
+!.github/
+!.github/workflows/
+!.github/workflows/ci.yml
+
+.idea/
+
+LearningtoOptimize/
+
+.github/
+
+._deps/
+
+.vscode/
+
+
+# Test/benchmark executables are built into tests/ (RUNTIME_OUTPUT_DIRECTORY);
+# ignore the binaries but keep sources, baselines and data visible.
+tests/*
+!tests/*.cpp
+!tests/*.hpp
+!tests/*.h
+!tests/baselines/
+!tests/data/
+
+# Hermetic-build scratch dirs (vendored sources under third_party/ stay tracked)
+_deps/
+third_party/build/
+third_party/install/
+# third_party/oneapi-mkl/
+
+# Root in-source build remnants (kept on disk, ignored by git)
+/CMakeCache.txt
+/CMakeFiles/
+/cmake_install.cmake
+/Makefile
+/libmipsolvers/
+
+.github/
+
+# The solver correctness and stable-hardware release gates are source files.
+!.github/
+.github/*
+!.github/workflows/
+.github/workflows/*
+!.github/workflows/ci.yml
+
+tests/data/
+
+# Module manual build artifacts (docs/modules LaTeX)
+docs/modules/**/*.pdf
+docs/modules/**/*.aux
+docs/modules/**/*.log
+docs/modules/**/*.out
+docs/modules/**/*.toc
+# Track the repository-local theory workflow for offline use.
+!/.github/
+!/.github/skills/
+/.github/skills/*
+!/.github/skills/theory-guided-coding/

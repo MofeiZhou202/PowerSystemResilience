@@ -35,7 +35,26 @@ isolated, model mutations use ETags, and analyses run as revision-bound jobs.
 the scalable read contracts. Raw `topology()`, `subgraph()`, `frame()`, and
 `violations()` methods remain available for forward-compatible JSON access.
 `HySimClient` remains available for the legacy GUI-compatible process-global
-routes. See `docs/python_api.md` for architecture and AI tool policy.
+routes. See [`docs/reference/python_api.md`](../docs/reference/python_api.md) for architecture and AI tool policy.
+
+## Connected runtime editions
+
+The 69 analyses in 18 families are the SDK-known platform universe, not a
+promise that every connected edition enables every route. `HySimClient` fetches
+and strictly validates `GET /api/edition`; its dedicated legacy-session
+`analysis_catalog` uses canonical `AnalysisSpec.name` IDs and filters the
+client's connected catalog. Known disabled names raise
+`AnalysisDisabledError`, unknown names raise `UnknownAnalysisError`, and a
+malformed profile raises `TransportError` before analysis transport. Supported
+client aliases (`resilience` and `integrated_energy`) are canonicalized first.
+The market example below therefore requires an edition whose catalog enables
+`market_clearing`.
+
+`HySimV1Client` performs separate strict discovery against `GET /api/v1` for
+isolated asynchronous jobs. Its enabled list is currently `power_flow` and
+`optimal_power_flow`; the v1 discovery document is not a complete list of
+retained legacy/session routes. See the
+[Resilience Edition contract](../docs/operations/resilience_edition_design.md).
 
 ## Comprehensive facade
 
@@ -65,4 +84,4 @@ Families include `pf`, `opf`, `reactive_power`, `short_circuit`, `harmonics`,
 tool policies and audit hooks can gate a call without parsing its payload.
 `HySimToolRegistry.register_family_tools()` exposes one effect-gated AI tool per
 analysis. The design and coverage roadmap are in
-`docs/reference/python_comprehensive_api_design.md`.
+[`docs/reference/python_comprehensive_api_design.md`](../docs/reference/python_comprehensive_api_design.md).

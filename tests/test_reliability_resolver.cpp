@@ -345,7 +345,7 @@ TEST_CASE("Reliability HL-II uses zero Pmin and exact shed-first dispatch",
 TEST_CASE("IEEE RTS-24 reliability data is mapped by unit and branch row",
           "[reliability][rts24][data]") {
   auto sys = io::parse_matpower(
-      std::string(HACDCPF_TEST_DATA_DIR) + "/case24_ieee_rts.m");
+      std::string(HACDCPF_MATPOWER_DATA_DIR) + "/case24_ieee_rts.m");
   REQUIRE(sys.ac.generators.size() == 33);
   REQUIRE(sys.ac.branches.size() == 38);
   REQUIRE_NOTHROW(apply_ieee24_reliability_data(sys));
@@ -386,7 +386,7 @@ TEST_CASE("IEEE RTS-24 reliability data is mapped by unit and branch row",
 TEST_CASE("IEEE RTS-24 every N-0 N-1 and N-2 HL-II state is feasible",
           "[reliability][rts24][state-scan]") {
   auto sys = io::parse_matpower(
-      std::string(HACDCPF_TEST_DATA_DIR) + "/case24_ieee_rts.m");
+      std::string(HACDCPF_MATPOWER_DATA_DIR) + "/case24_ieee_rts.m");
   apply_ieee24_reliability_data(sys);
 
   opf::DCOPFOptions options;

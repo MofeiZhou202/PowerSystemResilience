@@ -1,0 +1,14 @@
+{
+  "schema_version": 1,
+  "baseline_commit": "78939619f31ebe19b9399c8f52d5c35f6d6c06ba",
+  "policy": "Correctness contract plus shared-runner smoke ceiling; not a solver ranking",
+  "entries": [
+    {"case": "UC_6bus_3G_4T", "config": "Baseline[S]", "objective": 993830.1496144199, "objective_abs_tol": 0.001, "max_gap": 1e-8, "max_runtime_ms": 400.0},
+    {"case": "UC_6bus_3G_4T", "config": "NoCuts[S]", "objective": 993830.1496144199, "objective_abs_tol": 0.001, "max_gap": 1e-8, "max_runtime_ms": 400.0},
+    {"case": "UC_6bus_3G_4T", "config": "Baseline+Cuts[S]", "objective": 993830.1496144199, "objective_abs_tol": 0.001, "max_gap": 1e-8, "max_runtime_ms": 400.0},
+    {"case": "UC_6bus_3G_4T", "config": "I[IPM+xov]", "objective": 993830.1496144199, "objective_abs_tol": 0.001, "max_gap": 1e-8, "max_runtime_ms": 400.0},
+    {"case": "UC_6bus_3G_4T", "config": "I+A/B[-xov]", "objective": 993830.1496144199, "objective_abs_tol": 0.001, "max_gap": 1e-8, "max_runtime_ms": 400.0},
+    {"case": "UC_6bus_3G_4T", "config": "NativeSeed[S]", "objective": 993830.1496144199, "objective_abs_tol": 0.001, "max_gap": 1e-8, "max_runtime_ms": 400.0},
+    {"case": "UC_6bus_3G_4T", "config": "Seed+A/B[S]", "objective": 993830.1496144199, "objective_abs_tol": 0.001, "max_gap": 1e-8, "max_runtime_ms": 400.0}
+  ]
+}

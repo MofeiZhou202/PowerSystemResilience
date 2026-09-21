@@ -25,6 +25,7 @@ from hysim import (
     ViolationChunk,
 )
 from hysim.v1 import HySimJob
+from test_edition_capabilities import v1_payload
 
 
 class FakeTransport:
@@ -57,6 +58,7 @@ class V1ClientTests(unittest.TestCase):
             [
                 (201, {"ETag": '"hysim-ses-1-r1"'}, session_body(1)),
                 (200, {"ETag": '"hysim-ses-1-r2"'}, session_body(2)),
+                (200, {}, v1_payload()),
                 (
                     202,
                     {},
@@ -86,11 +88,11 @@ class V1ClientTests(unittest.TestCase):
             '"hysim-ses-1-r1"',
         )
         self.assertEqual(
-            transport.calls[2]["headers"]["If-Match"],
+            transport.calls[3]["headers"]["If-Match"],
             '"hysim-ses-1-r2"',
         )
         self.assertEqual(
-            transport.calls[2]["json_body"]["request"]["options"]["max_iter"],
+            transport.calls[3]["json_body"]["request"]["options"]["max_iter"],
             50,
         )
 
@@ -392,6 +394,7 @@ class V1ClientTests(unittest.TestCase):
     def test_v1_ai_tools_submit_jobs_but_guard_model_changes(self) -> None:
         transport = FakeTransport(
             [
+                (200, {}, v1_payload()),
                 (
                     202,
                     {},

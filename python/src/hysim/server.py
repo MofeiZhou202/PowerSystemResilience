@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import IO, Any
 
 from .client import HySimClient
+from .edition import EditionProfile
 from .errors import HySimError
 from .v1 import HySimV1Client
 
@@ -43,6 +44,7 @@ class LocalHySimServer:
         self.api_job_workers = api_job_workers
         self.log = log
         self.process: subprocess.Popen[str] | None = None
+        self.edition_profile: EditionProfile | None = None
 
     @property
     def base_url(self) -> str:
@@ -76,7 +78,7 @@ class LocalHySimServer:
             if self.process.poll() is not None:
                 raise HySimError(f"run_gui_server exited with code {self.process.returncode}")
             try:
-                client.list_cases()
+                self.edition_profile = client.refresh_edition_profile()
                 return self
             except HySimError:
                 time.sleep(0.1)

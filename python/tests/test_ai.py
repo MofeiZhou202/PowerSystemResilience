@@ -15,6 +15,7 @@ from hysim import (
     ToolPolicyError,
     TransportResponse,
 )
+from test_edition_capabilities import edition_payload, v1_payload
 
 
 class FakeTransport:
@@ -27,7 +28,9 @@ class FakeTransport:
 
 class AIToolTests(unittest.TestCase):
     def test_default_policy_blocks_model_mutation(self) -> None:
-        registry = HySimToolRegistry(HySimClient(transport=FakeTransport([])))
+        registry = HySimToolRegistry(
+            HySimClient(transport=FakeTransport([edition_payload()]))
+        )
         with self.assertRaises(ToolPolicyError):
             registry.call("hysim_load_builtin", {"case": "ieee14_acdc"}, approved=True)
 
@@ -38,7 +41,9 @@ class AIToolTests(unittest.TestCase):
             )
         )
         registry = HySimToolRegistry(
-            HySimClient(transport=FakeTransport([{"name": "ieee14_acdc"}])),
+            HySimClient(
+                transport=FakeTransport([edition_payload(), {"name": "ieee14_acdc"}])
+            ),
             policy=policy,
         )
         with self.assertRaises(ToolPolicyError):
@@ -52,7 +57,7 @@ class AIToolTests(unittest.TestCase):
         registry = HySimToolRegistry(
             HySimClient(
                 transport=FakeTransport(
-                    [{"converged": True, "iterations": 3, "vm": [1.0] * 100}]
+                    [edition_payload(), {"converged": True, "iterations": 3, "vm": [1.0] * 100}]
                 )
             )
         )
@@ -61,7 +66,9 @@ class AIToolTests(unittest.TestCase):
         self.assertEqual(result["result_sizes"]["vm"], 100)
 
     def test_tool_arguments_are_checked_before_execution(self) -> None:
-        registry = HySimToolRegistry(HySimClient(transport=FakeTransport([])))
+        registry = HySimToolRegistry(
+            HySimClient(transport=FakeTransport([edition_payload()]))
+        )
         with self.assertRaisesRegex(ValueError, "unknown tool arguments"):
             registry.call("hysim_run_power_flow", {"bus_id": 7})
         with self.assertRaisesRegex(ValueError, "must have type integer"):
@@ -69,6 +76,7 @@ class AIToolTests(unittest.TestCase):
 
     def test_v1_read_tools_expose_bounded_chunks(self) -> None:
         transport = FakeTransport([
+            v1_payload(),
             {
                 "schema": "hysim_topology_chunk_v1",
                 "model_revision": 1,

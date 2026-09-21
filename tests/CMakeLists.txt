@@ -708,9 +708,18 @@ target_link_libraries(test_edition_profile PRIVATE
   Catch2::Catch2WithMain nlohmann_json::nlohmann_json)
 if(HACDCPF_TRIAL_EDITION)
   target_compile_definitions(test_edition_profile PRIVATE HACDCPF_TRIAL_EDITION=1)
+elseif(HACDCPF_RESILIENCE_EDITION)
+  target_compile_definitions(test_edition_profile PRIVATE HACDCPF_RESILIENCE_EDITION=1)
+endif()
+if(HACDCPF_TRIAL_EDITION)
+  set(edition_profile_labels "edition-trial-unit")
+elseif(HACDCPF_RESILIENCE_EDITION)
+  set(edition_profile_labels "edition-resilience-unit")
+else()
+  set(edition_profile_labels "edition-full-unit")
 endif()
 catch_discover_tests(test_edition_profile
-  PROPERTIES LABELS "trial;unit")
+  PROPERTIES LABELS "${edition_profile_labels}")
 
 # ── HySim Web GUI server (single-line-diagram editor + REST backend) ──────────
 # Migrated from HybridACDCPowerSystemsPlanning. Header-only httplib is vendored
@@ -725,10 +734,14 @@ if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/run_gui_server.cpp")
   target_include_directories(run_gui_server PRIVATE
     "${CMAKE_SOURCE_DIR}/third_party"
     "${CMAKE_SOURCE_DIR}/src/server")
-  target_compile_definitions(run_gui_server PRIVATE
-    HACDCPF_PROJECT_ROOT="${CMAKE_SOURCE_DIR}")
+  if(HACDCPF_ENABLE_SOURCE_RESOURCE_FALLBACK)
+    target_compile_definitions(run_gui_server PRIVATE
+      HACDCPF_PROJECT_ROOT="${CMAKE_SOURCE_DIR}")
+  endif()
   if(HACDCPF_TRIAL_EDITION)
     target_compile_definitions(run_gui_server PRIVATE HACDCPF_TRIAL_EDITION=1)
+  elseif(HACDCPF_RESILIENCE_EDITION)
+    target_compile_definitions(run_gui_server PRIVATE HACDCPF_RESILIENCE_EDITION=1)
   endif()
   # httplib needs Winsock2 on Windows (freeaddrinfo / WSACleanup / socket).
   if(WIN32)
@@ -815,7 +828,15 @@ if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/run_gui_server.cpp")
                 --server "$<TARGET_FILE:run_gui_server>"
                 --data-dir "${CMAKE_SOURCE_DIR}/data")
       set_tests_properties(trial_edition_api_e2e PROPERTIES
-        LABELS "trial;api;e2e" TIMEOUT 180)
+        LABELS "edition-trial-api-e2e" TIMEOUT 180)
+    elseif(HACDCPF_RESILIENCE_EDITION)
+      add_test(NAME resilience_edition_api_e2e
+        COMMAND "${Python3_EXECUTABLE}"
+                "${CMAKE_SOURCE_DIR}/tools/resilience_edition_e2e.py"
+                --server "$<TARGET_FILE:run_gui_server>"
+                --data-dir "${CMAKE_SOURCE_DIR}/data")
+      set_tests_properties(resilience_edition_api_e2e PROPERTIES
+        LABELS "edition-resilience-api-e2e" TIMEOUT 180)
     endif()
   endif()
 
@@ -955,7 +976,14 @@ if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/run_gui_server.cpp")
                 "${CMAKE_SOURCE_DIR}/tests/e2e/trial_gui_e2e.mjs"
                 --server "$<TARGET_FILE:run_gui_server>")
       set_tests_properties(trial_gui_e2e PROPERTIES
-        LABELS "trial;gui;e2e;browser" TIMEOUT 180)
+        LABELS "edition-trial-gui-e2e-browser" TIMEOUT 180)
+    elseif(HACDCPF_RESILIENCE_EDITION)
+      add_test(NAME resilience_edition_gui_e2e
+        COMMAND "${HACDCPF_NODE_EXECUTABLE}"
+                "${CMAKE_SOURCE_DIR}/tests/e2e/resilience_edition_gui_e2e.mjs"
+                --server "$<TARGET_FILE:run_gui_server>")
+      set_tests_properties(resilience_edition_gui_e2e PROPERTIES
+        LABELS "edition-resilience-gui-e2e-browser" TIMEOUT 180)
     else()
       add_test(NAME market_gui_e2e
         COMMAND "${HACDCPF_NODE_EXECUTABLE}"
@@ -1050,12 +1078,14 @@ if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/run_gui_server.cpp")
         LABELS "gui;e2e;browser;market;system" TIMEOUT 1800 RUN_SERIAL TRUE)
     endif()
 
-    add_test(NAME rpo_gui_e2e
-      COMMAND "${HACDCPF_NODE_EXECUTABLE}"
-              "${CMAKE_SOURCE_DIR}/tests/e2e/rpo_gui_e2e.mjs"
-              --server "$<TARGET_FILE:run_gui_server>")
-    set_tests_properties(rpo_gui_e2e PROPERTIES
-      LABELS "gui;e2e;browser;rpo;cross_validation" TIMEOUT 180)
+    if(NOT HACDCPF_RESILIENCE_EDITION)
+      add_test(NAME rpo_gui_e2e
+        COMMAND "${HACDCPF_NODE_EXECUTABLE}"
+                "${CMAKE_SOURCE_DIR}/tests/e2e/rpo_gui_e2e.mjs"
+                --server "$<TARGET_FILE:run_gui_server>")
+      set_tests_properties(rpo_gui_e2e PROPERTIES
+        LABELS "gui;e2e;browser;rpo;cross_validation" TIMEOUT 180)
+    endif()
   endif()
 endif()
 

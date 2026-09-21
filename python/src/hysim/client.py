@@ -8,14 +8,28 @@ import threading
 import time
 import uuid
 from dataclasses import dataclass
+from types import MappingProxyType
 from typing import Any, Callable, Mapping
 
-from .errors import ApiError, BusyError, TransportError
+from .edition import EditionProfile
+from .errors import (
+    AnalysisDisabledError,
+    ApiError,
+    BusyError,
+    TransportError,
+    UnknownAnalysisError,
+)
 from .models import AnalysisResult, OPFRequest, PowerFlowRequest
 from .transport import Transport, TransportResponse, UrllibTransport
 
 
-ANALYSIS_ROUTES: dict[str, str] = {
+ANALYSIS_ALIASES = MappingProxyType(
+    {
+        "resilience": "distribution_resilience",
+        "integrated_energy": "campus_ies",
+    }
+)
+ANALYSIS_ROUTES = MappingProxyType({
     "power_flow": "/api/session/pf",
     "optimal_power_flow": "/api/session/opf",
     "short_circuit": "/api/session/sc",
@@ -35,16 +49,16 @@ ANALYSIS_ROUTES: dict[str, str] = {
     "reconfiguration": "/api/session/run_reconfig",
     "hosting_capacity": "/api/session/run_hosting_capacity",
     "reliability": "/api/session/run_reliability",
-    "resilience": "/api/session/run_distribution_resilience",
+    "distribution_resilience": "/api/session/run_distribution_resilience",
     "market_clearing": "/api/session/run_market_clearing",
     "real_time_market": "/api/session/run_real_time_market",
     "repeated_market_game": "/api/session/run_repeated_market_game",
-    "integrated_energy": "/api/session/run_campus_ies",
+    "campus_ies": "/api/session/run_campus_ies",
     "ev_power_traffic": "/api/session/run_ev_traffic",
     "scenario_generation": "/api/session/generate_scenarios",
     "typhoon_faults": "/api/session/generate_typhoon_faults",
     "sppt_guard": "/api/session/sppt_guard",
-}
+})
 
 
 @dataclass(frozen=True)
@@ -87,6 +101,63 @@ class HySimClient:
         self._operation_lock: Any = (
             threading.RLock() if serialize_model_access else _NullLock()
         )
+        self._edition_profile: EditionProfile | None = None
+        self._analysis_catalog: Any = None
+
+    @property
+    def edition_profile(self) -> EditionProfile:
+        """Discover and cache this client's immutable edition profile."""
+
+        self._ensure_edition_profile()
+        assert self._edition_profile is not None
+        return self._edition_profile
+
+    @property
+    def analysis_catalog(self) -> Any:
+        """Return this client's immutable, edition-filtered analysis catalog."""
+
+        self._ensure_edition_profile()
+        return self._analysis_catalog
+
+    def refresh_edition_profile(self) -> EditionProfile:
+        """Refresh capabilities for this client without sharing process-global state."""
+
+        from .analyses import ANALYSIS_CATALOG
+        from .edition import EDITION_PROFILE_PATH
+
+        payload = self._request_json("GET", EDITION_PROFILE_PATH)
+        profile = EditionProfile.parse(payload, ANALYSIS_CATALOG)
+        catalog = ANALYSIS_CATALOG.filtered(profile.enabled_names)
+        with self._state_lock:
+            self._edition_profile = profile
+            self._analysis_catalog = catalog
+        return profile
+
+    def _ensure_edition_profile(self) -> None:
+        if self._edition_profile is None:
+            self.refresh_edition_profile()
+
+    def require_analysis(self, analysis: str) -> Any:
+        """Resolve aliases, distinguish unknown/disabled, and return the known spec."""
+
+        from .analyses import ANALYSIS_CATALOG
+
+        canonical = ANALYSIS_ALIASES.get(analysis, analysis)
+        spec = ANALYSIS_CATALOG.get(canonical)
+        if spec is None:
+            raise UnknownAnalysisError(analysis)
+        self._ensure_edition_profile()
+        assert self._edition_profile is not None
+        capability = self._edition_profile.capability(canonical)
+        if capability is None:
+            # Strict profile parsing normally catches this. Keep the gate closed if
+            # a caller supplies a hand-built profile or the state is corrupted.
+            raise TransportError(
+                f"edition profile has no capability for SDK analysis {canonical!r}"
+            )
+        if not capability.enabled:
+            raise AnalysisDisabledError(canonical, edition=self._edition_profile.edition)
+        return spec
 
     @property
     def model_revision(self) -> int:
@@ -112,25 +183,24 @@ class HySimClient:
         return self._request_json("POST", "/api/session/cancel", payload={})
 
     def new_system(self) -> Mapping[str, Any]:
-        return self._modify_model("/api/session/new_empty", {})
+        return self._modify_model("new_empty", {})
 
     def load_builtin(self, case: str) -> Mapping[str, Any]:
-        return self._modify_model("/api/session/load_builtin", {"case": case})
+        return self._modify_model("load_builtin", {"case": case})
 
     def load_matpower(self, filename: str) -> Mapping[str, Any]:
-        return self._modify_model("/api/session/load_matpower", {"filename": filename})
+        return self._modify_model("load_matpower", {"filename": filename})
 
     def load_model(self, model: Mapping[str, Any] | str) -> Mapping[str, Any]:
         model_json = model if isinstance(model, str) else json.dumps(model, ensure_ascii=False)
-        return self._modify_model(
-            "/api/session/load_json_string", {"json_string": model_json}
-        )
+        return self._modify_model("load_json_string", {"json_string": model_json})
 
     def update_components(self, components: Mapping[str, Any]) -> Mapping[str, Any]:
-        return self._modify_model("/api/session/update_components", components)
+        return self._modify_model("update_components", components)
 
     def export_model(self) -> Mapping[str, Any]:
-        response = self._request_json("POST", "/api/session/export_json", payload={})
+        spec = self.require_analysis("export_json")
+        response = self._request_json(spec.method, spec.route, payload={})
         model_json = response.get("json_string")
         if not isinstance(model_json, str):
             raise TransportError("export_json response is missing json_string")
@@ -174,12 +244,17 @@ class HySimClient:
         *,
         timeout: float | None = None,
     ) -> AnalysisResult:
-        """Run a registered production analysis without hiding its raw schema."""
+        """Run an enabled production analysis after canonical alias resolution."""
 
-        if analysis not in ANALYSIS_ROUTES:
-            choices = ", ".join(sorted(ANALYSIS_ROUTES))
-            raise ValueError(f"unknown analysis {analysis!r}; choose one of: {choices}")
-        return self._run_analysis(analysis, payload or {}, timeout=timeout)
+        spec = self.require_analysis(analysis)
+        return self.execute(
+            name=spec.name,
+            route=spec.route,
+            method=spec.method,
+            modifies_model=spec.mutates_model,
+            payload=dict(payload or {}),
+            timeout=timeout,
+        )
 
     def execute(
         self,
@@ -195,10 +270,23 @@ class HySimClient:
         """Run any catalog route with honest result and revision semantics.
 
         This is the low-level seam used by the comprehensive family facade. It
-        does not know the analysis catalog; callers pass the resolved route,
-        method, and whether the call mutates the session model so the revision
-        is incremented exactly once for a mutation.
+        validates the caller-provided metadata against the SDK catalog and the
+        connected edition before transport, so it cannot bypass capability
+        gating.
         """
+
+        spec = self.require_analysis(name)
+        if route != spec.route or method.upper() != spec.method:
+            raise ValueError(
+                f"analysis {spec.name!r} must use {spec.method} {spec.route}"
+            )
+        if modifies_model != spec.mutates_model:
+            raise ValueError(
+                f"analysis {spec.name!r} has inconsistent model-mutation metadata"
+            )
+        name = spec.name
+        route = spec.route
+        method = spec.method
 
         request_id = str(uuid.uuid4())
         with self._operation_lock:
@@ -236,9 +324,12 @@ class HySimClient:
         )
         return AnalysisResult(analysis, route, request_id, revision, data)
 
-    def _modify_model(self, path: str, payload: Mapping[str, Any]) -> Mapping[str, Any]:
+    def _modify_model(self, analysis: str, payload: Mapping[str, Any]) -> Mapping[str, Any]:
+        spec = self.require_analysis(analysis)
+        if not spec.mutates_model:
+            raise ValueError(f"analysis {spec.name!r} is not a model mutation")
         with self._operation_lock:
-            result = self._request_json("POST", path, payload=payload)
+            result = self._request_json(spec.method, spec.route, payload=payload)
             with self._state_lock:
                 self._model_revision += 1
             return result
@@ -250,18 +341,18 @@ class HySimClient:
         *,
         timeout: float | None,
     ) -> AnalysisResult:
-        route = ANALYSIS_ROUTES[analysis]
+        spec = self.require_analysis(analysis)
         request_id = str(uuid.uuid4())
         with self._operation_lock:
             revision = self.model_revision
             data = self._request_json(
-                "POST",
-                route,
+                spec.method,
+                spec.route,
                 payload=payload,
                 timeout=timeout,
                 request_id=request_id,
             )
-        return AnalysisResult(analysis, route, request_id, revision, data)
+        return AnalysisResult(spec.name, spec.route, request_id, revision, data)
 
     def _request_json(
         self,

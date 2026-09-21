@@ -51,6 +51,7 @@ $requiredCache = @(
   'HACDCPF_ENABLE_IPO:BOOL=OFF',
   'HACDCPF_ENABLE_IPOPT:BOOL=ON',
   'HACDCPF_TRIAL_EDITION:BOOL=OFF',
+  'HACDCPF_RESILIENCE_EDITION:BOOL=OFF',
   'HACDCPF_USE_GUROBI:BOOL=OFF',
   'HACDCPF_USE_SUITESPARSE:BOOL=ON',
   'MIPSOLVERS_ENABLE_IPO:BOOL=OFF',
@@ -73,29 +74,48 @@ if ($cache -notmatch "(?m)^MIPSOLVERS_USE_PREBUILT_THIRD_PARTY:[^=]+=$expectedPr
 $mipSourceMatch = [regex]::Match($cache, '(?m)^MIPSOLVERS_SOURCE_DIR:PATH=(.+)$')
 if ($mipSourceMatch.Success -and $mipSourceMatch.Groups[1].Value.Trim()) {
   $mipSolversDir = [System.IO.Path]::GetFullPath($mipSourceMatch.Groups[1].Value.Trim())
-} elseif (Test-Path (Join-Path $repoRoot "MIPSolvers/CMakeLists.txt")) {
-  $mipSolversDir = [System.IO.Path]::GetFullPath((Join-Path $repoRoot "MIPSolvers"))
 } else {
-  $mipSolversDir = [System.IO.Path]::GetFullPath((Join-Path $repoRoot "../MIPSolvers"))
+  $mipSolversDir = [System.IO.Path]::GetFullPath((Join-Path $repoRoot "MIPSolvers"))
+}
+$vendoredMipsolversDir = [System.IO.Path]::GetFullPath((Join-Path $repoRoot "MIPSolvers"))
+if (-not $mipSolversDir.Equals($vendoredMipsolversDir,
+    [System.StringComparison]::OrdinalIgnoreCase)) {
+  throw "Windows releases must use the locked in-repository MIPSolvers import."
 }
 if (-not (Test-Path (Join-Path $mipSolversDir "CMakeLists.txt"))) {
-  throw "MIPSolvers source cannot be resolved from the CMake cache or repository layout."
+  throw "Locked in-repository MIPSolvers source is missing."
 }
-Assert-CleanGitCheckout $mipSolversDir "MIPSolvers"
-
-if (Test-Path (Join-Path $mipSolversDir ".git")) {
-  $expectedMatch = [regex]::Match(
-    $cache, '(?m)^_HACDCDSS_MIPSOLVERS_EXPECTED_COMMIT:STRING=(.+)$')
-  $actualCommit = (& git -C $mipSolversDir rev-parse HEAD).Trim()
-  if (-not $expectedMatch.Success -or
-      $actualCommit -ne $expectedMatch.Groups[1].Value.Trim()) {
-    throw "MIPSolvers HEAD does not match the HySim dependency pin."
-  }
+$expectedCommitMatch = [regex]::Match(
+  $cache, '(?m)^_HACDCDSS_MIPSOLVERS_EXPECTED_COMMIT:STRING=(.+)$')
+$expectedTreeMatch = [regex]::Match(
+  $cache, '(?m)^_HACDCDSS_MIPSOLVERS_EXPECTED_TREE:STRING=(.+)$')
+if (-not $expectedCommitMatch.Success -or -not $expectedTreeMatch.Success) {
+  throw "MIPSolvers provenance values are missing from the Windows CMake cache."
+}
+$lock = Get-Content -LiteralPath (Join-Path $repoRoot "cmake/MIPSolvers.lock.json") |
+  ConvertFrom-Json
+if ($expectedCommitMatch.Groups[1].Value.Trim() -ne $lock.upstream.commit -or
+    $expectedTreeMatch.Groups[1].Value.Trim() -ne $lock.import.git_tree) {
+  throw "MIPSolvers CMake provenance values do not match the dependency lock."
+}
+$trackedTree = (& git -C $repoRoot rev-parse "HEAD:MIPSolvers" 2>$null)
+if ($LASTEXITCODE -ne 0) {
+  throw "Commit the prefixed MIPSolvers import before creating a Windows release."
+}
+if ($trackedTree.Trim() -ne $lock.import.git_tree) {
+  throw "Committed MIPSolvers subtree does not match the dependency lock."
+}
+$pendingMipsolvers = & git -C $repoRoot status --porcelain --untracked-files=all -- MIPSolvers
+if ($LASTEXITCODE -ne 0 -or $pendingMipsolvers) {
+  throw "MIPSolvers import must have no staged, unstaged, or untracked changes before creating a Windows release."
 }
 
 if (-not $SkipBuild) {
-  & cmake --build $buildPath --config Release --parallel 8
-  if ($LASTEXITCODE -ne 0) { throw "Windows Release build failed" }
+  & cmake --build $buildPath --config Release --target run_gui_server test_edition_profile test_solver_capabilities --parallel 8
+  if ($LASTEXITCODE -ne 0) { throw "Windows server and edition tests failed to build" }
+  & ctest --test-dir $buildPath -C Release -L edition-full-unit `
+      --no-tests=error --output-on-failure
+  if ($LASTEXITCODE -ne 0) { throw "Windows full-edition unit test failed" }
   & ctest --test-dir $buildPath -C Release -R '^SolverCapabilities:' `
       --no-tests=error --output-on-failure
   if ($LASTEXITCODE -ne 0) { throw "Windows package acceptance tests failed" }
@@ -125,10 +145,7 @@ Copy-Item -LiteralPath (Join-Path $repoRoot "README.md") -Destination $outputPat
 Copy-Item -LiteralPath (Join-Path $repoRoot "third_party/OpenXLSX-master/LICENSE.md") `
   -Destination (Join-Path $outputPath "licenses/OpenXLSX-LICENSE.md")
 
-$mklLicenseRoot = Join-Path $mipSolversDir "third_party/install/share/mipsolvers-third-party/licenses/oneapi-mkl"
-if ($SourceDependencies) {
-  $mklLicenseRoot = Join-Path $mipSolversDir "third_party/oneapi-mkl/licensing"
-}
+$mklLicenseRoot = Join-Path $repoRoot "build/windows-dependencies/oneapi-mkl/licensing"
 if (-not (Test-Path $mklLicenseRoot)) { throw "Packaged oneMKL license material is missing" }
 Copy-Item -LiteralPath $mklLicenseRoot -Destination (Join-Path $outputPath "licenses/oneapi-mkl") -Recurse
 
@@ -183,14 +200,24 @@ $vcRedistRoot = $vcRedistCandidates | Where-Object {
   Test-Path (Join-Path $_ "Microsoft.VC143.CRT")
 } | Select-Object -First 1
 if (-not $vcRedistRoot) { throw "Visual C++ 2022 x64 redistributable files were not found" }
-foreach ($runtimeGroup in @("Microsoft.VC143.CRT", "Microsoft.VC143.OpenMP")) {
-  $runtimeDir = Join-Path $vcRedistRoot $runtimeGroup
-  if (Test-Path $runtimeDir) {
-    Get-ChildItem -LiteralPath $runtimeDir -Filter "*.dll" -File |
-      ForEach-Object {
-        Copy-Item -LiteralPath $_.FullName `
-          -Destination (Join-Path $outputPath "bin") -Force
-      }
+$vcRuntimeAllowlist = @(
+  'concrt140.dll',
+  'msvcp140.dll',
+  'msvcp140_1.dll',
+  'msvcp140_2.dll',
+  'msvcp140_atomic_wait.dll',
+  'msvcp140_codecvt_ids.dll',
+  'vccorlib140.dll',
+  'vcomp140.dll',
+  'vcruntime140.dll',
+  'vcruntime140_1.dll',
+  'vcruntime140_threads.dll'
+)
+foreach ($dll in $vcRuntimeAllowlist) {
+  $source = Get-ChildItem -LiteralPath $vcRedistRoot -Filter $dll -Recurse -File |
+    Select-Object -First 1 -ExpandProperty FullName
+  if ($source) {
+    Copy-Item -LiteralPath $source -Destination (Join-Path $outputPath "bin/$dll") -Force
   }
 }
 
@@ -213,12 +240,24 @@ if ($dependencies -match '^gurobi') {
 $systemDlls = @('KERNEL32.dll', 'WS2_32.dll', 'ADVAPI32.dll', 'SHELL32.dll',
   'USER32.dll', 'OLE32.dll', 'OLEAUT32.dll', 'CRYPT32.dll', 'bcrypt.dll',
   'ntdll.dll', 'UCRTBASE.dll')
+$requiredRuntimeDlls = [System.Collections.Generic.HashSet[string]]::new(
+  [System.StringComparer]::OrdinalIgnoreCase)
 foreach ($dll in $dependencies) {
   if ($dll -like 'api-ms-win-*.dll' -or $dll -in $systemDlls) { continue }
+  if ($dll -notin $vcRuntimeAllowlist) {
+    throw "Runtime dependency is not explicitly allowlisted: $dll"
+  }
   if (-not (Test-Path (Join-Path $outputPath "bin/$dll"))) {
     throw "Unpackaged runtime dependency: $dll"
   }
+  [void]$requiredRuntimeDlls.Add($dll)
 }
+Get-ChildItem -LiteralPath (Join-Path $outputPath 'bin') -Filter '*.dll' -File |
+  ForEach-Object {
+    if (-not $requiredRuntimeDlls.Contains($_.Name)) {
+      Remove-Item -LiteralPath $_.FullName -Force
+    }
+  }
 
 $startScript = @'
 $ErrorActionPreference = "Stop"
@@ -248,9 +287,7 @@ Set-Content -LiteralPath (Join-Path $outputPath "Start-HySim.cmd") -Value $cmdSc
 $hysimCommit = if (Test-Path (Join-Path $repoRoot ".git")) {
   (& git -C $repoRoot rev-parse HEAD).Trim()
 } else { "source-archive" }
-$mipCommit = if (Test-Path (Join-Path $mipSolversDir ".git")) {
-  (& git -C $mipSolversDir rev-parse HEAD).Trim()
-} else { "source-archive" }
+$mipCommit = $lock.upstream.commit
 $buildInfo = @(
   "Product=HySim-XJTU-HRPES",
   "Edition=full",

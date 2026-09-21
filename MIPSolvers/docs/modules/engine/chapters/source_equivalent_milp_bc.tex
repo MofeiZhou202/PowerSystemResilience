@@ -1,0 +1,761 @@
+% source_equivalent_milp_bc.tex —— engine 实现转写：原生 MILP Branch-and-Cut
+% 本文件为实现转写章，遵循 docs/modules/README.md 的数学模型规范。
+% 所有公式只转写当前源码实际执行的赋值、阈值与条件分支；锚点禁止行号。
+
+\section{原生 MILP Branch-and-Cut：求解主流程与树搜索}\label{sec:impl-milpbc}
+
+\subsection{转写范围与口径}\label{subsec:milpbc-scope}
+
+本章转写 \srcpath{src/engine/solver/native/milp/bc/} 下原生 branch-and-cut（B\&C）
+求解器的当前实现，核验日期 2026-09-13。覆盖文件：
+
+\begin{itemize}
+  \item 公共入口 \srcpath{src/engine/solver/native/milp/bc/api.cpp}（4 个
+        \texttt{solve\_*milp/minlp*\_bc} 重载的转发层）；
+  \item 主流程 \srcpath{src/engine/solver/native/milp/bc/legacy/branch\_and\_cut.cpp}
+        及其文本包含的 14 段 \srcpath{src/engine/solver/native/milp/bc/legacy/bc\_run/}
+        下的 \texttt{.inc} 片段（\texttt{01\_setup\_presolve\_root\_build.inc} 至
+        \texttt{14\_parallel\_path\_and\_result.inc}）；
+  \item 预求解 \srcpath{src/engine/solver/native/milp/bc/milp\_presolve.cpp}；
+  \item legacy 支撑单元（均位于
+        \srcpath{src/engine/solver/native/milp/bc/legacy/}）：
+        分支评分 \texttt{bc\_branching.cpp}、割生成
+        \texttt{bc\_cuts.cpp}/\texttt{bc\_cuts\_transformed.cpp}/\texttt{bc\_cuts\_common.hpp}、
+        CGLP \texttt{bc\_cglp.cpp}/\texttt{bc\_cglp\_model.cpp}、clique 表
+        \texttt{bc\_clique\_table.cpp}、域探测 \texttt{bc\_domain\_probe.cpp}、
+        隐含界 \texttt{bc\_implied\_bounds.cpp}、并行树 \texttt{bc\_parallel.cpp}、
+        对偶证明 \texttt{bc\_utils\_dual\_proof.cpp}/\texttt{bc\_utils\_dual\_proof\_conflict.cpp}、
+        根审计 \texttt{bc\_root\_audit.cpp}、解认证 \texttt{bc\_validation.cpp}、
+        HiGHS 风格数值规则 \texttt{bc\_highs\_style\_numerics.cpp}、通用工具
+        \texttt{bc\_utils.cpp}/\texttt{bc\_legacy\_helpers.cpp} 等；
+  \item 共享头文件 \srcpath{include/mipsolvers/engine/detail/} 下的
+        \texttt{bc\_types.hpp}、\texttt{bc\_pools.hpp}、\texttt{bc\_utils\_core.hpp}、
+        \texttt{bc\_restart.hpp}、\texttt{bc\_threading.hpp}、\texttt{bc\_status.hpp}，
+        与公共选项/统计 \srcpath{include/mipsolvers/engine/bc/options.hpp}、\srcpath{include/mipsolvers/engine/bc/stats.hpp}。
+\end{itemize}
+
+\begin{boundarynote}
+口径约定：（i）除明确标注外，本章所有目标值、界与 gap 均在 B\&C 的
+\textbf{内部最小化坐标}下叙述；最大化模型在入口处把目标取负，结果装配时再
+符号还原。（ii）\texttt{bc\_run/*.inc} 为 \texttt{BCSolveState::run()} 的文本
+包含片段，不独立编译；其中规则以 ``段号 + lambda 名'' 锚定，宿主函数锚点统一为\srcpath{src/engine/solver/native/milp/bc/legacy/branch\_and\_cut.cpp:BCSolveState::run}。
+（iii）本章不含通用 B\&C 理论；理论层见本手册理论章。（iv）数值证据只引用
+\texttt{docs/archive/} 中已冻结的实验记录，正文不复述其未达标预测为已实现行为。
+\end{boundarynote}
+
+\subsection{入口与主流程骨架}\label{subsec:milpbc-entry}
+
+公开 API 是纯转发层：\texttt{solve\_milp\_bc}/\texttt{solve\_minlp\_bc} 的两个
+重载（无/有 warm-start 与回调）分别直接调用
+\texttt{detail::solve\_milp\_bc\_legacy\_core} 与
+\texttt{detail::solve\_minlp\_bc\_legacy\_core}，不附加任何逻辑。
+对应源码为 \srcpath{src/engine/solver/native/milp/bc/api.cpp:solve\_milp\_bc}、\srcpath{src/engine/solver/native/milp/bc/api.cpp:solve\_minlp\_bc}。
+
+带回调的重载在进入主流程前执行三步前置处理：（1）把
+\texttt{BCWarmStart} 的原始点安装进模型副本；（2）若提供了
+\texttt{hyperparam\_tuner} 回调，先计算实例特征并用其返回值整体替换
+\texttt{BCOptions}；（3）校验回调与选项的相容性。求解后再调用
+\texttt{post\_solve} 回调。
+对应源码为\srcpath{src/engine/solver/native/milp/bc/legacy/branch\_and\_cut.cpp:detail::solve\_milp\_bc\_legacy\_core}、\srcpath{src/engine/solver/native/milp/bc/legacy/bc\_legacy\_entry\_helpers.hpp:install\_primal\_warm\_start}、\srcpath{src/engine/solver/native/milp/bc/legacy/bc\_instance\_features.cpp:compute\_instance\_features}。
+
+核心状态对象是 \texttt{BCSolveState}：持有原模型引用、（可能被 auto-tune 修改的）
+选项副本与回调指针，唯一的公开方法是 \texttt{run()}。该头文件同时固定了一组
+HiGHS 对齐的硬编码默认常量：MIP 可行容差 $10^{-6}$、小矩阵元阈值 $10^{-9}$、
+割池年龄上限 $30$、割池软上限 $10000$、LP 行年龄上限 $10$。
+对应源码为\srcpath{src/engine/solver/native/milp/bc/legacy/bc\_solve\_state.hpp:BCSolveState}。
+
+\texttt{run()} 的函数体由 14 个文本包含段按编号拼接而成，构成唯一主流程：
+
+\begin{enumerate}
+  \item \texttt{01\_setup\_presolve\_root\_build.inc}：参数/环境初始化、整数性
+        规范化、strict-HiGHS 入口、presolve、根节点构建；
+  \item \texttt{02}–\texttt{05}：根 LP 松弛与根割循环（HiGHS 侧状态、隐含界
+        分离、tableau 源、crossover 与根收尾）；
+  \item \texttt{06}–\texttt{08}：根启发式（feasibility pump、sub-MIP/舍入驱动、
+        progressive rounding、LP diving、LNS、根 probing）与并行树并发启动决策；
+  \item \texttt{09}：树基础设施（\texttt{NodeQueue}、全局下界、节点 LP 构造器）；
+  \item \texttt{10}–\texttt{11}：节点域传播与冲突/蕴含学习、队列管理；
+  \item \texttt{12}：单子节点处理（LP 求解、池分离、割生成）与对偶证明消费；
+  \item \texttt{13}：顺序主循环；
+  \item \texttt{14}：异构并行探索路径与最终结果装配/postsolve。
+\end{enumerate}
+
+对应源码为\srcpath{src/engine/solver/native/milp/bc/legacy/branch\_and\_cut.cpp:BCSolveState::run}
+与 \srcpath{src/engine/solver/native/milp/bc/legacy/bc\_run/}。
+MINLP 入口转发到同一遗产核心的 NLP 变体。
+对应源码为\srcpath{src/engine/solver/native/milp/bc/legacy/branch\_and\_cut.cpp:detail::solve\_minlp\_bc\_legacy\_core}、\srcpath{src/engine/solver/native/milp/bc/legacy/bc\_minlp\_legacy.cpp}。
+
+全程状态字符串集中在 \texttt{bc\_status} 命名空间，如
+\texttt{kTimeLimitReached}（\texttt{"Time limit reached"}）、
+\texttt{kNodeLimitReached}、\texttt{kSearchQueueExhausted}、
+\texttt{kOptimalityGapReached}、\texttt{kOptimalTreeExhausted}、
+\texttt{kFeasibleIncumbentFound}、\texttt{kNoFeasibleIntegerSolutionFound} 等；
+结果装配只从这些常量取词，不另行拼接（审计失败等例外情形除外，见
+\ref{subsec:milpbc-cert}）。
+对应源码为\srcpath{include/mipsolvers/engine/detail/bc\_status.hpp}。
+
+\subsection{全局时限合约与可选根预算}\label{subsec:milpbc-deadline}
+
+段 01 在任何嵌套阶段之前启动唯一求解时钟 $t_0$，并定义三个贯穿全程的 lambda：
+\begin{align}
+  \mathrm{elapsed} &= \mathrm{now}()-t_0,\\
+  \mathrm{remaining} &=
+    \begin{cases}
+      +\infty, & \texttt{time\_limit\_sec}\le 0\ \text{或非有限},\\
+      \texttt{time\_limit\_sec}-\mathrm{elapsed}, & \text{否则},
+    \end{cases}\\
+  R_{\mathrm{finalize}} &=
+    \begin{cases}
+      \min\bigl(1.0,\ \max(0.05,\ 0.10\cdot\texttt{time\_limit\_sec})\bigr),
+        & \texttt{time\_limit\_sec}>0\ \text{且有限},\\
+      0, & \text{否则},
+    \end{cases}
+\end{align}
+其中 $R_{\mathrm{finalize}}$ 是``根后收尾保留时间''。可选根工作（割轮次之间的
+检查、树准备的各阶段）的截止判据为
+\begin{equation}
+  \texttt{bc\_optional\_root\_budget\_expired}:\quad
+  \texttt{time\_limit\_sec}>0\ \land\ \mathrm{remaining}\le R_{\mathrm{finalize}} .
+\end{equation}
+$0.05$、$0.10$、$1.0$ 三个常数为硬编码。对应源码为\srcpath{src/engine/solver/native/milp/bc/legacy/bc\_run/01\_setup\_presolve\_root\_build.inc}
+中的 lambda \texttt{bc\_remaining\_sec} 与 \texttt{bc\_optional\_root\_budget\_expired}
+（宿主函数\srcpath{src/engine/solver/native/milp/bc/legacy/branch\_and\_cut.cpp:BCSolveState::run}）。
+该``单一全局预算被所有嵌套阶段继承''的合约及其缺陷修复记录见
+\srcpath{docs/archive/native\_milp\_cplex\_gap\_improvement\_2026-09-12.md}。
+
+\subsection{Presolve：strict-HiGHS 入口与原生管线}\label{subsec:milpbc-presolve}
+
+段 01 的 presolve 选择逻辑如下。当 \texttt{highs\_root\_native\_tree\_contract}
+开启且剩余预算为正时，先以 \texttt{retain\_postsolve=true} 运行一次 HiGHS
+presolve 预检并缓存其结果；同一原始模型只允许这一次权威 presolve，后续阶段
+复用该侧状态而不再调用。strict HiGHS 合约（\texttt{strict\_highs\_mip\_contract}
+或 LP 内核后端为 HiGHS 时的派生量）决定是否走直接 \texttt{evaluateRootNode}
+式的上游根生命周期；非 strict 路径则在 PaPILO 与原生 \texttt{MILPPresolve}
+之间按选项选择。
+对应源码为\srcpath{src/engine/solver/native/milp/bc/legacy/bc\_run/01\_setup\_presolve\_root\_build.inc}、\srcpath{src/engine/solver/native/milp/bc/legacy/bc\_conformance\_trace.cpp:cached\_highs\_presolve\_side\_state}
+（侧状态存储的实现在 \srcpath{src/engine/strategy/highs\_presolve\_side\_state.cpp}）。
+
+原生 MILP presolve 的不动点循环为：每轮依次执行
+固定变量消除 $\to$ 空行/空列消除 $\to$ 单行处理 $\to$ 单列处理 $\to$
+界收紧 $\to$ 固定变量消除 $\to$ forcing row $\to$ 固定变量消除 $\to$
+空行/空列消除 $\to$ doubleton 方程代入 $\to$ 被占优列 $\to$ 平行行
+（仅前 3 轮）$\to$ 二进制 probing $\to$ 末尾再各做一次固定变量与空行/空列
+消除；每步之后立刻检查不可行性，轮数上界为 \texttt{opts.max\_rounds}，
+一轮零变更即终止。每个约简边界与每 256 个 probing 候选/行轮询一次全局
+deadline。
+对应源码为\srcpath{src/engine/solver/native/milp/bc/milp\_presolve.cpp:MILPPresolve::run}、\srcpath{src/engine/solver/native/milp/bc/milp\_presolve.cpp:MILPPresolve::deadline\_expired}、\srcpath{src/engine/solver/native/milp/bc/milp\_presolve.cpp:MILPPresolve::run\_probing}。
+
+\begin{boundarynote}
+失败语义（须在引用处保持可见）：\texttt{MILPPresolve::run} 在不可行或超时时
+\textbf{不发布任何部分约简模型}——\texttt{rebuild\_model} 只在
+既非不可行又未超时被跳过，调用方必须保留原坐标系。postsolve 与正向映射分别由
+\srcpath{src/engine/solver/native/milp/bc/milp\_presolve.cpp:MILPPresolve::postsolve}
+与\srcpath{src/engine/solver/native/milp/bc/milp\_presolve.cpp:MILPPresolve::forward\_map}
+提供；另有原位变体
+\srcpath{src/engine/solver/native/milp/bc/milp\_presolve.cpp:presolve\_inplace}。
+\end{boundarynote}
+
+HiGHS 保留 presolve 的坐标恒等式在代码中以两个工具函数固定：目标偏移
+$f_{\mathrm{orig}} = f_{\mathrm{red}} + \Delta$ 的还原
+\begin{equation}
+  f_{\mathrm{red}} = f_{\mathrm{orig}} - \Delta_{\mathrm{presolve}},
+\end{equation}
+以及逐列仿射映射 $x_{\mathrm{orig}} = s\,x_{\mathrm{red}} + c$ 下变量界
+$x_t \le a x_z + b$ 的约简空间转运
+\begin{equation}
+  y_t \le \frac{a\,s_z}{s_t}\,y_z + \frac{a\,c_z + b - c_t}{s_t},
+  \qquad s_t<0\ \text{时上下界角色互换}.
+\end{equation}
+对应源码为\srcpath{src/engine/solver/native/milp/bc/legacy/bc\_highs\_style\_numerics.cpp:presolved\_objective\_value}、\srcpath{src/engine/solver/native/milp/bc/legacy/bc\_highs\_style\_numerics.cpp:highs\_style\_map\_variable\_bound\_to\_reduced}；
+推导记录见
+\srcpath{docs/archive/native\_milp\_root\_source\_eligibility\_2026-08-13.md} 与\srcpath{docs/archive/native\_milp\_presolve\_varbound\_coordinates\_2026-08-13.md}。
+
+\subsection{根 LP 松弛与根割循环}\label{subsec:milpbc-root}
+
+根 LP 松弛由 \texttt{solve\_lp\_relaxation} 系列完成（单纯形/IPM/vendored
+HiGHS 三种后端），其结果类型 \texttt{LPRelaxationResult} 除原始解与对偶界外
+还携带 \texttt{basis\_hint}、\texttt{row\_duals} 与标志
+\texttt{requires\_ipm\_nodes}：当 IPM$\to$单纯形 crossover 未能产出可用基时，
+后续节点 LP 必须路由到 IPM 而非从缺基状态冷启动单纯形——这是一条显式声明的
+回退路径。
+对应源码为\srcpath{src/engine/solver/native/milp/bc/legacy/bc\_relaxation.cpp:solve\_lp\_relaxation}、\srcpath{src/engine/solver/native/milp/bc/legacy/bc\_relaxation.cpp:solve\_lp\_relaxation\_with\_vendored\_highs}、\srcpath{include/mipsolvers/engine/detail/bc\_types.hpp:LPRelaxationResult}。
+
+\paragraph{割预算与轮次上限。}
+段 05 在割循环前把根剩余预算的有界份额分配给割：
+\begin{align}
+  B_{\mathrm{usable}} &= \max\bigl(0,\ \mathrm{remaining}-R_{\mathrm{finalize}}\bigr),
+  \qquad
+  B_{\mathrm{cut}} = 0.35\,B_{\mathrm{usable}},\\
+  R_{\mathrm{eff}} &= \texttt{root\_cut\_rounds}\ \text{再取}\ 
+  \begin{cases}
+    \min(R_{\mathrm{eff}},3), & B_{\mathrm{cut}}<2\,\mathrm{s},\\
+    \min\bigl(R_{\mathrm{eff}},\lfloor B_{\mathrm{cut}}/0.05\rfloor\bigr),
+      & \text{否则},
+  \end{cases}
+\end{align}
+且 $B_{\mathrm{cut}}\le 0.05$\,s 时 $R_{\mathrm{eff}}=0$。比例 $0.35$ 与每轮
+$0.05$\,s 的下界估计均为硬编码。规模自适应进一步按 presolved 行数压减轮次与
+每轮割数（阈值取 \texttt{cut\_budget\_*\_row\_threshold} 系列选项），SCUC 形态
+（二进制占比高、行数适中的判定）则放宽 GMI 过滤器并把停滞上限压到 2。
+对应源码为\srcpath{src/engine/solver/native/milp/bc/legacy/bc\_run/05\_root\_relaxation\_d.inc}
+（宿主\srcpath{src/engine/solver/native/milp/bc/legacy/branch\_and\_cut.cpp:BCSolveState::run}）；
+预算原则的推导见
+\srcpath{docs/archive/native\_milp\_cplex\_gap\_improvement\_2026-09-12.md}。
+
+\paragraph{根割源与停滞判据。}
+根部分离按``变换源（tableau/path/mod-k）$\to$ 通用 Gomory/MIR 轮次 $\to$
+根 probing''的顺序组织。变换源循环采用 HiGHS 风格的不动点：一轮所选行成功
+追加并重优化后，即使目标零抬升也保留这些行；终止由平滑进展停滞规则拥有——
+连续 \texttt{highs\_source\_stall}${}\ge 3$ 次无进展即停止。每轮之间检查
+\texttt{bc\_optional\_root\_budget\_expired}。
+对应源码为\srcpath{src/engine/solver/native/milp/bc/legacy/bc\_run/05\_root\_relaxation\_d.inc}、\srcpath{src/engine/solver/native/milp/bc/legacy/bc\_cuts\_transformed.cpp:add\_transformed\_tableau\_cuts}。
+该退化不动点的缺陷史与``保留零抬升行''的实验结论（界增强被接受、端到端
+运行时间合同失败而回滚生产策略）记录于
+\srcpath{docs/archive/native\_milp\_degenerate\_cutpool\_fixed\_point\_2026-08-13.md}；
+当前代码以选项与生命周期门槛体现其最终形态，正文不要把它读成``零抬升行
+一律回滚''。
+
+变换根的源合格性判据为
+\begin{equation}
+  \mathrm{eligible}\iff
+  \mathrm{root\_bound}\ \text{有限}\ \land\
+  \bigl(\mathrm{declared\_int}>0\ \lor\ \mathrm{implied\_int}>0\bigr),
+\end{equation}
+即声明整数列与 presolve 推断整数列的并集非空。
+对应源码为\srcpath{src/engine/solver/native/milp/bc/legacy/bc\_highs\_style\_numerics.cpp:highs\_style\_root\_source\_eligible}；
+资格修正的两轮实现保真记录见
+\srcpath{docs/archive/native\_milp\_root\_source\_eligibility\_2026-08-13.md}。
+
+\paragraph{根审计。}
+三个诊断/审计函数在割提交路径上复核实现保真性：
+（i）\texttt{audit\_root\_cut\_rows} 对每个新加行 $a^Tx\le b$ 计算 LP 点与
+（可选）incumbent 点的违反量，缩放因子
+$\mathrm{scale}=\max\{1,\|a\|,|b|\}$，LP 违反 $\le \texttt{tol}\cdot\mathrm{scale}$
+记为未违反，incumbent 违反 $>100\,\texttt{tol}\cdot\mathrm{scale}$ 计数；
+（ii）\texttt{audit\_root\_cut\_standard\_form\_rows} 把新加行重进标准形并逐系数
+比对（含行符号翻转与下界平移后的右端项
+$\mathrm{sign}\cdot(b-\sum_j a_j\,\mathrm{lbshift}_j)$）；
+（iii）\texttt{audit\_root\_reduced\_costs} 统计非零 reduced cost 并枚举
+reduced-cost fixing 候选：对处于下界的整数列 $j$，
+\begin{equation}
+  \mathrm{new\_ub}_j=\Bigl\lfloor \frac{\mathrm{gap}}{|\bar c_j|}
+  + l_j + \texttt{int\_tol}\Bigr\rfloor,
+  \qquad
+  \mathrm{gap}=\mathrm{incumbent}-\mathrm{node\_bound},
+\end{equation}
+处于上界时对称地取
+$\mathrm{new\_lb}_j=\lceil u_j-\mathrm{gap}/|\bar c_j|-\texttt{int\_tol}\rceil$；
+仅当 $|\bar c_j|(u_j-l_j)>\mathrm{gap}+10^{-9}$ 且能收紧时计数。
+对应源码为\srcpath{src/engine/solver/native/milp/bc/legacy/bc\_root\_audit.cpp:audit\_root\_cut\_rows}、\srcpath{src/engine/solver/native/milp/bc/legacy/bc\_root\_audit.cpp:audit\_root\_cut\_standard\_form\_rows}、\srcpath{src/engine/solver/native/milp/bc/legacy/bc\_root\_audit.cpp:audit\_root\_reduced\_costs}。
+
+\paragraph{重启前置条件。}
+根重启遵循 HiGHS 的``RENS 前置 + 非活跃整数率门槛''合约：低分数根上的 RENS
+槽位（\texttt{enable\_root\_low\_fractionality\_rens}）调用受限 sub-MIP 助手，
+其内部限制为至多 200 个子节点、500 个叶子、12 个无改进节点与
+$\min(3\,\mathrm{s},\,5\%\,\text{剩余时间})$；strict HiGHS 根属主上的重 presolve
+重启被显式关闭（\texttt{mip\_allow\_restart=false}），因为该合约下根坐标固定。
+对应源码为\srcpath{src/engine/solver/native/milp/bc/legacy/bc\_run/05\_root\_relaxation\_d.inc}
+（\texttt{highs\_root\_owner} 配置点，宿主
+\srcpath{src/engine/solver/native/milp/bc/legacy/branch\_and\_cut.cpp:BCSolveState::run}）；
+前提审计与多轮实测记录见
+\srcpath{docs/archive/native\_milp\_root\_quality\_restart\_prerequisites\_2026-08-13.md}。
+树级（非根）重启由状态化控制器掌管，见 \ref{subsec:milpbc-tree}。
+
+\subsection{割生成与割池管理}\label{subsec:milpbc-cuts}
+
+\paragraph{族调度。}
+\texttt{add\_cuts} 是割生成的总分派器：按 \texttt{opt.cuts} 枚举
+（\texttt{None}/\texttt{IntRounding}/\texttt{MIR}/\texttt{Gomory}/\texttt{Cover}
+等）选择族序列，在共享预算 \texttt{max\_cuts} 内依次消费。每族的可选统计由
+\texttt{CutFamilyTracker} 维护，admission 后按
+\begin{equation}
+  \mathrm{efficacy}(a^Tx\le b)=\frac{\max(0,\ a^Tx-b)}{\|a\|_2}
+\end{equation}
+记录该轮平均效力。
+对应源码为\srcpath{src/engine/solver/native/milp/bc/legacy/bc\_cuts.cpp:add\_cuts}、\srcpath{include/mipsolvers/engine/detail/bc\_types.hpp:CutFamilyTracker}。
+
+自适应门控：每族保留最近 $H=5$ 轮的环形效力历史；轮数达到 $H$ 后，若滑动平均
+\begin{equation}
+  \overline{\mathrm{eff}}=\frac{1}{H}\textstyle\sum_{i=0}^{H-1}\mathrm{history}_i
+  \;<\; \varepsilon_{\min}=10^{-3},
+\end{equation}
+则该族被禁用（\texttt{disabled=true}），后续轮次跳过并计
+\texttt{skipped\_rounds}；未满 $H$ 轮时滑动平均按乐观值 $1.0$ 处理。
+$H=5$ 与 $\varepsilon_{\min}=10^{-3}$ 均为硬编码常量。
+对应源码为\srcpath{include/mipsolvers/engine/detail/bc\_types.hpp:CutFamilyStats::add\_round}、\srcpath{include/mipsolvers/engine/detail/bc\_types.hpp:CutFamilyStats::should\_skip}。
+
+\paragraph{各分离器。}
+实现包含：基 MIR 与行 MIR
+（\texttt{add\_basis\_mir\_cuts}/\texttt{add\_row\_mir\_cuts}）、基 Gomory
+（\texttt{add\_basis\_gomory\_cuts}）、cover（\texttt{add\_cover\_cuts} 及投影
+容量变体 \texttt{add\_projected\_capacity\_cover\_cuts}）、clique
+（\texttt{add\_clique\_cuts}）、zero-half（\texttt{add\_zero\_half\_cuts}）、
+整数舍入类 MIR（\texttt{add\_mir\_like\_cuts}）以及变换 tableau 割
+（\texttt{add\_transformed\_tableau\_cuts}）。
+对应源码为\srcpath{src/engine/solver/native/milp/bc/legacy/bc\_cuts.cpp:add\_basis\_mir\_cuts}、\srcpath{src/engine/solver/native/milp/bc/legacy/bc\_cuts.cpp:add\_row\_mir\_cuts}、\srcpath{src/engine/solver/native/milp/bc/legacy/bc\_cuts.cpp:add\_basis\_gomory\_cuts}、\srcpath{src/engine/solver/native/milp/bc/legacy/bc\_cuts.cpp:add\_cover\_cuts}、\srcpath{src/engine/solver/native/milp/bc/legacy/bc\_cuts.cpp:add\_clique\_cuts}、\srcpath{src/engine/solver/native/milp/bc/legacy/bc\_cuts.cpp:add\_zero\_half\_cuts}、\srcpath{src/engine/solver/native/milp/bc/legacy/bc\_cuts\_transformed.cpp:add\_transformed\_tableau\_cuts}。
+GMI 准入阈值（\texttt{gmi\_min\_efficacy=1e-3}、\texttt{gmi\_max\_density=0.35}、
+\texttt{gmi\_max\_parallelism=0.90} 等）为 \texttt{BCOptions} 中的硬编码默认，
+对应源码为 \srcpath{include/mipsolvers/engine/bc/options.hpp}。
+
+CGLP（cut-generating LP）析取割单独成链：候选选择
+$\to$ 对每个候选列 $j$ 构造 master LP $\to$ 求解并抽取割 $\to$ 根处批量追加。
+对应源码为\srcpath{src/engine/solver/native/milp/bc/legacy/bc\_cglp.cpp:select\_cglp\_candidates}、\srcpath{src/engine/solver/native/milp/bc/legacy/bc\_cglp\_model.cpp:build\_cglp\_lp}、\srcpath{src/engine/solver/native/milp/bc/legacy/bc\_cglp.cpp:generate\_cglp\_cut}、\srcpath{src/engine/solver/native/milp/bc/legacy/bc\_cglp.cpp:add\_cglp\_cuts\_root}；
+采纳数经 \texttt{BCStats::cglp\_accepted} 透出到公共统计的
+\texttt{cglp\_cuts\_added}。
+
+\paragraph{割池（CutPool）。}
+全局树割池 \texttt{CutPool} 默认容量 2000、年龄上限 50（由
+\texttt{cut\_pool\_max\_size}/\texttt{cut\_pool\_max\_age} 选项给出）。插入规则：
+\begin{itemize}
+  \item 仅接受 \texttt{ValidityScope::GlobalCut}；rhs 必须有限，系数范数满足
+        $\|a\|\ge 10^{-12}$ 且有限，维度必须匹配 \texttt{expected\_size}；
+  \item 重复拒绝模仿 HiGHS cutpool 合约：同支撑（support hash 分桶后逐一比对）
+        且平行度
+        \begin{equation}
+          \mathrm{parallelism}=\frac{a_1^{T}a_2}{\|a_1\|\,\|a_2\|}
+          \;\ge\; 1-10^{-6}
+        \end{equation}
+        时视为重复；若新行 rhs 更紧（缩放后差超过
+        $10^{-9}\max\{1,|\mathrm{rhs}|,|\mathrm{rhs}_{\mathrm{old}}|\}$）则替换旧行，
+        或新行把 \texttt{domain\_only} 行升级为 LP 可见行时合并，否则拒绝；
+  \item 池满时用新行替换年龄最大者并重建支撑桶。
+\end{itemize}
+分离-老化一体化接口 \texttt{select\_violated\_and\_age(x, min\_viol, max\_selected)}
+以默认 $\texttt{min\_viol}=10^{-4}$ 选出违反行（重置其年龄为 0），其余行年龄
+加 1，随后清除年龄 $>\texttt{max\_age}$ 的行。
+对应源码为\srcpath{include/mipsolvers/engine/detail/bc\_pools.hpp:CutPool::add}、\srcpath{include/mipsolvers/engine/detail/bc\_pools.hpp:CutPool::select\_violated\_and\_age}、\srcpath{include/mipsolvers/engine/detail/bc\_pools.hpp:CutPool}。
+
+\texttt{domain\_only=true} 的行只参与域传播（
+\srcpath{include/mipsolvers/engine/detail/bc\_pools.hpp:CutPool::propagate\_with\_reasons}），
+不注入节点 LP；这是代码中显式的近似/分工路径。
+
+\paragraph{割的证明所有权。}
+``两段式所有权''谓词固定为
+\begin{equation}
+  \mathrm{tree\_owned}(\mathrm{row})\iff
+  \mathrm{alive}(\mathrm{row})\ \land\ \mathrm{in\_root\_lp}(\mathrm{row}),
+\end{equation}
+即一条生成行只有在通过割池选择、成功追加进根 LP 并重优化后才成为树全局的
+证明构件；在 strict 根不动点或自动 HiGHS 根流水线
+（\texttt{auto\_highs\_root\_pipeline}）任一激活时，候选行在根 LP 准入前保持
+根私有：
+\begin{equation}
+  \mathrm{stays\_root\_owned}\iff
+  \texttt{strict\_highs\_root\_fixed\_point}\ \lor\
+  \texttt{auto\_highs\_root\_pipeline}.
+\end{equation}
+对应源码为\srcpath{src/engine/solver/native/milp/bc/legacy/bc\_highs\_style\_numerics.cpp:highs\_style\_cutpool\_row\_tree\_owned}、\srcpath{src/engine/solver/native/milp/bc/legacy/bc\_highs\_style\_numerics.cpp:highs\_style\_cutpool\_candidate\_stays\_root\_owned}；
+所有权缺陷（最终播种才被当作所有权边界的实现失真）与修正记录见
+\srcpath{docs/archive/native\_milp\_cutpool\_proof\_ownership\_2026-08-13.md}。
+
+\subsection{域传播、clique 与冲突学习}\label{subsec:milpbc-domain}
+
+节点域传播的组合件包括：clique 表 \texttt{CliqueTable}（边/字面量边插入
+\texttt{add\_edges}/\texttt{add\_literal\_edges}/\texttt{add\_literal\_edges\_from\_cut}，
+不动点传播 \texttt{propagate}）、域探测工作区
+\texttt{BCDomainProbeWorkspace}（\texttt{probe(col, value\_one)} 试探、
+\texttt{commit} 提交、\texttt{propagate} 传播）、隐含界与变量界源表
+（\texttt{tighten\_integral\_row\_sides}、\texttt{append\_graph\_implied\_bound\_cuts}）。
+对应源码为\srcpath{src/engine/solver/native/milp/bc/legacy/bc\_clique\_table.cpp:CliqueTable::propagate}、\srcpath{src/engine/solver/native/milp/bc/legacy/bc\_domain\_probe.cpp:BCDomainProbeWorkspace::probe}、\srcpath{src/engine/solver/native/milp/bc/legacy/bc\_implied\_bounds.cpp:tighten\_integral\_row\_sides}、\srcpath{src/engine/solver/native/milp/bc/legacy/bc\_proof\_artifacts.cpp:append\_graph\_implied\_bound\_cuts}。
+
+冲突侧的数据结构在 \texttt{bc\_types.hpp}：域字面量
+\texttt{BranchDomainLiteral}、冲突子句 \texttt{ConflictClause}、带子树作用域的
+\texttt{ScopedConflictClause}、可全局消费的界提升证书
+\texttt{BoundLiftingCertificate}，以及 HiGHS \texttt{domchgstack\_} 对应的节点
+局部域轨迹 \texttt{LocalDomainTrailEntry}（每条局部界变更记录同侧前一活跃界）。
+对应源码为 \srcpath{include/mipsolvers/engine/detail/bc\_types.hpp}。
+子句池 \texttt{ConflictPool} 与重复拒绝工具（支撑/平行度判定）集中在
+\srcpath{include/mipsolvers/engine/detail/bc\_pools.hpp:ConflictPool}。
+
+对偶证明行把 LP 对偶转化为域侧证书：完整构造
+\texttt{build\_full\_dual\_proof\_row}、reduced-cost 质量版
+\texttt{build\_reduced\_cost\_mass\_dual\_proof\_row}、一致性校验
+\texttt{dual\_proof\_identity\_ok}、域固定应用
+\texttt{apply\_dual\_proof\_domain\_fixing}；冲突解析沿局部轨迹回解出
+reason 侧前沿（HiGHS \texttt{ConflictSet} 的对应物），状态枚举为
+\texttt{Success}/\texttt{InvalidInput}/\texttt{ActivityFailed}/\texttt{MissingReason}/%
+\texttt{ScopeBlocked}/\texttt{LiteralLimit}。
+对应源码为\srcpath{src/engine/solver/native/milp/bc/legacy/bc\_utils\_dual\_proof.cpp:build\_full\_dual\_proof\_row}、\srcpath{src/engine/solver/native/milp/bc/legacy/bc\_utils\_dual\_proof.cpp:apply\_dual\_proof\_domain\_fixing}、\srcpath{src/engine/solver/native/milp/bc/legacy/bc\_utils\_dual\_proof\_conflict.cpp:resolve\_dual\_proof\_conflict\_from\_local\_trail}、\srcpath{include/mipsolvers/engine/detail/bc\_utils\_core.hpp:DualProofResolutionStatus}。
+
+\subsection{队列与节点选择}\label{subsec:milpbc-queue}
+
+顺序树使用 \texttt{NodeQueue}：节点实体存于 id 映射，另维护 priority 视图、
+DFS 栈视图与两个按界有序的多重索引。优先级键为``估计引导''量
+\begin{equation}
+  \mathrm{key}(\mathrm{node})=
+  \begin{cases}
+    +\infty, & \mathrm{bound}\ \text{非有限},\\
+    \mathrm{bound}, & \mathrm{estimate}\ \text{非有限},\\
+    \tfrac12\bigl(\mathrm{bound}+\max(\mathrm{bound},\mathrm{estimate})\bigr),
+      & \text{否则},
+  \end{cases}
+\end{equation}
+而精确下界索引始终单独维护（不混入估计）。
+对应源码为\srcpath{include/mipsolvers/engine/detail/bc\_utils\_core.hpp:node\_selection\_priority}、\srcpath{include/mipsolvers/engine/detail/bc\_utils\_core.hpp:NodeQueue}。
+
+三种 \texttt{NodeSelection} 模式的 pop 语义：
+\begin{itemize}
+  \item \texttt{DepthFirst}：恒走 DFS 栈；
+  \item \texttt{BestBound}：从无 incumbent 起即按优先级/下界索引取最小；
+  \item \texttt{Hybrid}（默认）：无 incumbent 时 DFS；出现 incumbent 后切换到
+        优先级 pop，但每 $P=10$ 次出队（\texttt{kHybridBestBoundPeriod}，硬编码）
+        或当前出队界不劣于切换前下界（容差
+        $\max(10^{-9},10^{-12}\max(1,|\mathrm{lb}|))$）时强制一次 best-bound pop。
+\end{itemize}
+\texttt{pop\_bestbound} 在 priority 与 DFS 两个有序索引间取界更小者；
+\texttt{lower\_bound()} 为两者最小值；\texttt{audit\_lower\_bound} 重算全部
+存活节点以核对索引一致性（规模容差 $\max(10^{-9},\texttt{tol})\cdot
+\max\{1,|\mathrm{indexed}|,|\mathrm{computed}|\}$）。
+对应源码为\srcpath{include/mipsolvers/engine/detail/bc\_utils\_core.hpp:NodeQueue::pop}、\srcpath{include/mipsolvers/engine/detail/bc\_utils\_core.hpp:NodeQueue::pop\_bestbound}、\srcpath{include/mipsolvers/engine/detail/bc\_utils\_core.hpp:NodeQueue::lower\_bound}、\srcpath{include/mipsolvers/engine/detail/bc\_utils\_core.hpp:NodeQueue::audit\_lower\_bound\_index}。
+
+入队节点的域存储采用稀疏增量格式：\texttt{compact\_node\_domain} 只保留与根域
+不同的列界对并释放稠密向量，\texttt{materialize\_node\_domain} 在出队时还原；
+\texttt{Node::branch\_child} 以 copy-on-write 共享父节点的域学习负载
+（branch reasons、域轨迹、局部割等），子节点深度为父深度 $+1$。
+对应源码为\srcpath{include/mipsolvers/engine/detail/bc\_types.hpp:compact\_node\_domain}、\srcpath{include/mipsolvers/engine/detail/bc\_types.hpp:materialize\_node\_domain}、\srcpath{include/mipsolvers/engine/detail/bc\_types.hpp:Node::branch\_child}。
+
+\subsection{定界、剪枝与主循环}\label{subsec:milpbc-mainloop}
+
+\paragraph{incumbent 剪枝。}
+节点剪枝谓词（内部最小化坐标）为
+\begin{equation}
+  \mathrm{prune}\iff
+  \mathrm{has\_incumbent}\ \land\
+  \mathrm{node\_bound}\ \ge\ \mathrm{incumbent\_obj}-\texttt{prune\_tol},
+  \qquad \texttt{prune\_tol}=\max(10^{-9},\ \texttt{lp\_tol}),
+\end{equation}
+队列级批量版把同一判据作用于全部排队节点（共享容差常量
+\texttt{kIncumbentPruneTol}$=10^{-12}$ 用于部分队列维护路径——两处容差不同，
+属实现现状）。
+对应源码为\srcpath{src/engine/solver/native/milp/bc/legacy/bc\_utils.cpp:incumbent\_prunes\_node}、\srcpath{include/mipsolvers/engine/detail/bc\_utils\_core.hpp:NodeQueue::prune\_by\_lower\_bound\_limit}。
+
+搜索所用的 incumbent 上限不是 incumbent 目标本身，而是 HiGHS
+\texttt{computeNewUpperLimit} 的对应物：若目标在整数列上可按积分尺度
+$s>0$ 缩放（全整数目标系数的最大可公度尺度，见
+\texttt{highs\_style\_objective\_integral\_scale}），则
+\begin{equation}
+  U=\frac{\lceil s\cdot\mathrm{incumbent}-\mathrm{tol}\rceil-1}{s}+\mathrm{tol},
+  \qquad \mathrm{tol}=\max(10^{-9},\texttt{feastol}),
+\end{equation}
+否则 $U=\min\{\mathrm{incumbent}-\mathrm{tol},\
+\mathrm{nextafter}(\mathrm{incumbent},-\infty)\}$。
+对应源码为\srcpath{src/engine/solver/native/milp/bc/legacy/bc\_highs\_style\_numerics.cpp:highs\_style\_incumbent\_upper\_limit}、\srcpath{src/engine/solver/native/milp/bc/legacy/bc\_highs\_style\_numerics.cpp:highs\_style\_integral\_scale}。
+
+\paragraph{gap 剪枝。}
+当 \texttt{require\_tree\_exhaustion\_certificate=false}（默认，即通常的
+gap 容忍模式）且根 gap 证书就绪、incumbent 经审计有效时，最优性界限为
+\begin{equation}
+  L_{\mathrm{gap}}=\mathrm{incumbent\_obj}
+  -\texttt{gap\_tol}\cdot\max\bigl(1,\ |\mathrm{incumbent\_obj}|\bigr),
+\end{equation}
+界 $\ge L_{\mathrm{gap}}-\tau$ 的节点被剪掉并计入
+\texttt{gap\_suboptimal\_queue\_prunes}，其中
+\begin{equation}
+  \tau=\max\bigl\{10^{-7},\ 10\max(0,\texttt{lp\_tol}),\
+  10^{-9}\max(1,|L_{\mathrm{gap}}|)\bigr\}.
+\end{equation}
+（代码注释明确禁止在此处把容差按 $|\mathrm{obj}|$ 放大到积分尺度以外。）
+对应源码为\srcpath{src/engine/solver/native/milp/bc/legacy/bc\_run/11\_node\_domain\_conflict\_b.inc}
+中的 lambda \texttt{gap\_optimality\_limit}、\texttt{gap\_optimality\_prune\_tol} 与
+\texttt{prune\_queue\_by\_gap\_optimality\_limit}（宿主\srcpath{src/engine/solver/native/milp/bc/legacy/branch\_and\_cut.cpp:BCSolveState::run}）。
+
+\paragraph{主循环。}
+段 13 的顺序主循环每次迭代依次执行：
+\begin{enumerate}
+  \item 时限检查：$\mathrm{elapsed}>\texttt{time\_limit\_sec}$ 置
+        \texttt{kTimeLimitReached} 退出；节点数达 \texttt{max\_nodes} 置
+        \texttt{kNodeLimitReached} 退出；
+  \item incumbent 驱动的树重启判定（见 \ref{subsec:milpbc-tree}）；
+  \item IPM 节点模式下的人口控制：若剩余预算减收尾保留小于一对节点 LP 的估计
+        代价
+        \begin{equation}
+          \hat T_{\mathrm{pair}}=2.2\max\bigl(0.05,\ T_{\mathrm{root\_lp}}\bigr),
+        \end{equation}
+        则刷新队列下界并按 \texttt{kTimeLimitReached} 退出（$2.2$ 与 $0.05$
+        为硬编码）；
+  \item proof-tail 模式激活时：触发域闭包、强制前沿回放的队列剪枝与 gap 剪枝，
+        并以至多 8 轮的``前沿收缩''循环刷新近下界节点（每轮刷新带
+        $\max(\mathrm{termination\_band},\,2\,\texttt{lp\_tol})$）；
+  \item pop：proof-tail 模式恒 \texttt{pop\_bestbound}，否则按
+        \ref{subsec:milpbc-queue} 的模式语义；队列空时若 incumbent 有限则按
+        \begin{equation}
+          \mathrm{gap}=\max\Bigl(0,\ \frac{\mathrm{incumbent}-g_{\mathrm{lb}}}
+          {\max(1,|\mathrm{incumbent}|)}\Bigr)
+        \end{equation}
+        判定 \texttt{kOptimalityGapReached}（要求根证书就绪且
+        $\mathrm{gap}\le\texttt{gap\_tol}$）或 \texttt{kSearchQueueExhausted}；
+  \item 冲突池命中、incumbent 剪枝、gap 剪枝依次作用于弹出节点；
+  \item 迟到学习的域回放：若节点落后于当前学习 epoch，则以
+        \texttt{run\_node\_domain\_closure} 重放域传播，域变更后必须重解 LP
+        （先单纯形、失败回退 IPM）方可提交更紧域——注释明确禁止用旧基/旧
+        $x_{\mathrm{relax}}$ 搭配更紧域继续；
+  \item 节点处理与分支（段 12 与段 13 后半）。
+\end{enumerate}
+对应源码为\srcpath{src/engine/solver/native/milp/bc/legacy/bc\_run/13\_main\_loop\_sequential.inc}
+（宿主\srcpath{src/engine/solver/native/milp/bc/legacy/branch\_and\_cut.cpp:BCSolveState::run}）
+与域闭包 lambda 所在段
+\srcpath{src/engine/solver/native/milp/bc/legacy/bc\_run/11\_node\_domain\_conflict\_b.inc}。
+
+\subsection{分支：伪费用与可靠性分支的实现公式}\label{subsec:milpbc-branch}
+
+\paragraph{伪费用统计。}
+每个可分支列维护方向性统计：观测和 $\Sigma$、平方和 $Q$、计数 $n$，以及
+inference、cutoff、conflict 三路辅助计数。派生量：
+\begin{align}
+  \mathrm{avg} &= \Sigma/n\ (n=0\ \text{时取}\ 1.0),\\
+  \mathrm{var} &= \max\Bigl(0,\ \frac{Q-n\bar x^{2}}{n-1}\Bigr)\ (n<2\ \text{时取}\ 0),\\
+  \mathrm{lcb} &= \max\Bigl(10^{-6},\ \mathrm{avg}
+    -1.96\,\sqrt{\mathrm{var}/n}\Bigr)\ (n<2\ \text{时取}\ \mathrm{avg}),\\
+  \mathrm{hist} &= 1+0.05\ln(1+\overline{\mathrm{inf}})
+    +0.25\,\mathrm{cutoff\_ratio}
+    +0.05\ln\bigl(1+\mathrm{conflict\_score}\bigr),
+\end{align}
+其中 cutoff 比率为 $\mathrm{cutoff\_cnt}/\max(1,\mathrm{cutoff\_cnt}+n)$。
+$1.96$（95\% 置信）与各权重 $0.05/0.25/0.05$ 均为硬编码。
+对应源码为\srcpath{include/mipsolvers/engine/detail/bc\_types.hpp:PseudoCost}。
+
+子节点目标增益归一化为单位距离费用：
+\begin{equation}
+  \widehat g=\frac{\max(0,g)}{\max(10^{-9},\ |\mathrm{dist}|)}
+  \quad(g\ \text{非有限或}\ g\le 0\ \text{时记}\ 0).
+\end{equation}
+对应源码为\srcpath{include/mipsolvers/engine/detail/bc\_types.hpp:normalized\_pseudocost\_gain}。
+
+\paragraph{方向评分与乘积评分。}
+对分数变量 $j$（分数部分 $f=x_j-\lfloor x_j\rfloor$），方向评分按证据状态分派：
+\begin{equation}
+  s_{\mathrm{dir}}=
+  \begin{cases}
+    \max\bigl(\max(0,g_{\mathrm{obs}})\cdot\mathrm{hist},\ \varepsilon\bigr),
+      & \text{Measured/ExactOptimal 证据},\\
+    +\infty, & \text{ProvenCutoff 证据},\\
+    \max\bigl(d\cdot\max(\mathrm{lcb}+\Delta,\ \varepsilon)\cdot
+      \mathrm{hist},\ \varepsilon\bigr), & \text{否则（历史预测）},
+  \end{cases}
+\end{equation}
+其中 $d$ 为该方向分支距离（下支 $f$、上支 $1-f$），$\varepsilon=10^{-6}$，
+$\Delta$ 为预测偏移（调用方多传 0）。候选总分为两方向乘积
+$S_j=s_{\mathrm{down}}\,s_{\mathrm{up}}$；选择时取
+$\log(1+\max(0,S_j))$ 最大者，支持静态优先级覆盖与动态先验加性 overlay
+（动态先验回调异常、空返回或维度不符时整体回退到无先验评分——显式回退路径）。
+对应源码为\srcpath{src/engine/solver/native/milp/bc/legacy/bc\_branching.cpp:compute\_directional\_branch\_score}、\srcpath{src/engine/solver/native/milp/bc/legacy/bc\_branching.cpp:compute\_branch\_product\_score}、\srcpath{src/engine/solver/native/milp/bc/legacy/bc\_branching.cpp:choose\_branch\_var\_pseudocost\_with\_overlay}。
+
+分支方向先走哪侧由 \texttt{choose\_up\_branch\_first} 决定：有 incumbent 且
+恰好一侧被证 cutoff 时先走另一侧；无 incumbent 时比较两方向评分走更弱侧
+（先探低增益分支）；否则遵循 advisory 方向或既有偏好。
+对应源码为\srcpath{src/engine/solver/native/milp/bc/legacy/bc\_branching.cpp:choose\_up\_branch\_first}。
+
+基础策略枚举：\texttt{FirstFractional}（首候选）、\texttt{MostInfeasible}
+（$\tfrac12-|f-\tfrac12|$ 最大者，即最靠近 $0.5$）、\texttt{Pseudocost}
+（默认，上述乘积评分）。
+对应源码为\srcpath{src/engine/solver/native/milp/bc/legacy/bc\_branching.cpp:choose\_branch\_var}。
+
+\paragraph{可靠性分支（reliability branching）。}
+\texttt{choose\_branch\_var\_reliability} 的实现规则：
+\begin{itemize}
+  \item 深度 $>6$ 或 \texttt{max\_probes=0} 时退化为纯伪费用选择（硬编码深度
+        上限）；
+  \item 有效探测预算
+        \begin{equation}
+          P_{\mathrm{eff}}=
+          \begin{cases}
+            \texttt{max\_probes}, & \mathrm{depth}=0,\\
+            \max\bigl(2,\ \lfloor\texttt{max\_probes}/2\rfloor\bigr), & \text{否则};
+          \end{cases}
+        \end{equation}
+  \item 方向可靠门槛：若该列两方向均已有观测
+        （$\mathrm{down\_cnt}\ge1\land\mathrm{up\_cnt}\ge1$），取
+        $\max(2,\lfloor\texttt{reliability\_limit}/2\rfloor)$，否则取
+        \texttt{reliability\_limit}；
+  \item 探测 LP 在同一标准形的界事务（\texttt{StandardFormBoundTransaction}）
+        上执行：应用分支界 $\to$ 持久单纯形重解 $\to$ 回滚；域已空
+        （$\mathrm{lb}>\mathrm{ub}+10^{-12}$）直接记 ProvenCutoff；LP 结果按
+        \texttt{classify\_lp\_result} 归为 Measured/ExactOptimal/ProvenCutoff
+        （不可行且持 Farkas 证书或目标截断）/UnknownFailure 四态，再按
+        \texttt{update\_pseudocost\_from\_branch\_evidence} 入账——失败态
+        \textbf{不}向全局伪费用分布注入哨兵增益；
+  \item 循环``按当前观测选最优候选 $\to$ 探测其不可靠方向''直至 $P_{\mathrm{eff}}$
+        个候选探测完或候选全部可靠。
+\end{itemize}
+对应源码为\srcpath{src/engine/solver/native/milp/bc/legacy/bc\_branching.cpp:choose\_branch\_var\_reliability\_impl}、\srcpath{src/engine/solver/native/milp/bc/legacy/bc\_branching.cpp:update\_pseudocost\_from\_branch\_evidence}、\srcpath{src/engine/solver/native/milp/bc/legacy/bc\_branching.cpp:classify\_branch\_probe\_reuse}。
+证明尾段曾绕过可靠性分支的缺陷及``局部强分支评分不蕴含固定节点数下
+全局最优界推进''的失配结论见
+\srcpath{docs/archive/native\_milp\_reliability\_branching\_2026-08-13.md}；
+当前代码已无该绕过，但也不要把乘积评分读成全局界推进的保证。
+
+\paragraph{节点估计。}
+队列键所用的 \texttt{estimate} 由 \texttt{compute\_node\_estimate} 给出：对每个
+分数可分支列取方向评分的较弱者 $\min(s_{\mathrm{down}},s_{\mathrm{up}})$ 作为
+变量抬升，按 \texttt{NodeEstimateAggregation} 取和或取 max 加到节点界上：
+\begin{equation}
+  \mathrm{estimate}=\max\Bigl(\mathrm{bound},\ \mathrm{bound}
+  +\!\!\sum_{j\,\mathrm{frac}}\!\!\min(s_{\mathrm{down}}^j,s_{\mathrm{up}}^j)\Bigr),
+  \qquad
+  \Delta=\max\Bigl(10^{-6},\ \frac{\texttt{int\_tol}\max(1,|\mathrm{bound}|)}
+  {\max(1,n_{\mathrm{frac}})}\Bigr).
+\end{equation}
+对应源码为\srcpath{src/engine/solver/native/milp/bc/legacy/bc\_branching.cpp:compute\_node\_estimate}。
+
+\subsection{并行树调度}\label{subsec:milpbc-parallel}
+
+线程数解析：\texttt{num\_threads}$\ge 1$ 时照用；否则取硬件并发数并被
+\texttt{auto\_parallel\_min\_threads}（默认 2）/%
+\texttt{auto\_parallel\_max\_threads}（$0$ 表示不设上限）夹取；硬件并发不可用
+时退回最小值。
+对应源码为\srcpath{src/engine/solver/native/milp/bc/legacy/bc\_legacy\_helpers.cpp:resolve\_num\_threads}。
+
+并行树的准入条件（段 05/07/13 共同决定）：
+\begin{itemize}
+  \item \texttt{par\_mode}$\iff$解析线程数 $>1$；
+  \item \texttt{parallel\_serial\_on\_low\_fractionality\_root}（默认开）在
+        ``大而低分数''的根上把树保持串行
+        （\texttt{serial\_low\_fractionality\_root}）；但若已有审计 incumbent 且
+        根 gap 未闭，\texttt{parallel\_proof\_on\_incumbent\_gap}（默认开）重新放行
+        （\texttt{parallel\_proof\_low\_fractionality}）；
+  \item \texttt{parallel\_delay\_until\_incumbent}（默认开）在尚无有限 incumbent
+        时把主循环线程数压为 1（\texttt{serial\_until\_incumbent}）；
+  \item 并发（早期）启动还要求：线程数 $\ge2$、剩余时间
+        $\ge\max(0.25,\ 0.25\,\texttt{time\_limit\_sec})$ 秒、可选根预算未耗尽；
+        否则推迟到根启发式之后的晚期启动（\texttt{late\_tree*}）。
+\end{itemize}
+$0.25$\,s 与 $25\%$ 为硬编码。调度原因的枚举值（\texttt{single\_thread}、
+\texttt{enabled}、\texttt{concurrent\_tree}、\texttt{late\_tree} 等）写入
+\texttt{BCStats::parallel\_schedule\_reason}。
+对应源码为\srcpath{src/engine/solver/native/milp/bc/legacy/bc\_run/05\_root\_relaxation\_d.inc}、\srcpath{src/engine/solver/native/milp/bc/legacy/bc\_run/07\_root\_heuristics\_b.inc}、\srcpath{src/engine/solver/native/milp/bc/legacy/bc\_run/13\_main\_loop\_sequential.inc}
+（宿主\srcpath{src/engine/solver/native/milp/bc/legacy/branch\_and\_cut.cpp:BCSolveState::run}）；
+启动门槛的推导与 1/4 线程实测见
+\srcpath{docs/archive/native\_milp\_cplex\_gap\_improvement\_2026-09-12.md}。
+
+并行态由 \texttt{ConcurrentTreeState} 持有：共享队列
+\texttt{ThreadSafeNodeQueue}、共享割池/冲突池/解池/共享 incumbent、原子统计与
+停止标志。启动时把根割逐行播种进共享割池、把现有 incumbent 播种进共享
+incumbent/解池，并把 gap 最优性界限
+$\mathrm{incumbent}-\texttt{gap\_tol}\max(1,|\mathrm{incumbent}|)$ 写入
+\texttt{optimality\_limit}（仅在根证书就绪且非树穷举证书模式时）。并行单纯形
+选项被设为：迭代上限 $\max(10\,\texttt{max\_lp\_iter},2000)$、容差
+$\max(10^{-10},0.1\,\texttt{lp\_tol})$、禁止冷启动、且\textbf{关闭}内核内
+incumbent 截断（\texttt{incumbent\_bound=nullptr}）——注释说明并行节点 LP 是
+证明载体，内核内截断只暴露中间目标而非已认证界。
+对应源码为\srcpath{include/mipsolvers/engine/detail/bc\_concurrent\_tree\_state.hpp:ConcurrentTreeState}、\srcpath{include/mipsolvers/engine/detail/bc\_threading.hpp:ThreadSafeNodeQueue}、\srcpath{src/engine/solver/native/milp/bc/legacy/bc\_run/14\_parallel\_path\_and\_result.inc}。
+
+工作者角色按线程号分派：启用混合 IPM（探索者 $\ge2$ 且根行数超过
+\texttt{hybrid\_ipm\_threshold}）时 0 号线程为 \texttt{IPMDiver}；探索者
+$\ge2$ 时末号线程为 \texttt{Prover}（best-bound 聚焦、可靠性分支）；其余为
+\texttt{Diver}（DFS 聚焦、快找 incumbent）。当
+\texttt{cuts}$\ne$\texttt{None} 且 \texttt{max\_cut\_depth}$>0$ 时预留一个线程跑
+\texttt{cut\_worker\_thread}，探索者数 $=$ 线程数 $-1$。
+对应源码为\srcpath{include/mipsolvers/engine/detail/bc\_threading.hpp:WorkerRole}、\srcpath{src/engine/solver/native/milp/bc/legacy/bc\_parallel.cpp:explorer\_thread}、\srcpath{src/engine/solver/native/milp/bc/legacy/bc\_parallel.cpp:cut\_worker\_thread}。
+
+\begin{boundarynote}
+并行正确性边界（代码注释明确要求保持可见）：
+\texttt{share\_conflict\_learning\_across\_threads} 默认 \textbf{关闭}——跨线程
+共享冲突子句/冲突割/二元蕴含会把任何作用域错误放大到整片森林，使并行运行
+剪掉串行仍访问的区域；关闭时各探索者保留自己的局部冲突池与蕴含图，仅共享
+根割（\texttt{shared\_cp}）、incumbent 与解池。
+\texttt{deterministic\_parallel}（opt-in）用轮转令牌串行化队列 pop/子节点
+push，使节点探索顺序只是线程数与队列键的函数；LP 求解仍并行。工作窃取池以
+\texttt{random\_seed} 确定性播种。对应源码为\srcpath{include/mipsolvers/engine/bc/options.hpp} 与\srcpath{src/engine/solver/native/milp/bc/legacy/bc\_parallel.cpp:explorer\_thread}。
+\end{boundarynote}
+
+\subsection{树重启控制器}\label{subsec:milpbc-tree}
+
+incumbent 驱动的顺序树重启由 \texttt{IncumbentTreeRestartController} 判定。
+\texttt{note\_incumbent} 以相对容差
+$10^{-10}\max\{1,|\mathrm{obj}|,|\mathrm{pending}|\}$ 去重后登记待决 incumbent；
+\texttt{ready} 的全部前置条件（同时满足才允许重启）：
+\begin{gather}
+  \texttt{enabled}\ \land\ \mathrm{pending}\ \land\ \mathrm{proof\_valid}
+  \ \land\ \mathrm{restart\_count}<\texttt{max\_restarts}\
+  \land\ \mathrm{open\_nodes}\ge\texttt{min\_open\_nodes}\notag\\
+  \land\ \mathrm{node}-\mathrm{last\_restart\_node}\ge
+    \texttt{min\_nodes\_since\_restart}
+  \ \land\ \mathrm{remaining}\ge\texttt{min\_remaining\_time\_sec},
+\end{gather}
+且当已有上次重启目标时还要求相对改进
+\begin{equation}
+  \frac{\mathrm{last\_obj}-\mathrm{pending\_obj}}
+       {\max(1,|\mathrm{last\_obj}|)}+10^{-15}
+  \ \ge\ \texttt{min\_relative\_incumbent\_improvement}.
+\end{equation}
+默认参数：\texttt{max\_restarts=2}、\texttt{min\_nodes\_since\_restart=256}、
+\texttt{min\_open\_nodes=64}、\texttt{min\_relative\_incumbent\_improvement=0.01}、
+\texttt{min\_remaining\_time\_sec=0.25}，默认 \texttt{enabled=false}（硬编码，
+见 \texttt{BCTreeRestartOptions}）。控制器只判定时机；队列替换与证明状态归
+调用点所有。
+对应源码为\srcpath{include/mipsolvers/engine/detail/bc\_restart.hpp:IncumbentTreeRestartController::ready}、\srcpath{include/mipsolvers/engine/detail/bc\_restart.hpp:IncumbentTreeRestartController::note\_incumbent}、\srcpath{include/mipsolvers/engine/bc/options.hpp:BCTreeRestartOptions}。
+
+\subsection{解的认证、gap 计算与结果装配}\label{subsec:milpbc-cert}
+
+\paragraph{incumbent 审计。}
+\texttt{validate\_incumbent\_solution} 在原模型（或指定的约简源模型）上复核
+候选点：维度一致后逐项计算
+\begin{align}
+  \mathrm{viol}_{\mathrm{bnd}}&=\max_j\max(0,\ l_j-x_j,\ x_j-u_j),\\
+  \mathrm{viol}_{\mathrm{int}}&=\max_{j\,\mathrm{int}}|x_j-\mathrm{round}(x_j)|,\\
+  \mathrm{viol}_{\mathrm{ineq}}&=\max_i\max\bigl(0,\ (Ax)_i-b_i,\
+  (\mathrm{lhs}_i\ \text{有限时})\ \mathrm{lhs}_i-(Ax)_i\bigr),\\
+  \mathrm{viol}_{\mathrm{eq}}&=\max_i|(A_{\mathrm{eq}}x)_i-b_{\mathrm{eq},i}|,
+\end{align}
+四项均 $\le\texttt{tol}$ 才通过（结果装配处使用 $\texttt{tol}=10^{-6}$）。
+对应源码为\srcpath{src/engine/solver/native/milp/bc/legacy/bc\_validation.cpp:validate\_incumbent\_solution}。
+
+\paragraph{坐标还原与报告恒等式。}
+段 14 的报告函数固定为
+\begin{equation}
+  \mathrm{report}(f)=\begin{cases}
+    f, & f\ \text{非有限},\\
+    s_{\mathrm{sense}}\,(f+\Delta), & \text{否则},
+  \end{cases}
+  \qquad s_{\mathrm{sense}}=
+  \begin{cases}
+    +1,&\text{Minimize},\\ -1,&\text{Maximize},
+  \end{cases}
+\end{equation}
+其中 $\Delta$ 按激活的 presolve 路径取 strict-HiGHS 偏移、HiGHS MIP 偏移、
+PaPILO 偏移或 0。即：内部界先加偏移回到原空间、再按目标方向还原符号。
+对应源码为\srcpath{src/engine/solver/native/milp/bc/legacy/bc\_run/14\_parallel\_path\_and\_result.inc}
+中的 lambda \texttt{report\_objective\_value}（宿主\srcpath{src/engine/solver/native/milp/bc/legacy/branch\_and\_cut.cpp:BCSolveState::run}）；
+偏移坐标审计见
+\srcpath{docs/archive/native\_milp\_root\_source\_eligibility\_2026-08-13.md}
+（``Root-Gap Coordinate Audit''节）。
+
+\paragraph{gap 与状态映射。}
+有 incumbent 时若尚未登记 gap 且全局下界有限，则
+\begin{equation}
+  \texttt{bc\_stats.gap}=\max\Bigl(0,\ \frac{\mathrm{incumbent}-g_{\mathrm{lb}}}
+  {\max(1,|\mathrm{incumbent}|)}\Bigr),\qquad
+  \texttt{stats.mip\_gap}=\texttt{gap}\ (\text{有限时否则}\ 0);
+\end{equation}
+队列穷举（\texttt{kSearchQueueExhausted}）且无未安全回退剪枝
+（\texttt{fallback\_unsafe\_prunes=0}）、gap 不超 \texttt{gap\_tol} 时，改报
+\texttt{kOptimalTreeExhausted}、gap 置 0 并把 \texttt{best\_bound} 提升为
+\texttt{best\_obj}（注释：避免已证最优仍显示陈旧树界造成的 7--21\%``假
+gap''）；其余穷举情形保留实测 gap——队列耗尽但未闭合证明 gap 被视为
+前沿失败而非最优性证明。无 incumbent 时 \texttt{mip\_gap=+$\infty$}、状态
+\texttt{kNoFeasibleIntegerSolutionFound}、\texttt{success=false}。
+对应源码为\srcpath{src/engine/solver/native/milp/bc/legacy/bc\_run/14\_parallel\_path\_and\_result.inc}
+（宿主\srcpath{src/engine/solver/native/milp/bc/legacy/branch\_and\_cut.cpp:BCSolveState::run}）。
+
+\paragraph{失败即拒发。}
+发布前 incumbent 依次通过：约简（pre-cut 根模型）空间审计，失败则清空解、
+置 \texttt{kInvalidReducedIncumbent} 系状态并把 \texttt{success} 翻为 false；
+随后按 presolve 路径 postsolve 到原空间并再做
+\texttt{validate\_incumbent\_solution} 原模型审计，失败同样拒发
+（\texttt{kInvalidPapiloPostsolveIncumbent}/\texttt{kInvalidHighsPostsolveIncumbent}
+等）。\texttt{success} 仅在审计通过时保持 true。
+对应源码为\srcpath{src/engine/solver/native/milp/bc/legacy/bc\_run/14\_parallel\_path\_and\_result.inc}
+与状态常量
+\srcpath{include/mipsolvers/engine/detail/bc\_status.hpp}。
+
+\begin{boundarynote}
+边界与已知限制（均来自代码注释或冻结实验记录，非待办）：
+（i）\texttt{use\_papilo\_presolve} 等选项控制的 PaPILO 路径在编译期依赖缺失
+时整体缺席，运行时状态字符串会指明 presolve 来源（\texttt{kInfeasiblePapiloPresolve}
+等）；（ii）HiGHS 根剖面 \texttt{auto\_highs\_root\_pipeline} 的行为范围不限于根
+生命周期——基准剖面变更曾因下游树效应被否决，当前生产基准保持通用原生树策略
+（\srcpath{docs/archive/native\_milp\_highs\_lp\_root\_profile\_2026-08-13.md}）；
+（iii）浅节点池再分离的行数门槛在生产中被恢复为 500 行版本（
+\srcpath{docs/archive/native\_milp\_degenerate\_cutpool\_fixed\_point\_2026-08-13.md}
+末节的否决记录）；（iv）\texttt{presolve\_inplace} 不删列，仅把约简结果写回原
+\texttt{LPModel}，其统计语义与 \texttt{MILPPresolve::run} 不同，引用时注意区分。
+\end{boundarynote}

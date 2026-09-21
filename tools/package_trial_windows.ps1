@@ -34,6 +34,7 @@ if (-not (Test-Path $cachePath)) { throw "Missing Trial CMake cache: $cachePath"
 $cache = Get-Content -LiteralPath $cachePath -Raw
 $requiredCache = @(
   'HACDCPF_TRIAL_EDITION:BOOL=ON',
+  'HACDCPF_RESILIENCE_EDITION:BOOL=OFF',
   'HACDCPF_ENABLE_IPO:BOOL=OFF',
   'HACDCPF_ENABLE_OPENDSS:BOOL=ON',
   'HACDCPF_USE_GUROBI:BOOL=OFF',
@@ -47,30 +48,50 @@ foreach ($entry in $requiredCache) {
 $mipSourceMatch = [regex]::Match($cache, '(?m)^MIPSOLVERS_SOURCE_DIR:PATH=(.+)$')
 if ($mipSourceMatch.Success -and $mipSourceMatch.Groups[1].Value.Trim()) {
   $mipSolversDir = [System.IO.Path]::GetFullPath($mipSourceMatch.Groups[1].Value.Trim())
-} elseif (Test-Path (Join-Path $repoRoot "MIPSolvers/CMakeLists.txt")) {
-  $mipSolversDir = [System.IO.Path]::GetFullPath((Join-Path $repoRoot "MIPSolvers"))
 } else {
-  $mipSolversDir = [System.IO.Path]::GetFullPath((Join-Path $repoRoot "../MIPSolvers"))
+  $mipSolversDir = [System.IO.Path]::GetFullPath((Join-Path $repoRoot "MIPSolvers"))
+}
+$vendoredMipsolversDir = [System.IO.Path]::GetFullPath((Join-Path $repoRoot "MIPSolvers"))
+if (-not $mipSolversDir.Equals($vendoredMipsolversDir,
+    [System.StringComparison]::OrdinalIgnoreCase)) {
+  throw "Trial releases must use the locked in-repository MIPSolvers import."
 }
 if (-not (Test-Path (Join-Path $mipSolversDir "CMakeLists.txt"))) {
-  throw "MIPSolvers source cannot be resolved from the Trial cache or repository layout."
+  throw "Locked in-repository MIPSolvers source is missing."
 }
-if (Test-Path (Join-Path $mipSolversDir ".git")) {
-  $mipStatus = & git -C $mipSolversDir status --porcelain
-  if ($LASTEXITCODE -ne 0 -or $mipStatus) {
-    throw "MIPSolvers must be a clean checkout before creating a Trial release."
-  }
-  $expectedMatch = [regex]::Match($cache, '(?m)^_HACDCDSS_MIPSOLVERS_EXPECTED_COMMIT:STRING=(.+)$')
-  $actualCommit = (& git -C $mipSolversDir rev-parse HEAD).Trim()
-  if (-not $expectedMatch.Success -or $actualCommit -ne $expectedMatch.Groups[1].Value.Trim()) {
-    throw "MIPSolvers HEAD does not match the HySim dependency pin."
-  }
+$expectedCommitMatch = [regex]::Match(
+  $cache, '(?m)^_HACDCDSS_MIPSOLVERS_EXPECTED_COMMIT:STRING=(.+)$')
+$expectedTreeMatch = [regex]::Match(
+  $cache, '(?m)^_HACDCDSS_MIPSOLVERS_EXPECTED_TREE:STRING=(.+)$')
+if (-not $expectedCommitMatch.Success -or -not $expectedTreeMatch.Success) {
+  throw "MIPSolvers provenance values are missing from the Trial CMake cache."
+}
+$lock = Get-Content -LiteralPath (Join-Path $repoRoot "cmake/MIPSolvers.lock.json") |
+  ConvertFrom-Json
+if ($expectedCommitMatch.Groups[1].Value.Trim() -ne $lock.upstream.commit -or
+    $expectedTreeMatch.Groups[1].Value.Trim() -ne $lock.import.git_tree) {
+  throw "MIPSolvers CMake provenance values do not match the dependency lock."
+}
+$trackedTree = (& git -C $repoRoot rev-parse "HEAD:MIPSolvers" 2>$null)
+if ($LASTEXITCODE -ne 0) {
+  throw "Commit the prefixed MIPSolvers import before creating a Trial release."
+}
+if ($trackedTree.Trim() -ne $lock.import.git_tree) {
+  throw "Committed MIPSolvers subtree does not match the dependency lock."
+}
+$pendingMipsolvers = & git -C $repoRoot status --porcelain --untracked-files=all -- MIPSolvers
+if ($LASTEXITCODE -ne 0 -or $pendingMipsolvers) {
+  throw "MIPSolvers import must have no staged, unstaged, or untracked changes before creating a Trial release."
 }
 
 if (-not $SkipBuild) {
-  & cmake --build --preset windows-trial-release --target run_gui_server
-  if ($LASTEXITCODE -ne 0) { throw "Trial run_gui_server build failed" }
-  & ctest --preset windows-trial-release -L trial --output-on-failure
+  & cmake --build $buildPath --config Release --target run_gui_server test_edition_profile --parallel 8
+  if ($LASTEXITCODE -ne 0) { throw "Trial server and edition test failed to build" }
+  & ctest --test-dir $buildPath -C Release -L edition-trial-unit `
+      --no-tests=error --output-on-failure
+  if ($LASTEXITCODE -ne 0) { throw "Trial edition unit test failed" }
+  & ctest --test-dir $buildPath -C Release -L edition-trial-api-e2e `
+      --no-tests=error --output-on-failure
   if ($LASTEXITCODE -ne 0) { throw "Trial acceptance tests failed" }
 }
 
@@ -84,27 +105,46 @@ if (-not $serverExe) { throw "run_gui_server.exe was not found below $buildPath"
 
 if (Test-Path $outputPath) { Remove-Item -LiteralPath $outputPath -Recurse -Force }
 New-Item -ItemType Directory -Path (Join-Path $outputPath "bin") -Force | Out-Null
+New-Item -ItemType Directory -Path (Join-Path $outputPath "licenses") -Force | Out-Null
 New-Item -ItemType Directory -Path (Join-Path $outputPath "data") -Force | Out-Null
 New-Item -ItemType Directory -Path (Join-Path $outputPath "external_data") -Force | Out-Null
 Copy-Item -LiteralPath $serverExe -Destination (Join-Path $outputPath "bin/run_gui_server.exe")
 Copy-Item -LiteralPath (Join-Path $repoRoot "web") -Destination (Join-Path $outputPath "web") -Recurse
-Copy-Item -LiteralPath (Join-Path $repoRoot "docs/trial_edition_design.md") -Destination $outputPath
+Copy-Item -LiteralPath (Join-Path $repoRoot "docs/operations/trial_edition_design.md") -Destination $outputPath
 
-$dllSearchDirs = @($buildPath, (Join-Path $buildPath "tests/Release"), (Join-Path $buildPath "Release"))
+$dllSearchDirs = @(
+  $buildPath,
+  (Join-Path $buildPath "tests/Release"),
+  (Join-Path $buildPath "Release"),
+  (Join-Path $repoRoot "third_party/dss_capi/dss_capi/lib/win_x64")
+)
 if ($VcpkgRoot) { $dllSearchDirs += Join-Path $VcpkgRoot "installed/x64-windows/bin" }
-$requiredDlls = @('altdss_capi.dll')
+$requiredDlls = @(
+  'altdss_capi.dll',
+  'altdss_capi_loader.dll',
+  'altdss_oddie_capi.dll',
+  'CppIndMach012_AltDSS.dll',
+  'CppIndMach012_OpenDSSv10.dll',
+  'CppIndMach012_OpenDSSv7.dll',
+  'CppIndMach012_OpenDSSv8v9.dll',
+  'DSSExtensions.dll',
+  'libklusolvex.dll',
+  'libwinpthread-1.dll'
+)
 foreach ($dll in $requiredDlls) {
   $source = $dllSearchDirs | ForEach-Object { Join-Path $_ $dll } |
     Where-Object { Test-Path $_ } | Select-Object -First 1
   if (-not $source) { throw "Required Trial runtime DLL is missing: $dll" }
   Copy-Item -LiteralPath $source -Destination (Join-Path $outputPath "bin/$dll")
 }
-foreach ($dir in $dllSearchDirs) {
-  if (Test-Path $dir) {
-    Get-ChildItem -LiteralPath $dir -Filter '*.dll' -File | ForEach-Object {
-      Copy-Item -LiteralPath $_.FullName -Destination (Join-Path $outputPath "bin/$($_.Name)") -Force
-    }
+Copy-Item -LiteralPath (Join-Path $repoRoot "LICENSE") `
+  -Destination (Join-Path $outputPath "licenses/HySim-LICENSE")
+@('LICENSE.BSD3', 'LICENSE.LGPL3', 'OPENDSS_LICENSE') | ForEach-Object {
+  $source = Join-Path $repoRoot "third_party/dss_capi/dss_capi/$_"
+  if (-not (Test-Path -LiteralPath $source -PathType Leaf)) {
+    throw "Required Trial DSS C-API license is missing: $_"
   }
+  Copy-Item -LiteralPath $source -Destination (Join-Path $outputPath "licenses/DSS-CAPI-$_")
 }
 
 $externalDataDirs = @(
@@ -169,6 +209,26 @@ try {
 } finally {
   if (-not $smokeProcess.HasExited) { Stop-Process -Id $smokeProcess.Id -Force }
 }
+
+$hysimCommit = (& git -C $repoRoot rev-parse HEAD).Trim()
+if ($LASTEXITCODE -ne 0 -or -not $hysimCommit) {
+  throw "Unable to record the HySim source commit"
+}
+$buildInfo = @(
+  'Product=HySim-XJTU-HRPES',
+  'Edition=trial',
+  'Architecture=Windows-x64',
+  'Configuration=Release',
+  "HySimCommit=$hysimCommit",
+  "MIPSolversCommit=$($lock.upstream.commit)",
+  "MIPSolversTree=$($lock.import.git_tree)",
+  'OpenDSS=ON',
+  'Gurobi=OFF',
+  'RuntimeDllPolicy=explicit-allowlist',
+  'PackageAcceptance=edition-unit+trial-api-e2e+standalone-smoke'
+)
+Set-Content -LiteralPath (Join-Path $outputPath "BUILD_INFO.txt") `
+  -Value $buildInfo -Encoding ascii
 
 $manifestPath = Join-Path $outputPath "package_manifest.csv"
 $manifest = Get-ChildItem -LiteralPath $outputPath -Recurse -File |

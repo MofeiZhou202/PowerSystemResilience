@@ -1,0 +1,8 @@
+Vendored dependency — fmt 12.1.0
+Origin:     https://github.com/fmtlib/fmt/archive/refs/tags/12.1.0.tar.gz
+Version:    12.1.0 (matches the previously used Homebrew fmt 12.1.0)
+Fetched:    2026-07-25
+License:    MIT-style (see LICENSE)
+
+Full upstream tree, unmodified.  Built via add_subdirectory() with
+FMT_MASTER_PROJECT=OFF; see cmake/Dependencies.cmake.

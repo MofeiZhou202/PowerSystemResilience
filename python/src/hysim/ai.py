@@ -74,6 +74,9 @@ class HySimToolRegistry:
         self._tools: dict[str, ToolSpec] = {}
         self._register_builtins()
 
+    def _analysis_enabled(self, name: str) -> bool:
+        return self.client.edition_profile.capability(name).enabled
+
     def register(self, tool: ToolSpec) -> None:
         if tool.name in self._tools:
             raise ValueError(f"duplicate tool name: {tool.name}")
@@ -126,77 +129,81 @@ class HySimToolRegistry:
                 lambda _: dict(self.client.status()),
             )
         )
-        self.register(
-            ToolSpec(
-                "hysim_load_builtin",
-                "Replace the current model with a named built-in case.",
-                {
-                    "type": "object",
-                    "properties": {"case": {"type": "string", "minLength": 1}},
-                    "required": ["case"],
-                    "additionalProperties": False,
-                },
-                ToolEffect.MODIFY_MODEL,
-                lambda args: dict(self.client.load_builtin(str(args["case"]))),
-            )
-        )
-        self.register(
-            ToolSpec(
-                "hysim_run_power_flow",
-                "Run power flow and return convergence, scope, limitations, and result sizes.",
-                {
-                    "type": "object",
-                    "properties": {
-                        "method": {"type": "string", "default": "ac_newton"},
-                        "max_iter": {"type": "integer", "minimum": 1},
-                        "tol": {"type": "number", "exclusiveMinimum": 0},
-                        "include_raw": {"type": "boolean", "default": False},
+        if self._analysis_enabled("load_builtin"):
+            self.register(
+                ToolSpec(
+                    "hysim_load_builtin",
+                    "Replace the current model with a named built-in case.",
+                    {
+                        "type": "object",
+                        "properties": {"case": {"type": "string", "minLength": 1}},
+                        "required": ["case"],
+                        "additionalProperties": False,
                     },
-                    "additionalProperties": False,
-                },
-                ToolEffect.ANALYZE,
-                self._power_flow,
+                    ToolEffect.MODIFY_MODEL,
+                    lambda args: dict(self.client.load_builtin(str(args["case"]))),
+                )
             )
-        )
-        self.register(
-            ToolSpec(
-                "hysim_run_optimal_power_flow",
-                "Run OPF and return its scientific status, scope, limitations, and result sizes.",
-                {
-                    "type": "object",
-                    "properties": {
-                        "solver": {
-                            "type": "string",
-                            "enum": ["parity", "ipopt", "auto", "dc", "dispatch"],
-                            "default": "parity",
+        if self._analysis_enabled("power_flow"):
+            self.register(
+                ToolSpec(
+                    "hysim_run_power_flow",
+                    "Run power flow and return convergence, scope, limitations, and result sizes.",
+                    {
+                        "type": "object",
+                        "properties": {
+                            "method": {"type": "string", "default": "ac_newton"},
+                            "max_iter": {"type": "integer", "minimum": 1},
+                            "tol": {"type": "number", "exclusiveMinimum": 0},
+                            "include_raw": {"type": "boolean", "default": False},
                         },
-                        "network_model": {
-                            "type": "string",
-                            "enum": [
-                                "balanced_aggregate",
-                                "balanced_with_three_phase_validation",
-                                "three_phase_hybrid",
-                            ],
-                            "default": "balanced_aggregate",
-                        },
-                        "check_consistency": {"type": "boolean", "default": True},
-                        "include_raw": {"type": "boolean", "default": False},
+                        "additionalProperties": False,
                     },
-                    "additionalProperties": False,
-                },
-                ToolEffect.ANALYZE,
-                self._optimal_power_flow,
+                    ToolEffect.ANALYZE,
+                    self._power_flow,
+                )
             )
-        )
-        self.register(
-            ToolSpec(
-                "hysim_sppt_guard",
-                "Check validation, well-posedness, and authored-component attribution.",
-                object_schema,
-                ToolEffect.ANALYZE,
-                lambda _: self.client.run_analysis("sppt_guard").to_record(include_raw=True),
+        if self._analysis_enabled("optimal_power_flow"):
+            self.register(
+                ToolSpec(
+                    "hysim_run_optimal_power_flow",
+                    "Run OPF and return its scientific status, scope, limitations, and result sizes.",
+                    {
+                        "type": "object",
+                        "properties": {
+                            "solver": {
+                                "type": "string",
+                                "enum": ["parity", "ipopt", "auto", "dc", "dispatch"],
+                                "default": "parity",
+                            },
+                            "network_model": {
+                                "type": "string",
+                                "enum": [
+                                    "balanced_aggregate",
+                                    "balanced_with_three_phase_validation",
+                                    "three_phase_hybrid",
+                                ],
+                                "default": "balanced_aggregate",
+                            },
+                            "check_consistency": {"type": "boolean", "default": True},
+                            "include_raw": {"type": "boolean", "default": False},
+                        },
+                        "additionalProperties": False,
+                    },
+                    ToolEffect.ANALYZE,
+                    self._optimal_power_flow,
+                )
             )
-        )
+        if self._analysis_enabled("sppt_guard"):
+            self.register(
+                ToolSpec(
+                    "hysim_sppt_guard",
+                    "Check validation, well-posedness, and authored-component attribution.",
+                    object_schema,
+                    ToolEffect.ANALYZE,
+                    lambda _: self.client.run_analysis("sppt_guard").to_record(include_raw=True),
+                )
+            )
 
     def _power_flow(self, args: Mapping[str, Any]) -> Mapping[str, Any]:
         request = PowerFlowRequest(
@@ -226,12 +233,11 @@ class HySimToolRegistry:
         include: Iterable[str] | None = None,
         categories: Iterable[Any] | None = None,
     ) -> tuple[str, ...]:
-        """Register a bounded, effect-gated tool per catalog analysis.
+        """Register a bounded tool for each enabled catalog analysis.
 
-        Opt-in: not registered by default. Each tool wraps one production
-        analysis, maps its catalog effect to the tool policy, and returns a
-        compact honest record. Names already curated (e.g. the power-flow
-        tools) are left untouched. Returns the newly registered tool names.
+        Capability admission is independent of :class:`ToolPolicy`: unavailable
+        analyses are not advertised at registration, while policy still decides
+        whether an enabled tool's effect is authorized at call time.
         """
 
         from .analyses import ANALYSIS_CATALOG, AnalysisEffect
@@ -244,8 +250,15 @@ class HySimToolRegistry:
         include_set = set(include) if include is not None else None
         category_set = set(categories) if categories is not None else None
         registered: list[str] = []
+        requested_names: set[str] = set()
+        if include_set is not None:
+            for name in include_set:
+                requested_names.add(self.client.require_analysis(name).name)
+        enabled_names = self.client.edition_profile.enabled_names
         for spec in ANALYSIS_CATALOG:
-            if include_set is not None and spec.name not in include_set:
+            if spec.name not in enabled_names:
+                continue
+            if include_set is not None and spec.name not in requested_names:
                 continue
             if category_set is not None and spec.category not in category_set:
                 continue
@@ -273,13 +286,14 @@ class HySimToolRegistry:
 
     def _make_family_handler(self, spec: Any) -> ToolHandler:
         def handler(args: Mapping[str, Any]) -> Mapping[str, Any]:
+            checked = self.client.require_analysis(spec.name)
             request = args.get("request")
             payload = dict(request) if isinstance(request, Mapping) else {}
             result = self.client.execute(
-                name=spec.name,
-                route=spec.route,
-                method=spec.method,
-                modifies_model=spec.mutates_model,
+                name=checked.name,
+                route=checked.route,
+                method=checked.method,
+                modifies_model=checked.mutates_model,
                 payload=payload,
             )
             return result.to_record(include_raw=bool(args.get("include_raw", False)))
@@ -300,6 +314,9 @@ class HySimV1ToolRegistry:
         self.policy = policy or ToolPolicy()
         self._tools: dict[str, ToolSpec] = {}
         self._register_builtins()
+
+    def _analysis_enabled(self, name: str) -> bool:
+        return name in self.session.client.capabilities().enabled_analyses
 
     def specs(self) -> tuple[ToolSpec, ...]:
         return tuple(self._tools[name] for name in sorted(self._tools))
@@ -414,41 +431,43 @@ class HySimV1ToolRegistry:
                 ),
             )
         )
-        self._register(
-            ToolSpec(
-                "hysim_v1_submit_power_flow",
-                "Submit a power-flow job bound to the current model revision.",
-                {
-                    "type": "object",
-                    "properties": {
-                        "max_iter": {"type": "integer", "minimum": 1},
-                        "tol": {"type": "number", "exclusiveMinimum": 0},
+        if self._analysis_enabled("power_flow"):
+            self._register(
+                ToolSpec(
+                    "hysim_v1_submit_power_flow",
+                    "Submit a power-flow job bound to the current model revision.",
+                    {
+                        "type": "object",
+                        "properties": {
+                            "max_iter": {"type": "integer", "minimum": 1},
+                            "tol": {"type": "number", "exclusiveMinimum": 0},
+                        },
+                        "additionalProperties": False,
                     },
-                    "additionalProperties": False,
-                },
-                ToolEffect.ANALYZE,
-                self._submit_power_flow,
+                    ToolEffect.ANALYZE,
+                    self._submit_power_flow,
+                )
             )
-        )
-        self._register(
-            ToolSpec(
-                "hysim_v1_submit_optimal_power_flow",
-                "Submit an OPF job bound to the current model revision.",
-                {
-                    "type": "object",
-                    "properties": {
-                        "solver": {
-                            "type": "string",
-                            "enum": ["parity", "ipopt", "auto", "dc", "dispatch"],
-                            "default": "parity",
-                        }
+        if self._analysis_enabled("optimal_power_flow"):
+            self._register(
+                ToolSpec(
+                    "hysim_v1_submit_optimal_power_flow",
+                    "Submit an OPF job bound to the current model revision.",
+                    {
+                        "type": "object",
+                        "properties": {
+                            "solver": {
+                                "type": "string",
+                                "enum": ["parity", "ipopt", "auto", "dc", "dispatch"],
+                                "default": "parity",
+                            }
+                        },
+                        "additionalProperties": False,
                     },
-                    "additionalProperties": False,
-                },
-                ToolEffect.ANALYZE,
-                self._submit_opf,
+                    ToolEffect.ANALYZE,
+                    self._submit_opf,
+                )
             )
-        )
         job_schema = {
             "type": "object",
             "properties": {

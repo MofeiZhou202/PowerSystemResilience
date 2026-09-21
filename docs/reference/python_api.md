@@ -1,6 +1,6 @@
 # Python API and AI Enhancement Architecture
 
-Updated: 2026-07-19
+Updated: 2026-09-19
 
 ## Decision
 
@@ -60,6 +60,16 @@ native JSON payload through `run_analysis()`.
 
 ## AI tool safety
 
+Edition capability admission and `ToolPolicy` are orthogonal gates. A connected
+runtime first decides whether an analysis is known and enabled; only then does
+`ToolPolicy` decide whether its `read`, `analyze`, `modify_model`, or `control`
+effect is allowed and whether explicit approval is required. Expanding
+`allowed_effects` cannot enable a route disabled by the edition, and an enabled
+route still cannot bypass effect policy. Comprehensive family tools ultimately
+call `HySimClient.execute()`, which revalidates the canonical analysis,
+route/method, mutation metadata, and connected-edition capability before
+transport. V1 job submission uses its own `/api/v1` capability gate.
+
 The default policy permits `read` and `analyze`. `modify_model` and `control`
 are disabled. Enabling a mutating effect is a deployment decision, and each call
 still requires `approved=True`. This separates model reasoning from execution
@@ -70,6 +80,31 @@ while large vectors are represented by their sizes. Direct SDK calls always
 retain the full raw result for NumPy/pandas/PyTorch post-processing. Provider
 adapters can consume `function_schemas()` or `openai_tools()`; provider-specific
 dependencies do not belong in the core package.
+
+## Edition discovery and availability
+
+Python treats the process-global and isolated discovery domains independently:
+
+- `HySimClient.edition_profile` fetches and caches `GET /api/edition`. The
+  profile's `analysis_catalog` has exact schema
+  `hacdcpf.edition-analysis-catalog.v1`, exact top-level fields `schema` and
+  `entries`, and exact entry fields `name`, `route`, `method`, and `enabled`.
+  The parser reconciles all 69 canonical names/routes/methods with the local
+  `ANALYSIS_CATALOG`; missing, extra, duplicate, malformed, or contradictory
+  data fails closed as `TransportError`.
+- `HySimV1Client.capabilities()` fetches and caches the independent
+  `GET /api/v1` document. It describes isolated asynchronous job types, not all
+  retained legacy routes.
+
+Canonical server IDs are the `AnalysisSpec.name` values. The legacy client
+currently accepts only two convenience aliases: `resilience` resolves to
+`distribution_resilience`, and `integrated_energy` resolves to `campus_ies`.
+Aliases are resolved before capability admission and are not additional server
+catalog entries. A name outside the SDK-known universe raises
+`UnknownAnalysisError`; a known catalog entry whose `enabled` value is false
+raises `AnalysisDisabledError`, both before analysis transport. A direct
+low-level call cannot bypass the check because `HySimClient.execute()` performs
+the same canonical catalog and edition validation.
 
 ## Runtime boundaries
 

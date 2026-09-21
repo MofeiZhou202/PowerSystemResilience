@@ -11,10 +11,10 @@ living documentation together.
 
 ## Establish Current Behavior
 
-1. Read `AGENTS.md` and `docs/development_status.md`.
+1. Read `AGENTS.md` and `docs/overview/development_status.md`.
 2. Read the relevant contract in `docs/README.md`; use
-   `docs/runtime_api.md` for session routes and `docs/gui_canvas_runtime.md` for
-   Canvas navigation.
+   `docs/reference/runtime_api.md` for session routes and
+   `docs/developer/gui_canvas_runtime.md` for Canvas navigation.
 3. Trace the feature through its authoritative surfaces:
    - model and resolver: `include/hacdcpf/` plus `src/`;
    - HTTP session and JSON: `tests/run_gui_server.cpp`;
@@ -147,7 +147,7 @@ successful.
 - Perform real browser inspection after automated E2E; retain an accessible
   local GUI URL when practical.
 - Update existing contracts rather than adding dated snapshots. Record volatile
-  build/test evidence and unclosed failures in `docs/development_status.md`.
+  build/test evidence and unclosed failures in `docs/overview/development_status.md`.
 - Use `manage-codebase-context` when changing AI-facing or status documents.
 - Do not claim completion while any affected backend field, component family,
   GUI control, stable link, or round-trip path remains unverified.

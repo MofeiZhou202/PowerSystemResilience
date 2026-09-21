@@ -1,0 +1,147 @@
+# cmake/mipsolversThirdPartyConfig.cmake.in
+# Package config for the prebuilt third-party libraries produced by a
+# -DMIPSOLVERS_THIRD_PARTY_ONLY=ON build (see third_party/build_third_party.sh).
+#
+# Imported target names intentionally match the in-tree vendored target names
+# (highs, libscip, ipopt_local, dmumps, MUMPS::MUMPS, cholmod_vendored,
+# umfpack_vendored, klu_vendored, fmt::fmt, Eigen3::Eigen,
+# nlohmann_json::nlohmann_json, Catch2::Catch2, Catch2::Catch2WithMain,
+# reflapack_vendored when built) so the rest of the build is mode-agnostic:
+# CMakeLists.txt links the same names whether the deps were compiled in-tree
+# or loaded from this package.
+
+@PACKAGE_INIT@
+
+include(CMakeFindDependencyMacro)
+
+# Threads::Threads is referenced by the exported Catch2 and HiGHS link
+# interfaces (same as the in-tree build).
+find_dependency(Threads)
+
+# Recreate the relocatable MKL interface before loading ipopt_local: the
+# exported static archive has a LINK_ONLY dependency on this target.
+set(MIPSOLVERS_TP_MKL_INCLUDE_DIRS "")
+set(MIPSOLVERS_TP_MKL_LIBRARIES "")
+set(MIPSOLVERS_TP_MKL_THREADING "@MIPSOLVERS_MKL_THREADING@")
+set(MIPSOLVERS_TP_MKL_RUNTIME_DLLS "")
+if("@MIPSOLVERS_HAVE_MKL_PARDISO@")
+  set(MIPSOLVERS_TP_MKL_INCLUDE_DIRS
+    "${PACKAGE_PREFIX_DIR}/@CMAKE_INSTALL_INCLUDEDIR@/mipsolvers-deps/oneapi-mkl")
+  foreach(_MIPSOLVERS_TP_MKL_NAME IN ITEMS @_tp_mkl_library_names@)
+    set(_MIPSOLVERS_TP_MKL_LIB
+      "${PACKAGE_PREFIX_DIR}/@CMAKE_INSTALL_LIBDIR@/mipsolvers-deps/oneapi-mkl/${_MIPSOLVERS_TP_MKL_NAME}")
+    if(NOT EXISTS "${_MIPSOLVERS_TP_MKL_LIB}")
+      message(FATAL_ERROR
+        "Corrupt MIPSolvers third-party package: missing ${_MIPSOLVERS_TP_MKL_LIB}")
+    endif()
+    list(APPEND MIPSOLVERS_TP_MKL_LIBRARIES "${_MIPSOLVERS_TP_MKL_LIB}")
+  endforeach()
+  foreach(_MIPSOLVERS_TP_MKL_RUNTIME_NAME IN ITEMS @_tp_mkl_runtime_names@)
+    set(_MIPSOLVERS_TP_MKL_RUNTIME
+      "${PACKAGE_PREFIX_DIR}/@CMAKE_INSTALL_BINDIR@/${_MIPSOLVERS_TP_MKL_RUNTIME_NAME}")
+    if(NOT EXISTS "${_MIPSOLVERS_TP_MKL_RUNTIME}")
+      message(FATAL_ERROR
+        "Corrupt MIPSolvers third-party package: missing ${_MIPSOLVERS_TP_MKL_RUNTIME}")
+    endif()
+    list(APPEND MIPSOLVERS_TP_MKL_RUNTIME_DLLS
+      "${_MIPSOLVERS_TP_MKL_RUNTIME}")
+  endforeach()
+  if(NOT TARGET MIPSolvers::MKL)
+    add_library(MIPSolvers::MKL INTERFACE IMPORTED GLOBAL)
+    set_target_properties(MIPSolvers::MKL PROPERTIES
+      INTERFACE_INCLUDE_DIRECTORIES "${MIPSOLVERS_TP_MKL_INCLUDE_DIRS}"
+      INTERFACE_LINK_LIBRARIES "${MIPSOLVERS_TP_MKL_LIBRARIES}")
+  endif()
+  unset(_MIPSOLVERS_TP_MKL_LIB)
+  unset(_MIPSOLVERS_TP_MKL_NAME)
+  unset(_MIPSOLVERS_TP_MKL_RUNTIME)
+  unset(_MIPSOLVERS_TP_MKL_RUNTIME_NAME)
+endif()
+
+include("${CMAKE_CURRENT_LIST_DIR}/mipsolversThirdPartyTargets.cmake")
+
+# find_package-like dependency targets must remain visible to a parent project
+# that adds MIPSolvers with add_subdirectory(). Exported imported targets are
+# directory-scoped unless they are promoted before aliases are created.
+foreach(_MIPSOLVERS_TP_IMPORTED_TARGET IN ITEMS
+    cholmod_vendored umfpack_vendored klu_vendored fmt highs libscip
+    ipopt_local MUMPS Catch2 Catch2WithMain reflapack_vendored)
+  if(TARGET ${_MIPSOLVERS_TP_IMPORTED_TARGET})
+    set_property(TARGET ${_MIPSOLVERS_TP_IMPORTED_TARGET}
+      PROPERTY IMPORTED_GLOBAL TRUE)
+  endif()
+endforeach()
+unset(_MIPSOLVERS_TP_IMPORTED_TARGET)
+
+set(MIPSOLVERS_THIRD_PARTY_PREFIX "${PACKAGE_PREFIX_DIR}")
+set(_MIPSOLVERS_TP_INC "@PACKAGE_CMAKE_INSTALL_INCLUDEDIR@")
+
+# ── Include-dir surface consumed via variables by the main CMakeLists ───────
+# These mirror the values the in-tree vendored build sets in
+# cmake/BuildCHOLMOD.cmake and cmake/Dependencies.cmake.
+set(MIPSOLVERS_TP_SUITESPARSE_INCLUDE_DIRS
+  "${_MIPSOLVERS_TP_INC}/suitesparse/SuiteSparse_config"
+  "${_MIPSOLVERS_TP_INC}/suitesparse/AMD"
+  "${_MIPSOLVERS_TP_INC}/suitesparse/CAMD"
+  "${_MIPSOLVERS_TP_INC}/suitesparse/COLAMD"
+  "${_MIPSOLVERS_TP_INC}/suitesparse/CCOLAMD"
+  "${_MIPSOLVERS_TP_INC}/suitesparse/CHOLMOD"
+  "${_MIPSOLVERS_TP_INC}/suitesparse/UMFPACK"
+  "${_MIPSOLVERS_TP_INC}/suitesparse/KLU"
+  "${_MIPSOLVERS_TP_INC}/suitesparse/BTF")
+set(MIPSOLVERS_TP_CHOLMOD_INCLUDE_DIRS "${_MIPSOLVERS_TP_INC}/suitesparse/CHOLMOD")
+set(MIPSOLVERS_TP_UMFPACK_INCLUDE_DIRS "${_MIPSOLVERS_TP_INC}/suitesparse/UMFPACK")
+set(MIPSOLVERS_TP_KLU_INCLUDE_DIRS     "${_MIPSOLVERS_TP_INC}/suitesparse/KLU")
+set(MIPSOLVERS_TP_IPOPT_INCLUDE_DIRS
+  "${_MIPSOLVERS_TP_INC}/ipopt/Interfaces"
+  "${_MIPSOLVERS_TP_INC}/ipopt/Common"
+  "${_MIPSOLVERS_TP_INC}/ipopt/LinAlg"
+  "${_MIPSOLVERS_TP_INC}/ipopt/Algorithm"
+  "${_MIPSOLVERS_TP_INC}/ipopt/config")
+
+# ── Namespaced aliases of the exported bare targets ─────────────────────────
+# In-tree these aliases are created by Dependencies.cmake / the Build*.cmake
+# modules; recreate them here so consumer code sees identical target names.
+if(TARGET highs AND NOT TARGET highs::highs)
+  add_library(highs::highs ALIAS highs)
+endif()
+if(TARGET libscip AND NOT TARGET SCIP::libscip)
+  add_library(SCIP::libscip ALIAS libscip)
+endif()
+if(TARGET ipopt_local AND NOT TARGET Ipopt::ipopt)
+  add_library(Ipopt::ipopt ALIAS ipopt_local)
+endif()
+if(TARGET MUMPS AND NOT TARGET MUMPS::MUMPS)
+  add_library(MUMPS::MUMPS ALIAS MUMPS)
+endif()
+if(TARGET umfpack_vendored AND NOT TARGET mipsolvers::umfpack_vendored)
+  add_library(mipsolvers::umfpack_vendored ALIAS umfpack_vendored)
+endif()
+if(TARGET klu_vendored AND NOT TARGET mipsolvers::klu_vendored)
+  add_library(mipsolvers::klu_vendored ALIAS klu_vendored)
+endif()
+if(TARGET fmt AND NOT TARGET fmt::fmt)
+  add_library(fmt::fmt ALIAS fmt)
+endif()
+if(TARGET Catch2 AND NOT TARGET Catch2::Catch2)
+  add_library(Catch2::Catch2 ALIAS Catch2)
+endif()
+if(TARGET Catch2WithMain AND NOT TARGET Catch2::Catch2WithMain)
+  add_library(Catch2::Catch2WithMain ALIAS Catch2WithMain)
+endif()
+
+# ── Header-only deps (IMPORTED targets cannot be exported; hand-written) ────
+if(NOT TARGET Eigen3::Eigen)
+  add_library(Eigen3::Eigen INTERFACE IMPORTED GLOBAL)
+  set_target_properties(Eigen3::Eigen PROPERTIES
+    INTERFACE_INCLUDE_DIRECTORIES "${_MIPSOLVERS_TP_INC}/mipsolvers-deps/eigen3")
+endif()
+if(NOT TARGET nlohmann_json::nlohmann_json)
+  add_library(nlohmann_json::nlohmann_json INTERFACE IMPORTED GLOBAL)
+  set_target_properties(nlohmann_json::nlohmann_json PROPERTIES
+    INTERFACE_INCLUDE_DIRECTORIES "${_MIPSOLVERS_TP_INC}/mipsolvers-deps/nlohmann_json")
+endif()
+
+unset(_MIPSOLVERS_TP_INC)
+
+check_required_components(mipsolvers-third-party)

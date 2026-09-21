@@ -1,6 +1,6 @@
 # HySim-XJTU-HRPES 文档中心
 
-最后核实：2026-09-13
+最后核实：2026-09-19
 
 新能源样本工厂已补充可执行的 PyTorch 多任务 surrogate（CAS 标签、早停训练、
 固定承诺 LP 可行性投影与 checkpoint 验证），入口见
@@ -133,6 +133,7 @@ Native固定整数LP修复、GAP退出条件及IEEE118恢复出清的证据见�
 |---|---|---|
 | 当前构建、测试、依赖与未闭环工作 | 状态 | [开发状态](overview/development_status.md) |
 | 跨平台离线构建与依赖配置 | 契约 | [跨平台构建](operations/cross_platform_build.md) |
+| Resilience Edition 能力发现、失败关闭、构建与打包边界 | 契约 | [Resilience Edition 契约](operations/resilience_edition_design.md) |
 | 组件模型与参数 | 实现参考 | [模型手册](modules/model/model_manual.tex) |
 | 交直流与三相潮流 | 实现参考 | [潮流计算手册](modules/power_flow/power_flow_manual.tex) |
 | AC/DC、混合与三相 OPF | 实现参考 | [最优潮流手册](modules/optimal_power_flow/opf_manual.tex) |

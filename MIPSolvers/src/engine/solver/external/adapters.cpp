@@ -1,0 +1,5181 @@
+#include "mipsolvers/engine/solver/external/adapters.hpp"
+
+#include <chrono>
+#include <cmath>
+#include <cctype>
+#include <cstdio>
+#include <cstdlib>
+#include <filesystem>
+#include <fstream>
+#include <iomanip>
+#include <algorithm>
+#include <map>
+#include <limits>
+#include <memory>
+#include <optional>
+#include <set>
+#include <sstream>
+#include <string>
+#include <unordered_map>
+#include <vector>
+
+#include "mipsolvers/core/string_utils.hpp"
+#include "mipsolvers/engine/kernel/linear_algebra/linear_solver.hpp"
+#include "mipsolvers/engine/util/problem_validation.hpp"
+
+#ifdef HACDCPF_HAVE_HIGHS_LIB
+#if defined(__clang__)
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wunused-parameter"
+#elif defined(__GNUC__)
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wunused-parameter"
+#endif
+#include "Highs.h"
+#if defined(__clang__)
+#pragma clang diagnostic pop
+#elif defined(__GNUC__)
+#pragma GCC diagnostic pop
+#endif
+#endif
+
+#ifdef HACDCPF_HAVE_IPOPT
+#include "IpIpoptCalculatedQuantities.hpp"
+#include "IpIpoptApplication.hpp"
+#include "IpTNLP.hpp"
+#endif
+
+#ifdef HACDCPF_HAVE_SCIP_LIB
+#include <scip/scip.h>
+#include <scip/scipdefplugins.h>
+#endif
+
+#ifdef HACDCPF_HAVE_CPLEX
+#include <ilcplex/cplex.h>
+#endif
+
+namespace fs = std::filesystem;
+
+namespace mipsolvers::engine {
+namespace {
+
+std::string shell_quote(const fs::path& p) {
+  return std::string("\"") + p.string() + "\"";
+}
+
+std::string shell_quote(const std::string& s) {
+  return std::string("\"") + s + "\"";
+}
+
+const char* shell_null_device() {
+#ifdef _WIN32
+  return "NUL";
+#else
+  return "/dev/null";
+#endif
+}
+
+bool file_exists(const std::string& p) {
+  return !p.empty() && fs::exists(fs::path(p));
+}
+
+std::string resolve_explicit_executable(const std::string& explicit_path) {
+  if (!explicit_path.empty() && file_exists(explicit_path)) {
+    return explicit_path;
+  }
+  return "";
+}
+
+bool env_flag_enabled(const char* name) {
+  const char* env = std::getenv(name);
+  return env != nullptr && env[0] != '\0' && env[0] != '0';
+}
+
+void relay_highs_conformance_lines(const fs::path& log_path) {
+  const bool relay_conf = env_flag_enabled("HACDCPF_HIGHS_CONF");
+  const bool relay_frontier =
+      env_flag_enabled("HACDCPF_HIGHS_FRONTIER_CONFORM");
+  const bool relay_timeline = env_flag_enabled("HACDCPF_HIGHS_TIMELINE");
+  const bool relay_xrow = env_flag_enabled("HIGHS_XROW_TRACE") ||
+                          env_flag_enabled("HACDCPF_XTAB_ROW_TRACE");
+  const bool relay_lpbasis = env_flag_enabled("HIGHS_LP_BASIS_TRACE") ||
+                             env_flag_enabled("HACDCPF_LP_BASIS_TRACE") ||
+                             relay_xrow;
+  const bool relay_analysis = std::getenv("HACDCPF_HIGHS_ANALYSIS") != nullptr;
+  if (!relay_conf && !relay_frontier && !relay_timeline && !relay_xrow &&
+      !relay_lpbasis && !relay_analysis)
+    return;
+  std::ifstream in(log_path);
+  std::string line;
+  while (std::getline(in, line)) {
+    if ((relay_conf && (line.find("[HIGHS-CONF]") != std::string::npos ||
+                        line.find("[HIGHS-SEP]") != std::string::npos ||
+                        line.find("[HIGHS-PRESOLVE-STATE]") != std::string::npos ||
+                        line.find("[HIGHS-VBSTATE]") != std::string::npos ||
+                        line.find("[HIGHS-LPSTATE]") != std::string::npos)) ||
+        (relay_timeline && line.find("[HIGHS-TL]") != std::string::npos) ||
+        (relay_frontier &&
+         (line.find("[HIGHS-FRONTIER]") != std::string::npos ||
+          line.find("[HIGHS-LPSTATE]") != std::string::npos ||
+          line.find("[HIGHS-PRESOLVE-STATE]") != std::string::npos ||
+          line.find("[HIGHS-VBSTATE]") != std::string::npos ||
+          line.find("[HIGHS-REPAIR]") != std::string::npos ||
+          line.find("[HIGHS-REPAIR-CAND]") != std::string::npos)) ||
+        (relay_xrow && line.find("[HIGHS-XROW]") != std::string::npos)) {
+      std::fprintf(stderr, "%s\n", line.c_str());
+    } else if (relay_lpbasis &&
+               line.find("[HIGHS-LPBASIS]") != std::string::npos) {
+      std::fprintf(stderr, "%s\n", line.c_str());
+    } else if (relay_analysis &&
+               (line.find("MipCore_") != std::string::npos ||
+                line.find("MipLevl1") != std::string::npos ||
+                line.find("MipRootNode") != std::string::npos ||
+                line.find("MipSerch") != std::string::npos ||
+                line.find("MipDive") != std::string::npos ||
+                line.find("MipNodeSearch") != std::string::npos ||
+                line.find("MipSeparation") != std::string::npos ||
+                line.find("MipSlvLp") != std::string::npos ||
+                line.find("MipSubMip") != std::string::npos ||
+                line.find("MipPrslv") != std::string::npos ||
+                line.find("MipRootSeparation") != std::string::npos)) {
+      std::fprintf(stderr, "[HIGHS-CLK] %s\n", line.c_str());
+    }
+  }
+}
+
+void write_mps_bounds(std::ofstream& out, const std::vector<VariableMeta>& vars) {
+  out << "BOUNDS\n";
+  for (size_t j = 0; j < vars.size(); ++j) {
+    const std::string v = "X" + std::to_string(j + 1);
+    out << " LO BND       " << v << " " << vars[j].lb << "\n";
+    out << " UP BND       " << v << " " << vars[j].ub << "\n";
+  }
+}
+
+void write_mps_rhs(std::ofstream& out,
+                   const Eigen::VectorXd& b,
+                   const std::string& prefix) {
+  for (int i = 0; i < b.size(); ++i) {
+    out << "    RHS1      " << prefix << (i + 1) << " " << b[i] << "\n";
+  }
+}
+
+void write_mps_ranges(std::ofstream& out, const LPModel& lp) {
+  if (!lp_has_row_lhs(lp)) return;
+  bool opened = false;
+  for (int i = 0; i < lp.A.rows(); ++i) {
+    const double lhs = lp_row_lhs_or_neg_inf(lp, i);
+    if (!std::isfinite(lhs) || !std::isfinite(lp.b[i])) continue;
+    const double range = lp.b[i] - lhs;
+    if (range < -1e-9) continue;
+    if (!opened) {
+      out << "RANGES\n";
+      opened = true;
+    }
+    out << "    RNG1      C" << (i + 1) << " "
+        << std::max(0.0, range) << "\n";
+  }
+}
+
+bool write_lp_as_mps(const LPModel& lp, const fs::path& mps_path, bool with_integer_markers) {
+  std::ofstream out(mps_path);
+  if (!out.is_open()) {
+    return false;
+  }
+
+  out << "NAME HACDCPF\n";
+  if (lp.sense == Sense::Maximize) {
+    out << "OBJSENSE\n    MAX\n";
+  }
+  out << "ROWS\n";
+  out << " N  OBJ\n";
+  for (int i = 0; i < lp.A.rows(); ++i) {
+    out << " L  C" << (i + 1) << "\n";
+  }
+  for (int i = 0; i < lp.Aeq.rows(); ++i) {
+    out << " E  E" << (i + 1) << "\n";
+  }
+
+  out << "COLUMNS\n";
+  bool in_mark = false;
+  const Eigen::SparseMatrix<double, Eigen::ColMajor> A_col(lp.A);
+  const Eigen::SparseMatrix<double, Eigen::ColMajor> Aeq_col(lp.Aeq);
+  for (int j = 0; j < lp.c.size(); ++j) {
+    if (with_integer_markers) {
+      const bool is_int = lp.vars[j].type == VarType::Integer ||
+                          lp.vars[j].type == VarType::Binary;
+      if (is_int && !in_mark) {
+        out << "    MARK0000  'MARKER'                 'INTORG'\n";
+        in_mark = true;
+      }
+      if (!is_int && in_mark) {
+        out << "    MARK0001  'MARKER'                 'INTEND'\n";
+        in_mark = false;
+      }
+    }
+
+    const std::string xname = "X" + std::to_string(j + 1);
+    if (lp.c[j] != 0.0) {
+      out << "    " << xname << "  OBJ " << lp.c[j] << "\n";
+    }
+    for (Eigen::SparseMatrix<double, Eigen::ColMajor>::InnerIterator it(A_col, j);
+         it; ++it) {
+      out << "    " << xname << "  C" << (it.row() + 1) << " "
+          << it.value() << "\n";
+    }
+    for (Eigen::SparseMatrix<double, Eigen::ColMajor>::InnerIterator it(Aeq_col, j);
+         it; ++it) {
+      out << "    " << xname << "  E" << (it.row() + 1) << " "
+          << it.value() << "\n";
+    }
+  }
+  if (with_integer_markers && in_mark) {
+    out << "    MARK0002  'MARKER'                 'INTEND'\n";
+  }
+
+  out << "RHS\n";
+  write_mps_rhs(out, lp.b, "C");
+  write_mps_rhs(out, lp.beq, "E");
+  write_mps_ranges(out, lp);
+
+  write_mps_bounds(out, lp.vars);
+  out << "ENDATA\n";
+
+  return true;
+}
+
+std::optional<double> parse_first_number(const std::string& text,
+                                         bool* is_percent = nullptr) {
+  std::stringstream ss(text);
+  std::string tok;
+  while (ss >> tok) {
+    try {
+      size_t p = 0;
+      const double v = std::stod(tok, &p);
+      if (p > 0) {
+        if (is_percent) {
+          *is_percent = tok.find('%') != std::string::npos;
+        }
+        return v;
+      }
+    } catch (const std::exception&) {
+    }
+  }
+  return std::nullopt;
+}
+
+struct HighsRunReport {
+  std::optional<std::string> status;
+  std::optional<double> primal_bound;
+  std::optional<double> dual_bound;
+  std::optional<double> gap;
+};
+
+std::optional<std::string> parse_highs_report_status_line(const std::string& line) {
+  const std::string t = trim(line);
+  constexpr const char* kStatus = "Status";
+  if (t.rfind(kStatus, 0) != 0) return std::nullopt;
+  const std::string rest =
+      trim(t.substr(std::char_traits<char>::length(kStatus)));
+  return rest.empty() ? std::nullopt : std::optional<std::string>(rest);
+}
+
+HighsRunReport parse_highs_run_report(const fs::path& log_path) {
+  HighsRunReport report;
+  std::ifstream in(log_path);
+  if (!in.is_open()) return report;
+
+  std::string line;
+  bool in_solving_report = false;
+  while (std::getline(in, line)) {
+    const std::string t = trim(line);
+    if (t == "Solving report") {
+      in_solving_report = true;
+      continue;
+    }
+    if (!in_solving_report) continue;
+
+    if (!report.status) {
+      report.status = parse_highs_report_status_line(t);
+    }
+    if (t.rfind("Primal bound", 0) == 0) {
+      report.primal_bound = parse_first_number(t.substr(12));
+    } else if (t.rfind("Dual bound", 0) == 0) {
+      report.dual_bound = parse_first_number(t.substr(10));
+    } else if (t.rfind("Gap", 0) == 0) {
+      bool is_percent = false;
+      if (auto v = parse_first_number(t.substr(3), &is_percent)) {
+        report.gap = is_percent ? (*v / 100.0) : *v;
+      }
+    }
+  }
+  return report;
+}
+
+SolveResult unavailable_result(const std::string& solver_name, const std::string& reason) {
+  SolveResult out;
+  out.stats.success = false;
+  out.stats.solver_name = solver_name;
+  out.stats.status = "Unavailable: " + reason;
+  return out;
+}
+
+std::optional<double> parse_highs_solution_objective(const fs::path& sol_path) {
+  std::ifstream in(sol_path);
+  if (!in.is_open()) {
+    return std::nullopt;
+  }
+
+  std::string line;
+  while (std::getline(in, line)) {
+    if (line.find("Objective") != std::string::npos || line.find("objective") != std::string::npos) {
+      std::stringstream ss(line);
+      std::string tok;
+      while (ss >> tok) {
+        try {
+          size_t p = 0;
+          const double v = std::stod(tok, &p);
+          if (p == tok.size()) {
+            return v;
+          }
+        } catch (const std::exception&) {
+        }
+      }
+    }
+  }
+  return std::nullopt;
+}
+
+std::optional<std::string> parse_highs_model_status(const fs::path& sol_path) {
+  std::ifstream in(sol_path);
+  if (!in.is_open()) {
+    return std::nullopt;
+  }
+
+  std::string line;
+  while (std::getline(in, line)) {
+    if (trim(line) == "Model status") {
+      while (std::getline(in, line)) {
+        const std::string s = trim(line);
+        if (!s.empty()) {
+          return s;
+        }
+      }
+      break;
+    }
+  }
+  return std::nullopt;
+}
+
+#ifdef HACDCPF_HAVE_HIGHS_LIB
+std::string highs_model_status_label(HighsModelStatus status) {
+  switch (status) {
+    case HighsModelStatus::kNotset:
+      return "notset";
+    case HighsModelStatus::kLoadError:
+      return "load_error";
+    case HighsModelStatus::kModelError:
+      return "model_error";
+    case HighsModelStatus::kPresolveError:
+      return "presolve_error";
+    case HighsModelStatus::kSolveError:
+      return "solve_error";
+    case HighsModelStatus::kPostsolveError:
+      return "postsolve_error";
+    case HighsModelStatus::kModelEmpty:
+      return "empty";
+    case HighsModelStatus::kOptimal:
+      return "optimal";
+    case HighsModelStatus::kInfeasible:
+      return "infeasible";
+    case HighsModelStatus::kUnboundedOrInfeasible:
+      return "unbounded_or_infeasible";
+    case HighsModelStatus::kUnbounded:
+      return "unbounded";
+    case HighsModelStatus::kObjectiveBound:
+      return "objective_bound";
+    case HighsModelStatus::kObjectiveTarget:
+      return "objective_target";
+    case HighsModelStatus::kTimeLimit:
+      return "time_limit";
+    case HighsModelStatus::kIterationLimit:
+      return "iteration_limit";
+    case HighsModelStatus::kUnknown:
+      return "unknown";
+    case HighsModelStatus::kSolutionLimit:
+      return "solution_limit";
+    case HighsModelStatus::kInterrupt:
+      return "interrupt";
+    case HighsModelStatus::kMemoryLimit:
+      return "memory_limit";
+    case HighsModelStatus::kHighsInterrupt:
+      return "highs_interrupt";
+  }
+  return "unknown";
+}
+
+bool highs_status_has_solution(HighsModelStatus status) {
+  return status == HighsModelStatus::kOptimal ||
+         status == HighsModelStatus::kTimeLimit ||
+         status == HighsModelStatus::kIterationLimit ||
+         status == HighsModelStatus::kSolutionLimit;
+}
+
+std::optional<SolveResult> solve_lp_with_embedded_highs(const LPModel& prob,
+                                                        bool with_integer_markers,
+                                                        const std::string& solver_name,
+                                                        const Eigen::VectorXd* mip_start,
+                                                        bool pricing = false,
+                                                        double time_limit = kHighsInf,
+                                                        int threads = 1,
+                                                        std::uint32_t random_seed = 0) {
+  const auto t0 = std::chrono::steady_clock::now();
+  SolveResult out;
+  out.stats.solver_name = solver_name;
+
+  const ValidationReport vr = validate(prob);
+  if (!vr.valid) {
+    out.stats.status = vr.errors.empty() ? "Invalid model" : vr.errors.front();
+    return out;
+  }
+
+  const int ncols = static_cast<int>(prob.vars.size());
+  const int m_ineq = static_cast<int>(prob.A.rows());
+  const int m_eq = static_cast<int>(prob.Aeq.rows());
+  const int nrows = m_ineq + m_eq;
+  if (ncols == 0) {
+    out.stats.success = true;
+    out.stats.status = "HiGHS empty";
+    out.x = Eigen::VectorXd::Zero(0);
+    return out;
+  }
+
+  std::vector<double> col_cost(static_cast<std::size_t>(ncols), 0.0);
+  std::vector<double> col_lower(static_cast<std::size_t>(ncols), -kHighsInf);
+  std::vector<double> col_upper(static_cast<std::size_t>(ncols), kHighsInf);
+  std::vector<HighsInt> integrality(static_cast<std::size_t>(ncols),
+                                    static_cast<HighsInt>(HighsVarType::kContinuous));
+  for (int j = 0; j < ncols; ++j) {
+    const auto& var = prob.vars[static_cast<std::size_t>(j)];
+    col_cost[static_cast<std::size_t>(j)] = prob.c[j];
+    col_lower[static_cast<std::size_t>(j)] =
+        std::isfinite(var.lb) ? var.lb : -kHighsInf;
+    col_upper[static_cast<std::size_t>(j)] =
+        std::isfinite(var.ub) ? var.ub : kHighsInf;
+    if (with_integer_markers && var.type != VarType::Continuous) {
+      integrality[static_cast<std::size_t>(j)] =
+          static_cast<HighsInt>(HighsVarType::kInteger);
+    }
+  }
+
+  std::vector<double> row_lower(static_cast<std::size_t>(nrows), -kHighsInf);
+  std::vector<double> row_upper(static_cast<std::size_t>(nrows), kHighsInf);
+  for (int r = 0; r < m_ineq; ++r) {
+    const double lhs = lp_row_lhs_or_neg_inf(prob, r);
+    row_lower[static_cast<std::size_t>(r)] =
+        std::isfinite(lhs) ? lhs : -kHighsInf;
+    row_upper[static_cast<std::size_t>(r)] =
+        std::isfinite(prob.b[r]) ? prob.b[r] : kHighsInf;
+  }
+  for (int r = 0; r < m_eq; ++r) {
+    const int rr = m_ineq + r;
+    const double rhs = prob.beq[r];
+    row_lower[static_cast<std::size_t>(rr)] =
+        std::isfinite(rhs) ? rhs : (rhs < 0.0 ? -kHighsInf : kHighsInf);
+    row_upper[static_cast<std::size_t>(rr)] = row_lower[static_cast<std::size_t>(rr)];
+  }
+
+  std::vector<HighsInt> start(static_cast<std::size_t>(ncols + 1), 0);
+  std::vector<HighsInt> index;
+  std::vector<double> value;
+  index.reserve(static_cast<std::size_t>(prob.A.nonZeros() + prob.Aeq.nonZeros()));
+  value.reserve(index.capacity());
+  for (int j = 0; j < ncols; ++j) {
+    start[static_cast<std::size_t>(j)] = static_cast<HighsInt>(index.size());
+    for (Eigen::SparseMatrix<double>::InnerIterator it(prob.A, j); it; ++it) {
+      if (it.value() == 0.0) continue;
+      index.push_back(static_cast<HighsInt>(it.row()));
+      value.push_back(it.value());
+    }
+    for (Eigen::SparseMatrix<double>::InnerIterator it(prob.Aeq, j); it; ++it) {
+      if (it.value() == 0.0) continue;
+      index.push_back(static_cast<HighsInt>(m_ineq + it.row()));
+      value.push_back(it.value());
+    }
+  }
+  start[static_cast<std::size_t>(ncols)] = static_cast<HighsInt>(index.size());
+
+  Highs highs;
+  const bool highs_log_on = std::getenv("MIPSOLVERS_HIGHS_ADAPTER_LOG") != nullptr;
+  highs.setOptionValue("output_flag", highs_log_on);
+  highs.setOptionValue("log_to_console", highs_log_on);
+  highs.setOptionValue("threads", threads);
+  highs.setOptionValue("random_seed", static_cast<HighsInt>(random_seed));
+  if (std::isfinite(time_limit) && time_limit > 0.0 &&
+      highs.setOptionValue("time_limit", time_limit) == HighsStatus::kError) {
+    out.stats.status = "HiGHS rejected solve deadline";
+    return out;
+  }
+  // Fixed ordered-LP price selection; docs/solvers.md, deterministic pricing.
+  if (pricing && (highs.setOptionValue("solver", "simplex") == HighsStatus::kError ||
+      highs.setOptionValue("simplex_strategy", 1) == HighsStatus::kError ||
+      highs.setOptionValue("parallel", "off") == HighsStatus::kError ||
+      highs.setOptionValue("random_seed", static_cast<HighsInt>(random_seed)) == HighsStatus::kError ||
+      highs.setOptionValue("presolve", "on") == HighsStatus::kError ||
+      highs.setOptionValue("time_limit", time_limit) == HighsStatus::kError)) {
+    out.stats.status = "HiGHS rejected deterministic pricing options";
+    return out;
+  }
+  if (with_integer_markers) {
+    highs.setOptionValue("mip_rel_gap", 1e-4);
+  }
+
+  const auto pass_status = highs.passModel(
+      static_cast<HighsInt>(ncols), static_cast<HighsInt>(nrows),
+      static_cast<HighsInt>(index.size()),
+      static_cast<HighsInt>(MatrixFormat::kColwise),
+      static_cast<HighsInt>(prob.sense == Sense::Maximize ? ObjSense::kMaximize
+                                                          : ObjSense::kMinimize),
+      0.0, col_cost.data(), col_lower.data(), col_upper.data(), row_lower.data(),
+      row_upper.data(), start.data(), index.data(), value.data(),
+      with_integer_markers ? integrality.data() : nullptr);
+  if (pass_status == HighsStatus::kError) {
+    out.stats.status = "HiGHS passModel failed";
+    return out;
+  }
+
+  if (with_integer_markers && mip_start != nullptr &&
+      static_cast<int>(mip_start->size()) == ncols) {
+    HighsSolution start;
+    start.value_valid = true;
+    start.dual_valid = false;
+    start.col_value.resize(static_cast<std::size_t>(ncols), 0.0);
+    for (int j = 0; j < ncols; ++j) {
+      double value_j = (*mip_start)[j];
+      if (!std::isfinite(value_j)) value_j = col_lower[static_cast<std::size_t>(j)];
+      value_j = std::min(col_upper[static_cast<std::size_t>(j)],
+                         std::max(col_lower[static_cast<std::size_t>(j)], value_j));
+      if (integrality[static_cast<std::size_t>(j)] !=
+          static_cast<HighsInt>(HighsVarType::kContinuous)) {
+        const double rounded = std::round(value_j);
+        if (std::abs(value_j - rounded) <= 1e-5) value_j = rounded;
+      }
+      start.col_value[static_cast<std::size_t>(j)] = value_j;
+    }
+    highs.setSolution(start);
+  }
+
+  const auto run_status = highs.run();
+  const HighsModelStatus model_status = highs.getModelStatus();
+  out.stats.status = "HiGHS " + highs_model_status_label(model_status);
+
+  const bool optimal = model_status == HighsModelStatus::kOptimal;
+  const bool feasible_with_limit =
+      highs_status_has_solution(model_status) && highs.getSolution().value_valid;
+  out.stats.success = optimal || feasible_with_limit;
+  if (!out.stats.success && run_status == HighsStatus::kError) {
+    out.stats.status = "HiGHS solve failed";
+    return out;
+  }
+
+  const HighsInfo& info = highs.getInfo();
+  out.stats.objective = info.objective_function_value;
+  out.stats.iterations = static_cast<int>(info.simplex_iteration_count +
+                                          info.ipm_iteration_count +
+                                          info.pdlp_iteration_count);
+  out.stats.primal_feas = info.max_primal_infeasibility;
+  out.stats.dual_feas = info.max_dual_infeasibility;
+  out.stats.residual_inf =
+      std::max(info.max_primal_infeasibility, info.max_dual_infeasibility);
+  if (with_integer_markers && std::isfinite(info.mip_gap)) {
+    out.stats.mip_gap = info.mip_gap;
+  }
+
+  const HighsSolution& sol = highs.getSolution();
+  if (static_cast<int>(sol.col_value.size()) >= ncols) {
+    out.x = Eigen::VectorXd::Zero(ncols);
+    for (int j = 0; j < ncols; ++j) {
+      out.x[j] = sol.col_value[static_cast<std::size_t>(j)];
+    }
+  }
+
+  if (!with_integer_markers &&
+      static_cast<int>(sol.row_dual.size()) >= nrows &&
+      static_cast<int>(sol.col_dual.size()) >= ncols) {
+    out.constraint_duals = Eigen::VectorXd::Zero(nrows);
+    for (int i = 0; i < nrows; ++i) {
+      out.constraint_duals[i] = sol.row_dual[static_cast<std::size_t>(i)];
+    }
+    out.box_dual_lb = Eigen::VectorXd::Zero(ncols);
+    out.box_dual_ub = Eigen::VectorXd::Zero(ncols);
+    for (int j = 0; j < ncols; ++j) {
+      const double dual = sol.col_dual[static_cast<std::size_t>(j)];
+      if (dual > 0.0) {
+        out.box_dual_lb[j] = dual;
+      } else if (dual < 0.0) {
+        out.box_dual_ub[j] = -dual;
+      }
+    }
+  }
+
+  const auto t1 = std::chrono::steady_clock::now();
+  out.stats.runtime_sec = std::chrono::duration<double>(t1 - t0).count();
+  return out;
+}
+#endif
+
+// ---------------------------------------------------------------------------
+// Parse HiGHS solution file for variable values
+// HiGHS .sol format has a "Columns" section with lines like:
+//   <index> <name> <value>   or   <name> <value>
+// Variables are named X1, X2, ... (1-indexed) matching write_lp_as_mps().
+// ---------------------------------------------------------------------------
+std::unordered_map<std::string, double> parse_highs_solution_values(
+    const fs::path& sol_path) {
+  std::unordered_map<std::string, double> values;
+  std::ifstream in(sol_path);
+  if (!in.is_open()) return values;
+
+  std::string line;
+  bool in_columns = false;
+
+  const auto normalize_section_line = [](std::string text) {
+    text = trim(text);
+    if (!text.empty() && text.front() == '#') {
+      text.erase(text.begin());
+      text = trim(text);
+    }
+    return text;
+  };
+
+  while (std::getline(in, line)) {
+    const std::string t = trim(line);
+    if (t.empty()) continue;
+
+    const std::string normalized = normalize_section_line(t);
+
+    // Detect start of Columns section
+    if (normalized.rfind("Columns", 0) == 0 || normalized.rfind("columns", 0) == 0) {
+      in_columns = true;
+      continue;
+    }
+
+    // Stop at next named section (e.g., "Rows")
+    if (in_columns && (normalized.rfind("Rows", 0) == 0 ||
+                       normalized.rfind("rows", 0) == 0 ||
+                       normalized.rfind("Dual", 0) == 0 ||
+                       normalized.rfind("dual", 0) == 0 ||
+                       normalized.rfind("Basis", 0) == 0 ||
+                       normalized.rfind("basis", 0) == 0)) {
+      break;
+    }
+
+    if (!in_columns) continue;
+
+    // Parse: possibly "<int> <name> <value>" or "<name> <value>"
+    std::istringstream iss(t);
+    std::string tok1, tok2, tok3;
+    iss >> tok1;
+    if (!iss) continue;
+
+    // Try 3-token format: index name value
+    if (iss >> tok2 && iss >> tok3) {
+      // tok1 might be integer index, tok2 = name, tok3 = value
+      try {
+        double val = std::stod(tok3);
+        values[tok2] = val;
+        continue;
+      } catch (const std::exception&) {}
+    }
+
+    // Try 2-token format: name value
+    if (!tok2.empty()) {
+      try {
+        double val = std::stod(tok2);
+        values[tok1] = val;
+        continue;
+      } catch (const std::exception&) {}
+    }
+  }
+
+  return values;
+}
+
+// ---------------------------------------------------------------------------
+// Polynomial expansion for PIP export
+// ---------------------------------------------------------------------------
+// A Monomial is coefficient * product of (variable_index, power) pairs.
+// A Polynomial is a vector of Monomials.
+
+struct Monomial {
+  double coeff{1.0};
+  std::map<int, int> vars;  // var_index -> integer power (>= 1)
+};
+
+using Polynomial = std::vector<Monomial>;
+
+Polynomial poly_constant(double c) {
+  return {{c, {}}};
+}
+
+Polynomial poly_variable(int idx) {
+  Monomial m;
+  m.coeff = 1.0;
+  m.vars[idx] = 1;
+  return {m};
+}
+
+Polynomial poly_negate(const Polynomial& p) {
+  Polynomial out;
+  out.reserve(p.size());
+  for (auto m : p) {
+    m.coeff = -m.coeff;
+    out.push_back(std::move(m));
+  }
+  return out;
+}
+
+Polynomial poly_add(const Polynomial& a, const Polynomial& b) {
+  Polynomial out = a;
+  out.insert(out.end(), b.begin(), b.end());
+  return out;
+}
+
+Polynomial poly_sub(const Polynomial& a, const Polynomial& b) {
+  return poly_add(a, poly_negate(b));
+}
+
+Monomial mono_mul(const Monomial& a, const Monomial& b) {
+  Monomial out;
+  out.coeff = a.coeff * b.coeff;
+  out.vars = a.vars;
+  for (const auto& [idx, pow] : b.vars) {
+    out.vars[idx] += pow;
+  }
+  return out;
+}
+
+Polynomial poly_mul(const Polynomial& a, const Polynomial& b) {
+  Polynomial out;
+  out.reserve(a.size() * b.size());
+  for (const auto& ma : a) {
+    for (const auto& mb : b) {
+      out.push_back(mono_mul(ma, mb));
+    }
+  }
+  return out;
+}
+
+Polynomial poly_pow(const Polynomial& base, int n) {
+  if (n <= 0) {
+    return poly_constant(1.0);
+  }
+  Polynomial result = poly_constant(1.0);
+  for (int i = 0; i < n; ++i) {
+    result = poly_mul(result, base);
+  }
+  return result;
+}
+
+// Collect like terms to keep the polynomial compact.
+Polynomial poly_simplify(const Polynomial& p) {
+  // Key: sorted vector of (var_index, power)
+  std::map<std::vector<std::pair<int, int>>, double> bucket;
+  for (const auto& m : p) {
+    std::vector<std::pair<int, int>> key(m.vars.begin(), m.vars.end());
+    bucket[key] += m.coeff;
+  }
+  Polynomial out;
+  out.reserve(bucket.size());
+  for (auto& [key, c] : bucket) {
+    if (std::abs(c) < 1e-15) {
+      continue;
+    }
+    Monomial m;
+    m.coeff = c;
+    m.vars.insert(key.begin(), key.end());
+    out.push_back(std::move(m));
+  }
+  return out;
+}
+
+bool expand_to_polynomial(const std::shared_ptr<SymExpr>& e,
+                          Polynomial& out,
+                          std::string& err) {
+  if (!e) {
+    err = "null symbolic expression";
+    return false;
+  }
+
+  switch (e->op) {
+    case SymOp::Constant:
+      out = poly_constant(e->value);
+      return true;
+    case SymOp::Variable:
+      out = poly_variable(e->var_index);
+      return true;
+    case SymOp::Neg: {
+      Polynomial a;
+      if (!expand_to_polynomial(e->lhs, a, err)) return false;
+      out = poly_negate(a);
+      return true;
+    }
+    case SymOp::Add: {
+      Polynomial a, b;
+      if (!expand_to_polynomial(e->lhs, a, err)) return false;
+      if (!expand_to_polynomial(e->rhs, b, err)) return false;
+      out = poly_add(a, b);
+      return true;
+    }
+    case SymOp::Sub: {
+      Polynomial a, b;
+      if (!expand_to_polynomial(e->lhs, a, err)) return false;
+      if (!expand_to_polynomial(e->rhs, b, err)) return false;
+      out = poly_sub(a, b);
+      return true;
+    }
+    case SymOp::Mul: {
+      Polynomial a, b;
+      if (!expand_to_polynomial(e->lhs, a, err)) return false;
+      if (!expand_to_polynomial(e->rhs, b, err)) return false;
+      out = poly_mul(a, b);
+      return true;
+    }
+    case SymOp::Pow2: {
+      Polynomial a;
+      if (!expand_to_polynomial(e->lhs, a, err)) return false;
+      out = poly_pow(a, 2);
+      return true;
+    }
+    case SymOp::PowN: {
+      Polynomial a;
+      if (!expand_to_polynomial(e->lhs, a, err)) return false;
+      const int n = e->var_index;
+      if (n < 0) {
+        err = "PowN exponent must be non-negative";
+        return false;
+      }
+      out = poly_pow(a, n);
+      return true;
+    }
+  }
+
+  err = "unsupported symbolic operation";
+  return false;
+}
+
+// ---------------------------------------------------------------------------
+// PIP format serialization
+// ---------------------------------------------------------------------------
+
+std::string sanitize_var_name(const std::string& base, int idx) {
+  if (base.empty()) {
+    return "x" + std::to_string(idx + 1);
+  }
+  std::string out;
+  out.reserve(base.size());
+  for (char c : base) {
+    if (std::isalnum(static_cast<unsigned char>(c)) || c == '_') {
+      out.push_back(c);
+    } else {
+      out.push_back('_');
+    }
+  }
+  if (out.empty()) {
+    out = "x" + std::to_string(idx + 1);
+  }
+  return out;
+}
+
+// Format a simplified polynomial in PIP syntax (e.g. "3 x^2 y - 2 z + 7").
+std::string poly_to_pip(const Polynomial& p,
+                        const std::vector<std::string>& var_names) {
+  if (p.empty()) {
+    return "0";
+  }
+
+  std::ostringstream os;
+  bool first = true;
+  for (const auto& m : p) {
+    const double c = m.coeff;
+    if (std::abs(c) < 1e-15) continue;
+
+    if (first) {
+      if (m.vars.empty()) {
+        os << c;
+      } else {
+        if (c == -1.0) {
+          os << "- ";
+        } else if (c != 1.0) {
+          if (c < 0.0) {
+            os << "- " << std::abs(c) << " ";
+          } else {
+            os << c << " ";
+          }
+        }
+        bool var_first = true;
+        for (const auto& [idx, pow] : m.vars) {
+          if (!var_first) os << " ";
+          os << var_names[idx];
+          if (pow > 1) os << "^" << pow;
+          var_first = false;
+        }
+      }
+      first = false;
+    } else {
+      if (m.vars.empty()) {
+        os << (c >= 0.0 ? " + " : " - ") << std::abs(c);
+      } else {
+        const double ac = std::abs(c);
+        os << (c >= 0.0 ? " + " : " - ");
+        if (ac != 1.0) {
+          os << ac << " ";
+        }
+        bool var_first = true;
+        for (const auto& [idx, pow] : m.vars) {
+          if (!var_first) os << " ";
+          os << var_names[idx];
+          if (pow > 1) os << "^" << pow;
+          var_first = false;
+        }
+      }
+    }
+  }
+
+  if (first) {
+    return "0";
+  }
+  return os.str();
+}
+
+bool write_minlp_as_scip_pip(const MINLPModel& prob,
+                             const fs::path& pip_path,
+                             std::vector<std::string>& var_names,
+                             std::string& err,
+                             bool& maximize_objective) {
+  const auto& nlp = prob.nonlinear_part;
+  const int n = static_cast<int>(nlp.vars.size());
+  if (!nlp.symbolic_objective) {
+    err = "symbolic objective is required for native SCIP MINLP export";
+    return false;
+  }
+
+  var_names.clear();
+  var_names.reserve(n);
+  for (int i = 0; i < n; ++i) {
+    var_names.push_back(sanitize_var_name(nlp.vars[i].name, i));
+  }
+
+  std::ofstream out(pip_path);
+  if (!out.is_open()) {
+    err = "failed to open temporary PIP file";
+    return false;
+  }
+
+  maximize_objective = (nlp.sense == Sense::Maximize);
+
+  Polynomial obj_poly;
+  if (!expand_to_polynomial(nlp.symbolic_objective, obj_poly, err)) {
+    return false;
+  }
+  obj_poly = poly_simplify(obj_poly);
+  if (maximize_objective) {
+    obj_poly = poly_negate(obj_poly);
+  }
+
+  out << "Minimize\n";
+  out << " obj: " << poly_to_pip(obj_poly, var_names) << "\n";
+
+  out << "Subject To\n";
+  int cid = 1;
+  for (const auto& c : nlp.symbolic_constraints) {
+    Polynomial cpoly;
+    if (!expand_to_polynomial(c.expr, cpoly, err)) {
+      err = "constraint conversion failed: " + err;
+      return false;
+    }
+    cpoly = poly_simplify(cpoly);
+
+    // Separate constant from non-constant terms: move constant to RHS.
+    double lhs_constant = 0.0;
+    Polynomial lhs_terms;
+    for (const auto& m : cpoly) {
+      if (m.vars.empty()) {
+        lhs_constant += m.coeff;
+      } else {
+        lhs_terms.push_back(m);
+      }
+    }
+    const double rhs = c.rhs - lhs_constant;
+
+    const std::string cname = c.name.empty() ? ("c" + std::to_string(cid++)) : c.name;
+    out << " " << cname << ": " << poly_to_pip(lhs_terms, var_names);
+
+    switch (c.sense) {
+      case SymbolicSense::LessEqual:    out << " <= " << rhs; break;
+      case SymbolicSense::GreaterEqual: out << " >= " << rhs; break;
+      case SymbolicSense::Equal:        out << " = " << rhs;  break;
+    }
+    out << "\n";
+  }
+
+  out << "Bounds\n";
+  for (int i = 0; i < n; ++i) {
+    out << " " << nlp.vars[i].lb << " <= " << var_names[i] << " <= " << nlp.vars[i].ub << "\n";
+  }
+
+  if (!prob.integer_idx.empty()) {
+    out << "General\n";
+    for (int idx : prob.integer_idx) {
+      out << " " << var_names[idx] << "\n";
+    }
+  }
+  if (!prob.binary_idx.empty()) {
+    out << "Binary\n";
+    for (int idx : prob.binary_idx) {
+      out << " " << var_names[idx] << "\n";
+    }
+  }
+
+  out << "End\n";
+  return true;
+}
+
+#ifndef HACDCPF_HAVE_SCIP_LIB
+struct ScipSolution {
+  bool success{false};
+  double objective{0.0};
+  std::unordered_map<std::string, double> values;
+  std::string status;
+};
+
+ScipSolution parse_scip_solution(const fs::path& sol_path) {
+  ScipSolution s;
+  std::ifstream in(sol_path);
+  if (!in.is_open()) {
+    s.status = "solution file missing";
+    return s;
+  }
+
+  std::string line;
+  while (std::getline(in, line)) {
+    const std::string t = trim(line);
+    if (t.rfind("solution status:", 0) == 0) {
+      s.status = trim(t.substr(std::string("solution status:").size()));
+      std::string l = s.status;
+      std::transform(l.begin(), l.end(), l.begin(),
+                     [](unsigned char c) { return std::tolower(c); });
+      s.success = (l.find("optimal") != std::string::npos ||
+                   l.find("feasible") != std::string::npos);
+    } else if (t.rfind("objective value:", 0) == 0) {
+      const std::string v = trim(t.substr(std::string("objective value:").size()));
+      try {
+        s.objective = std::stod(v);
+      } catch (const std::exception&) {
+      }
+    } else if (!t.empty() && t.find(':') == std::string::npos) {
+      std::istringstream iss(t);
+      std::string name;
+      double val = 0.0;
+      if (iss >> name >> val) {
+        s.values[name] = val;
+      }
+    }
+  }
+
+  return s;
+}
+#endif
+
+#ifdef HACDCPF_HAVE_IPOPT
+class CallbackTNLP final : public Ipopt::TNLP {
+ public:
+  explicit CallbackTNLP(const NLPModel& prob)
+      : prob_(prob),
+        n_(static_cast<int>(prob.vars.size())),
+        meq_(0),
+        mineq_(0),
+        m_(0),
+        iters_(0),
+        primal_inf_(0.0),
+        dual_inf_(0.0),
+        complementarity_(0.0),
+        barrier_parameter_(0.0),
+        unscaled_primal_inf_(0.0),
+        unscaled_dual_inf_(0.0),
+        unscaled_complementarity_(0.0),
+        objective_(0.0),
+        best_merit_(std::numeric_limits<double>::infinity()),
+        best_primal_inf_(0.0),
+        best_dual_inf_(0.0),
+        best_complementarity_(0.0),
+        best_iter_(0),
+        best_iterate_valid_(false),
+        exact_hessian_(false),
+        nnz_hess_(0) {
+    if (prob_.g) {
+      Eigen::VectorXd geq;
+      prob_.g(prob_.x0, geq);
+      meq_ = static_cast<int>(geq.size());
+    }
+    if (prob_.h) {
+      Eigen::VectorXd h;
+      prob_.h(prob_.x0, h);
+      mineq_ = static_cast<int>(h.size());
+    }
+    m_ = meq_ + mineq_;
+
+    nnz_jac_ = 0;
+    // The callbacks emit structural zeros, so x0 exposes the complete pattern.
+    {
+      auto collect = [&](const auto& jac_cb, int row_offset) {
+        Eigen::SparseMatrix<double> J;
+        jac_cb(prob_.x0, J);
+        J.makeCompressed();
+        for (int k = 0; k < J.outerSize(); ++k)
+          for (Eigen::SparseMatrix<double>::InnerIterator it(J, k); it; ++it) {
+            jac_rows_.push_back(row_offset + static_cast<int>(it.row()));
+            jac_cols_.push_back(static_cast<int>(it.col()));
+          }
+      };
+
+      if (prob_.jac_g) collect(prob_.jac_g, 0);
+      if (prob_.jac_h) collect(prob_.jac_h, meq_);
+
+      nnz_jac_ = static_cast<int>(jac_rows_.size());
+    }
+    // A TNLP Hessian has a fixed lower-triangular sparsity pattern.  Probe the
+    // supplied exact Lagrangian Hessian with two nonzero multiplier vectors so
+    // constraint curvature is present even when the initial multipliers are
+    // zero.  Sparse callbacks are expected to retain their structural entries;
+    // the second, nonuniform probe avoids accidental cancellation between rows.
+    if (prob_.lagrangian_hess) {
+      std::set<std::pair<int, int>> pattern;
+      const auto collect_hessian_pattern = [&](double sign) {
+        Eigen::VectorXd lambda(meq_);
+        Eigen::VectorXd nu(mineq_);
+        for (int i = 0; i < meq_; ++i) {
+          lambda[i] = sign * (1.0 + 0.013 * static_cast<double>(i + 1));
+        }
+        for (int i = 0; i < mineq_; ++i) {
+          nu[i] = sign * (1.0 + 0.017 * static_cast<double>(i + 1));
+        }
+        Eigen::SparseMatrix<double> hess;
+        prob_.lagrangian_hess(prob_.x0, lambda,
+                              mineq_ > 0 ? &nu : nullptr, hess);
+        if (hess.rows() != n_ || hess.cols() != n_) {
+          return false;
+        }
+        hess.makeCompressed();
+        for (int col = 0; col < hess.outerSize(); ++col) {
+          for (Eigen::SparseMatrix<double>::InnerIterator it(hess, col); it;
+               ++it) {
+            const int row = static_cast<int>(it.row());
+            const int column = static_cast<int>(it.col());
+            pattern.emplace(std::max(row, column), std::min(row, column));
+          }
+        }
+        return true;
+      };
+      try {
+        exact_hessian_ = collect_hessian_pattern(1.0) &&
+                         collect_hessian_pattern(-1.0);
+      } catch (const std::exception&) {
+        exact_hessian_ = false;
+      }
+      if (exact_hessian_) {
+        for (const auto& [row, col] : pattern) {
+          hess_rows_.push_back(row);
+          hess_cols_.push_back(col);
+        }
+        nnz_hess_ = static_cast<int>(hess_rows_.size());
+      }
+    }
+    // Ipopt accepts nnz_jac_g == 0 for unconstrained problems.  Advertising a
+    // synthetic entry here is unsafe because there is no valid constraint row
+    // to attach it to and the value callback cannot reproduce that structure.
+  }
+
+  bool get_nlp_info(Ipopt::Index& n,
+                    Ipopt::Index& m,
+                    Ipopt::Index& nnz_jac_g,
+                    Ipopt::Index& nnz_h_lag,
+                    Ipopt::TNLP::IndexStyleEnum& index_style) override {
+    n = n_;
+    m = m_;
+    nnz_jac_g = nnz_jac_;
+    nnz_h_lag = nnz_hess_;
+    index_style = Ipopt::TNLP::C_STYLE;
+    return true;
+  }
+
+  bool get_bounds_info(Ipopt::Index n,
+                       Ipopt::Number* x_l,
+                       Ipopt::Number* x_u,
+                       Ipopt::Index m,
+                       Ipopt::Number* g_l,
+                       Ipopt::Number* g_u) override {
+    if (n != n_ || m != m_) {
+      return false;
+    }
+
+    for (int i = 0; i < n_; ++i) {
+      x_l[i] = prob_.vars[i].lb;
+      x_u[i] = prob_.vars[i].ub;
+    }
+
+    for (int i = 0; i < meq_; ++i) {
+      g_l[i] = 0.0;
+      g_u[i] = 0.0;
+    }
+    for (int i = 0; i < mineq_; ++i) {
+      g_l[meq_ + i] = -1e19;
+      g_u[meq_ + i] = 0.0;
+    }
+    return true;
+  }
+
+  bool get_starting_point(Ipopt::Index n,
+                          bool init_x,
+                          Ipopt::Number* x,
+                          bool init_z,
+                          Ipopt::Number* z_L,
+                          Ipopt::Number* z_U,
+                          Ipopt::Index m,
+                          bool init_lambda,
+                          Ipopt::Number* lambda) override {
+    if (!init_x || n != n_ || x == nullptr) {
+      return false;
+    }
+
+    for (int i = 0; i < n_; ++i) {
+      x[i] = std::min(prob_.vars[i].ub, std::max(prob_.vars[i].lb, prob_.x0[i]));
+    }
+
+    if (init_z) {
+      if (z_L == nullptr || z_U == nullptr) {
+        return false;
+      }
+      for (int i = 0; i < n_; ++i) {
+        z_L[i] = prob_.solver_options.primal_dual_warm_start
+            ? prob_.box_dual_lb_start[i] : 0.0;
+        z_U[i] = prob_.solver_options.primal_dual_warm_start
+            ? prob_.box_dual_ub_start[i] : 0.0;
+      }
+    }
+
+    if (init_lambda) {
+      if (lambda == nullptr || m != m_) {
+        return false;
+      }
+      if (prob_.solver_options.primal_dual_warm_start) {
+        // Ipopt TNLP rows are [equalities | h(x)<=0], whereas the engine's
+        // public dual contract is [inequalities | equalities]. The sign is
+        // unchanged because both use L=f+lambda'g+mu'h with mu>=0.
+        // Ipopt TNLP::get_starting_point; Waechter--Biegler (2006), Sec. 3.1.
+        for (int i = 0; i < meq_; ++i) {
+          lambda[i] = prob_.constraint_dual_start[mineq_ + i];
+        }
+        for (int i = 0; i < mineq_; ++i) {
+          lambda[meq_ + i] = prob_.constraint_dual_start[i];
+        }
+      } else {
+        for (int i = 0; i < m_; ++i) {
+          lambda[i] = 0.0;
+        }
+      }
+    }
+    return true;
+  }
+
+  bool eval_f(Ipopt::Index n,
+              const Ipopt::Number* x,
+              bool new_x,
+              Ipopt::Number& obj_value) override {
+    (void)new_x;
+    if (n != n_ || x == nullptr) {
+      return false;
+    }
+    Eigen::Map<const Eigen::VectorXd> xv(x, n_);
+    obj_value = prob_.f(xv);
+    return std::isfinite(obj_value);
+  }
+
+  bool eval_grad_f(Ipopt::Index n,
+                   const Ipopt::Number* x,
+                   bool new_x,
+                   Ipopt::Number* grad_f) override {
+    (void)new_x;
+    if (n != n_ || x == nullptr || grad_f == nullptr) {
+      return false;
+    }
+    Eigen::Map<const Eigen::VectorXd> xv(x, n_);
+    Eigen::VectorXd g;
+    prob_.grad(xv, g);
+    if (g.size() != n_) {
+      return false;
+    }
+    for (int i = 0; i < n_; ++i) {
+      grad_f[i] = g[i];
+    }
+    return true;
+  }
+
+  bool eval_g(Ipopt::Index n,
+              const Ipopt::Number* x,
+              bool new_x,
+              Ipopt::Index m,
+              Ipopt::Number* g) override {
+    (void)new_x;
+    if (n != n_ || m != m_ || x == nullptr || (m_ > 0 && g == nullptr)) {
+      return false;
+    }
+
+    Eigen::Map<const Eigen::VectorXd> xv(x, n_);
+    if (meq_ > 0) {
+      Eigen::VectorXd geq;
+      prob_.g(xv, geq);
+      if (geq.size() != meq_) {
+        return false;
+      }
+      for (int i = 0; i < meq_; ++i) {
+        g[i] = geq[i];
+      }
+    }
+    if (mineq_ > 0) {
+      Eigen::VectorXd h;
+      prob_.h(xv, h);
+      if (h.size() != mineq_) {
+        return false;
+      }
+      for (int i = 0; i < mineq_; ++i) {
+        g[meq_ + i] = h[i];
+      }
+    }
+    return true;
+  }
+
+  bool eval_jac_g(Ipopt::Index n,
+                  const Ipopt::Number* x,
+                  bool new_x,
+                  Ipopt::Index m,
+                  Ipopt::Index nele_jac,
+                  Ipopt::Index* iRow,
+                  Ipopt::Index* jCol,
+                  Ipopt::Number* values) override {
+    (void)new_x;
+    if (n != n_ || m != m_) {
+      return false;
+    }
+    int cursor = 0;
+
+    if (values == nullptr) {
+      // Structure pass: emit the pre-computed sparse pattern.
+      if (nele_jac > 0 && (iRow == nullptr || jCol == nullptr)) {
+        return false;
+      }
+      for (int k = 0; k < static_cast<int>(jac_rows_.size()); ++k) {
+        iRow[cursor] = jac_rows_[static_cast<std::size_t>(k)];
+        jCol[cursor] = jac_cols_[static_cast<std::size_t>(k)];
+        ++cursor;
+      }
+    } else {
+      // Value pass: callbacks preserve their compressed-column structural order.
+      if (x == nullptr) {
+        return false;
+      }
+      Eigen::Map<const Eigen::VectorXd> xv(x, n_);
+      auto fill_block = [&](const Eigen::SparseMatrix<double>& J, int row_offset) {
+        for (int k = 0; k < J.outerSize(); ++k)
+          for (Eigen::SparseMatrix<double>::InnerIterator it(J, k); it; ++it) {
+            const int gr = row_offset + static_cast<int>(it.row());
+            const int gc = static_cast<int>(it.col());
+            if (cursor >= nnz_jac_ ||
+                jac_rows_[static_cast<std::size_t>(cursor)] != gr ||
+                jac_cols_[static_cast<std::size_t>(cursor)] != gc) return false;
+            values[cursor++] = it.value();
+          }
+        return true;
+      };
+
+      if (meq_ > 0 && prob_.jac_g) {
+        Eigen::SparseMatrix<double> jg;
+        prob_.jac_g(xv, jg);
+        if (!fill_block(jg, 0)) return false;
+      }
+      if (mineq_ > 0 && prob_.jac_h) {
+        Eigen::SparseMatrix<double> jh;
+        prob_.jac_h(xv, jh);
+        if (!fill_block(jh, meq_)) return false;
+      }
+    }
+
+    return cursor == nele_jac;
+  }
+
+  bool eval_h(Ipopt::Index n,
+              const Ipopt::Number* x,
+              bool new_x,
+              Ipopt::Number obj_factor,
+              Ipopt::Index m,
+              const Ipopt::Number* lambda,
+              bool new_lambda,
+              Ipopt::Index nele_hess,
+              Ipopt::Index* iRow,
+              Ipopt::Index* jCol,
+              Ipopt::Number* values) override {
+    if (n != n_ || m != m_ || nele_hess != nnz_hess_) {
+      return false;
+    }
+    (void)new_x;
+    (void)new_lambda;
+    if (!exact_hessian_) {
+      return nele_hess == 0;
+    }
+    if (values == nullptr) {
+      if (nele_hess > 0 && (iRow == nullptr || jCol == nullptr)) {
+        return false;
+      }
+      for (int k = 0; k < nnz_hess_; ++k) {
+        iRow[k] = hess_rows_[static_cast<std::size_t>(k)];
+        jCol[k] = hess_cols_[static_cast<std::size_t>(k)];
+      }
+      return true;
+    }
+    if (x == nullptr || (m_ > 0 && lambda == nullptr)) {
+      return false;
+    }
+
+    try {
+      Eigen::Map<const Eigen::VectorXd> xv(x, n_);
+      Eigen::VectorXd lambda_eq = Eigen::VectorXd::Zero(meq_);
+      Eigen::VectorXd nu = Eigen::VectorXd::Zero(mineq_);
+      for (int i = 0; i < meq_; ++i) lambda_eq[i] = lambda[i];
+      for (int i = 0; i < mineq_; ++i) nu[i] = lambda[meq_ + i];
+
+      Eigen::SparseMatrix<double> full_hessian;
+      prob_.lagrangian_hess(xv, lambda_eq,
+                            mineq_ > 0 ? &nu : nullptr, full_hessian);
+      Eigen::VectorXd zero_lambda = Eigen::VectorXd::Zero(meq_);
+      Eigen::VectorXd zero_nu = Eigen::VectorXd::Zero(mineq_);
+      Eigen::SparseMatrix<double> objective_hessian;
+      prob_.lagrangian_hess(
+          xv, zero_lambda, mineq_ > 0 ? &zero_nu : nullptr,
+          objective_hessian);
+      if (full_hessian.rows() != n_ || full_hessian.cols() != n_ ||
+          objective_hessian.rows() != n_ ||
+          objective_hessian.cols() != n_) {
+        return false;
+      }
+      // full_hessian = Hess(f + lambda'c).  Ipopt supplies an independent
+      // objective factor, so replace the implicit unit coefficient on Hess(f).
+      Eigen::SparseMatrix<double> combined =
+          full_hessian + (obj_factor - 1.0) * objective_hessian;
+      combined.makeCompressed();
+      for (int k = 0; k < nnz_hess_; ++k) {
+        values[k] = combined.coeff(
+            hess_rows_[static_cast<std::size_t>(k)],
+            hess_cols_[static_cast<std::size_t>(k)]);
+        if (!std::isfinite(values[k])) return false;
+      }
+      return true;
+    } catch (const std::exception&) {
+      return false;
+    }
+  }
+
+  void finalize_solution(Ipopt::SolverReturn status,
+                         Ipopt::Index n,
+                         const Ipopt::Number* x,
+                         const Ipopt::Number* z_L,
+                         const Ipopt::Number* z_U,
+                         Ipopt::Index m,
+                         const Ipopt::Number* g,
+                         const Ipopt::Number* lambda,
+                         Ipopt::Number obj_value,
+                         const Ipopt::IpoptData* ip_data,
+                         Ipopt::IpoptCalculatedQuantities* ip_cq) override {
+    (void)g;
+    (void)ip_data;
+    (void)ip_cq;
+    if (x != nullptr && n > 0) {
+      solution_ = Eigen::Map<const Eigen::VectorXd>(x, n);
+    } else {
+      solution_ = Eigen::VectorXd::Zero(n_);
+    }
+    bound_dual_lb_ = Eigen::VectorXd::Zero(n_);
+    bound_dual_ub_ = Eigen::VectorXd::Zero(n_);
+    constraint_dual_ = Eigen::VectorXd::Zero(m_);
+    if (z_L != nullptr && n == n_) {
+      bound_dual_lb_ = Eigen::Map<const Eigen::VectorXd>(z_L, n);
+    }
+    if (z_U != nullptr && n == n_) {
+      bound_dual_ub_ = Eigen::Map<const Eigen::VectorXd>(z_U, n);
+    }
+    if (lambda != nullptr && m == m_) {
+      constraint_dual_ = Eigen::Map<const Eigen::VectorXd>(lambda, m);
+    }
+    objective_ = obj_value;
+
+    const bool successful_terminal =
+        status == Ipopt::SUCCESS ||
+        status == Ipopt::STOP_AT_ACCEPTABLE_POINT ||
+        status == Ipopt::FEASIBLE_POINT_FOUND;
+    if (!successful_terminal && best_iterate_valid_) {
+      if (std::getenv("HACDCPF_OPF_TRACE") != nullptr) {
+        std::fprintf(stderr,
+                     "IPOPT_BEST_ITERATE iter=%d merit=%.17g "
+                     "primal=%.17g dual=%.17g complementarity=%.17g\n",
+                     best_iter_, best_merit_, best_primal_inf_,
+                     best_dual_inf_, best_complementarity_);
+        std::fflush(stderr);
+      }
+      solution_ = best_solution_;
+      constraint_dual_ = best_constraint_dual_;
+      bound_dual_lb_ = best_bound_dual_lb_;
+      bound_dual_ub_ = best_bound_dual_ub_;
+      objective_ = prob_.f(solution_);
+      primal_inf_ = best_primal_inf_;
+      dual_inf_ = best_dual_inf_;
+      complementarity_ = best_complementarity_;
+      unscaled_primal_inf_ = best_primal_inf_;
+      unscaled_dual_inf_ = best_dual_inf_;
+      unscaled_complementarity_ = best_complementarity_;
+    }
+  }
+
+  bool intermediate_callback(Ipopt::AlgorithmMode mode,
+                             Ipopt::Index iter,
+                             Ipopt::Number obj_value,
+                             Ipopt::Number inf_pr,
+                             Ipopt::Number inf_du,
+                             Ipopt::Number mu,
+                             Ipopt::Number d_norm,
+                             Ipopt::Number regularization_size,
+                             Ipopt::Number alpha_du,
+                             Ipopt::Number alpha_pr,
+                             Ipopt::Index ls_trials,
+                             const Ipopt::IpoptData* ip_data,
+                             Ipopt::IpoptCalculatedQuantities* ip_cq) override {
+    (void)obj_value;
+    (void)d_norm;
+    (void)regularization_size;
+    (void)alpha_du;
+    (void)alpha_pr;
+    (void)ls_trials;
+    iters_ = static_cast<int>(iter);
+    if (ip_cq != nullptr) {
+      // Preserve Ipopt's scaled callback metrics for convergence parity, and
+      // expose original-model residuals alongside them for physical audits.
+      unscaled_primal_inf_ = ip_cq->unscaled_curr_nlp_constraint_violation(
+          Ipopt::NORM_MAX);
+      unscaled_dual_inf_ =
+          ip_cq->unscaled_curr_dual_infeasibility(Ipopt::NORM_MAX);
+      unscaled_complementarity_ = ip_cq->unscaled_curr_complementarity(
+          0.0, Ipopt::NORM_MAX);
+    }
+    primal_inf_ = inf_pr;
+    dual_inf_ = inf_du;
+    complementarity_ = unscaled_complementarity_;
+    barrier_parameter_ = mu;
+
+    // Keep a coherent unscaled primal-dual iterate from the regular algorithm.
+    // A later restoration failure can otherwise pair restoration variables with
+    // KKT metrics from the last regular iterate.
+    if (mode == Ipopt::RegularMode && ip_data != nullptr && ip_cq != nullptr) {
+      Eigen::VectorXd current_x(n_);
+      Eigen::VectorXd current_z_l(n_);
+      Eigen::VectorXd current_z_u(n_);
+      Eigen::VectorXd current_g(m_);
+      Eigen::VectorXd current_lambda(m_);
+      Eigen::VectorXd lower_violation(n_);
+      Eigen::VectorXd upper_violation(n_);
+      Eigen::VectorXd lower_complementarity(n_);
+      Eigen::VectorXd upper_complementarity(n_);
+      Eigen::VectorXd lagrangian_gradient(n_);
+      Eigen::VectorXd constraint_violation(m_);
+      Eigen::VectorXd constraint_complementarity(m_);
+      const bool have_iterate = get_curr_iterate(
+          ip_data, ip_cq, false, n_, current_x.data(), current_z_l.data(),
+          current_z_u.data(), m_, current_g.data(), current_lambda.data());
+      const bool have_violations = get_curr_violations(
+          ip_data, ip_cq, false, n_, lower_violation.data(),
+          upper_violation.data(), lower_complementarity.data(),
+          upper_complementarity.data(), lagrangian_gradient.data(), m_,
+          constraint_violation.data(), constraint_complementarity.data());
+      const bool finite =
+          have_iterate && have_violations && current_x.allFinite() &&
+          current_z_l.allFinite() && current_z_u.allFinite() &&
+          current_lambda.allFinite() && lower_violation.allFinite() &&
+          upper_violation.allFinite() && lagrangian_gradient.allFinite() &&
+          constraint_violation.allFinite() &&
+          lower_complementarity.allFinite() &&
+          upper_complementarity.allFinite() &&
+          constraint_complementarity.allFinite();
+      if (finite) {
+        const auto max_abs = [](const Eigen::VectorXd& values) {
+          return values.size() > 0 ? values.cwiseAbs().maxCoeff() : 0.0;
+        };
+        const double primal = std::max({
+            max_abs(lower_violation), max_abs(upper_violation),
+            max_abs(constraint_violation)});
+        const double multiplier_scale = 1.0 + std::max({
+            max_abs(current_lambda), max_abs(current_z_l),
+            max_abs(current_z_u)});
+        const double dual = max_abs(lagrangian_gradient) / multiplier_scale;
+        const double comp = std::max({
+            max_abs(lower_complementarity),
+            max_abs(upper_complementarity),
+            max_abs(constraint_complementarity)});
+        const double merit = std::max({primal, dual, comp});
+        if (std::isfinite(merit) && merit < best_merit_) {
+          best_merit_ = merit;
+          best_solution_ = std::move(current_x);
+          best_bound_dual_lb_ = std::move(current_z_l);
+          best_bound_dual_ub_ = std::move(current_z_u);
+          best_constraint_dual_ = std::move(current_lambda);
+          best_primal_inf_ = primal;
+          best_dual_inf_ = dual;
+          best_complementarity_ = comp;
+          best_iter_ = static_cast<int>(iter);
+          best_iterate_valid_ = true;
+        }
+      }
+    }
+    return true;
+  }
+
+  SolveResult build_result(Ipopt::ApplicationReturnStatus app_status) const {
+    SolveResult out;
+    out.x = solution_;
+    // Ipopt returns rows as [equalities | upper-bounded h(x) <= 0].  The
+    // engine certificate contract is [inequalities | equalities].  Ipopt's
+    // upper-row multipliers have the same nonnegative sign convention as the
+    // native Lagrangian f + lambda^T g + mu^T h.
+    out.constraint_duals.resize(mineq_ + meq_);
+    if (mineq_ > 0) {
+      out.constraint_duals.head(mineq_) =
+          constraint_dual_.segment(meq_, mineq_);
+    }
+    if (meq_ > 0) {
+      out.constraint_duals.tail(meq_) = constraint_dual_.head(meq_);
+    }
+    out.box_dual_lb = bound_dual_lb_;
+    out.box_dual_ub = bound_dual_ub_;
+    out.stats.objective = objective_;
+    out.stats.iterations = iters_;
+    out.stats.primal_feas = primal_inf_;
+    out.stats.dual_feas = dual_inf_;
+    out.stats.complementarity = complementarity_;
+    out.stats.barrier_parameter = barrier_parameter_;
+    out.stats.unscaled_primal_feas = unscaled_primal_inf_;
+    out.stats.unscaled_dual_feas = unscaled_dual_inf_;
+    out.stats.unscaled_complementarity = unscaled_complementarity_;
+    out.stats.residual_inf = std::max(primal_inf_, dual_inf_);
+    out.stats.warm_start_used = prob_.solver_options.primal_dual_warm_start;
+
+    switch (app_status) {
+      case Ipopt::Solve_Succeeded:
+        out.stats.success = true;
+        out.stats.strict_convergence = true;
+        out.stats.status = "Converged";
+        break;
+      case Ipopt::Solved_To_Acceptable_Level:
+        out.stats.success = true;
+        out.stats.acceptable_convergence = true;
+        out.stats.status = "Converged (acceptable level)";
+        break;
+      case Ipopt::Feasible_Point_Found:
+        out.stats.success = true;
+        out.stats.status = "Feasible point found";
+        break;
+      case Ipopt::Maximum_Iterations_Exceeded:
+        out.stats.success = false;
+        out.stats.status = "Max iterations exceeded";
+        break;
+      case Ipopt::Infeasible_Problem_Detected:
+        out.stats.success = false;
+        out.stats.status = "Ipopt infeasible problem detected";
+        break;
+      case Ipopt::Search_Direction_Becomes_Too_Small:
+        out.stats.success = false;
+        out.stats.status = "Ipopt search direction too small";
+        break;
+      case Ipopt::Diverging_Iterates:
+        out.stats.success = false;
+        out.stats.status = "Ipopt diverging iterates";
+        break;
+      case Ipopt::User_Requested_Stop:
+        out.stats.success = false;
+        out.stats.status = "Ipopt user requested stop";
+        break;
+      case Ipopt::Restoration_Failed:
+        out.stats.success = false;
+        out.stats.status = "Ipopt restoration failed";
+        break;
+      case Ipopt::Error_In_Step_Computation:
+        out.stats.success = false;
+        out.stats.status = "Ipopt step computation failed";
+        break;
+      case Ipopt::Invalid_Option:
+        out.stats.success = false;
+        out.stats.status = "Ipopt invalid option";
+        break;
+      case Ipopt::Invalid_Number_Detected:
+        out.stats.success = false;
+        out.stats.status = "Ipopt invalid number detected";
+        break;
+      case Ipopt::Not_Enough_Degrees_Of_Freedom:
+        out.stats.success = false;
+        out.stats.status = "Ipopt insufficient degrees of freedom";
+        break;
+      case Ipopt::Invalid_Problem_Definition:
+        out.stats.success = false;
+        out.stats.status = "Ipopt invalid problem definition";
+        break;
+      case Ipopt::Maximum_CpuTime_Exceeded:
+        out.stats.success = false;
+        out.stats.status = "Ipopt CPU time limit exceeded";
+        break;
+      case Ipopt::Maximum_WallTime_Exceeded:
+        out.stats.success = false;
+        out.stats.status = "Ipopt wall time limit exceeded";
+        break;
+      case Ipopt::Insufficient_Memory:
+        out.stats.success = false;
+        out.stats.status = "Ipopt insufficient memory";
+        break;
+      case Ipopt::Unrecoverable_Exception:
+        out.stats.success = false;
+        out.stats.status = "Ipopt unrecoverable exception";
+        break;
+      case Ipopt::NonIpopt_Exception_Thrown:
+        out.stats.success = false;
+        out.stats.status = "Ipopt non-Ipopt exception";
+        break;
+      case Ipopt::Internal_Error:
+        out.stats.success = false;
+        out.stats.status = "Ipopt internal error";
+        break;
+      default:
+        out.stats.success = false;
+        out.stats.status = "Ipopt failed";
+        break;
+    }
+    return out;
+  }
+
+ private:
+  const NLPModel& prob_;
+  int n_;
+  int meq_;
+  int mineq_;
+  int m_;
+  int nnz_jac_;
+  std::vector<int> jac_rows_;   ///< Sparse Jacobian row indices (structural pattern)
+  std::vector<int> jac_cols_;   ///< Sparse Jacobian column indices (structural pattern)
+  bool exact_hessian_;
+  int nnz_hess_;
+  std::vector<int> hess_rows_;  ///< Lower-triangular Hessian row indices.
+  std::vector<int> hess_cols_;  ///< Lower-triangular Hessian column indices.
+
+  Eigen::VectorXd solution_;
+  Eigen::VectorXd constraint_dual_;
+  Eigen::VectorXd bound_dual_lb_;
+  Eigen::VectorXd bound_dual_ub_;
+  int iters_;
+  double primal_inf_;
+  double dual_inf_;
+  double complementarity_;
+  double barrier_parameter_;
+  double unscaled_primal_inf_;
+  double unscaled_dual_inf_;
+  double unscaled_complementarity_;
+  double objective_;
+  double best_merit_;
+  double best_primal_inf_;
+  double best_dual_inf_;
+  double best_complementarity_;
+  int best_iter_;
+  bool best_iterate_valid_;
+  Eigen::VectorXd best_solution_;
+  Eigen::VectorXd best_constraint_dual_;
+  Eigen::VectorXd best_bound_dual_lb_;
+  Eigen::VectorXd best_bound_dual_ub_;
+};
+#endif
+
+}  // namespace
+
+// AUDIT-NAV: 外部适配器从本节开始。审核重点是模型/目标/状态/对偶映射和临时
+// 资源生命周期，不把适配器封装描述成项目自研算法。
+HighsAdapter::HighsAdapter(std::string executable)
+    : executable_(resolve_explicit_executable(executable)) {}
+
+std::string HighsAdapter::name() const {
+  return "HiGHS";
+}
+
+bool HighsAdapter::supports(ProblemClass cls) const {
+  return cls == ProblemClass::LP || cls == ProblemClass::MILP;
+}
+
+bool HighsAdapter::available() const {
+#ifdef HACDCPF_HAVE_HIGHS_LIB
+  return true;
+#else
+  return !executable_.empty();
+#endif
+}
+
+const std::string& HighsAdapter::executable() const {
+  return executable_;
+}
+
+SolveResult HighsAdapter::solve_pricing_lp(const LPModel& prob, double time_limit_sec) const {
+  if (!std::isfinite(time_limit_sec) || time_limit_sec <= 0)
+    throw std::invalid_argument("Invalid pricing time limit");
+#ifdef HACDCPF_HAVE_HIGHS_LIB
+  Highs::resetGlobalScheduler(/*blocking=*/true);
+  if (auto result = solve_lp_with_embedded_highs(prob, false, name(), nullptr, true, time_limit_sec))
+    return *result;
+#else
+  (void)prob;
+#endif
+  return unavailable_result(name(), "deterministic pricing requires embedded HiGHS");
+}
+
+SolveResult HighsAdapter::solve_lp(const LPModel& prob) const {
+  return solve_lp_impl(prob, kHighsInf, 1, 0);
+}
+
+std::string precise_decimal(double value) {
+  std::ostringstream out;
+  out << std::setprecision(std::numeric_limits<double>::max_digits10) << value;
+  return out.str();
+}
+
+SolveResult stopped_context_result(const std::string& solver_name,
+                                   const SolveContext& context) {
+  SolveResult out;
+  out.stats.solver_name = solver_name;
+  out.stats.status = context.deadline_expired() ? "Time limit" : "Cancelled";
+  return out;
+}
+
+SolveResult HighsAdapter::solve_lp(const LPModel& prob,
+                                   const SolveContext& context) const {
+  if (context.stop_requested()) {
+    return stopped_context_result(name(), context);
+  }
+  return solve_lp_impl(prob,
+                       context.backend_time_limit_sec(kHighsInf),
+                       context.has_explicit_thread_budget()
+                           ? context.thread_budget()
+                           : 1,
+                       context.random_seed());
+}
+
+SolveResult HighsAdapter::solve_lp_impl(const LPModel& prob,
+                                        double time_limit_sec,
+                                        int threads,
+                                        std::uint32_t random_seed) const {
+  const auto t0 = std::chrono::steady_clock::now();
+#ifdef HACDCPF_HAVE_HIGHS_LIB
+  // A previous MILP solve can initialize HiGHS's process-global scheduler
+  // with a different thread count. Reset it before the LP helper requests its
+  // deterministic single-thread configuration.
+  Highs::resetGlobalScheduler(/*blocking=*/true);
+  if (auto embedded = solve_lp_with_embedded_highs(
+          prob, false, name(), nullptr, false, time_limit_sec, threads, random_seed)) {
+    return *embedded;
+  }
+#endif
+  if (!available()) {
+    return unavailable_result(name(), "embedded HiGHS library not compiled");
+  }
+
+  const ValidationReport vr = validate(prob);
+  if (!vr.valid) {
+    return unavailable_result(name(), vr.errors.empty() ? "invalid LP model" : vr.errors.front());
+  }
+
+  const auto stamp = std::to_string(
+      std::chrono::duration_cast<std::chrono::nanoseconds>(t0.time_since_epoch()).count());
+  const fs::path mps_path = fs::temp_directory_path() / ("mipsolvers_lp_" + stamp + ".mps");
+  const fs::path sol_path = fs::temp_directory_path() / ("mipsolvers_lp_" + stamp + ".sol");
+  const fs::path opt_path = fs::temp_directory_path() / ("mipsolvers_lp_" + stamp + ".opt");
+  const fs::path log_path = fs::temp_directory_path() / ("mipsolvers_lp_" + stamp + ".log");
+
+  SolveResult out;
+  out.stats.solver_name = name();
+
+  if (!write_lp_as_mps(prob, mps_path, false)) {
+    out.stats.status = "Unavailable: failed to write MPS";
+    return out;
+  }
+
+  {
+    std::ofstream ofs(opt_path);
+    ofs << "log_file = " << log_path.string() << "\n";
+    if (std::isfinite(time_limit_sec)) ofs << "time_limit = " << time_limit_sec << "\n";
+    ofs << "threads = " << threads << "\n";
+    ofs << "random_seed = " << random_seed << "\n";
+  }
+
+  const std::string cmd = shell_quote(executable_) + " --model_file " + shell_quote(mps_path) +
+                          " --solution_file " + shell_quote(sol_path) +
+                          " --options_file " + shell_quote(opt_path) +
+                          (env_flag_enabled("HIGHS_XROW_TRACE") ||
+                                   env_flag_enabled("HACDCPF_XTAB_ROW_TRACE")
+                               ? " >> " + shell_quote(log_path) + " 2>&1"
+                   : std::string(" > ") + shell_null_device() + " 2>&1");
+
+  const int rc = std::system(cmd.c_str());
+  const HighsRunReport run_report = parse_highs_run_report(log_path);
+  auto model_status = parse_highs_model_status(sol_path);
+  if (!model_status && run_report.status) model_status = run_report.status;
+  const bool solved = model_status.has_value() &&
+                      (*model_status == "Optimal" || *model_status == "Feasible");
+  if (!solved && rc != 0) {
+    out.stats.status = "HiGHS process failed";
+    std::error_code ec;
+    fs::remove(mps_path, ec);
+    fs::remove(sol_path, ec);
+    fs::remove(opt_path, ec);
+    fs::remove(log_path, ec);
+    return out;
+  }
+
+  out.stats.success = solved;
+  out.stats.status = solved ? ("HiGHS " + *model_status)
+                            : "HiGHS finished without solution";
+  if (const auto obj = parse_highs_solution_objective(sol_path)) {
+    out.stats.objective = *obj;
+  } else if (run_report.primal_bound) {
+    out.stats.objective = *run_report.primal_bound;
+  }
+  if (run_report.gap) {
+    out.stats.mip_gap = *run_report.gap;
+  }
+
+  // Parse variable values from solution file (X1..Xn, 1-indexed)
+  if (solved) {
+    const int n = static_cast<int>(prob.vars.size());
+    const auto vals = parse_highs_solution_values(sol_path);
+    out.x = Eigen::VectorXd::Zero(n);
+    for (int i = 0; i < n; ++i) {
+      auto it = vals.find("X" + std::to_string(i + 1));
+      if (it != vals.end()) out.x[i] = it->second;
+    }
+  }
+
+  const auto t1 = std::chrono::steady_clock::now();
+  out.stats.runtime_sec = std::chrono::duration<double>(t1 - t0).count();
+
+  relay_highs_conformance_lines(log_path);
+
+  std::error_code ec;
+  fs::remove(mps_path, ec);
+  fs::remove(sol_path, ec);
+  fs::remove(opt_path, ec);
+  fs::remove(log_path, ec);
+  return out;
+}
+
+
+SolveResult HighsAdapter::solve_milp(const MIPModel& prob) const {
+  return solve_milp_impl(prob, kHighsInf, 1, 0);
+}
+
+SolveResult HighsAdapter::solve_milp(const MIPModel& prob,
+                                     const SolveContext& context) const {
+  if (context.stop_requested()) {
+    return stopped_context_result(name(), context);
+  }
+  return solve_milp_impl(prob,
+                         context.backend_time_limit_sec(kHighsInf),
+                         context.has_explicit_thread_budget()
+                             ? context.thread_budget()
+                             : 1,
+                         context.random_seed());
+}
+
+SolveResult HighsAdapter::solve_milp_impl(const MIPModel& prob,
+                                          double time_limit_sec,
+                                          int threads,
+                                          std::uint32_t random_seed) const {
+  const auto t0 = std::chrono::steady_clock::now();
+  const ValidationReport vr = validate(prob);
+  if (!vr.valid) {
+    return unavailable_result(name(), vr.errors.empty() ? "invalid MILP model" : vr.errors.front());
+  }
+
+  LPModel lp = prob.linear_part;
+  for (int idx : prob.integer_idx) {
+    lp.vars[idx].type = VarType::Integer;
+  }
+  for (int idx : prob.binary_idx) {
+    lp.vars[idx].type = VarType::Binary;
+    lp.vars[idx].lb = std::max(0.0, lp.vars[idx].lb);
+    lp.vars[idx].ub = std::min(1.0, lp.vars[idx].ub);
+  }
+
+#ifdef HACDCPF_HAVE_HIGHS_LIB
+  // The native B&C solver may have already initialized HiGHS's global thread
+  // scheduler (with num_threads > 1).  Resetting it before constructing a new
+  // Highs instance allows solve_lp_with_embedded_highs to set its own thread
+  // count without triggering the "scheduler already initialized" error.
+  Highs::resetGlobalScheduler(/*blocking=*/true);
+  const Eigen::VectorXd* mip_start =
+      prob.initial_solution.size() == static_cast<int>(lp.vars.size())
+          ? &prob.initial_solution
+          : nullptr;
+  if (auto embedded = solve_lp_with_embedded_highs(
+          lp, true, name(), mip_start, false, time_limit_sec, threads, random_seed)) {
+    return *embedded;
+  }
+#endif
+  if (!available()) {
+    return unavailable_result(name(), "embedded HiGHS library not compiled");
+  }
+
+  SolveResult out;
+  out.stats.solver_name = name();
+
+  const auto stamp = std::to_string(
+      std::chrono::duration_cast<std::chrono::nanoseconds>(t0.time_since_epoch()).count());
+  const fs::path mps_path = fs::temp_directory_path() / ("mipsolvers_milp_" + stamp + ".mps");
+  const fs::path sol_path = fs::temp_directory_path() / ("mipsolvers_milp_" + stamp + ".sol");
+  const fs::path opt_path = fs::temp_directory_path() / ("mipsolvers_milp_" + stamp + ".opt");
+  const fs::path log_path = fs::temp_directory_path() / ("mipsolvers_milp_" + stamp + ".log");
+
+  if (!write_lp_as_mps(lp, mps_path, true)) {
+    out.stats.status = "Unavailable: failed to write MPS";
+    return out;
+  }
+
+  // Write options file to set MIP gap tolerance (not available as CLI flag).
+  {
+    std::ofstream ofs(opt_path);
+    ofs << "mip_rel_gap = 1e-4\n";
+    ofs << "log_file = " << log_path.string() << "\n";
+    if (std::isfinite(time_limit_sec)) ofs << "time_limit = " << time_limit_sec << "\n";
+    ofs << "threads = " << threads << "\n";
+    ofs << "random_seed = " << random_seed << "\n";
+    // Optional: enable HiGHS' built-in MIP timer (per-clock report) so we can
+    // compare phase-by-phase against the native B&C diagnostics. Activated
+    // by HACDCPF_HIGHS_ANALYSIS=<level> (e.g. 128 for kHighsAnalysisLevelMipTime).
+    if (const char* env_lvl = std::getenv("HACDCPF_HIGHS_ANALYSIS")) {
+      if (env_lvl[0] != '\0') ofs << "highs_analysis_level = " << env_lvl << "\n";
+    }
+  }
+
+  // When HACDCPF_HIGHS_TIMELINE/CONF/SEP are on we want HiGHS' stderr/stdout
+  // captured so the relay can pick those tagged lines up.
+  const bool capture_log =
+      env_flag_enabled("HIGHS_XROW_TRACE") ||
+      env_flag_enabled("HACDCPF_XTAB_ROW_TRACE") ||
+      env_flag_enabled("HACDCPF_HIGHS_TIMELINE") ||
+      env_flag_enabled("HACDCPF_HIGHS_FRONTIER_CONFORM") ||
+      env_flag_enabled("HACDCPF_HIGHS_CONF") ||
+      std::getenv("HACDCPF_HIGHS_ANALYSIS") != nullptr;
+
+  const std::string cmd = shell_quote(executable_) + " --model_file " + shell_quote(mps_path) +
+                          " --solution_file " + shell_quote(sol_path) +
+                          " --options_file " + shell_quote(opt_path) +
+                          (capture_log
+                               ? " >> " + shell_quote(log_path) + " 2>&1"
+               : std::string(" > ") + shell_null_device() + " 2>&1");
+
+  const int rc = std::system(cmd.c_str());
+  const HighsRunReport run_report = parse_highs_run_report(log_path);
+  auto model_status = parse_highs_model_status(sol_path);
+  if (!model_status && run_report.status) model_status = run_report.status;
+  const bool solved = model_status.has_value() &&
+                      (*model_status == "Optimal" || *model_status == "Feasible");
+  if (!solved && rc != 0) {
+    out.stats.status = "HiGHS process failed";
+    std::error_code ec;
+    fs::remove(mps_path, ec);
+    fs::remove(sol_path, ec);
+    fs::remove(opt_path, ec);
+    fs::remove(log_path, ec);
+    return out;
+  }
+
+  out.stats.success = solved;
+  out.stats.status = solved ? ("HiGHS " + *model_status)
+                            : "HiGHS finished without solution";
+  if (const auto obj = parse_highs_solution_objective(sol_path)) {
+    out.stats.objective = *obj;
+  } else if (run_report.primal_bound) {
+    out.stats.objective = *run_report.primal_bound;
+  }
+  if (run_report.gap) {
+    out.stats.mip_gap = *run_report.gap;
+  }
+
+  // Parse variable values from solution file (X1..Xn, 1-indexed)
+  if (solved) {
+    const int n = static_cast<int>(lp.vars.size());
+    const auto vals = parse_highs_solution_values(sol_path);
+    out.x = Eigen::VectorXd::Zero(n);
+    for (int i = 0; i < n; ++i) {
+      auto it = vals.find("X" + std::to_string(i + 1));
+      if (it != vals.end()) out.x[i] = it->second;
+    }
+  }
+
+  const auto t1 = std::chrono::steady_clock::now();
+  out.stats.runtime_sec = std::chrono::duration<double>(t1 - t0).count();
+
+  relay_highs_conformance_lines(log_path);
+
+  std::error_code ec;
+  fs::remove(mps_path, ec);
+  fs::remove(sol_path, ec);
+  fs::remove(opt_path, ec);
+  fs::remove(log_path, ec);
+  return out;
+}
+
+
+IpoptAdapter::IpoptAdapter(std::string executable)
+    : executable_(resolve_explicit_executable(executable)) {}
+
+ScipAdapter::ScipAdapter(std::string executable)
+  : executable_(resolve_explicit_executable(executable)) {}
+
+std::string IpoptAdapter::name() const {
+  return "Ipopt";
+}
+
+std::string ScipAdapter::name() const {
+  return "SCIP";
+}
+
+bool IpoptAdapter::supports(ProblemClass cls) const {
+  return cls == ProblemClass::NLP;
+}
+
+bool ScipAdapter::supports(ProblemClass cls) const {
+  return cls == ProblemClass::MINLP || cls == ProblemClass::MILP;
+}
+
+bool IpoptAdapter::available() const {
+#ifdef HACDCPF_HAVE_IPOPT
+  return true;
+#else
+  return !executable_.empty();
+#endif
+}
+
+const std::string& IpoptAdapter::executable() const {
+  return executable_;
+}
+
+bool ScipAdapter::available() const {
+#ifdef HACDCPF_HAVE_SCIP_LIB
+  return true;
+#else
+  return !executable_.empty();
+#endif
+}
+
+const std::string& ScipAdapter::executable() const {
+  return executable_;
+}
+
+SolveResult ScipAdapter::solve_milp(const MIPModel& prob) const {
+  return solve_milp_impl(prob, 300.0, 0, 0);
+}
+
+SolveResult ScipAdapter::solve_milp(const MIPModel& prob,
+                                    const SolveContext& context) const {
+  if (context.stop_requested()) return stopped_context_result(name(), context);
+  return solve_milp_impl(
+      prob, std::min(300.0, context.backend_time_limit_sec(300.0)),
+      context.has_explicit_thread_budget() ? context.thread_budget() : 0,
+      context.random_seed());
+}
+
+SolveResult ScipAdapter::solve_milp_impl(const MIPModel& prob,
+                                         double time_limit_sec, int threads,
+                                         std::uint32_t random_seed) const {
+  const auto t0 = std::chrono::steady_clock::now();
+  SolveResult out;
+  out.stats.solver_name = name();
+
+  const ValidationReport vr = validate(prob);
+  if (!vr.valid) {
+    return unavailable_result(name(), vr.errors.empty() ? "invalid MILP model"
+                                                        : vr.errors.front());
+  }
+  if (!available()) {
+    return unavailable_result(name(), "embedded SCIP library not compiled");
+  }
+
+  // Promote integrality onto the linear part so the MPS export carries the
+  // INTORG/INTEND markers SCIP reads.  Mirrors HighsAdapter::solve_milp().
+  LPModel lp = prob.linear_part;
+  for (int idx : prob.integer_idx) {
+    lp.vars[idx].type = VarType::Integer;
+  }
+  for (int idx : prob.binary_idx) {
+    lp.vars[idx].type = VarType::Binary;
+    lp.vars[idx].lb = std::max(0.0, lp.vars[idx].lb);
+    lp.vars[idx].ub = std::min(1.0, lp.vars[idx].ub);
+  }
+  const int n = static_cast<int>(lp.vars.size());
+
+  std::error_code ec;
+  const auto stamp = std::to_string(
+      std::chrono::duration_cast<std::chrono::nanoseconds>(t0.time_since_epoch()).count());
+  const fs::path mps_path =
+      fs::temp_directory_path() / ("mipsolvers_scip_milp_" + stamp + ".mps");
+  const fs::path sol_path =
+      fs::temp_directory_path() / ("mipsolvers_scip_milp_" + stamp + ".sol");
+
+  // write_lp_as_mps names columns X1..Xn (1-indexed); the solution is mapped
+  // back through that convention below.
+  if (!write_lp_as_mps(lp, mps_path, true)) {
+    out.stats.status = "Unavailable: failed to write MPS for SCIP";
+    return out;
+  }
+
+#ifdef HACDCPF_HAVE_SCIP_LIB
+  // ── In-process SCIP via libscip ────────────────────────────────────────────
+  SCIP* scip_env = nullptr;
+  SCIP_RETCODE scip_rc = SCIPcreate(&scip_env);
+  if (scip_rc != SCIP_OKAY || scip_env == nullptr) {
+    out.stats.status =
+        "SCIPcreate failed (rc=" + std::to_string(static_cast<int>(scip_rc)) + ")";
+    fs::remove(mps_path, ec);
+    out.stats.runtime_sec =
+        std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
+    return out;
+  }
+  auto fail_scip = [&](const char* operation, SCIP_RETCODE rc) {
+    if (scip_env != nullptr) SCIPfree(&scip_env);
+    out.stats.success = false;
+    out.stats.status = std::string(operation) + " failed (rc=" +
+                       std::to_string(static_cast<int>(rc)) + ")";
+    fs::remove(mps_path, ec);
+    out.stats.runtime_sec = std::chrono::duration<double>(
+        std::chrono::steady_clock::now() - t0).count();
+    return out;
+  };
+  if ((scip_rc = SCIPincludeDefaultPlugins(scip_env)) != SCIP_OKAY)
+    return fail_scip("SCIPincludeDefaultPlugins", scip_rc);
+  if ((scip_rc = SCIPsetIntParam(scip_env, "display/verblevel", 0)) != SCIP_OKAY)
+    return fail_scip("SCIPsetIntParam(display/verblevel)", scip_rc);
+  // SCIP 9 parameter reference, limits/time, lp/threads,
+  // randomization/randomseedshift; call-wide allocation is derivation R1.
+  if ((scip_rc = SCIPsetRealParam(scip_env, "limits/gap", 1e-3)) != SCIP_OKAY)
+    return fail_scip("SCIPsetRealParam(limits/gap)", scip_rc);
+  if ((scip_rc = SCIPsetRealParam(scip_env, "limits/time", time_limit_sec)) != SCIP_OKAY)
+    return fail_scip("SCIPsetRealParam(limits/time)", scip_rc);
+  if (threads > 0) {
+    if ((scip_rc = SCIPsetIntParam(scip_env, "lp/threads", threads)) != SCIP_OKAY)
+      return fail_scip("SCIPsetIntParam(lp/threads)", scip_rc);
+    if ((scip_rc = SCIPsetIntParam(scip_env, "parallel/maxnthreads", threads)) != SCIP_OKAY)
+      return fail_scip("SCIPsetIntParam(parallel/maxnthreads)", scip_rc);
+  }
+  if ((scip_rc = SCIPsetIntParam(
+           scip_env, "randomization/randomseedshift",
+           static_cast<int>(random_seed & 0x7fffffffU))) != SCIP_OKAY)
+    return fail_scip("SCIPsetIntParam(randomization/randomseedshift)", scip_rc);
+
+  scip_rc = SCIPreadProb(scip_env, mps_path.string().c_str(), nullptr);
+  if (scip_rc != SCIP_OKAY) {
+    SCIPfree(&scip_env);
+    out.stats.status =
+        "SCIPreadProb(MPS) failed (rc=" + std::to_string(static_cast<int>(scip_rc)) + ")";
+    fs::remove(mps_path, ec);
+    out.stats.runtime_sec =
+        std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
+    return out;
+  }
+
+  if ((scip_rc = SCIPsolve(scip_env)) != SCIP_OKAY)
+    return fail_scip("SCIPsolve", scip_rc);
+  const SCIP_STATUS scip_status = SCIPgetStatus(scip_env);
+  SCIP_SOL* scip_sol = SCIPgetBestSol(scip_env);
+  if (scip_sol != nullptr && SCIPgetNSols(scip_env) > 0) {
+    out.stats.success = true;
+    out.stats.status = (scip_status == SCIP_STATUS_OPTIMAL) ? "Solved"
+                                                            : "Feasible (limit)";
+    out.stats.objective = SCIPgetSolOrigObj(scip_env, scip_sol);
+    out.stats.mip_gap = SCIPgetGap(scip_env);
+
+    std::unordered_map<std::string, int> name_to_idx;
+    name_to_idx.reserve(static_cast<std::size_t>(n));
+    for (int i = 0; i < n; ++i) name_to_idx.emplace("X" + std::to_string(i + 1), i);
+
+    // Iterate the ORIGINAL variables (named X1..Xn by write_lp_as_mps).  After
+    // presolve, SCIPgetVars() returns transformed/aggregated columns whose names
+    // no longer match the MPS export, which would silently zero the solution.
+    // SCIPgetBestSol() lives in the original space, so original vars map cleanly.
+    const int nvars_scip = SCIPgetNOrigVars(scip_env);
+    SCIP_VAR** scip_vars = SCIPgetOrigVars(scip_env);
+    out.x = Eigen::VectorXd::Zero(n);
+    for (int vi = 0; vi < nvars_scip; ++vi) {
+      const char* vname = SCIPvarGetName(scip_vars[vi]);
+      if (vname == nullptr) continue;
+      auto it = name_to_idx.find(vname);
+      if (it != name_to_idx.end()) {
+        out.x[it->second] = SCIPgetSolVal(scip_env, scip_sol, scip_vars[vi]);
+      }
+    }
+  } else {
+    out.stats.success = false;
+    out.stats.status = (scip_status == SCIP_STATUS_INFEASIBLE)
+                           ? "Infeasible"
+                           : "SCIP finished without solution";
+  }
+
+  SCIPfree(&scip_env);
+  fs::remove(mps_path, ec);
+  out.stats.runtime_sec =
+      std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
+  return out;
+#else
+  // ── External SCIP subprocess ────────────────────────────────────────────────
+  std::string resource_commands =
+      " -c \"set limits time " + precise_decimal(time_limit_sec) + "\"";
+  if (threads > 0) {
+    resource_commands += " -c \"set lp threads " + std::to_string(threads) +
+                         "\" -c \"set parallel maxnthreads " +
+                         std::to_string(threads) + "\"";
+  }
+  resource_commands += " -c \"set randomization randomseedshift " +
+                       std::to_string(random_seed & 0x7fffffffU) + "\"";
+  const std::string cmd = shell_quote(executable_) + resource_commands +
+                          " -c \"set limits gap 0.001\" -c \"read " + shell_quote(mps_path) +
+                          "\" -c \"optimize\" -c \"write solution " + shell_quote(sol_path) +
+                          "\" -c \"quit\" > " + shell_null_device() + " 2>&1";
+  const int rc = std::system(cmd.c_str());
+  const ScipSolution sol = parse_scip_solution(sol_path);
+  if (!sol.success && rc != 0) {
+    out.stats.status = "SCIP process failed";
+    fs::remove(mps_path, ec);
+    fs::remove(sol_path, ec);
+    out.stats.runtime_sec =
+        std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
+    return out;
+  }
+  out.stats.success = sol.success;
+  // Preserve SCIP's proof-bearing solution-file status. A feasible incumbent
+  // written after a limit is useful to general callers but is not an exact
+  // optimum for decomposition bounds/cuts (SCIP solution format contract).
+  out.stats.status = sol.status.empty() ? "SCIP finished without solution"
+                                        : sol.status;
+  out.stats.objective = sol.objective;
+  out.x = Eigen::VectorXd::Zero(n);
+  for (int i = 0; i < n; ++i) {
+    auto it = sol.values.find("X" + std::to_string(i + 1));
+    if (it != sol.values.end()) out.x[i] = it->second;
+  }
+  fs::remove(mps_path, ec);
+  fs::remove(sol_path, ec);
+  out.stats.runtime_sec =
+      std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
+  return out;
+#endif  // HACDCPF_HAVE_SCIP_LIB
+}
+
+SolveResult ScipAdapter::solve_minlp(const MINLPModel& prob_in) const {
+  return solve_minlp_impl(prob_in, 30.0, 0, 0, nullptr);
+}
+
+SolveResult ScipAdapter::solve_minlp(const MINLPModel& prob_in,
+                                     const SolveContext& context) const {
+  if (context.stop_requested()) return stopped_context_result(name(), context);
+  return solve_minlp_impl(
+      prob_in, std::min(30.0, context.backend_time_limit_sec(30.0)),
+      context.has_explicit_thread_budget() ? context.thread_budget() : 0,
+      context.random_seed(), &context);
+}
+
+SolveResult ScipAdapter::solve_minlp_impl(
+    const MINLPModel& prob_in, double time_limit_sec, int threads,
+    std::uint32_t random_seed, const SolveContext* context) const {
+  const auto t0 = std::chrono::steady_clock::now();
+  SolveResult out;
+  out.stats.solver_name = name();
+
+  // Default an absent/wrong-sized nonlinear x0 to a bounds-aware interior
+  // point so callers (the AML converter) need not pre-size it; validation and
+  // the NLP relaxation both require x0 to match the variable count.
+  MINLPModel prob = prob_in;
+  {
+    const int n_vars = static_cast<int>(prob.nonlinear_part.vars.size());
+    if (prob.nonlinear_part.x0.size() != n_vars && n_vars > 0) {
+      prob.nonlinear_part.x0 = Eigen::VectorXd::Zero(n_vars);
+      for (int i = 0; i < n_vars; ++i) {
+        const double lo = prob.nonlinear_part.vars[static_cast<std::size_t>(i)].lb;
+        const double hi = prob.nonlinear_part.vars[static_cast<std::size_t>(i)].ub;
+        double v = 0.0;
+        if (std::isfinite(lo) && std::isfinite(hi)) {
+          v = 0.5 * (lo + hi);
+        } else if (std::isfinite(lo)) {
+          v = lo;
+        } else if (std::isfinite(hi)) {
+          v = hi;
+        }
+        prob.nonlinear_part.x0[i] = v;
+      }
+    }
+  }
+
+  const ValidationReport vr = validate(prob);
+  if (!vr.valid) {
+    out.stats.status = vr.errors.empty() ? "Invalid MINLP model" : vr.errors.front();
+    return out;
+  }
+
+  if (!available()) {
+    out.stats.status = "Unavailable: embedded SCIP library not compiled";
+    return out;
+  }
+
+  auto solve_relaxation_rounding = [&]() {
+    NLPModel relaxed = prob.nonlinear_part;
+    for (int idx : prob.integer_idx) {
+      relaxed.vars[idx].type = VarType::Continuous;
+    }
+    for (int idx : prob.binary_idx) {
+      relaxed.vars[idx].type = VarType::Continuous;
+      relaxed.vars[idx].lb = std::max(0.0, relaxed.vars[idx].lb);
+      relaxed.vars[idx].ub = std::min(1.0, relaxed.vars[idx].ub);
+    }
+
+    IpoptAdapter nlp_fallback;
+    const SolveResult rel = context ? nlp_fallback.solve_nlp(relaxed, *context)
+                                    : nlp_fallback.solve_nlp(relaxed);
+    if (!rel.stats.success || rel.x.size() != static_cast<int>(relaxed.vars.size())) {
+      out.stats.status = "MINLP fallback failed: " + rel.stats.status;
+      return;
+    }
+
+    Eigen::VectorXd x = rel.x;
+    for (int idx : prob.integer_idx) {
+      x[idx] = std::round(x[idx]);
+    }
+    for (int idx : prob.binary_idx) {
+      x[idx] = (x[idx] >= 0.5) ? 1.0 : 0.0;
+    }
+    for (int i = 0; i < x.size(); ++i) {
+      x[i] = std::min(relaxed.vars[i].ub, std::max(relaxed.vars[i].lb, x[i]));
+    }
+
+    double feas = 0.0;
+    if (relaxed.g) {
+      Eigen::VectorXd geq;
+      relaxed.g(x, geq);
+      if (geq.size() > 0) {
+        feas = std::max(feas, geq.cwiseAbs().maxCoeff());
+      }
+    }
+    if (relaxed.h) {
+      Eigen::VectorXd h;
+      relaxed.h(x, h);
+      for (int i = 0; i < h.size(); ++i) {
+        feas = std::max(feas, h[i]);
+      }
+    }
+
+    out.x = x;
+    out.stats.objective = relaxed.f ? relaxed.f(x) : rel.stats.objective;
+    out.stats.iterations = rel.stats.iterations;
+    out.stats.primal_feas = std::max(0.0, feas);
+    out.stats.residual_inf = std::max(out.stats.primal_feas, rel.stats.residual_inf);
+    out.stats.success = out.stats.primal_feas <= 1e-4;
+    out.stats.status = out.stats.success ? "Solved (NLP-relaxation+rounding)"
+                                         : "Infeasible after rounding";
+  };
+
+  if (!prob.nonlinear_part.symbolic_objective) {
+    solve_relaxation_rounding();
+    const auto t1 = std::chrono::steady_clock::now();
+    out.stats.runtime_sec = std::chrono::duration<double>(t1 - t0).count();
+    return out;
+  }
+
+  std::error_code ec;
+  const auto stamp = std::to_string(
+      std::chrono::duration_cast<std::chrono::nanoseconds>(t0.time_since_epoch()).count());
+  const fs::path pip_path = fs::temp_directory_path() / ("mipsolvers_minlp_" + stamp + ".pip");
+  const fs::path sol_path = fs::temp_directory_path() / ("mipsolvers_minlp_" + stamp + ".sol");
+
+  std::vector<std::string> var_names;
+  bool was_maximize = false;
+  std::string export_err;
+  if (!write_minlp_as_scip_pip(prob, pip_path, var_names, export_err, was_maximize)) {
+    if (prob.nonlinear_part.f && prob.nonlinear_part.grad) {
+      solve_relaxation_rounding();
+      if (!out.stats.success) {
+        out.stats.status = "SCIP export failed: " + export_err + "; " + out.stats.status;
+      }
+      const auto t1 = std::chrono::steady_clock::now();
+      out.stats.runtime_sec = std::chrono::duration<double>(t1 - t0).count();
+      return out;
+    }
+    out.stats.status = "SCIP export failed: " + export_err;
+    const auto t1 = std::chrono::steady_clock::now();
+    out.stats.runtime_sec = std::chrono::duration<double>(t1 - t0).count();
+    return out;
+  }
+
+  std::string resource_commands =
+      " -c \"set limits time " + precise_decimal(time_limit_sec) + "\"";
+  if (threads > 0) {
+    resource_commands += " -c \"set lp threads " + std::to_string(threads) +
+                         "\" -c \"set parallel maxnthreads " +
+                         std::to_string(threads) + "\"";
+  }
+  resource_commands += " -c \"set randomization randomseedshift " +
+                       std::to_string(random_seed & 0x7fffffffU) + "\"";
+  const std::string cmd = shell_quote(executable_) + resource_commands +
+                          " -c \"read " + pip_path.string() +
+                          "\" -c \"optimize\" -c \"write solution " + sol_path.string() +
+                          "\" -c \"quit\" > " + shell_null_device() + " 2>&1";
+
+#ifdef HACDCPF_HAVE_SCIP_LIB
+  // ── In-process SCIP via libscip ────────────────────────────────────────────
+  // Load the PIP file into the embedded SCIP library instance, solve in-process,
+  // and read back the solution without spawning a subprocess.
+  SCIP* scip_env = nullptr;
+  SCIP_RETCODE scip_rc = SCIPcreate(&scip_env);
+  if (scip_rc != SCIP_OKAY || scip_env == nullptr) {
+    out.stats.status = "SCIPcreate failed (rc=" + std::to_string(static_cast<int>(scip_rc)) + ")";
+    fs::remove(pip_path, ec);
+    const auto t1 = std::chrono::steady_clock::now();
+    out.stats.runtime_sec = std::chrono::duration<double>(t1 - t0).count();
+    return out;
+  }
+  auto fail_scip = [&](const char* operation, SCIP_RETCODE rc) {
+    if (scip_env != nullptr) SCIPfree(&scip_env);
+    out.stats.success = false;
+    out.stats.status = std::string(operation) + " failed (rc=" +
+                       std::to_string(static_cast<int>(rc)) + ")";
+    fs::remove(pip_path, ec);
+    out.stats.runtime_sec = std::chrono::duration<double>(
+        std::chrono::steady_clock::now() - t0).count();
+    return out;
+  };
+  if ((scip_rc = SCIPincludeDefaultPlugins(scip_env)) != SCIP_OKAY)
+    return fail_scip("SCIPincludeDefaultPlugins", scip_rc);
+  if ((scip_rc = SCIPsetIntParam(scip_env, "display/verblevel", 0)) != SCIP_OKAY)
+    return fail_scip("SCIPsetIntParam(display/verblevel)", scip_rc);
+  // SCIP 9 parameter reference, limits/time, lp/threads,
+  // randomization/randomseedshift; call-wide allocation is derivation R1.
+  if ((scip_rc = SCIPsetRealParam(scip_env, "limits/time", time_limit_sec)) != SCIP_OKAY)
+    return fail_scip("SCIPsetRealParam(limits/time)", scip_rc);
+  if (threads > 0) {
+    if ((scip_rc = SCIPsetIntParam(scip_env, "lp/threads", threads)) != SCIP_OKAY)
+      return fail_scip("SCIPsetIntParam(lp/threads)", scip_rc);
+    if ((scip_rc = SCIPsetIntParam(scip_env, "parallel/maxnthreads", threads)) != SCIP_OKAY)
+      return fail_scip("SCIPsetIntParam(parallel/maxnthreads)", scip_rc);
+  }
+  if ((scip_rc = SCIPsetIntParam(
+           scip_env, "randomization/randomseedshift",
+           static_cast<int>(random_seed & 0x7fffffffU))) != SCIP_OKAY)
+    return fail_scip("SCIPsetIntParam(randomization/randomseedshift)", scip_rc);
+
+  scip_rc = SCIPreadProb(scip_env, pip_path.string().c_str(), nullptr);
+  if (scip_rc != SCIP_OKAY) {
+    SCIPfree(&scip_env);
+    out.stats.status = "SCIPreadProb failed (rc=" + std::to_string(static_cast<int>(scip_rc)) + ")";
+    fs::remove(pip_path, ec);
+    const auto t1 = std::chrono::steady_clock::now();
+    out.stats.runtime_sec = std::chrono::duration<double>(t1 - t0).count();
+    return out;
+  }
+
+  if ((scip_rc = SCIPsolve(scip_env)) != SCIP_OKAY)
+    return fail_scip("SCIPsolve", scip_rc);
+
+  SCIP_STATUS scip_status = SCIPgetStatus(scip_env);
+  const bool scip_solved = (scip_status == SCIP_STATUS_OPTIMAL ||
+                             scip_status == SCIP_STATUS_TIMELIMIT ||
+                             scip_status == SCIP_STATUS_NODELIMIT);
+  SCIP_SOL* scip_sol = SCIPgetBestSol(scip_env);
+
+  if (scip_sol != nullptr) {
+    out.stats.success = (scip_status == SCIP_STATUS_OPTIMAL ||
+                          SCIPgetNSols(scip_env) > 0);
+    out.stats.status = (scip_status == SCIP_STATUS_OPTIMAL) ? "Solved"
+                     : (scip_solved ? "Feasible (time/node limit)" : "No solution");
+    out.stats.objective = was_maximize
+                              ? -SCIPgetSolOrigObj(scip_env, scip_sol)
+                              : SCIPgetSolOrigObj(scip_env, scip_sol);
+
+    // Map SCIP variable names back to our variable index.
+    const int nvars_scip = SCIPgetNVars(scip_env);
+    SCIP_VAR** scip_vars = SCIPgetVars(scip_env);
+    const int n = static_cast<int>(prob.nonlinear_part.vars.size());
+    out.x = Eigen::VectorXd::Zero(n);
+    for (int vi = 0; vi < nvars_scip; ++vi) {
+      const char* vname = SCIPvarGetName(scip_vars[vi]);
+      for (int i = 0; i < n; ++i) {
+        if (var_names[static_cast<std::size_t>(i)] == vname) {
+          out.x[i] = SCIPgetSolVal(scip_env, scip_sol, scip_vars[vi]);
+          break;
+        }
+      }
+    }
+  } else {
+    out.stats.success = false;
+    out.stats.status = (scip_status == SCIP_STATUS_INFEASIBLE) ? "Infeasible"
+                       : "SCIP finished without solution";
+  }
+
+  SCIPfree(&scip_env);
+  fs::remove(pip_path, ec);
+  const auto t1_lib = std::chrono::steady_clock::now();
+  out.stats.runtime_sec = std::chrono::duration<double>(t1_lib - t0).count();
+  return out;
+#else
+  // ── External SCIP subprocess ────────────────────────────────────────────────
+  const int rc = std::system(cmd.c_str());
+
+  const ScipSolution sol = parse_scip_solution(sol_path);
+  if (!sol.success && rc != 0) {
+    out.stats.status = "SCIP process failed";
+    fs::remove(pip_path, ec);
+    fs::remove(sol_path, ec);
+    const auto t1 = std::chrono::steady_clock::now();
+    out.stats.runtime_sec = std::chrono::duration<double>(t1 - t0).count();
+    return out;
+  }
+
+  out.stats.success = sol.success;
+  out.stats.status = sol.status.empty() ? "SCIP finished without solution"
+                                        : sol.status;
+
+  const int n = static_cast<int>(prob.nonlinear_part.vars.size());
+  out.x = Eigen::VectorXd::Zero(n);
+  for (int i = 0; i < n; ++i) {
+    auto it = sol.values.find(var_names[i]);
+    if (it != sol.values.end()) {
+      out.x[i] = it->second;
+    }
+  }
+
+  out.stats.objective = was_maximize ? -sol.objective : sol.objective;
+
+  const auto t1 = std::chrono::steady_clock::now();
+  out.stats.runtime_sec = std::chrono::duration<double>(t1 - t0).count();
+
+  fs::remove(pip_path, ec);
+  fs::remove(sol_path, ec);
+  return out;
+#endif  // HACDCPF_HAVE_SCIP_LIB
+}
+
+SolveResult IpoptAdapter::solve_nlp(const NLPModel& prob_in) const {
+  return solve_nlp_impl(prob_in, 1e20);
+}
+
+SolveResult IpoptAdapter::solve_nlp(const NLPModel& prob_in,
+                                    const SolveContext& context) const {
+  if (context.stop_requested()) return stopped_context_result(name(), context);
+  const ScopedMklThreadLimit thread_limit(
+      context.has_explicit_thread_budget() ? context.thread_budget() : 0);
+  return solve_nlp_impl(
+      prob_in,
+      context.backend_time_limit_sec(1e20));
+}
+
+SolveResult IpoptAdapter::solve_nlp_impl(const NLPModel& prob_in,
+                                         double time_limit_sec) const {
+#ifdef HACDCPF_HAVE_IPOPT
+  const auto t0 = std::chrono::steady_clock::now();
+#endif
+  SolveResult out;
+  out.stats.solver_name = name();
+
+  // Ensure an initial point sized to the variable count. Validation and the
+  // constraint callbacks (g/h, evaluated at x0 during CallbackTNLP
+  // construction) reject a mismatched x0, so default an absent/wrong-sized x0
+  // to a bounds-aware interior point here rather than requiring every caller
+  // (e.g. the SCIP MINLP relaxation) to supply one.
+  const int n_vars = static_cast<int>(prob_in.vars.size());
+  NLPModel prob = prob_in;
+  if (prob.x0.size() != n_vars && n_vars > 0) {
+    prob.x0 = Eigen::VectorXd::Zero(n_vars);
+    for (int i = 0; i < n_vars; ++i) {
+      const double lo = prob.vars[static_cast<std::size_t>(i)].lb;
+      const double hi = prob.vars[static_cast<std::size_t>(i)].ub;
+      double v = 0.0;
+      if (std::isfinite(lo) && std::isfinite(hi)) {
+        v = 0.5 * (lo + hi);
+      } else if (std::isfinite(lo)) {
+        v = lo;
+      } else if (std::isfinite(hi)) {
+        v = hi;
+      }
+      prob.x0[i] = v;
+    }
+  }
+
+  const ValidationReport vr = validate(prob);
+  if (!vr.valid) {
+    out.stats.status = vr.errors.empty() ? "Invalid NLP model" : vr.errors.front();
+    return out;
+  }
+
+#ifdef HACDCPF_HAVE_IPOPT
+  if (!prob.f || !prob.grad) {
+    out.stats.status = "Unavailable: NLP model missing objective callbacks";
+    return out;
+  }
+  if (prob.g && !prob.jac_g) {
+    out.stats.status = "Unavailable: NLP model missing jac_g callback";
+    return out;
+  }
+  if (prob.h && !prob.jac_h) {
+    out.stats.status = "Unavailable: NLP model missing jac_h callback";
+    return out;
+  }
+
+  if (prob.solver_options.primal_dual_warm_start) {
+    Eigen::VectorXd equality_values;
+    Eigen::VectorXd inequality_values;
+    if (prob.g) prob.g(prob.x0, equality_values);
+    if (prob.h) prob.h(prob.x0, inequality_values);
+    const int constraint_count = static_cast<int>(
+        equality_values.size() + inequality_values.size());
+    const bool valid_dimensions =
+        prob.constraint_dual_start.size() == constraint_count &&
+        prob.box_dual_lb_start.size() == n_vars &&
+        prob.box_dual_ub_start.size() == n_vars;
+    const bool valid_values = valid_dimensions &&
+        prob.constraint_dual_start.allFinite() &&
+        prob.box_dual_lb_start.allFinite() &&
+        prob.box_dual_ub_start.allFinite() &&
+        (inequality_values.size() == 0 ||
+         (prob.constraint_dual_start.head(inequality_values.size()).array() >=
+          0.0).all()) &&
+        (prob.box_dual_lb_start.array() >= 0.0).all() &&
+        (prob.box_dual_ub_start.array() >= 0.0).all();
+    if (!valid_dimensions || !valid_values) {
+      out.stats.status =
+          "Invalid NLP primal-dual warm start: expected finite constraint "
+          "duals [inequalities|equalities] and nonnegative bound duals";
+      return out;
+    }
+  }
+
+  Ipopt::SmartPtr<Ipopt::TNLP> nlp = new CallbackTNLP(prob);
+  Ipopt::SmartPtr<Ipopt::IpoptApplication> app = IpoptApplicationFactory();
+
+  const bool trace_ipopt = std::getenv("HACDCPF_OPF_TRACE") != nullptr;
+  app->Options()->SetIntegerValue("print_level", trace_ipopt ? 5 : 0);
+  app->Options()->SetStringValue("sb", trace_ipopt ? "no" : "yes");
+  app->Options()->SetStringValue(
+      "hessian_approximation",
+      prob.lagrangian_hess ? "exact" : "limited-memory");
+  // Ipopt options reference, max_wall_time; shared-deadline model is R1 in
+  // general_solver_performance_program_2026-09-13.md.
+  app->Options()->SetNumericValue("max_wall_time", time_limit_sec);
+  // SolveResult exposes the caller's original constraint and variable bounds
+  // together with Ipopt's multipliers. Solve that exact contract: Ipopt's
+  // default bound relaxation can otherwise leave tiny signed violations whose
+  // products with large active multipliers fail original-model
+  // complementarity. A post-solve projection is insufficient because it can
+  // perturb coupled equality constraints without recomputing the primal-dual
+  // endpoint.
+  app->Options()->SetNumericValue("bound_relax_factor", 0.0);
+  if (prob.solver_options.adaptive_barrier) {
+    app->Options()->SetStringValue("mu_strategy", "adaptive");
+  }
+  if (prob.solver_options.primal_dual_warm_start) {
+    // Ipopt's warm-start initializer perturbs a supplied KKT point into the
+    // strict interior. A common small push preserves nearby active sets while
+    // avoiding zero slack/multiplier pairs. Ipopt
+    // IpWarmStartIterateInitializer.cpp; Waechter--Biegler (2006), Sec. 3.1.
+    const double warm_start_push =
+        std::isfinite(prob.solver_options.warm_start_push) &&
+                prob.solver_options.warm_start_push > 0.0
+            ? prob.solver_options.warm_start_push : 1e-8;
+    app->Options()->SetStringValue("warm_start_init_point", "yes");
+    app->Options()->SetNumericValue("warm_start_bound_push", warm_start_push);
+    app->Options()->SetNumericValue("warm_start_bound_frac", warm_start_push);
+    app->Options()->SetNumericValue(
+        "warm_start_slack_bound_push", warm_start_push);
+    app->Options()->SetNumericValue(
+        "warm_start_slack_bound_frac", warm_start_push);
+    app->Options()->SetNumericValue(
+        "warm_start_mult_bound_push", warm_start_push);
+  }
+  // Keep the adapter boundary deterministic for malformed configuration.
+  // Passing NaN/Inf through SetNumericValue makes Ipopt fail during option
+  // initialisation, while zero/negative tolerances are outside its contract.
+  // Fall back to the documented historical defaults, then enforce Ipopt's
+  // practical lower bound and acceptable_tol >= tol relationship.
+  const int max_iterations = std::max(1, prob.solver_options.max_iterations);
+  const auto positive_finite_or = [](double value, double fallback) {
+    return std::isfinite(value) && value > 0.0 ? value : fallback;
+  };
+  const double tolerance = std::max(
+      positive_finite_or(prob.solver_options.tolerance, 1e-8), 1e-14);
+  const double acceptable_tolerance = std::max(
+      positive_finite_or(prob.solver_options.acceptable_tolerance, 1e-6),
+      tolerance);
+  const double dual_tolerance = positive_finite_or(
+      prob.solver_options.dual_infeasibility_tolerance, 1.0);
+  const double constraint_tolerance = positive_finite_or(
+      prob.solver_options.constraint_violation_tolerance, 1e-4);
+  const double complementarity_tolerance = positive_finite_or(
+      prob.solver_options.complementarity_tolerance, 1e-4);
+  const double acceptable_dual_tolerance = std::max(
+      positive_finite_or(
+          prob.solver_options.acceptable_dual_infeasibility_tolerance, 1e10),
+      dual_tolerance);
+  const double acceptable_constraint_tolerance = std::max(
+      positive_finite_or(
+          prob.solver_options.acceptable_constraint_violation_tolerance, 1e-2),
+      constraint_tolerance);
+  const double acceptable_complementarity_tolerance = std::max(
+      positive_finite_or(
+          prob.solver_options.acceptable_complementarity_tolerance, 1e-2),
+      complementarity_tolerance);
+  app->Options()->SetIntegerValue("max_iter", max_iterations);
+  app->Options()->SetNumericValue("tol", tolerance);
+  app->Options()->SetNumericValue("dual_inf_tol", dual_tolerance);
+  app->Options()->SetNumericValue("constr_viol_tol", constraint_tolerance);
+  app->Options()->SetNumericValue("compl_inf_tol", complementarity_tolerance);
+  app->Options()->SetNumericValue("acceptable_tol", acceptable_tolerance);
+  app->Options()->SetNumericValue(
+      "acceptable_dual_inf_tol", acceptable_dual_tolerance);
+  app->Options()->SetNumericValue(
+      "acceptable_constr_viol_tol", acceptable_constraint_tolerance);
+  app->Options()->SetNumericValue(
+      "acceptable_compl_inf_tol", acceptable_complementarity_tolerance);
+  app->Options()->SetIntegerValue(
+      "acceptable_iter", std::max(0, prob.solver_options.acceptable_iterations));
+
+  const Ipopt::ApplicationReturnStatus init_status = app->Initialize();
+  if (init_status != Ipopt::Solve_Succeeded) {
+    out.stats.status = "Ipopt initialization failed";
+    return out;
+  }
+
+  const Ipopt::ApplicationReturnStatus solve_status = app->OptimizeTNLP(nlp);
+
+  const CallbackTNLP* cb = dynamic_cast<const CallbackTNLP*>(GetRawPtr(nlp));
+  if (!cb) {
+    out.stats.status = "Ipopt internal callback error";
+    return out;
+  }
+  out = cb->build_result(solve_status);
+  out.stats.solver_name = name();
+
+  const auto t1 = std::chrono::steady_clock::now();
+  out.stats.runtime_sec = std::chrono::duration<double>(t1 - t0).count();
+  return out;
+#else
+  if (executable_.empty()) {
+    out.stats.status = "Unavailable: embedded Ipopt TNLP bridge not compiled";
+    return out;
+  }
+
+  out.stats.status = "Unavailable: external Ipopt executable adapter is disabled by default; build embedded Ipopt";
+  return out;
+#endif
+}
+
+// ---------------------------------------------------------------------------
+// CplexAdapter — native Callable Library adapter
+// ---------------------------------------------------------------------------
+#ifdef HACDCPF_HAVE_CPLEX
+namespace {
+
+std::string cplex_error(CPXENVptr env, int code) {
+  char buffer[CPXMESSAGEBUFSIZE]{};
+  const char* message = CPXgeterrorstring(env, code, buffer);
+  return message != nullptr ? std::string(message)
+                            : "CPLEX error " + std::to_string(code);
+}
+
+std::string cplex_status(CPXENVptr env, int status) {
+  char buffer[CPXMESSAGEBUFSIZE]{};
+  const char* message = CPXgetstatstring(env, status, buffer);
+  return message != nullptr ? std::string(message)
+                            : "CPLEX status " + std::to_string(status);
+}
+
+struct CplexProblemGuard {
+  CPXENVptr env{nullptr};
+  CPXLPptr problem{nullptr};
+  CplexProblemGuard(CPXENVptr environment, CPXLPptr lp)
+      : env(environment), problem(lp) {}
+  CplexProblemGuard(const CplexProblemGuard&) = delete;
+  CplexProblemGuard& operator=(const CplexProblemGuard&) = delete;
+  ~CplexProblemGuard() {
+    if (problem != nullptr) CPXfreeprob(env, &problem);
+  }
+};
+
+// IBM ILOG CPLEX 22.1.1 Callable Library, solution status reference;
+// docs/archive/cplex_callable_library.md, "Result mapping".
+bool cplex_status_proven(int status) {
+  return status == CPXMIP_OPTIMAL || status == CPXMIP_OPTIMAL_TOL ||
+         status == CPXMIP_INFEASIBLE || status == CPXMIP_UNBOUNDED ||
+         status == CPXMIP_INForUNBD;
+}
+
+bool cplex_status_optimal(int status) {
+  return status == CPXMIP_OPTIMAL || status == CPXMIP_OPTIMAL_TOL;
+}
+
+bool cplex_status_timed_out(int status) {
+  return status == CPXMIP_TIME_LIM_FEAS || status == CPXMIP_TIME_LIM_INFEAS;
+}
+
+}  // namespace
+#endif
+
+namespace {
+thread_local CplexSolveInfo cplex_solve_info;
+}
+
+CplexSolveInfo last_cplex_solve_info() { return cplex_solve_info; }
+
+CplexAdapter::CplexAdapter() : CplexAdapter(CplexOptions{}) {}
+
+CplexAdapter::CplexAdapter(CplexOptions options) : options_(options) {
+  if (!(options.time_limit_sec > 0.0) || !std::isfinite(options.time_limit_sec) ||
+      options.mip_gap < 0.0 || !std::isfinite(options.mip_gap) ||
+      options.threads < 0) {
+    throw std::invalid_argument(
+        "Invalid CPLEX time limit, MIP gap, or thread count");
+  }
+#ifdef HACDCPF_HAVE_CPLEX
+  int status = 0;
+  CPXENVptr env = CPXopenCPLEX(&status);
+  if (env == nullptr) {
+    initialization_error_ = cplex_error(nullptr, status);
+    return;
+  }
+  env_ = env;
+  // IBM ILOG CPLEX 22.1.1 Callable Library parameter reference. These are
+  // direct experiment controls, not algorithmic tuning constants.
+  if ((status = CPXsetintparam(env, CPXPARAM_ScreenOutput, CPX_OFF)) != 0 ||
+      (status = CPXsetdblparam(env, CPXPARAM_TimeLimit,
+                               options.time_limit_sec)) != 0 ||
+      (status = CPXsetdblparam(env, CPXPARAM_MIP_Tolerances_MIPGap,
+                               options.mip_gap)) != 0 ||
+      (status = CPXsetintparam(env, CPXPARAM_Threads, options.threads)) != 0 ||
+      (status = CPXsetintparam(env, CPXPARAM_RandomSeed,
+                               options.random_seed)) != 0) {
+    initialization_error_ = cplex_error(env, status);
+    CPXcloseCPLEX(&env);
+    env_ = nullptr;
+  }
+#else
+  initialization_error_ = "CPLEX Callable Library not linked";
+#endif
+}
+
+CplexAdapter::~CplexAdapter() {
+#ifdef HACDCPF_HAVE_CPLEX
+  auto* env = static_cast<CPXENVptr>(env_);
+  if (env != nullptr) {
+    CPXcloseCPLEX(&env);
+    env_ = nullptr;
+  }
+#endif
+}
+
+std::string CplexAdapter::name() const { return "CPLEX"; }
+
+bool CplexAdapter::supports(ProblemClass cls) const {
+  return cls == ProblemClass::MILP;
+}
+
+bool CplexAdapter::available() const {
+#ifdef HACDCPF_HAVE_CPLEX
+  return env_ != nullptr;
+#else
+  return false;
+#endif
+}
+
+SolveResult CplexAdapter::solve_milp(const MIPModel& prob,
+                                     const SolveContext& context) const {
+  if (context.stop_requested()) return stopped_context_result(name(), context);
+  CplexOptions effective = options_.value_or(CplexOptions{});
+  if (context.has_deadline()) {
+    effective.time_limit_sec = std::min(
+        effective.time_limit_sec,
+        context.backend_time_limit_sec(effective.time_limit_sec));
+  }
+  if (context.has_explicit_thread_budget()) {
+    effective.threads = context.thread_budget();
+  }
+  effective.random_seed =
+      static_cast<int>(context.random_seed() & 0x7fffffffU);
+  // CPLEX Callable Library time/thread/seed parameters are applied by the
+  // scoped adapter constructor; call-wide allocation is derivation R1.
+  CplexAdapter scoped(effective);
+  return scoped.solve_milp(prob);
+}
+
+SolveResult CplexAdapter::solve_milp(const MIPModel& prob) const {
+  cplex_solve_info = {};
+  SolveResult out;
+  out.stats.solver_name = name();
+#ifndef HACDCPF_HAVE_CPLEX
+  (void)prob;
+#endif
+#ifdef HACDCPF_HAVE_CPLEX
+  const auto total_start = std::chrono::steady_clock::now();
+  if (!available()) {
+    out.stats.status = "Unavailable: " + initialization_error_;
+    return out;
+  }
+  const ValidationReport validation = validate(prob);
+  if (!validation.valid) {
+    out.stats.status = "Invalid MILP: " +
+        (validation.errors.empty() ? std::string("validation failed")
+                                   : validation.errors.front());
+    return out;
+  }
+
+  auto* env = static_cast<CPXENVptr>(env_);
+  int status = 0;
+  CplexProblemGuard guard{env, CPXcreateprob(env, &status, "mipsolvers_milp")};
+  if (guard.problem == nullptr) {
+    out.stats.status = cplex_error(env, status);
+    return out;
+  }
+
+  const LPModel& lp = prob.linear_part;
+  const int n = static_cast<int>(lp.c.size());
+  const int m_ineq = static_cast<int>(lp.A.rows());
+  const int m_eq = static_cast<int>(lp.Aeq.rows());
+  std::vector<int> upper_row(static_cast<std::size_t>(m_ineq), -1);
+  std::vector<int> lower_row(static_cast<std::size_t>(m_ineq), -1);
+  std::vector<int> equality_row(static_cast<std::size_t>(m_eq), -1);
+  std::vector<double> rhs;
+  std::vector<char> row_sense;
+  rhs.reserve(static_cast<std::size_t>(2 * m_ineq + m_eq));
+  row_sense.reserve(static_cast<std::size_t>(2 * m_ineq + m_eq));
+
+  // Exact two-sided-row expansion; see
+  // docs/archive/cplex_callable_library_integration_2026-09-12.md, Claim.
+  for (int i = 0; i < m_ineq; ++i) {
+    if (std::isfinite(lp.b[i])) {
+      upper_row[static_cast<std::size_t>(i)] = static_cast<int>(rhs.size());
+      rhs.push_back(lp.b[i]);
+      row_sense.push_back('L');
+    }
+    const double lhs = lp_row_lhs_or_neg_inf(lp, i);
+    if (std::isfinite(lhs)) {
+      lower_row[static_cast<std::size_t>(i)] = static_cast<int>(rhs.size());
+      rhs.push_back(lhs);
+      row_sense.push_back('G');
+    }
+  }
+  for (int i = 0; i < m_eq; ++i) {
+    equality_row[static_cast<std::size_t>(i)] = static_cast<int>(rhs.size());
+    rhs.push_back(lp.beq[i]);
+    row_sense.push_back('E');
+  }
+  if (rhs.size() > static_cast<std::size_t>(std::numeric_limits<int>::max())) {
+    out.stats.status = "CPLEX model has more rows than the Callable Library API supports";
+    return out;
+  }
+
+  std::vector<int> matbeg(static_cast<std::size_t>(n));
+  std::vector<int> matcnt(static_cast<std::size_t>(n));
+  std::vector<int> matind;
+  std::vector<double> matval;
+  const std::size_t reserve_nnz =
+      2 * static_cast<std::size_t>(lp.A.nonZeros()) +
+      static_cast<std::size_t>(lp.Aeq.nonZeros());
+  matind.reserve(reserve_nnz);
+  matval.reserve(reserve_nnz);
+  for (int j = 0; j < n; ++j) {
+    matbeg[static_cast<std::size_t>(j)] = static_cast<int>(matind.size());
+    for (Eigen::SparseMatrix<double>::InnerIterator it(lp.A, j); it; ++it) {
+      const int source_row = static_cast<int>(it.row());
+      const int upper = upper_row[static_cast<std::size_t>(source_row)];
+      const int lower = lower_row[static_cast<std::size_t>(source_row)];
+      if (upper >= 0) {
+        matind.push_back(upper);
+        matval.push_back(it.value());
+      }
+      if (lower >= 0) {
+        matind.push_back(lower);
+        matval.push_back(it.value());
+      }
+    }
+    for (Eigen::SparseMatrix<double>::InnerIterator it(lp.Aeq, j); it; ++it) {
+      matind.push_back(equality_row[static_cast<std::size_t>(it.row())]);
+      matval.push_back(it.value());
+    }
+    const std::size_t count = matind.size() -
+        static_cast<std::size_t>(matbeg[static_cast<std::size_t>(j)]);
+    if (matind.size() > static_cast<std::size_t>(std::numeric_limits<int>::max()) ||
+        count > static_cast<std::size_t>(std::numeric_limits<int>::max())) {
+      out.stats.status =
+          "CPLEX model has more nonzeros than the Callable Library API supports";
+      return out;
+    }
+    matcnt[static_cast<std::size_t>(j)] = static_cast<int>(count);
+  }
+
+  std::vector<double> objective(static_cast<std::size_t>(n));
+  std::vector<double> lower_bound(static_cast<std::size_t>(n));
+  std::vector<double> upper_bound(static_cast<std::size_t>(n));
+  std::vector<char> column_type(static_cast<std::size_t>(n), 'C');
+  for (int j = 0; j < n; ++j) {
+    objective[static_cast<std::size_t>(j)] = lp.c[j];
+    lower_bound[static_cast<std::size_t>(j)] =
+        variable_has_finite_lower_bound(lp.vars[static_cast<std::size_t>(j)].lb)
+            ? lp.vars[static_cast<std::size_t>(j)].lb : -CPX_INFBOUND;
+    upper_bound[static_cast<std::size_t>(j)] =
+        variable_has_finite_upper_bound(lp.vars[static_cast<std::size_t>(j)].ub)
+            ? lp.vars[static_cast<std::size_t>(j)].ub : CPX_INFBOUND;
+  }
+  for (int index : prob.integer_idx) {
+    column_type[static_cast<std::size_t>(index)] = 'I';
+  }
+  // Binary domain intersection follows docs/archive/cplex_callable_library.md,
+  // "Model and claim", and the public MIPModel binary-index contract.
+  for (int index : prob.binary_idx) {
+    column_type[static_cast<std::size_t>(index)] = 'B';
+    lower_bound[static_cast<std::size_t>(index)] =
+        std::max(0.0, lower_bound[static_cast<std::size_t>(index)]);
+    upper_bound[static_cast<std::size_t>(index)] =
+        std::min(1.0, upper_bound[static_cast<std::size_t>(index)]);
+  }
+
+  // CPXcopylp consumes CSC arrays in one call. The construction above is
+  // O(n+m+nnz); see the integration derivation, Cost model.
+  status = CPXcopylp(env, guard.problem, n, static_cast<int>(rhs.size()),
+                     lp.sense == Sense::Minimize ? CPX_MIN : CPX_MAX,
+                     objective.data(), rhs.data(), row_sense.data(),
+                     matbeg.data(), matcnt.data(), matind.data(), matval.data(),
+                     lower_bound.data(), upper_bound.data(), nullptr);
+  if (status == 0) {
+    status = CPXcopyctype(env, guard.problem, column_type.data());
+  }
+  if (status == 0 && prob.initial_solution.size() == n) {
+    std::vector<int> indices(static_cast<std::size_t>(n));
+    for (int j = 0; j < n; ++j) indices[static_cast<std::size_t>(j)] = j;
+    const int begin[] = {0};
+    const int effort[] = {CPX_MIPSTART_AUTO};
+    status = CPXaddmipstarts(env, guard.problem, 1, n, begin, indices.data(),
+                            prob.initial_solution.data(), effort, nullptr);
+  }
+  const auto optimize_start = std::chrono::steady_clock::now();
+  cplex_solve_info.model_import_sec =
+      std::chrono::duration<double>(optimize_start - total_start).count();
+  if (status != 0) {
+    out.stats.status = cplex_error(env, status);
+    out.stats.runtime_sec = *cplex_solve_info.model_import_sec;
+    return out;
+  }
+
+  status = CPXmipopt(env, guard.problem);
+  const auto extract_start = std::chrono::steady_clock::now();
+  cplex_solve_info.optimize_sec =
+      std::chrono::duration<double>(extract_start - optimize_start).count();
+  struct ExtractionTimer {
+    std::chrono::steady_clock::time_point start;
+    ~ExtractionTimer() {
+      cplex_solve_info.result_extract_sec = std::chrono::duration<double>(
+          std::chrono::steady_clock::now() - start).count();
+    }
+  } extraction_timer{extract_start};
+  if (status != 0) {
+    out.stats.status = cplex_error(env, status);
+    out.stats.runtime_sec = std::chrono::duration<double>(
+        std::chrono::steady_clock::now() - total_start).count();
+    return out;
+  }
+
+  const int solution_status = CPXgetstat(env, guard.problem);
+  cplex_solve_info.status = solution_status;
+  cplex_solve_info.proven = cplex_status_proven(solution_status);
+  cplex_solve_info.optimal = cplex_status_optimal(solution_status);
+  cplex_solve_info.timed_out = cplex_status_timed_out(solution_status);
+  out.stats.status = cplex_status(env, solution_status);
+
+  double objective_value = 0.0;
+  cplex_solve_info.has_solution =
+      CPXgetobjval(env, guard.problem, &objective_value) == 0;
+  out.stats.success = cplex_solve_info.has_solution;
+  out.stats.strict_convergence = cplex_solve_info.optimal;
+  out.stats.acceptable_convergence = cplex_solve_info.proven;
+  if (cplex_solve_info.has_solution) {
+    out.stats.objective = objective_value;
+    out.x.resize(n);
+    if (CPXgetx(env, guard.problem, out.x.data(), 0, n - 1) != 0) {
+      out.x.resize(0);
+      out.stats.success = false;
+      cplex_solve_info.has_solution = false;
+      out.stats.status = "CPLEX solution extraction failed";
+    }
+    double mip_gap = 0.0;
+    if (CPXgetmiprelgap(env, guard.problem, &mip_gap) == 0) {
+      out.stats.mip_gap = mip_gap;
+    }
+  }
+  double best_bound = 0.0;
+  if (CPXgetbestobjval(env, guard.problem, &best_bound) == 0) {
+    cplex_solve_info.best_bound = best_bound;
+  }
+  cplex_solve_info.node_count =
+      static_cast<long long>(CPXgetnodecnt(env, guard.problem));
+  out.stats.iterations = CPXgetmipitcnt(env, guard.problem);
+  out.stats.runtime_sec = std::chrono::duration<double>(
+      std::chrono::steady_clock::now() - total_start).count();
+#else
+  out.stats.status = "Unavailable: CPLEX Callable Library not linked";
+#endif
+  return out;
+}
+
+// ---------------------------------------------------------------------------
+// GurobiAdapter — native C API adapter
+// ---------------------------------------------------------------------------
+#ifdef HACDCPF_HAVE_GUROBI
+#include "gurobi_c.h"
+
+namespace {
+
+// Per-solve context passed to the Gurobi MIP callback for dynamic cut injection.
+struct GurobiScucCutData {
+  int n{0};                              // total variable count
+  const MIPModel::UCGenHint* uc{nullptr}; // SCUC structural hints
+  double pair_floor{0.05};              // min fractional value to trigger cut check
+  int max_cuts_per_call{256};           // cap on cuts injected per MIPNODE event
+  int total_cuts_added{0};             // accumulator reported in SolveStats
+  bool enable_dynamic_cuts{true};       // false when callback is diagnostics-only
+  bool separate_network{false};         // add PTDF rows through lazy/user cuts
+  double network_cut_tol{1e-6};
+  int max_network_user_cuts_per_call{128};
+  int max_network_lazy_cuts_per_call{4096};
+  int network_user_cuts_added{0};
+  int network_lazy_cuts_added{0};
+  std::vector<unsigned char> network_user_cut_seen;
+  std::vector<unsigned char> network_lazy_cut_seen;
+  bool analyze_gap{false};              // emit one relaxation violation report
+  bool analyze_done{false};
+  double analyze_gap_trigger{0.014};    // default: sample near the observed 1.35% gap
+  int analyze_top{20};
+};
+
+struct ScucNetworkCutCandidate {
+  int row{-1};
+  double violation{0.0};
+};
+
+struct ScucRelaxationViolation {
+  std::string family;
+  double violation{0.0};
+  int g{-1};
+  int t{-1};
+  int aux{-1};
+  double lhs{0.0};
+  double rhs{0.0};
+};
+
+struct ScucRelaxationSummary {
+  int count{0};
+  double max_violation{0.0};
+  double sum_violation{0.0};
+};
+
+struct ScucCoverItem {
+  int g{-1};
+  double weight{0.0};
+  double z_value{0.0};
+  bool complemented{false};
+  bool s_class{false};
+};
+
+struct ScucPtdfRowCandidate {
+  int line{-1};
+  int direction{0};
+  double rhs{0.0};
+  double slack{0.0};
+  std::vector<double> coeff;
+};
+
+static int scuc_col(const std::vector<int>& cols, int ng, int T, int g, int t) {
+  if (g < 0 || g >= ng || t < 0 || t >= T) return -1;
+  const auto pos = static_cast<std::size_t>(t * ng + g);
+  return pos < cols.size() ? cols[pos] : -1;
+}
+
+static double scuc_val(const std::vector<double>& sol, int col) {
+  if (col < 0 || col >= static_cast<int>(sol.size())) return 0.0;
+  return sol[static_cast<std::size_t>(col)];
+}
+
+static void record_scuc_relaxation_violation(
+    std::vector<ScucRelaxationViolation>& top,
+    std::map<std::string, ScucRelaxationSummary>& summary,
+    const std::string& family,
+    double violation,
+    int g,
+    int t,
+    int aux,
+    double lhs,
+    double rhs) {
+  constexpr double kTol = 1e-6;
+  if (!(violation > kTol)) return;
+  auto& s = summary[family];
+  ++s.count;
+  s.max_violation = std::max(s.max_violation, violation);
+  s.sum_violation += violation;
+  top.push_back({family, violation, g, t, aux, lhs, rhs});
+}
+
+static void analyze_scuc_relaxation_at_gap(
+    const MIPModel::UCGenHint& uc,
+    const std::vector<double>& sol,
+    double incumbent,
+    double bound,
+    double rel_gap,
+    double runtime,
+    double node_count,
+    int top_limit) {
+  const int ng = uc.ng;
+  const int T = uc.T;
+  if (ng <= 0 || T <= 0) return;
+
+  std::vector<ScucRelaxationViolation> top;
+  std::map<std::string, ScucRelaxationSummary> summary;
+
+  auto get_ig = [&](int g, int t) {
+    return scuc_val(sol, scuc_col(uc.ig_cols, ng, T, g, t));
+  };
+  auto get_su = [&](int g, int t) {
+    return scuc_val(sol, scuc_col(uc.su_cols, ng, T, g, t));
+  };
+  auto get_sd = [&](int g, int t) {
+    return scuc_val(sol, scuc_col(uc.sd_cols, ng, T, g, t));
+  };
+  auto get_pg = [&](int g, int t) {
+    return scuc_val(sol, scuc_col(uc.pg_cols, ng, T, g, t));
+  };
+  auto record = [&](const std::string& family, double lhs, double rhs,
+                    int g, int t, int aux = -1) {
+    record_scuc_relaxation_violation(top, summary, family, lhs - rhs,
+                                     g, t, aux, lhs, rhs);
+  };
+  auto record_violation = [&](const std::string& family, double violation,
+                              int g, int t, int aux, double lhs, double rhs) {
+    record_scuc_relaxation_violation(top, summary, family, violation,
+                                     g, t, aux, lhs, rhs);
+  };
+  auto record_fractional = [&](const std::string& family, double value,
+                               int g, int t) {
+    const double rounded = (value >= 0.5) ? 1.0 : 0.0;
+    const double frac = std::abs(value - rounded);
+    record_scuc_relaxation_violation(top, summary, family, frac,
+                                     g, t, -1, value, rounded);
+  };
+  auto frac_distance = [](double value) {
+    const double rounded = (value >= 0.5) ? 1.0 : 0.0;
+    return std::abs(value - rounded);
+  };
+  auto pmax_tier = [](double pmax) {
+    return (pmax > 600.0) ? 6
+         : (pmax > 500.0) ? 5
+         : (pmax > 400.0) ? 4
+         : (pmax > 250.0) ? 3
+         : (pmax > 150.0) ? 2
+         : (pmax > 100.0) ? 1
+         : 0;
+  };
+  const char* tier_label[7] = {
+      "<=100", "100-150", "150-250", "250-400", "400-500", "500-600", ">600"};
+  std::vector<double> gen_ig_frac(static_cast<std::size_t>(ng), 0.0);
+  std::vector<double> gen_su_frac(static_cast<std::size_t>(ng), 0.0);
+  std::vector<double> gen_sd_frac(static_cast<std::size_t>(ng), 0.0);
+  std::vector<double> gen_u_sum(static_cast<std::size_t>(ng), 0.0);
+  std::vector<double> time_ig_frac(static_cast<std::size_t>(T), 0.0);
+  std::vector<double> time_u_sum(static_cast<std::size_t>(T), 0.0);
+  std::vector<double> time_pmin_u(static_cast<std::size_t>(T), 0.0);
+  std::vector<double> time_pmax_u(static_cast<std::size_t>(T), 0.0);
+  int tier_count[7] = {0, 0, 0, 0, 0, 0, 0};
+  double tier_ig_frac[7] = {0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0};
+  double tier_u_sum[7] = {0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0};
+  double tier_pmax_u[7] = {0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0};
+  int s_group_id = -1;
+  int s_group_size = 0;
+  if (uc.identical_group_count > 0 &&
+      uc.group_member_start.size() >= static_cast<std::size_t>(uc.identical_group_count + 1) &&
+      uc.group_is_s_class.size() >= static_cast<std::size_t>(uc.identical_group_count)) {
+    for (int q = 0; q < uc.identical_group_count; ++q) {
+      if (uc.group_is_s_class[static_cast<std::size_t>(q)] == 0) continue;
+      const int begin = uc.group_member_start[static_cast<std::size_t>(q)];
+      const int end = uc.group_member_start[static_cast<std::size_t>(q + 1)];
+      const int size = std::max(0, end - begin);
+      if (size > s_group_size) {
+        s_group_id = q;
+        s_group_size = size;
+      }
+    }
+  }
+
+  // Binary fractionality is not a valid cut by itself, but it tells us where
+  // the relaxation is escaping the commitment polytope at the sampled gap.
+  for (int g = 0; g < ng; ++g) {
+    const double pmin = uc.pmin.size() > static_cast<std::size_t>(g)
+                            ? std::max(0.0, uc.pmin[static_cast<std::size_t>(g)]) : 0.0;
+    const double pmax = uc.pmax.size() > static_cast<std::size_t>(g)
+                            ? std::max(0.0, uc.pmax[static_cast<std::size_t>(g)]) : 0.0;
+    const int tier = pmax_tier(pmax);
+    if (tier >= 0 && tier < 7) ++tier_count[tier];
+    for (int t = 0; t < T; ++t) {
+      const double u = get_ig(g, t);
+      const double su = get_su(g, t);
+      const double sd = get_sd(g, t);
+      const double ig_frac = frac_distance(u);
+      const double su_frac = frac_distance(su);
+      const double sd_frac = frac_distance(sd);
+      gen_ig_frac[static_cast<std::size_t>(g)] += ig_frac;
+      gen_su_frac[static_cast<std::size_t>(g)] += su_frac;
+      gen_sd_frac[static_cast<std::size_t>(g)] += sd_frac;
+      gen_u_sum[static_cast<std::size_t>(g)] += u;
+      time_ig_frac[static_cast<std::size_t>(t)] += ig_frac;
+      time_u_sum[static_cast<std::size_t>(t)] += u;
+      time_pmin_u[static_cast<std::size_t>(t)] += pmin * u;
+      time_pmax_u[static_cast<std::size_t>(t)] += pmax * u;
+      if (tier >= 0 && tier < 7) {
+        tier_ig_frac[tier] += ig_frac;
+        tier_u_sum[tier] += u;
+        tier_pmax_u[tier] += pmax * u;
+      }
+      record_fractional("fractional_IG", u, g, t);
+      record_fractional("fractional_SU", su, g, t);
+      record_fractional("fractional_SD", sd, g, t);
+    }
+  }
+
+  // Family T (transition hull), currently disabled for large UC instances.
+  if (uc.ig_cols.size() >= static_cast<std::size_t>(ng * T) &&
+      uc.su_cols.size() >= static_cast<std::size_t>(ng * T) &&
+      uc.sd_cols.size() >= static_cast<std::size_t>(ng * T)) {
+    for (int g = 0; g < ng; ++g) {
+      const double ig0 =
+          (uc.ig0.size() > static_cast<std::size_t>(g) && uc.ig0[static_cast<std::size_t>(g)] != 0)
+              ? 1.0 : 0.0;
+      for (int t = 0; t < T; ++t) {
+        const double u = get_ig(g, t);
+        const double su = get_su(g, t);
+        const double sd = get_sd(g, t);
+        record("T:SU<=IG", su, u, g, t);
+        record("T:SD<=1-IG", sd + u, 1.0, g, t);
+        if (t == 0) {
+          record("T:SU<=1-IG0", su, 1.0 - ig0, g, t);
+          record("T:SD<=IG0", sd, ig0, g, t);
+        } else {
+          const double up = get_ig(g, t - 1);
+          record("T:SU+IGprev<=1", su + up, 1.0, g, t);
+          record("T:SD<=IGprev", sd, up, g, t);
+        }
+      }
+    }
+  }
+
+  // Pairwise SU/SD conflict rows should already be present in the tight Gurobi
+  // path.  Keeping them in the report is a quick sanity check that the sampled
+  // relaxation is not escaping already-added min-up/down user cuts.
+  if (uc.min_up.size() >= static_cast<std::size_t>(ng) &&
+      uc.min_down.size() >= static_cast<std::size_t>(ng)) {
+    for (int g = 0; g < ng; ++g) {
+      const int mu = uc.min_up[static_cast<std::size_t>(g)];
+      const int md = uc.min_down[static_cast<std::size_t>(g)];
+      if (mu > 1) {
+        for (int t1 = 0; t1 < T; ++t1) {
+          const double su = get_su(g, t1);
+          for (int t2 = t1 + 1; t2 <= std::min(T - 1, t1 + mu - 1); ++t2)
+            record("H:SU+SD<=1", su + get_sd(g, t2), 1.0, g, t1, t2);
+        }
+      }
+      if (md > 1) {
+        for (int t1 = 0; t1 < T; ++t1) {
+          const double sd = get_sd(g, t1);
+          for (int t2 = t1 + 1; t2 <= std::min(T - 1, t1 + md - 1); ++t2)
+            record("H:SD+SU<=1", sd + get_su(g, t2), 1.0, g, t1, t2);
+        }
+      }
+    }
+  }
+
+  // Ramp-perspective and multi-lag startup/shutdown capacity cuts, using the
+  // conservative ramp value available in UCGenHint.  These are valid but weaker
+  // than a direction-specific test if ramp-up and ramp-down differ.
+  if (!uc.pg_cols.empty() && uc.pg_cols.size() >= static_cast<std::size_t>(ng * T) &&
+      uc.pmax.size() >= static_cast<std::size_t>(ng) &&
+      uc.pmin.size() >= static_cast<std::size_t>(ng) &&
+      uc.ramp.size() >= static_cast<std::size_t>(ng)) {
+    for (int g = 0; g < ng; ++g) {
+      const double pmax = std::max(0.0, uc.pmax[static_cast<std::size_t>(g)]);
+      const double pmin = std::max(0.0, uc.pmin[static_cast<std::size_t>(g)]);
+      const double ramp = std::min(pmax, std::max(0.0, uc.ramp[static_cast<std::size_t>(g)]));
+      if (!(pmax > 1e-9)) continue;
+      const double su_cap = std::min(pmax, pmin + ramp);
+      const double sd_cap = std::min(pmax, pmin + ramp);
+      for (int t = 1; t < T; ++t) {
+        const double pg = get_pg(g, t);
+        const double pg_prev = get_pg(g, t - 1);
+        record("R:up_perspective", pg - pg_prev, ramp * get_ig(g, t - 1) + su_cap * get_su(g, t), g, t);
+        record("R:down_perspective", pg_prev - pg, ramp * get_ig(g, t) + sd_cap * get_sd(g, t), g, t);
+      }
+
+      const int tu = uc.min_up.size() > static_cast<std::size_t>(g)
+                         ? uc.min_up[static_cast<std::size_t>(g)] : 0;
+      const int td = uc.min_down.size() > static_cast<std::size_t>(g)
+                         ? uc.min_down[static_cast<std::size_t>(g)] : 0;
+      for (int k = 1; k <= std::min(std::max(0, tu - 1), 8); ++k) {
+        const double excess = pmax - pmin - static_cast<double>(k) * ramp;
+        if (!(excess > 1e-9)) break;
+        for (int t = k - 1; t < T; ++t) {
+          const int su_t = t - k + 1;
+          record("P:startup_multilag", get_pg(g, t) + excess * get_su(g, su_t),
+                 pmax * get_ig(g, t), g, t, k);
+        }
+      }
+      for (int k = 1; k <= std::min(std::max(0, td - 1), 8); ++k) {
+        const double excess = pmax - pmin - static_cast<double>(k) * ramp;
+        if (!(excess > 1e-9)) break;
+        for (int t = 0; t + k < T; ++t) {
+          const int sd_t = t + k;
+          record("Q:shutdown_multilag", get_pg(g, t) + excess * get_sd(g, sd_t),
+                 pmax * get_ig(g, t), g, t, k);
+        }
+      }
+    }
+  }
+
+  // Full-density Family C check.  The production cut currently drops small
+  // positive coefficients below 1 MW; violations here measure whether those
+  // dropped valid terms still matter at the sampled relaxation.
+  if (uc.certifies_hard_network_flow_rows && uc.network_line_count > 0 &&
+      !uc.line_gsf.empty() && !uc.line_fwd_rhs.empty() && !uc.line_rev_rhs.empty() &&
+      uc.pmin.size() >= static_cast<std::size_t>(ng) &&
+      uc.pmax.size() >= static_cast<std::size_t>(ng)) {
+    const int nl = uc.network_line_count;
+    for (int l = 0; l < nl; ++l) {
+      for (int t = 0; t < T; ++t) {
+        const double fwd_rhs = uc.line_fwd_rhs[static_cast<std::size_t>(l * T + t)];
+        const double rev_rhs = uc.line_rev_rhs[static_cast<std::size_t>(l * T + t)];
+        if (fwd_rhs < 1e8) {
+          double lhs = 0.0;
+          for (int g = 0; g < ng; ++g) {
+            const double gsf = uc.line_gsf[static_cast<std::size_t>(l * ng + g)];
+            if (std::abs(gsf) < 1e-10) continue;
+            const double coeff = (gsf > 0.0 ? gsf * uc.pmin[static_cast<std::size_t>(g)]
+                                            : gsf * uc.pmax[static_cast<std::size_t>(g)]);
+            lhs += coeff * get_ig(g, t);
+          }
+          record("C_full:fwd", lhs, fwd_rhs, -1, t, l);
+        }
+        if (rev_rhs < 1e8) {
+          double lhs = 0.0;
+          for (int g = 0; g < ng; ++g) {
+            const double neg_gsf = -uc.line_gsf[static_cast<std::size_t>(l * ng + g)];
+            if (std::abs(neg_gsf) < 1e-10) continue;
+            const double coeff = (neg_gsf > 0.0 ? neg_gsf * uc.pmin[static_cast<std::size_t>(g)]
+                                                : neg_gsf * uc.pmax[static_cast<std::size_t>(g)]);
+            lhs += coeff * get_ig(g, t);
+          }
+          record("C_full:rev", lhs, rev_rhs, -1, t, l);
+        }
+      }
+    }
+
+    auto scan_s_group_cover = [&](const std::string& family,
+                                  const std::vector<double>& row_coeff,
+                                  double rhs,
+                                  int line,
+                                  int t) {
+      if (s_group_id < 0 || rhs >= 1e8) return;
+      if (uc.identical_group_id.size() < static_cast<std::size_t>(ng)) return;
+      double transformed_rhs = rhs;
+      for (int g = 0; g < ng; ++g) {
+        const double coeff = row_coeff[static_cast<std::size_t>(g)];
+        if (coeff < -1e-10) transformed_rhs -= coeff;
+      }
+      std::vector<ScucCoverItem> items;
+      std::vector<ScucCoverItem> s_items;
+      items.reserve(static_cast<std::size_t>(ng));
+      s_items.reserve(static_cast<std::size_t>(s_group_size));
+      for (int g = 0; g < ng; ++g) {
+        const bool is_s = uc.identical_group_id[static_cast<std::size_t>(g)] == s_group_id;
+        const double coeff = row_coeff[static_cast<std::size_t>(g)];
+        if (std::abs(coeff) <= 1e-10) continue;
+        ScucCoverItem item;
+        item.g = g;
+        item.s_class = is_s;
+        if (coeff > 0.0) {
+          item.weight = coeff;
+          item.z_value = get_ig(g, t);
+          item.complemented = false;
+        } else {
+          item.weight = -coeff;
+          item.z_value = 1.0 - get_ig(g, t);
+          item.complemented = true;
+        }
+        items.push_back(item);
+        if (is_s) s_items.push_back(item);
+      }
+      if (items.empty() || transformed_rhs < -1e-8) return;
+
+      auto evaluate_order = [&](std::vector<ScucCoverItem> ordered,
+                                const std::string& tag,
+                                bool require_s_member) {
+        double weight_sum = 0.0;
+        double z_sum = 0.0;
+        int complement_count = 0;
+        int s_count = 0;
+        for (int k = 0; k < static_cast<int>(ordered.size()); ++k) {
+          weight_sum += ordered[static_cast<std::size_t>(k)].weight;
+          z_sum += ordered[static_cast<std::size_t>(k)].z_value;
+          complement_count += ordered[static_cast<std::size_t>(k)].complemented ? 1 : 0;
+          s_count += ordered[static_cast<std::size_t>(k)].s_class ? 1 : 0;
+          if (weight_sum <= transformed_rhs + 1e-8) continue;
+          const double cover_rhs = static_cast<double>(k);
+          const double violation = z_sum - cover_rhs;
+          if (violation > 1e-6 && (!require_s_member || s_count > 0)) {
+            const std::string name = family + tag + (complement_count > 0 ? ":mixed" : ":pos");
+            record_violation(name, violation, s_group_id, t, line, z_sum, cover_rhs);
+          }
+          break;
+        }
+      };
+
+      auto evaluate_family = [&](const std::vector<ScucCoverItem>& source,
+                                 const std::string& tag,
+                                 bool require_s_member) {
+        if (source.empty()) return;
+        auto by_z = source;
+        std::sort(by_z.begin(), by_z.end(), [](const auto& a, const auto& b) {
+          if (std::abs(a.z_value - b.z_value) > 1e-12) return a.z_value > b.z_value;
+          return a.weight > b.weight;
+        });
+        evaluate_order(std::move(by_z), tag, require_s_member);
+
+        auto by_weight = source;
+        std::sort(by_weight.begin(), by_weight.end(), [](const auto& a, const auto& b) {
+          if (std::abs(a.weight - b.weight) > 1e-12) return a.weight > b.weight;
+          return a.z_value > b.z_value;
+        });
+        evaluate_order(std::move(by_weight), tag, require_s_member);
+
+        auto by_score = source;
+        std::sort(by_score.begin(), by_score.end(), [](const auto& a, const auto& b) {
+          const double sa = a.z_value * std::max(1e-9, a.weight);
+          const double sb = b.z_value * std::max(1e-9, b.weight);
+          if (std::abs(sa - sb) > 1e-12) return sa > sb;
+          return a.z_value > b.z_value;
+        });
+        evaluate_order(std::move(by_score), tag, require_s_member);
+      };
+
+      evaluate_family(s_items, ":SOnly", false);
+      evaluate_family(items, ":WithS", true);
+    };
+
+    std::vector<double> row_coeff(static_cast<std::size_t>(ng), 0.0);
+    std::vector<std::vector<ScucPtdfRowCandidate>> rows_by_time(static_cast<std::size_t>(T));
+    for (int l = 0; l < nl; ++l) {
+      for (int t = 0; t < T; ++t) {
+        const double fwd_rhs = uc.line_fwd_rhs[static_cast<std::size_t>(l * T + t)];
+        const double rev_rhs = uc.line_rev_rhs[static_cast<std::size_t>(l * T + t)];
+        if (fwd_rhs < 1e8) {
+          double lhs = 0.0;
+          for (int g = 0; g < ng; ++g) {
+            const double gsf = uc.line_gsf[static_cast<std::size_t>(l * ng + g)];
+            row_coeff[static_cast<std::size_t>(g)] =
+                (gsf > 0.0 ? gsf * uc.pmin[static_cast<std::size_t>(g)]
+                           : gsf * uc.pmax[static_cast<std::size_t>(g)]);
+            lhs += row_coeff[static_cast<std::size_t>(g)] * get_ig(g, t);
+          }
+          scan_s_group_cover("SGroupCover:C_fwd", row_coeff, fwd_rhs, l, t);
+          rows_by_time[static_cast<std::size_t>(t)].push_back(
+              {l, 1, fwd_rhs, fwd_rhs - lhs, row_coeff});
+        }
+        if (rev_rhs < 1e8) {
+          double lhs = 0.0;
+          for (int g = 0; g < ng; ++g) {
+            const double neg_gsf = -uc.line_gsf[static_cast<std::size_t>(l * ng + g)];
+            row_coeff[static_cast<std::size_t>(g)] =
+                (neg_gsf > 0.0 ? neg_gsf * uc.pmin[static_cast<std::size_t>(g)]
+                               : neg_gsf * uc.pmax[static_cast<std::size_t>(g)]);
+            lhs += row_coeff[static_cast<std::size_t>(g)] * get_ig(g, t);
+          }
+          scan_s_group_cover("SGroupCover:C_rev", row_coeff, rev_rhs, l, t);
+          rows_by_time[static_cast<std::size_t>(t)].push_back(
+              {l, -1, rev_rhs, rev_rhs - lhs, row_coeff});
+        }
+      }
+    }
+
+    std::vector<double> agg_coeff(static_cast<std::size_t>(ng), 0.0);
+    for (int t = 0; t < T; ++t) {
+      auto& rows = rows_by_time[static_cast<std::size_t>(t)];
+      if (rows.size() < 2) continue;
+      std::sort(rows.begin(), rows.end(), [](const auto& a, const auto& b) {
+        return a.slack < b.slack;
+      });
+      const int limit = std::min<int>(12, static_cast<int>(rows.size()));
+      for (int i = 0; i < limit; ++i) {
+        for (int j = i + 1; j < limit; ++j) {
+          for (int g = 0; g < ng; ++g) {
+            agg_coeff[static_cast<std::size_t>(g)] =
+                rows[static_cast<std::size_t>(i)].coeff[static_cast<std::size_t>(g)] +
+                rows[static_cast<std::size_t>(j)].coeff[static_cast<std::size_t>(g)];
+          }
+          const double agg_rhs = rows[static_cast<std::size_t>(i)].rhs +
+                                 rows[static_cast<std::size_t>(j)].rhs;
+          const int aux = rows[static_cast<std::size_t>(i)].line * 1000 +
+                          rows[static_cast<std::size_t>(j)].line;
+          scan_s_group_cover("SGroupCover:C_pair", agg_coeff, agg_rhs, aux, t);
+        }
+      }
+    }
+  }
+
+  std::sort(top.begin(), top.end(), [](const auto& a, const auto& b) {
+    return a.violation > b.violation;
+  });
+
+  std::fprintf(stderr,
+               "[Gurobi][SCUC gap analysis] node=%.0f time=%.2fs incumbent=%.8g bound=%.8g rel_gap=%.4f\n",
+               node_count, runtime, incumbent, bound, rel_gap);
+  if (summary.empty()) {
+    std::fprintf(stderr, "[Gurobi][SCUC gap analysis] no tested violations above tolerance\n");
+    return;
+  }
+  std::fprintf(stderr, "[Gurobi][SCUC gap analysis] violation summary:\n");
+  for (const auto& [family, s] : summary) {
+    std::fprintf(stderr,
+                 "  %-24s count=%5d max=%11.6g sum=%11.6g\n",
+                 family.c_str(), s.count, s.max_violation, s.sum_violation);
+  }
+  if (s_group_id >= 0) {
+    const double pmin = uc.group_pmin.size() > static_cast<std::size_t>(s_group_id)
+                            ? uc.group_pmin[static_cast<std::size_t>(s_group_id)] : 0.0;
+    const double pmax = uc.group_pmax.size() > static_cast<std::size_t>(s_group_id)
+                            ? uc.group_pmax[static_cast<std::size_t>(s_group_id)] : 0.0;
+    std::fprintf(stderr,
+                 "[Gurobi][SCUC gap analysis] S-class group q=%d size=%d pmin=%.2f pmax=%.2f\n",
+                 s_group_id, s_group_size, pmin, pmax);
+  }
+  std::fprintf(stderr, "[Gurobi][SCUC gap analysis] IG fractionality by pmax tier:\n");
+  for (int tier = 0; tier < 7; ++tier) {
+    if (tier_count[tier] == 0) continue;
+    std::fprintf(stderr,
+                 "  tier=%-7s gens=%2d ig_frac_sum=%10.6f u_sum=%10.6f pmax_u=%12.3f\n",
+                 tier_label[tier], tier_count[tier], tier_ig_frac[tier],
+                 tier_u_sum[tier], tier_pmax_u[tier]);
+  }
+
+  std::vector<int> gen_order;
+  gen_order.reserve(static_cast<std::size_t>(ng));
+  for (int g = 0; g < ng; ++g) gen_order.push_back(g);
+  std::sort(gen_order.begin(), gen_order.end(), [&](int a, int b) {
+    return gen_ig_frac[static_cast<std::size_t>(a)] >
+           gen_ig_frac[static_cast<std::size_t>(b)];
+  });
+  std::fprintf(stderr, "[Gurobi][SCUC gap analysis] top generators by IG fractionality:\n");
+  const int gen_limit = std::min(12, ng);
+  for (int i = 0; i < gen_limit; ++i) {
+    const int g = gen_order[static_cast<std::size_t>(i)];
+    const double pmin = uc.pmin.size() > static_cast<std::size_t>(g) ? uc.pmin[static_cast<std::size_t>(g)] : 0.0;
+    const double pmax = uc.pmax.size() > static_cast<std::size_t>(g) ? uc.pmax[static_cast<std::size_t>(g)] : 0.0;
+    std::fprintf(stderr,
+                 "  g=%3d pmin=%7.2f pmax=%7.2f ig_frac_sum=%9.6f u_sum=%9.6f su_frac=%9.6f sd_frac=%9.6f\n",
+                 g, pmin, pmax, gen_ig_frac[static_cast<std::size_t>(g)],
+                 gen_u_sum[static_cast<std::size_t>(g)],
+                 gen_su_frac[static_cast<std::size_t>(g)],
+                 gen_sd_frac[static_cast<std::size_t>(g)]);
+  }
+
+  std::vector<int> time_order;
+  time_order.reserve(static_cast<std::size_t>(T));
+  for (int t = 0; t < T; ++t) time_order.push_back(t);
+  std::sort(time_order.begin(), time_order.end(), [&](int a, int b) {
+    return time_ig_frac[static_cast<std::size_t>(a)] >
+           time_ig_frac[static_cast<std::size_t>(b)];
+  });
+  std::fprintf(stderr, "[Gurobi][SCUC gap analysis] top periods by IG fractionality:\n");
+  const int time_limit = std::min(12, T);
+  for (int i = 0; i < time_limit; ++i) {
+    const int t = time_order[static_cast<std::size_t>(i)];
+    const double demand = uc.demand.size() > static_cast<std::size_t>(t) ? uc.demand[static_cast<std::size_t>(t)] : 0.0;
+    const double up_req = uc.reserve_requirement.size() > static_cast<std::size_t>(t)
+                              ? uc.reserve_requirement[static_cast<std::size_t>(t)] : 0.0;
+    std::fprintf(stderr,
+                 "  t=%3d ig_frac_sum=%9.6f u_sum=%9.6f pmin_u=%10.3f pmax_u=%10.3f demand=%10.3f up_req=%9.3f cap_slack=%10.3f\n",
+                 t, time_ig_frac[static_cast<std::size_t>(t)],
+                 time_u_sum[static_cast<std::size_t>(t)],
+                 time_pmin_u[static_cast<std::size_t>(t)],
+                 time_pmax_u[static_cast<std::size_t>(t)], demand, up_req,
+                 time_pmax_u[static_cast<std::size_t>(t)] - demand - up_req);
+  }
+  const int limit = std::max(0, std::min(top_limit, static_cast<int>(top.size())));
+  std::fprintf(stderr, "[Gurobi][SCUC gap analysis] top %d violations:\n", limit);
+  for (int i = 0; i < limit; ++i) {
+    const auto& v = top[static_cast<std::size_t>(i)];
+    std::fprintf(stderr,
+                 "  %-24s viol=%11.6g g=%3d t=%3d aux=%3d lhs=%12.6f rhs=%12.6f\n",
+                 v.family.c_str(), v.violation, v.g, v.t, v.aux, v.lhs, v.rhs);
+  }
+}
+
+static int separate_scuc_network_rows(void* cbdata, const std::vector<double>& sol,
+                                      GurobiScucCutData& data, bool as_lazy) {
+  const auto* uc_ptr = data.uc;
+  if (uc_ptr == nullptr) return 0;
+  const auto& uc = *uc_ptr;
+  const int row_count = uc.network_flow_row_count;
+  if (row_count <= 0 || data.n <= 0) return 0;
+  if (uc.network_flow_row_start.size() != static_cast<std::size_t>(row_count + 1) ||
+      uc.network_flow_rhs.size() < static_cast<std::size_t>(row_count)) {
+    return 0;
+  }
+
+  auto& seen = as_lazy ? data.network_lazy_cut_seen : data.network_user_cut_seen;
+  if (seen.size() < static_cast<std::size_t>(row_count))
+    seen.assign(static_cast<std::size_t>(row_count), 0);
+
+  std::vector<ScucNetworkCutCandidate> candidates;
+  candidates.reserve(64);
+  for (int r = 0; r < row_count; ++r) {
+    if (seen[static_cast<std::size_t>(r)] != 0) continue;
+    const int begin = uc.network_flow_row_start[static_cast<std::size_t>(r)];
+    const int end = uc.network_flow_row_start[static_cast<std::size_t>(r + 1)];
+    if (begin < 0 || end < begin ||
+        end > static_cast<int>(uc.network_flow_col.size()) ||
+        end > static_cast<int>(uc.network_flow_value.size())) {
+      continue;
+    }
+    double activity = 0.0;
+    for (int k = begin; k < end; ++k) {
+      const int col = uc.network_flow_col[static_cast<std::size_t>(k)];
+      if (col < 0 || col >= data.n) continue;
+      activity += uc.network_flow_value[static_cast<std::size_t>(k)] *
+                  sol[static_cast<std::size_t>(col)];
+    }
+    const double rhs = uc.network_flow_rhs[static_cast<std::size_t>(r)];
+    const double violation = activity - rhs;
+    if (violation > data.network_cut_tol)
+      candidates.push_back({r, violation});
+  }
+
+  if (candidates.empty()) return 0;
+  std::sort(candidates.begin(), candidates.end(), [](const auto& a, const auto& b) {
+    return a.violation > b.violation;
+  });
+
+  const int max_cuts = as_lazy ? data.max_network_lazy_cuts_per_call
+                               : data.max_network_user_cuts_per_call;
+  if (max_cuts <= 0) return 0;
+  int cuts_added = 0;
+  std::vector<int> ind;
+  std::vector<double> val;
+  for (const auto& candidate : candidates) {
+    if (cuts_added >= max_cuts) break;
+    const int r = candidate.row;
+    const int begin = uc.network_flow_row_start[static_cast<std::size_t>(r)];
+    const int end = uc.network_flow_row_start[static_cast<std::size_t>(r + 1)];
+    ind.clear();
+    val.clear();
+    ind.reserve(static_cast<std::size_t>(end - begin));
+    val.reserve(static_cast<std::size_t>(end - begin));
+    for (int k = begin; k < end; ++k) {
+      const int col = uc.network_flow_col[static_cast<std::size_t>(k)];
+      if (col < 0 || col >= data.n) continue;
+      const double coeff = uc.network_flow_value[static_cast<std::size_t>(k)];
+      if (std::abs(coeff) <= 1e-15) continue;
+      ind.push_back(col);
+      val.push_back(coeff);
+    }
+    if (ind.empty()) continue;
+    const double rhs = uc.network_flow_rhs[static_cast<std::size_t>(r)];
+    int err = 0;
+    if (as_lazy) {
+      err = GRBcblazy(cbdata, static_cast<int>(ind.size()), ind.data(),
+                      val.data(), GRB_LESS_EQUAL, rhs);
+    } else {
+      err = GRBcbcut(cbdata, static_cast<int>(ind.size()), ind.data(),
+                     val.data(), GRB_LESS_EQUAL, rhs);
+    }
+    if (err == 0) {
+      seen[static_cast<std::size_t>(r)] = 1;
+      ++cuts_added;
+    }
+  }
+
+  data.total_cuts_added += cuts_added;
+  if (as_lazy) data.network_lazy_cuts_added += cuts_added;
+  else data.network_user_cuts_added += cuts_added;
+  return cuts_added;
+}
+
+// Gurobi MIP callback: inject violated pairwise min-up/down conflict cuts as
+// user cuts at every MIPNODE LP-optimal node during branch-and-bound.
+//
+//   SU(g,t1) + SD(g,t2) <= 1   for 0 < t2 - t1 < min_up[g]   (min-up conflict)
+//   SD(g,t1) + SU(g,t2) <= 1   for 0 < t2 - t1 < min_down[g] (min-down conflict)
+//
+// These are valid implied cuts derived from the min-up/down constraints that
+// are NOT present in the base SCUC formulation, mirroring the native B&C
+// append_strict_scuc_dynamic_cuts() logic.
+static int gurobi_scuc_cut_callback(
+    GRBmodel* /*model*/, void* cbdata, int where, void* usrdata) {
+  auto* data = static_cast<GurobiScucCutData*>(usrdata);
+  if (!data || !data->uc) return 0;
+  const auto& uc = *data->uc;
+
+  if (where == GRB_CB_MIPSOL) {
+    if (!data->separate_network) return 0;
+    std::vector<double> sol(static_cast<std::size_t>(data->n), 0.0);
+    if (GRBcbget(cbdata, where, GRB_CB_MIPSOL_SOL, sol.data()) != 0) return 0;
+    separate_scuc_network_rows(cbdata, sol, *data, true);
+    return 0;
+  }
+
+  if (where != GRB_CB_MIPNODE) return 0;
+
+  // Only proceed when the LP relaxation is LP-optimal at this node.
+  int node_status = 0;
+  if (GRBcbget(cbdata, where, GRB_CB_MIPNODE_STATUS, &node_status) != 0)
+    return 0;
+  if (node_status != GRB_OPTIMAL) return 0;
+
+  const int ng = uc.ng, T = uc.T, n = data->n;
+  if (ng <= 0 || T <= 0 || n <= 0) return 0;
+  // (su_cols/sd_cols size guards are per-block below; absent data causes those
+  // blocks to be skipped gracefully via internal bounds checks.)
+
+  // Fetch LP relaxation solution at this node.
+  std::vector<double> sol(static_cast<std::size_t>(n), 0.0);
+  if (GRBcbget(cbdata, where, GRB_CB_MIPNODE_REL, sol.data()) != 0) return 0;
+
+  if (data->separate_network)
+    separate_scuc_network_rows(cbdata, sol, *data, false);
+
+  if (data->analyze_gap && !data->analyze_done) {
+    double incumbent = 0.0;
+    double bound = 0.0;
+    double node_count = 0.0;
+    double runtime = 0.0;
+    const int ok_best = GRBcbget(cbdata, where, GRB_CB_MIPNODE_OBJBST, &incumbent);
+    const int ok_bound = GRBcbget(cbdata, where, GRB_CB_MIPNODE_OBJBND, &bound);
+    GRBcbget(cbdata, where, GRB_CB_MIPNODE_NODCNT, &node_count);
+    GRBcbget(cbdata, where, GRB_CB_RUNTIME, &runtime);
+    if (ok_best == 0 && ok_bound == 0 && std::isfinite(incumbent) &&
+        std::isfinite(bound) && std::abs(incumbent) < 1e90) {
+      const double rel_gap = std::abs(incumbent - bound) /
+                             std::max(1.0, std::abs(incumbent));
+      if (rel_gap <= data->analyze_gap_trigger) {
+        analyze_scuc_relaxation_at_gap(uc, sol, incumbent, bound, rel_gap,
+                                       runtime, node_count, data->analyze_top);
+        data->analyze_done = true;
+      }
+    }
+  }
+
+  if (!data->enable_dynamic_cuts) return 0;
+  if (!uc.certifies_min_up_down_rows) return 0;
+
+  const double pf = data->pair_floor;
+  const int max_cuts = data->max_cuts_per_call;
+  int cuts_added = 0;
+
+  auto get_col = [&](const std::vector<int>& cols, int g, int t) -> int {
+    if (g < 0 || g >= ng || t < 0 || t >= T) return -1;
+    const auto idx = static_cast<std::size_t>(t * ng + g);
+    if (idx >= cols.size()) return -1;
+    return cols[idx];
+  };
+  auto get_val = [&](int col) -> double {
+    if (col < 0 || col >= n) return 0.0;
+    return sol[static_cast<std::size_t>(col)];
+  };
+
+  // Min-up violations: SU(g,t1) + SD(g,t2) > 1
+  if (uc.min_up.size() >= static_cast<std::size_t>(ng)) {
+    for (int g = 0; g < ng && cuts_added < max_cuts; ++g) {
+      const int mu = uc.min_up[static_cast<std::size_t>(g)];
+      if (mu <= 1) continue;
+      for (int t1 = 0; t1 < T && cuts_added < max_cuts; ++t1) {
+        const int su_col = get_col(uc.su_cols, g, t1);
+        if (su_col < 0) continue;
+        const double su_v = get_val(su_col);
+        if (su_v <= pf) continue;
+        const int last = std::min(T - 1, t1 + mu - 1);
+        for (int t2 = t1 + 1; t2 <= last && cuts_added < max_cuts; ++t2) {
+          const int sd_col = get_col(uc.sd_cols, g, t2);
+          if (sd_col < 0) continue;
+          const double sd_v = get_val(sd_col);
+          if (sd_v <= pf || su_v + sd_v <= 1.0 + pf) continue;
+          const int ind[2] = {su_col, sd_col};
+          const double val[2] = {1.0, 1.0};
+          GRBcbcut(cbdata, 2, ind, val, GRB_LESS_EQUAL, 1.0);
+          ++cuts_added;
+        }
+      }
+    }
+  }
+
+  // Min-down violations: SD(g,t1) + SU(g,t2) > 1
+  if (uc.min_down.size() >= static_cast<std::size_t>(ng)) {
+    for (int g = 0; g < ng && cuts_added < max_cuts; ++g) {
+      const int md = uc.min_down[static_cast<std::size_t>(g)];
+      if (md <= 1) continue;
+      for (int t1 = 0; t1 < T && cuts_added < max_cuts; ++t1) {
+        const int sd_col = get_col(uc.sd_cols, g, t1);
+        if (sd_col < 0) continue;
+        const double sd_v = get_val(sd_col);
+        if (sd_v <= pf) continue;
+        const int last = std::min(T - 1, t1 + md - 1);
+        for (int t2 = t1 + 1; t2 <= last && cuts_added < max_cuts; ++t2) {
+          const int su_col = get_col(uc.su_cols, g, t2);
+          if (su_col < 0) continue;
+          const double su_v = get_val(su_col);
+          if (su_v <= pf || sd_v + su_v <= 1.0 + pf) continue;
+          const int ind[2] = {sd_col, su_col};
+          const double val[2] = {1.0, 1.0};
+          GRBcbcut(cbdata, 2, ind, val, GRB_LESS_EQUAL, 1.0);
+          ++cuts_added;
+        }
+      }
+    }
+  }
+
+  // -------------------------------------------------------------------
+  // Family B (dynamic): reserve-commitment cover violations
+  //   sum_g cap[g] * u_lp(g,t) < requirement[t]  → inject GEQ cut
+  // -------------------------------------------------------------------
+  if (uc.certifies_system_reserve_rows &&
+      uc.ig_cols.size() >= static_cast<std::size_t>(ng * T)) {
+    auto check_reserve_cover = [&](const std::vector<double>& caps,
+                                   const std::vector<double>& req) {
+      for (int t = 0; t < T && cuts_added < max_cuts; ++t) {
+        if (req.size() <= static_cast<std::size_t>(t)) continue;
+        const double requirement = req[static_cast<std::size_t>(t)];
+        if (!(requirement > 0.0)) continue;
+        if (caps.size() < static_cast<std::size_t>(ng)) continue;
+        std::vector<int>    r_ind;
+        std::vector<double> r_val;
+        double lhs = 0.0;
+        for (int g = 0; g < ng; ++g) {
+          const int ig = uc.ig_cols[static_cast<std::size_t>(t * ng + g)];
+          if (ig < 0 || ig >= n) continue;
+          const double cap = std::max(0.0, caps[static_cast<std::size_t>(g)]);
+          if (!(cap > 0.0)) continue;
+          const double u_v = get_val(ig);
+          lhs += cap * u_v;
+          r_ind.push_back(ig); r_val.push_back(cap);
+        }
+        if (!r_ind.empty() && lhs < requirement - pf) {
+          GRBcbcut(cbdata, static_cast<int>(r_ind.size()), r_ind.data(),
+                   r_val.data(), GRB_GREATER_EQUAL, requirement);
+          ++cuts_added;
+        }
+      }
+    };
+
+    if (!uc.up_reserve_headroom_cap.empty() && !uc.reserve_requirement.empty())
+      check_reserve_cover(uc.up_reserve_headroom_cap, uc.reserve_requirement);
+    if (!uc.spinning_reserve_cap.empty() && !uc.spinning_requirement.empty())
+      check_reserve_cover(uc.spinning_reserve_cap, uc.spinning_requirement);
+    if (!uc.regulation_up_cap.empty() && !uc.regulation_up_requirement.empty())
+      check_reserve_cover(uc.regulation_up_cap, uc.regulation_up_requirement);
+    if (!uc.regulation_down_cap.empty() &&
+        !uc.regulation_down_requirement.empty())
+      check_reserve_cover(uc.regulation_down_cap, uc.regulation_down_requirement);
+  }
+
+  // -------------------------------------------------------------------
+  // Family G (extended clique): sum_{t'=t}^{t+T^U+T^D-1} SU(g,t') <= 1
+  // Check each startup window; inject cut when LP sum > 1.
+  // When static tight SCUC is enabled these rows are already in the model
+  // and no violations will be found; cost is O(ng*T) dot product per node.
+  // -------------------------------------------------------------------
+  if (uc.min_up.size() >= static_cast<std::size_t>(ng) &&
+      uc.min_down.size() >= static_cast<std::size_t>(ng)) {
+    for (int g = 0; g < ng && cuts_added < max_cuts; ++g) {
+      const int mu = uc.min_up[static_cast<std::size_t>(g)];
+      const int md = uc.min_down[static_cast<std::size_t>(g)];
+      const int L = mu + md;
+      if (L <= 1) continue;
+      for (int t = 0; t < T && cuts_added < max_cuts; ++t) {
+        const int last = std::min(T - 1, t + L - 1);
+        if (last == t) continue;
+        std::vector<int>    w_ind;
+        std::vector<double> w_val;
+        double sum_su = 0.0;
+        for (int t2 = t; t2 <= last; ++t2) {
+          const int col = get_col(uc.su_cols, g, t2);
+          if (col < 0) continue;
+          const double v = get_val(col);
+          w_ind.push_back(col); w_val.push_back(1.0); sum_su += v;
+        }
+        if (static_cast<int>(w_ind.size()) >= 2 && sum_su > 1.0 + pf) {
+          GRBcbcut(cbdata, static_cast<int>(w_ind.size()), w_ind.data(),
+                   w_val.data(), GRB_LESS_EQUAL, 1.0);
+          ++cuts_added;
+        }
+      }
+    }
+  }
+
+  data->total_cuts_added += cuts_added;
+  return 0;
+}
+
+int apply_gurobi_context(GRBmodel* model, const SolveContext* context) {
+  if (context == nullptr) return 0;
+  GRBenv* model_env = GRBgetenv(model);
+  if (GRBsetdblparam(model_env, "TimeLimit",
+                     context->backend_time_limit_sec(GRB_INFINITY)) != 0) {
+    return 1;
+  }
+  if (context->has_explicit_thread_budget() &&
+      GRBsetintparam(model_env, "Threads", context->thread_budget()) != 0) {
+    return 1;
+  }
+  return GRBsetintparam(
+      model_env, "Seed",
+      static_cast<int>(context->random_seed() % 2000000001U));
+}
+
+}  // anonymous namespace
+
+#endif  // HACDCPF_HAVE_GUROBI
+
+GurobiAdapter::GurobiAdapter() {
+#ifdef HACDCPF_HAVE_GUROBI
+  GRBenv* env = nullptr;
+  if (GRBemptyenv(&env) == 0 && env != nullptr) {
+    GRBsetintparam(env, "OutputFlag", 0);
+    if (GRBstartenv(env) == 0) env_ = env;
+    else GRBfreeenv(env);
+  }
+#endif
+}
+
+GurobiAdapter::~GurobiAdapter() {
+#ifdef HACDCPF_HAVE_GUROBI
+  if (env_) {
+    GRBfreeenv(static_cast<GRBenv*>(env_));
+  }
+#endif
+}
+
+GurobiAdapter::GurobiAdapter(GurobiOptions options) : GurobiAdapter() {
+  if (!std::isfinite(options.time_limit_sec) || options.time_limit_sec <= 0 ||
+      !std::isfinite(options.mip_gap) || options.mip_gap < 0 || options.mip_gap > 1 || options.threads < 0 || options.threads > 1024 || options.random_seed < 0 || options.random_seed > 2000000000 || options.method < -1 || options.method > 5 || options.crossover < -1 || options.crossover > 4)
+    throw std::invalid_argument("Invalid Gurobi time limit, MIP gap, threads or method");
+  options_ = options;
+#ifdef HACDCPF_HAVE_GUROBI
+  if (env_) {
+    auto* env = static_cast<GRBenv*>(env_);
+    if (GRBsetdblparam(env,"TimeLimit",options.time_limit_sec) || GRBsetdblparam(env,"MIPGap",options.mip_gap) ||
+        GRBsetintparam(env,"Threads",options.threads) || GRBsetintparam(env,"Seed",options.random_seed) ||
+        GRBsetintparam(env,"Method",options.method) || GRBsetintparam(env,"Crossover",options.crossover)) throw std::invalid_argument("Gurobi rejected solve options");
+  }
+#endif
+}
+
+std::string GurobiAdapter::name() const { return "Gurobi"; }
+
+bool GurobiAdapter::supports(ProblemClass cls) const {
+  return available() && (cls == ProblemClass::LP || cls == ProblemClass::QP || cls == ProblemClass::MILP);
+}
+
+bool GurobiAdapter::available() const {
+#ifdef HACDCPF_HAVE_GUROBI
+  return env_ != nullptr;
+#else
+  return false;
+#endif
+}
+
+SolveResult GurobiAdapter::solve_pricing_lp(const LPModel& prob) {
+  // Fixed algorithm by ordered LP size, never concurrent algorithm selection.
+  // Versioned pricing policy and full-dual repeatability: docs/solvers.md.
+  auto options = options_.value_or(GurobiOptions{});
+  const bool large=prob.c.size()>=1000000;
+  options.method = large ? 2 : 1; options.threads = large ? 8 : 1; options.crossover = large ? 0 : -1;
+  options_ = options;
+#ifdef HACDCPF_HAVE_GUROBI
+  if (env_) {
+    auto* env = static_cast<GRBenv*>(env_);
+    if (GRBresetparams(env) || GRBsetintparam(env,"OutputFlag",0) ||
+        GRBsetdblparam(env,"OptimalityTol",1e-8))
+      throw std::runtime_error("Gurobi rejected deterministic pricing options");
+  }
+#endif
+  return solve_lp(prob);
+}
+
+SolveResult GurobiAdapter::solve_relaxation_lp(const LPModel& prob, double relative_tolerance) {
+  // Inexact barrier for separately certified LP lower bounds; docs/solvers.md.
+  // Never use this entry point to certify prices or original primal feasibility.
+  if(!std::isfinite(relative_tolerance)||relative_tolerance<1e-8||relative_tolerance>1e-2)
+    throw std::invalid_argument("Invalid relaxation barrier tolerance");
+  auto options=options_.value_or(GurobiOptions{});
+  options.method=2;options.crossover=0;options_=options;
+#ifdef HACDCPF_HAVE_GUROBI
+  if(env_ && GRBsetdblparam(static_cast<GRBenv*>(env_),"BarConvTol",relative_tolerance))
+    throw std::runtime_error("Gurobi rejected relaxation barrier tolerance");
+#endif
+  return solve_lp(prob);
+}
+
+SolveResult GurobiAdapter::solve_lp(const LPModel& prob) const {
+  return solve_lp_impl(prob, nullptr);
+}
+
+SolveResult GurobiAdapter::solve_lp(const LPModel& prob,
+                                    const SolveContext& context) const {
+  if (context.stop_requested()) return stopped_context_result(name(), context);
+  return solve_lp_impl(prob, &context);
+}
+
+SolveResult GurobiAdapter::solve_lp_impl(
+    const LPModel& prob, const SolveContext* context) const {
+  if (options_) {
+    MIPModel linear; linear.linear_part = prob;
+    return solve_milp_impl(linear, context);
+  }
+  SolveResult out;
+  out.stats.solver_name = name();
+#ifndef HACDCPF_HAVE_GUROBI
+  (void)prob;  // Gurobi disabled at compile time; parameter is unavailable.
+  (void)context;
+#endif
+#ifdef HACDCPF_HAVE_GUROBI
+  const auto t0 = std::chrono::steady_clock::now();
+  if (!available()) {
+    out.stats.status = "Unavailable: Gurobi env not initialized";
+    return out;
+  }
+  auto* env = static_cast<GRBenv*>(env_);
+  GRBmodel* model = nullptr;
+  if (GRBnewmodel(env, &model, "lp", 0, nullptr, nullptr, nullptr, nullptr, nullptr) != 0) {
+    out.stats.status = "Gurobi: failed to create model";
+    return out;
+  }
+  // Gurobi Parameter Reference, TimeLimit/Threads/Seed; context model is R1.
+  if (apply_gurobi_context(model, context) != 0) {
+    out.stats.status = "Gurobi rejected SolveContext parameters";
+    GRBfreemodel(model);
+    return out;
+  }
+
+  const int n = static_cast<int>(prob.vars.size());
+  const int m_ineq = static_cast<int>(prob.A.rows());
+  const int m_eq = static_cast<int>(prob.Aeq.rows());
+  const double obj_sign = (prob.sense == Sense::Maximize) ? -1.0 : 1.0;
+
+  // Add variables.
+  std::vector<double> obj_coeff(n), lb(n), ub(n);
+  for (int j = 0; j < n; ++j) {
+    obj_coeff[j] = obj_sign * prob.c[j];
+    lb[j] = prob.vars[j].lb;
+    ub[j] = prob.vars[j].ub;
+  }
+  GRBaddvars(model, n, 0, nullptr, nullptr, nullptr,
+             obj_coeff.data(), lb.data(), ub.data(), nullptr, nullptr);
+  GRBsetintattr(model, "ModelSense", GRB_MINIMIZE);
+
+  // Inequality constraints: Ax <= b.
+  for (int i = 0; i < m_ineq; ++i) {
+    std::vector<int> ind;
+    std::vector<double> val;
+    for (Eigen::SparseMatrix<double>::InnerIterator it(prob.A, 0); it; ++it) {
+      // Sparse col-major iteration — need row-by-row, so iterate all columns.
+    }
+    // Use dense row extraction for correctness.
+    for (int j = 0; j < n; ++j) {
+      const double v = prob.A.coeff(i, j);
+      if (std::abs(v) > 1e-15) {
+        ind.push_back(j);
+        val.push_back(v);
+      }
+    }
+    GRBaddconstr(model, static_cast<int>(ind.size()), ind.data(), val.data(),
+                 GRB_LESS_EQUAL, prob.b[i], nullptr);
+    const double lhs = lp_row_lhs_or_neg_inf(prob, i);
+    if (std::isfinite(lhs)) {
+      GRBaddconstr(model, static_cast<int>(ind.size()), ind.data(), val.data(),
+                   GRB_GREATER_EQUAL, lhs, nullptr);
+    }
+  }
+
+  // Equality constraints: Aeq x = beq.
+  for (int i = 0; i < m_eq; ++i) {
+    std::vector<int> ind;
+    std::vector<double> val;
+    for (int j = 0; j < n; ++j) {
+      const double v = prob.Aeq.coeff(i, j);
+      if (std::abs(v) > 1e-15) {
+        ind.push_back(j);
+        val.push_back(v);
+      }
+    }
+    GRBaddconstr(model, static_cast<int>(ind.size()), ind.data(), val.data(),
+                 GRB_EQUAL, prob.beq[i], nullptr);
+  }
+
+  GRBupdatemodel(model);
+  GRBoptimize(model);
+
+  int status = 0;
+  GRBgetintattr(model, "Status", &status);
+
+  if (status == GRB_OPTIMAL) {
+    out.stats.success = true;
+    out.stats.status = "Optimal";
+    double objval = 0.0;
+    GRBgetdblattr(model, "ObjVal", &objval);
+    out.stats.objective = obj_sign * objval;
+    out.x.resize(n);
+    GRBgetdblattrarray(model, "X", 0, n, out.x.data());
+
+    // Extract constraint duals (Pi) for LP.
+    const int m_total = m_ineq + m_eq;
+    out.constraint_duals.resize(m_total);
+    if (GRBgetdblattrarray(model, "Pi", 0, m_total,
+                           out.constraint_duals.data()) == 0) {
+      out.constraint_duals *= obj_sign;
+    } else {
+      out.constraint_duals.resize(0);
+    }
+  } else if (status == GRB_INFEASIBLE) {
+    out.stats.status = "Infeasible";
+    // Compute Farkas certificate (IIS-based dual ray).
+    GRBsetintparam(GRBgetenv(model), "InfUnbdInfo", 1);
+    GRBoptimize(model);
+    int recheck = 0;
+    GRBgetintattr(model, "Status", &recheck);
+    if (recheck == GRB_INFEASIBLE) {
+      out.stats.farkas_ray.resize(m_ineq);
+      out.stats.farkas_ray_eq.resize(m_eq);
+      // Gurobi stores Farkas dual on constraints via FarkasDual attribute.
+      std::vector<double> fdual(m_ineq + m_eq);
+      if (GRBgetdblattrarray(model, "FarkasDual", 0, m_ineq + m_eq, fdual.data()) == 0) {
+        for (int i = 0; i < m_ineq; ++i) out.stats.farkas_ray[i] = fdual[i];
+        for (int i = 0; i < m_eq; ++i) out.stats.farkas_ray_eq[i] = fdual[m_ineq + i];
+        out.stats.has_farkas_certificate = true;
+      }
+    }
+  } else {
+    out.stats.status = "Gurobi status=" + std::to_string(status);
+  }
+
+  const auto t1 = std::chrono::steady_clock::now();
+  out.stats.runtime_sec = std::chrono::duration<double>(t1 - t0).count();
+  GRBfreemodel(model);
+#else
+  out.stats.status = "Unavailable: Gurobi not linked";
+#endif
+  return out;
+}
+
+SolveResult GurobiAdapter::solve_qp(const QPModel& prob) const {
+  return solve_qp_impl(prob, nullptr);
+}
+
+SolveResult GurobiAdapter::solve_qp(const QPModel& prob,
+                                    const SolveContext& context) const {
+  if (context.stop_requested()) return stopped_context_result(name(), context);
+  return solve_qp_impl(prob, &context);
+}
+
+SolveResult GurobiAdapter::solve_qp_impl(
+    const QPModel& prob, const SolveContext* context) const {
+  SolveResult out;
+  out.stats.solver_name = name();
+#ifndef HACDCPF_HAVE_GUROBI
+  (void)prob;
+  (void)context;
+#endif
+#ifdef HACDCPF_HAVE_GUROBI
+  const auto t0 = std::chrono::steady_clock::now();
+  if (!available()) {
+    out.stats.status = "Unavailable: Gurobi env not initialized";
+    return out;
+  }
+  auto* env = static_cast<GRBenv*>(env_);
+  GRBmodel* model = nullptr;
+  if (GRBnewmodel(env, &model, "qp", 0, nullptr, nullptr, nullptr, nullptr, nullptr) != 0) {
+    out.stats.status = "Gurobi: failed to create model";
+    return out;
+  }
+  if (apply_gurobi_context(model, context) != 0) {
+    out.stats.status = "Gurobi rejected SolveContext parameters";
+    GRBfreemodel(model);
+    return out;
+  }
+
+  const int n = static_cast<int>(prob.vars.size());
+  const int m_ineq = static_cast<int>(prob.A.rows());
+  const int m_eq = static_cast<int>(prob.Aeq.rows());
+  const double obj_sign = (prob.sense == Sense::Maximize) ? -1.0 : 1.0;
+
+  // Add variables with linear objective coefficients
+  std::vector<double> obj_coeff(n), lb(n), ub(n);
+  for (int j = 0; j < n; ++j) {
+    obj_coeff[j] = obj_sign * prob.c[j];
+    lb[j] = prob.vars[j].lb;
+    ub[j] = prob.vars[j].ub;
+  }
+  GRBaddvars(model, n, 0, nullptr, nullptr, nullptr,
+             obj_coeff.data(), lb.data(), ub.data(), nullptr, nullptr);
+  GRBsetintattr(model, "ModelSense", GRB_MINIMIZE);
+
+  // Add quadratic objective: Q is stored as the Hessian (we need 0.5*x'Qx)
+  // Gurobi expects quadratic terms as coefficient pairs
+  for (int k = 0; k < prob.Q.outerSize(); ++k) {
+    for (Eigen::SparseMatrix<double>::InnerIterator it(prob.Q, k); it; ++it) {
+      int i = it.row();
+      int j = it.col();
+      double qij = it.value();
+      if (std::abs(qij) > 1e-15) {
+        // GRBaddqpterms uses raw coefficient: contributes qij*xi*xj directly.
+        // QPModel convention is 0.5*x'Qx: halve here so Gurobi sees the
+        // right effective coefficient. Apply obj_sign for maximize support.
+        double qij_half = 0.5 * obj_sign * qij;
+        GRBaddqpterms(model, 1, &i, &j, &qij_half);
+      }
+    }
+  }
+
+  // Inequality constraints: Ax <= b
+  for (int i = 0; i < m_ineq; ++i) {
+    std::vector<int> ind;
+    std::vector<double> val;
+    for (int j = 0; j < n; ++j) {
+      const double v = prob.A.coeff(i, j);
+      if (std::abs(v) > 1e-15) {
+        ind.push_back(j);
+        val.push_back(v);
+      }
+    }
+    GRBaddconstr(model, static_cast<int>(ind.size()), ind.data(), val.data(),
+                 GRB_LESS_EQUAL, prob.b[i], nullptr);
+  }
+
+  // Equality constraints: Aeq x = beq
+  for (int i = 0; i < m_eq; ++i) {
+    std::vector<int> ind;
+    std::vector<double> val;
+    for (int j = 0; j < n; ++j) {
+      const double v = prob.Aeq.coeff(i, j);
+      if (std::abs(v) > 1e-15) {
+        ind.push_back(j);
+        val.push_back(v);
+      }
+    }
+    GRBaddconstr(model, static_cast<int>(ind.size()), ind.data(), val.data(),
+                 GRB_EQUAL, prob.beq[i], nullptr);
+  }
+
+  GRBupdatemodel(model);
+  GRBoptimize(model);
+
+  int status = 0;
+  GRBgetintattr(model, "Status", &status);
+
+  if (status == GRB_OPTIMAL) {
+    out.stats.success = true;
+    out.stats.status = "Optimal";
+    double objval = 0.0;
+    GRBgetdblattr(model, "ObjVal", &objval);
+    out.stats.objective = obj_sign * objval;
+    out.x.resize(n);
+    GRBgetdblattrarray(model, "X", 0, n, out.x.data());
+  } else if (status == GRB_INFEASIBLE) {
+    out.stats.status = "Infeasible";
+  } else {
+    out.stats.status = "Gurobi status=" + std::to_string(status);
+  }
+
+  const auto t1 = std::chrono::steady_clock::now();
+  out.stats.runtime_sec = std::chrono::duration<double>(t1 - t0).count();
+  GRBfreemodel(model);
+#else
+  out.stats.status = "Unavailable: Gurobi not linked";
+#endif
+  return out;
+}
+
+namespace {
+thread_local GurobiSolveTiming gurobi_solve_timing;
+}
+GurobiSolveTiming last_gurobi_solve_timing() { return gurobi_solve_timing; }
+
+SolveResult GurobiAdapter::solve_milp(const MIPModel& prob) const {
+  return solve_milp_impl(prob, nullptr);
+}
+
+SolveResult GurobiAdapter::solve_milp(const MIPModel& prob,
+                                      const SolveContext& context) const {
+  if (context.stop_requested()) return stopped_context_result(name(), context);
+  return solve_milp_impl(prob, &context);
+}
+
+SolveResult GurobiAdapter::solve_milp_impl(
+    const MIPModel& prob, const SolveContext* context) const {
+  gurobi_solve_timing = {};
+  SolveResult out;
+  out.stats.solver_name = name();
+#ifndef HACDCPF_HAVE_GUROBI
+  (void)prob;
+  (void)context;
+#endif
+#ifdef HACDCPF_HAVE_GUROBI
+  const auto t0 = std::chrono::steady_clock::now();
+  if (!available()) {
+    out.stats.status = "Unavailable: Gurobi env not initialized";
+    return out;
+  }
+  auto* env = static_cast<GRBenv*>(env_);
+  GRBmodel* model = nullptr;
+  if (GRBnewmodel(env, &model, "milp", 0, nullptr, nullptr, nullptr, nullptr, nullptr) != 0) {
+    out.stats.status = "Gurobi: failed to create model";
+    return out;
+  }
+  if (apply_gurobi_context(model, context) != 0) {
+    out.stats.status = "Gurobi rejected SolveContext parameters";
+    GRBfreemodel(model);
+    return out;
+  }
+
+  const auto& lp = prob.linear_part;
+  const int n = static_cast<int>(lp.vars.size());
+  const int m_ineq = static_cast<int>(lp.A.rows());
+  const int m_eq = static_cast<int>(lp.Aeq.rows());
+  std::vector<int> upper_rows(m_ineq), lower_rows(m_ineq, -1), equality_rows(m_eq);
+  int loaded_rows = 0;
+  const double obj_sign = (lp.sense == Sense::Maximize) ? -1.0 : 1.0;
+
+  // Prepare variable metadata.
+  std::vector<double> obj_coeff(n), lb_vec(n), ub_vec(n);
+  std::vector<char> vtype(n, GRB_CONTINUOUS);
+  for (int j = 0; j < n; ++j) {
+    obj_coeff[j] = obj_sign * lp.c[j];
+    lb_vec[j] = lp.vars[j].lb;
+    ub_vec[j] = lp.vars[j].ub;
+  }
+  for (int idx : prob.integer_idx) {
+    if (idx >= 0 && idx < n) {
+      vtype[idx] = GRB_INTEGER;
+    }
+  }
+  for (int idx : prob.binary_idx) {
+    if (idx >= 0 && idx < n) {
+      vtype[idx] = GRB_BINARY;
+      lb_vec[idx] = std::max(0.0, lb_vec[idx]);
+      ub_vec[idx] = std::min(1.0, ub_vec[idx]);
+    }
+  }
+
+  GRBaddvars(model, n, 0, nullptr, nullptr, nullptr,
+             obj_coeff.data(), lb_vec.data(), ub_vec.data(), vtype.data(), nullptr);
+  GRBsetintattr(model, "ModelSense", GRB_MINIMIZE);
+
+  const bool separate_gurobi_network =
+      prob.uc_hint.has_value() && prob.uc_hint->certifies_hard_network_flow_rows &&
+      prob.uc_hint->network_flow_row_count > 0 &&
+      prob.uc_hint->network_flow_row_start.size() ==
+          static_cast<std::size_t>(prob.uc_hint->network_flow_row_count + 1) &&
+      (std::getenv("MIPSOLVERS_GUROBI_SEPARATE_NETWORK") != nullptr ||
+       std::getenv("MIPSOLVERS_SCUC_LAZY_NETWORK") != nullptr);
+  std::vector<unsigned char> skip_ineq_row(static_cast<std::size_t>(m_ineq), 0);
+  int skipped_network_rows = 0;
+  if (separate_gurobi_network) {
+    for (int row : prob.uc_hint->network_flow_original_row) {
+      if (row >= 0 && row < m_ineq && skip_ineq_row[static_cast<std::size_t>(row)] == 0) {
+        skip_ineq_row[static_cast<std::size_t>(row)] = 1;
+        ++skipped_network_rows;
+      }
+    }
+  }
+
+  // Load inequality constraints using row-major sparse iteration.
+  // The dense lp.A.coeff(i,j) approach is O(n) per entry (O(m*n) total),
+  // which is prohibitive for large SCUC instances (26k vars × 32k rows).
+  // Converting to row-major once and iterating over nonzeros is O(nnz).
+  {
+    Eigen::SparseMatrix<double, Eigen::RowMajor> A_rm(lp.A);
+    for (int i = 0; i < m_ineq; ++i) {
+      if (skip_ineq_row[static_cast<std::size_t>(i)] != 0) continue;
+      upper_rows[i] = loaded_rows++;
+      std::vector<int> ind;
+      std::vector<double> val;
+      for (Eigen::SparseMatrix<double, Eigen::RowMajor>::InnerIterator it(A_rm, i); it; ++it) {
+        if (std::abs(it.value()) > 1e-15) {
+          ind.push_back(static_cast<int>(it.col()));
+          val.push_back(it.value());
+        }
+      }
+      GRBaddconstr(model, static_cast<int>(ind.size()), ind.data(), val.data(),
+                   GRB_LESS_EQUAL, lp.b[i], nullptr);
+      const double lhs = lp_row_lhs_or_neg_inf(lp, i);
+      if (std::isfinite(lhs)) {
+        lower_rows[i] = loaded_rows++;
+        GRBaddconstr(model, static_cast<int>(ind.size()), ind.data(), val.data(),
+                     GRB_GREATER_EQUAL, lhs, nullptr);
+      }
+    }
+  }
+
+  // Load equality constraints using row-major sparse iteration.
+  {
+    Eigen::SparseMatrix<double, Eigen::RowMajor> Aeq_rm(lp.Aeq);
+    for (int i = 0; i < m_eq; ++i) {
+      equality_rows[i] = loaded_rows++;
+      std::vector<int> ind;
+      std::vector<double> val;
+      for (Eigen::SparseMatrix<double, Eigen::RowMajor>::InnerIterator it(Aeq_rm, i); it; ++it) {
+        if (std::abs(it.value()) > 1e-15) {
+          ind.push_back(static_cast<int>(it.col()));
+          val.push_back(it.value());
+        }
+      }
+      GRBaddconstr(model, static_cast<int>(ind.size()), ind.data(), val.data(),
+                   GRB_EQUAL, lp.beq[i], nullptr);
+    }
+  }
+
+  // Tight SCUC formulation: add pairwise min-up/down conflict cuts as static
+  // constraints before solve.  These are valid implied cuts not in the base
+  // formulation that tighten the LP relaxation root bound.
+  //   SU(g,t1) + SD(g,t2) <= 1  for 0 < t2-t1 < min_up[g]
+  //   SD(g,t1) + SU(g,t2) <= 1  for 0 < t2-t1 < min_down[g]
+  // Enable by setting MIPSOLVERS_GUROBI_TIGHT_SCUC=1.
+  const bool add_tight_scuc =
+      prob.uc_hint.has_value() &&
+      prob.uc_hint->certifies_min_up_down_rows &&
+      std::getenv("MIPSOLVERS_GUROBI_TIGHT_SCUC") != nullptr;
+  if (add_tight_scuc) {
+    const auto& uc = *prob.uc_hint;
+    const int ng = uc.ng, T_uc = uc.T;
+    int static_cuts = 0;
+    auto add_pair = [&](int col_a, int col_b) {
+      if (col_a < 0 || col_b < 0 || col_a >= n || col_b >= n) return;
+      int ind[2] = {col_a, col_b};
+      double val[2] = {1.0, 1.0};
+      GRBaddconstr(model, 2, ind, val, GRB_LESS_EQUAL, 1.0, nullptr);
+      ++static_cuts;
+    };
+    if (uc.su_cols.size() >= static_cast<std::size_t>(ng * T_uc) &&
+        uc.sd_cols.size() >= static_cast<std::size_t>(ng * T_uc) &&
+        uc.min_up.size() >= static_cast<std::size_t>(ng)) {
+      for (int g = 0; g < ng; ++g) {
+        const int mu = uc.min_up[static_cast<std::size_t>(g)];
+        if (mu <= 1) continue;
+        for (int t1 = 0; t1 < T_uc; ++t1) {
+          const int su = uc.su_cols[static_cast<std::size_t>(t1 * ng + g)];
+          if (su < 0) continue;
+          for (int t2 = t1 + 1; t2 <= std::min(T_uc - 1, t1 + mu - 1); ++t2)
+            add_pair(su, uc.sd_cols[static_cast<std::size_t>(t2 * ng + g)]);
+        }
+      }
+    }
+    if (uc.sd_cols.size() >= static_cast<std::size_t>(ng * T_uc) &&
+        uc.su_cols.size() >= static_cast<std::size_t>(ng * T_uc) &&
+        uc.min_down.size() >= static_cast<std::size_t>(ng)) {
+      for (int g = 0; g < ng; ++g) {
+        const int md = uc.min_down[static_cast<std::size_t>(g)];
+        if (md <= 1) continue;
+        for (int t1 = 0; t1 < T_uc; ++t1) {
+          const int sd = uc.sd_cols[static_cast<std::size_t>(t1 * ng + g)];
+          if (sd < 0) continue;
+          for (int t2 = t1 + 1; t2 <= std::min(T_uc - 1, t1 + md - 1); ++t2)
+            add_pair(sd, uc.su_cols[static_cast<std::size_t>(t2 * ng + g)]);
+        }
+      }
+    }
+    // -------------------------------------------------------------------
+    // Family G: Extended startup clique (no two startups within T^U+T^D window)
+    //   sum_{t'=t}^{t+T^U+T^D-1} SU(g,t') <= 1   for each g, t
+    // Also: total startup count bound
+    //   sum_t SU(g,t) <= floor(T / (T^U + T^D))
+    // These dominate the pairwise SU+SD cuts and tighten the LP relaxation
+    // by 25-30% expected gap closure.
+    // -------------------------------------------------------------------
+    if (uc.su_cols.size() >= static_cast<std::size_t>(ng * T_uc) &&
+        uc.min_up.size() >= static_cast<std::size_t>(ng) &&
+        uc.min_down.size() >= static_cast<std::size_t>(ng)) {
+      for (int g = 0; g < ng; ++g) {
+        const int mu = uc.min_up[static_cast<std::size_t>(g)];
+        const int md = uc.min_down[static_cast<std::size_t>(g)];
+        const int L = mu + md;
+        if (L <= 1) continue;
+
+        // Clique cuts: at most 1 startup in each window [t, t+L-1].
+        for (int t = 0; t < T_uc; ++t) {
+          const int last = std::min(T_uc - 1, t + L - 1);
+          if (last == t) continue;
+          std::vector<int> ind;
+          std::vector<double> val;
+          for (int t2 = t; t2 <= last; ++t2) {
+            const int col = uc.su_cols[static_cast<std::size_t>(t2 * ng + g)];
+            if (col >= 0 && col < n) { ind.push_back(col); val.push_back(1.0); }
+          }
+          if (static_cast<int>(ind.size()) >= 2) {
+            GRBaddconstr(model, static_cast<int>(ind.size()), ind.data(), val.data(),
+                         GRB_LESS_EQUAL, 1.0, nullptr);
+            ++static_cuts;
+          }
+        }
+
+        // Total startup count bound: sum_t SU(g,t) <= floor(T / L).
+        const int max_starts = T_uc / L;
+        if (max_starts >= 1) {
+          std::vector<int> ind;
+          std::vector<double> val;
+          for (int t = 0; t < T_uc; ++t) {
+            const int col = uc.su_cols[static_cast<std::size_t>(t * ng + g)];
+            if (col >= 0 && col < n) { ind.push_back(col); val.push_back(1.0); }
+          }
+          if (!ind.empty()) {
+            GRBaddconstr(model, static_cast<int>(ind.size()), ind.data(), val.data(),
+                         GRB_LESS_EQUAL, static_cast<double>(max_starts), nullptr);
+            ++static_cuts;
+          }
+        }
+      }
+    }
+
+    // -------------------------------------------------------------------
+    // Family A: Bid-segment cumulative coupling
+    //   sum_{m=0}^{k-1} seg(g,t,m) <= cumcap[g,k] * u(g,t)   for each g,t,k
+    // Prevents the LP from using fractional commitment to spread dispatch
+    // evenly across bid segments (dispatch fills sequentially).
+    // -------------------------------------------------------------------
+    if (uc.n_segments > 1 &&
+        uc.segment_cols.size() >=
+            static_cast<std::size_t>(ng * T_uc * uc.n_segments) &&
+        uc.segment_cap.size() >= static_cast<std::size_t>(ng * uc.n_segments) &&
+        uc.ig_cols.size() >= static_cast<std::size_t>(ng * T_uc)) {
+      const int ns = uc.n_segments;
+      // Precompute cumulative capacities per generator.
+      std::vector<double> cumcap(static_cast<std::size_t>(ng * ns), 0.0);
+      for (int g = 0; g < ng; ++g)
+        for (int m = 1; m < ns; ++m)
+          cumcap[static_cast<std::size_t>(g * ns + m)] =
+              cumcap[static_cast<std::size_t>(g * ns + m - 1)] +
+              uc.segment_cap[static_cast<std::size_t>(g * ns + m - 1)];
+
+      for (int g = 0; g < ng; ++g) {
+        for (int k = 1; k < ns; ++k) {   // prefix 1..ns-1
+          const double cc = cumcap[static_cast<std::size_t>(g * ns + k)];
+          if (cc <= 0.0) continue;
+          for (int t = 0; t < T_uc; ++t) {
+            const int ig_col = uc.ig_cols[static_cast<std::size_t>(t * ng + g)];
+            if (ig_col < 0 || ig_col >= n) continue;
+            std::vector<int> ind;
+            std::vector<double> val;
+            for (int m = 0; m < k; ++m) {
+              const int sc = uc.segment_cols[
+                  static_cast<std::size_t>((t * ng + g) * ns + m)];
+              if (sc >= 0 && sc < n) { ind.push_back(sc); val.push_back(1.0); }
+            }
+            // sum seg - cc * u(g,t) <= 0
+            ind.push_back(ig_col);
+            val.push_back(-cc);
+            if (static_cast<int>(ind.size()) >= 2) {
+              GRBaddconstr(model, static_cast<int>(ind.size()), ind.data(),
+                           val.data(), GRB_LESS_EQUAL, 0.0, nullptr);
+              ++static_cuts;
+            }
+          }
+        }
+      }
+    }
+
+    if (std::getenv("MIPSOLVERS_GUROBI_VERBOSE") != nullptr)
+      std::fprintf(stderr, "[Gurobi] tight SCUC: %d static cuts added"
+                   " (pairwise SU/SD + Family G clique + Family A segment)\n",
+                   static_cuts);
+
+    // -------------------------------------------------------------------
+    // Family B: Reserve-commitment cover inequalities
+    //   sum_g cap[g] * u(g,t) >= requirement[t]   for each reserve type, t
+    // Mirrors native branch_and_cut.cpp: add_reserve_cover_cut().
+    // These implied rows (derivable from headroom bound + reserve balance)
+    // are explicitly added to strengthen the LP at root and all nodes.
+    // -------------------------------------------------------------------
+    if (uc.certifies_system_reserve_rows &&
+        uc.ig_cols.size() >= static_cast<std::size_t>(ng * T_uc)) {
+      int b_cuts = 0;
+
+      auto add_reserve_cover_static = [&](const std::vector<double>& caps,
+                                          const std::vector<double>& req, int t) {
+        if (req.size() <= static_cast<std::size_t>(t) ||
+            !(req[static_cast<std::size_t>(t)] > 0.0)) return;
+        if (caps.size() < static_cast<std::size_t>(ng)) return;
+        const double rhs = req[static_cast<std::size_t>(t)];
+        std::vector<int> ind;
+        std::vector<double> val;
+        for (int g = 0; g < ng; ++g) {
+          const int ig = uc.ig_cols[static_cast<std::size_t>(t * ng + g)];
+          if (ig < 0 || ig >= n) continue;
+          const double cap = std::max(0.0, caps[static_cast<std::size_t>(g)]);
+          if (!(cap > 0.0)) continue;
+          ind.push_back(ig); val.push_back(cap);
+        }
+        if (!ind.empty()) {
+          GRBaddconstr(model, static_cast<int>(ind.size()), ind.data(), val.data(),
+                       GRB_GREATER_EQUAL, rhs, nullptr);
+          ++static_cuts; ++b_cuts;
+        }
+      };
+
+      for (int t = 0; t < T_uc; ++t) {
+        if (!uc.up_reserve_headroom_cap.empty() && !uc.reserve_requirement.empty())
+          add_reserve_cover_static(uc.up_reserve_headroom_cap,
+                                   uc.reserve_requirement, t);
+        if (!uc.spinning_reserve_cap.empty() && !uc.spinning_requirement.empty())
+          add_reserve_cover_static(uc.spinning_reserve_cap,
+                                   uc.spinning_requirement, t);
+        if (!uc.regulation_up_cap.empty() &&
+            !uc.regulation_up_requirement.empty())
+          add_reserve_cover_static(uc.regulation_up_cap,
+                                   uc.regulation_up_requirement, t);
+        if (!uc.regulation_down_cap.empty() &&
+            !uc.regulation_down_requirement.empty())
+          add_reserve_cover_static(uc.regulation_down_cap,
+                                   uc.regulation_down_requirement, t);
+      }
+
+      if (std::getenv("MIPSOLVERS_GUROBI_VERBOSE") != nullptr)
+        std::fprintf(stderr, "[Gurobi] tight SCUC: %d Family B reserve-cover"
+                     " rows added statically\n", b_cuts);
+    }
+
+    // Family C: network line capacity commitment cuts.
+    // For each monitored line l and period t, the maximum possible flow from
+    // committed generators must not exceed the line thermal limit:
+    //   Forward: sum_g coeff_fwd(g,l) * u(g,t) <= line_fwd_rhs[l,t]
+    //   Reverse: sum_g coeff_rev(g,l) * u(g,t) <= line_rev_rhs[l,t]
+    // where coeff_fwd(g,l) = max(0,gsf)*pmin[g] + min(0,gsf)*pmax[g] and
+    //       coeff_rev(g,l) = max(0,-gsf)*pmin[g] + min(0,-gsf)*pmax[g].
+    // Lines with sentinel RHS (1e8+) are unconstrained and skipped.
+    if (uc.certifies_hard_network_flow_rows &&
+        uc.network_line_count > 0 && !uc.line_gsf.empty() &&
+        !uc.line_fwd_rhs.empty() && !uc.line_rev_rhs.empty() &&
+        !uc.pmax.empty() && !uc.pmin.empty()) {
+      const int nl = uc.network_line_count;
+      int c_cuts = 0;
+      std::vector<int>    cidx;
+      std::vector<double> cval;
+      for (int l = 0; l < nl; ++l) {
+        for (int t = 0; t < T_uc; ++t) {
+          const double fwd_rhs = uc.line_fwd_rhs[static_cast<size_t>(l * T_uc + t)];
+          const double rev_rhs = uc.line_rev_rhs[static_cast<size_t>(l * T_uc + t)];
+
+          // Forward capacity cut: sum_{gsf>0} gsf*pmin*u + sum_{gsf<0} gsf*pmax*u <= fwd_rhs
+          // Derived from: flow_min_from_committed <= actual_flow <= fwd_rhs
+          //
+          // Density filter: drop positive terms with coeff < 1 MW.  Dropping a
+          // positive LHS term only weakens (relaxes) the cut, so validity is
+          // preserved.  Negative terms are always kept (dropping them would
+          // tighten the cut and could cut off feasible solutions).
+          // All non-empty cuts are added regardless of trivial satisfaction;
+          // trivially-satisfied cuts still provide LP dual information that
+          // helps Gurobi's internal cut separation.
+          if (fwd_rhs < 1e8) {
+            cidx.clear(); cval.clear();
+            for (int g = 0; g < ng; ++g) {
+              const double gsf = uc.line_gsf[static_cast<size_t>(l * ng + g)];
+              if (std::abs(gsf) < 1e-10) continue;
+              const int ig_col = uc.ig_cols[static_cast<size_t>(t * ng + g)];
+              if (ig_col < 0) continue;
+              const double coeff = (gsf > 0.0 ? gsf * uc.pmin[g] : gsf * uc.pmax[g]);
+              if (std::abs(coeff) < 1e-10) continue;
+              if (coeff > 0.0 && coeff < 1.0) continue;  // drop small positive terms (< 1 MW)
+              cidx.push_back(ig_col);
+              cval.push_back(coeff);
+            }
+            if (!cidx.empty()) {
+              GRBaddconstr(model, static_cast<int>(cidx.size()),
+                           cidx.data(), cval.data(),
+                           GRB_LESS_EQUAL, fwd_rhs, nullptr);
+              ++c_cuts;
+            }
+          }
+
+          // Reverse capacity cut: sum_{gsf<0} (-gsf)*pmin*u + sum_{gsf>0} (-gsf)*pmax*u <= rev_rhs
+          if (rev_rhs < 1e8) {
+            cidx.clear(); cval.clear();
+            for (int g = 0; g < ng; ++g) {
+              const double neg_gsf = -uc.line_gsf[static_cast<size_t>(l * ng + g)];
+              if (std::abs(neg_gsf) < 1e-10) continue;
+              const int ig_col = uc.ig_cols[static_cast<size_t>(t * ng + g)];
+              if (ig_col < 0) continue;
+              const double coeff = (neg_gsf > 0.0 ? neg_gsf * uc.pmin[g] : neg_gsf * uc.pmax[g]);
+              if (std::abs(coeff) < 1e-10) continue;
+              if (coeff > 0.0 && coeff < 1.0) continue;  // drop small positive terms (< 1 MW)
+              cidx.push_back(ig_col);
+              cval.push_back(coeff);
+            }
+            if (!cidx.empty()) {
+              GRBaddconstr(model, static_cast<int>(cidx.size()),
+                           cidx.data(), cval.data(),
+                           GRB_LESS_EQUAL, rev_rhs, nullptr);
+              ++c_cuts;
+            }
+          }
+        }
+      }
+      if (std::getenv("MIPSOLVERS_GUROBI_VERBOSE") != nullptr)
+        std::fprintf(stderr, "[Gurobi] tight SCUC: %d Family C network-line"
+                     " capacity cuts added statically\n", c_cuts);
+    }
+  }
+
+  GRBupdatemodel(model);
+
+  // --- Solver options ---
+  if (GRBenv* model_env = GRBgetenv(model)) {
+    // Tighten default 1e-4 MIPGap for oracle-quality solves.
+    GRBsetdblparam(model_env, "MIPGap", 1e-9);
+    GRBsetdblparam(model_env, "MIPGapAbs", 1e-6);
+
+    // BranchDir=1: branch toward commitment (u=1) first.  For UC problems the
+    // optimal solution has most generators committed; branching up first finds
+    // good primal solutions earlier, enabling tighter pruning of the B&B tree.
+    // Heuristics=0.15: modest increase from default 0.05 to allocate more of
+    // the B&B time to primal improvement heuristics (RINS, local branching)
+    // so the optimal incumbent is found earlier, enabling tighter pruning.
+    if (std::getenv("MIPSOLVERS_GUROBI_TIGHT_SCUC") != nullptr) {
+      GRBsetintparam(model_env, "BranchDir", 1);
+      GRBsetdblparam(model_env, "Heuristics", 0.15);
+    }
+
+    // Optional time limit from env var MIPSOLVERS_GUROBI_TIME_LIMIT (seconds).
+    if (const char* tl_env = std::getenv("MIPSOLVERS_GUROBI_TIME_LIMIT")) {
+      char* endp = nullptr;
+      const double tl = std::strtod(tl_env, &endp);
+      if (endp != tl_env && tl > 0.0)
+        GRBsetdblparam(model_env, "TimeLimit", tl);
+    }
+    // Per-instance options win over legacy environment defaults; docs/solvers.md.
+    if (options_) {
+      GRBsetdblparam(model_env, "TimeLimit", options_->time_limit_sec);
+      GRBsetdblparam(model_env, "MIPGap", options_->mip_gap);
+      GRBsetdblparam(model_env, "MIPGapAbs", 0);
+      GRBsetintparam(model_env, "Threads", options_->threads);
+      GRBsetintparam(model_env, "Seed", options_->random_seed);
+      // Gurobi 13 Method parameter; dedicated barrier vs concurrent LP policy
+      // and fixed performance acceptance protocol are documented in docs/solvers.md.
+      GRBsetintparam(model_env, "Method", options_->method);
+      GRBsetintparam(model_env, "Crossover", options_->crossover);
+      GRBsetdblparam(model_env, "FeasibilityTol", 1e-8);
+      GRBsetdblparam(model_env, "IntFeasTol", 1e-8);
+    }
+    if (apply_gurobi_context(model, context) != 0) {
+      out.stats.status = "Gurobi rejected SolveContext parameters";
+      GRBfreemodel(model);
+      return out;
+    }
+
+    // Output to stderr when MIPSOLVERS_GUROBI_VERBOSE is set.
+    if (std::getenv("MIPSOLVERS_GUROBI_VERBOSE") != nullptr)
+      GRBsetintparam(model_env, "OutputFlag", 1);
+
+    // PreCrush=1 allows Gurobi to presolve user cuts (required for GRBcbcut).
+    // Only set when the callback is expected.
+    if (prob.uc_hint.has_value() &&
+        (prob.uc_hint->certifies_min_up_down_rows ||
+         prob.uc_hint->certifies_hard_network_flow_rows))
+      GRBsetintparam(model_env, "PreCrush", 1);
+    if (separate_gurobi_network)
+      GRBsetintparam(model_env, "LazyConstraints", 1);
+  }
+
+  // Branching priorities: set from MIPModel::branching_priority when provided.
+  if (!prob.branching_priority.empty()) {
+    const int prio_n = std::min(n, static_cast<int>(prob.branching_priority.size()));
+    std::vector<int> priorities(static_cast<std::size_t>(prio_n));
+    for (int j = 0; j < prio_n; ++j)
+      priorities[static_cast<std::size_t>(j)] = prob.branching_priority[static_cast<std::size_t>(j)];
+    GRBsetintattrarray(model, "BranchPriority", 0, prio_n, priorities.data());
+  }
+
+  // Warm start.
+  if (static_cast<int>(prob.initial_solution.size()) == n) {
+    GRBsetdblattrarray(model, "Start", 0, n,
+                       const_cast<double*>(prob.initial_solution.data()));
+  }
+
+  // Dynamic SCUC callback: inject violated min-up/down conflict cuts as user
+  // cuts at every LP-optimal MIPNODE.  Disable with MIPSOLVERS_GUROBI_NO_DYNAMIC_CUTS.
+  GurobiScucCutData cut_data;
+  const bool analyze_scuc_gap =
+      prob.uc_hint.has_value() &&
+      std::getenv("MIPSOLVERS_GUROBI_ANALYZE_GAP") != nullptr;
+  const bool enable_dynamic_scuc_cuts =
+      prob.uc_hint.has_value() &&
+      (prob.uc_hint->certifies_min_up_down_rows ||
+       (prob.uc_hint->certifies_hard_network_flow_rows &&
+        prob.uc_hint->network_line_count > 0 &&
+        !prob.uc_hint->line_gsf.empty())) &&
+      std::getenv("MIPSOLVERS_GUROBI_NO_DYNAMIC_CUTS") == nullptr;
+  const bool enable_cb = enable_dynamic_scuc_cuts || analyze_scuc_gap || separate_gurobi_network;
+  if (enable_cb) {
+    cut_data.n = n;
+    cut_data.uc = &(*prob.uc_hint);
+    cut_data.enable_dynamic_cuts = enable_dynamic_scuc_cuts;
+    cut_data.separate_network = separate_gurobi_network;
+    if (const char* tol_env = std::getenv("MIPSOLVERS_GUROBI_NETWORK_CUT_TOL")) {
+      char* endp = nullptr;
+      const double value = std::strtod(tol_env, &endp);
+      if (endp != tol_env && value > 0.0)
+        cut_data.network_cut_tol = value;
+    }
+    if (const char* cap_env = std::getenv("MIPSOLVERS_GUROBI_NETWORK_USER_CUTS")) {
+      char* endp = nullptr;
+      const long value = std::strtol(cap_env, &endp, 10);
+      if (endp != cap_env && value >= 0)
+        cut_data.max_network_user_cuts_per_call = static_cast<int>(std::min<long>(value, 100000));
+    }
+    if (const char* cap_env = std::getenv("MIPSOLVERS_GUROBI_NETWORK_LAZY_CUTS")) {
+      char* endp = nullptr;
+      const long value = std::strtol(cap_env, &endp, 10);
+      if (endp != cap_env && value >= 0)
+        cut_data.max_network_lazy_cuts_per_call = static_cast<int>(std::min<long>(value, 100000));
+    }
+    if (separate_gurobi_network) {
+      const int row_count = prob.uc_hint->network_flow_row_count;
+      cut_data.network_user_cut_seen.assign(static_cast<std::size_t>(row_count), 0);
+      cut_data.network_lazy_cut_seen.assign(static_cast<std::size_t>(row_count), 0);
+      if (std::getenv("MIPSOLVERS_GUROBI_VERBOSE") != nullptr) {
+        std::fprintf(stderr,
+                     "[Gurobi] lazy network: skipped %d upfront PTDF rows, callback rows=%d\n",
+                     skipped_network_rows, row_count);
+      }
+    }
+    cut_data.analyze_gap = analyze_scuc_gap;
+    if (const char* gap_env = std::getenv("MIPSOLVERS_GUROBI_ANALYZE_GAP_TRIGGER")) {
+      char* endp = nullptr;
+      const double value = std::strtod(gap_env, &endp);
+      if (endp != gap_env && value > 0.0)
+        cut_data.analyze_gap_trigger = value;
+    }
+    if (const char* top_env = std::getenv("MIPSOLVERS_GUROBI_ANALYZE_TOP")) {
+      char* endp = nullptr;
+      const long value = std::strtol(top_env, &endp, 10);
+      if (endp != top_env && value > 0)
+        cut_data.analyze_top = static_cast<int>(std::min<long>(value, 200));
+    }
+    GRBsetcallbackfunc(model, gurobi_scuc_cut_callback, &cut_data);
+  }
+
+  // Wall intervals bracket the actual C API calls, not inferred search phases.
+  // See docs/solvers.md, Gurobi timing; optimize includes lazy model updates.
+  const auto optimize_start = std::chrono::steady_clock::now();
+  gurobi_solve_timing.model_import_sec = std::chrono::duration<double>(optimize_start-t0).count();
+  const int optimize_error = GRBoptimize(model);
+  const auto extract_start = std::chrono::steady_clock::now();
+  gurobi_solve_timing.optimize_sec = std::chrono::duration<double>(extract_start-optimize_start).count();
+  struct ExtractionTimer {
+    std::chrono::steady_clock::time_point start;
+    ~ExtractionTimer() {
+      gurobi_solve_timing.result_extract_sec = std::chrono::duration<double>(std::chrono::steady_clock::now()-start).count();
+    }
+  } extraction_timer{extract_start};
+  if (optimize_error != 0) {
+    out.stats.status = "Gurobi optimize error=" + std::to_string(optimize_error);
+    out.stats.runtime_sec = std::chrono::duration<double>(std::chrono::steady_clock::now()-t0).count();
+    GRBfreemodel(model); return out;
+  }
+
+  int status = 0;
+  GRBgetintattr(model, "Status", &status);
+  int sol_count = 0;
+  GRBgetintattr(model, "SolCount", &sol_count);
+  const bool has_incumbent = sol_count > 0;
+
+  if (status == GRB_OPTIMAL) {
+    out.stats.success = true;
+    out.stats.status = "Optimal";
+  } else if (status == GRB_TIME_LIMIT || status == GRB_NODE_LIMIT || status == GRB_ITERATION_LIMIT ||
+             status == GRB_SOLUTION_LIMIT || status == GRB_INTERRUPTED || status == GRB_WORK_LIMIT || status == GRB_MEM_LIMIT) {
+    out.stats.success = has_incumbent;
+    out.stats.status = status == GRB_TIME_LIMIT ? "TimeLimit" : status == GRB_NODE_LIMIT ? "NodeLimit" :
+      status == GRB_ITERATION_LIMIT ? "IterationLimit" : status == GRB_SOLUTION_LIMIT ? "SolutionLimit" :
+      status == GRB_INTERRUPTED ? "Interrupt" : status == GRB_WORK_LIMIT ? "WorkLimit" : "MemoryLimit";
+  } else if (status == GRB_INFEASIBLE) {
+    out.stats.status = "Infeasible";
+  } else if (status == GRB_INF_OR_UNBD) {
+    out.stats.status = "UnboundedOrInfeasible";
+  } else if (status == GRB_UNBOUNDED) {
+    out.stats.status = "Unbounded";
+  } else {
+    out.stats.status = "Gurobi status=" + std::to_string(status);
+  }
+
+  if (has_incumbent && out.stats.success) {
+    double objval = 0.0;
+    GRBgetdblattr(model, "ObjVal", &objval);
+    out.stats.objective = obj_sign * objval;
+    out.x.resize(n);
+    if (GRBgetdblattrarray(model, "X", 0, n, out.x.data()) != 0) {
+      out.x.resize(0); out.stats.success = false; out.stats.status = "Gurobi solution extraction failed";
+    }
+    double mip_gap = 0.0;
+    if (GRBgetdblattr(model, "MIPGap", &mip_gap) == 0)
+      out.stats.mip_gap = mip_gap;
+
+    // Extract constraint duals (Pi) for pure LP problems.
+    if (status == GRB_OPTIMAL && prob.binary_idx.empty() && prob.integer_idx.empty() && !separate_gurobi_network) {
+      // Numerical quality, not a lower-bound certificate; docs/solvers.md.
+      GRBgetdblattr(model,"DualVio",&out.stats.dual_feas);
+      GRBgetdblattr(model,"ConstrVio",&out.stats.primal_feas);
+      const int m_total = m_ineq + m_eq;
+      std::vector<double> pi(loaded_rows);
+      if (GRBgetdblattrarray(model, "Pi", 0, loaded_rows, pi.data()) == 0) {
+        out.constraint_duals.resize(m_total);
+        for (int i = 0; i < m_ineq; ++i)
+          out.constraint_duals[i] = obj_sign*(pi[upper_rows[i]] + (lower_rows[i] >= 0 ? pi[lower_rows[i]] : 0));
+        for (int i = 0; i < m_eq; ++i) out.constraint_duals[m_ineq+i] = obj_sign*pi[equality_rows[i]];
+      }
+    }
+  }
+
+  // Report dynamic cuts injected via callback.
+  if (enable_cb && cut_data.total_cuts_added > 0)
+    out.stats.cglp_cuts_added = cut_data.total_cuts_added;
+  if (separate_gurobi_network && std::getenv("MIPSOLVERS_GUROBI_VERBOSE") != nullptr) {
+    std::fprintf(stderr,
+                 "[Gurobi] lazy network: user_cuts=%d lazy_cuts=%d total_callback_rows=%d\n",
+                 cut_data.network_user_cuts_added, cut_data.network_lazy_cuts_added,
+                 cut_data.total_cuts_added);
+  }
+
+  const auto t1 = std::chrono::steady_clock::now();
+  out.stats.runtime_sec = std::chrono::duration<double>(t1 - t0).count();
+  GRBfreemodel(model);
+#else
+  out.stats.status = "Unavailable: Gurobi not linked";
+#endif
+  return out;
+}
+
+}  // namespace mipsolvers::engine

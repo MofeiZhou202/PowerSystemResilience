@@ -428,7 +428,8 @@ const App = (() => {
   let _lastInvalidationReason = '';
   const _canvasPlaybackControllers = new Map();
   let _activeWorkflow = 'steady';
-  let _editionProfile = { edition: 'full', product_name: 'HySim-XJTU-HRPES' };
+  let _editionProfile = null;
+  let _startupState = 'loading';
   let _trialAnalysisPlanRequest = 0;
   let _parameterLibraryData = null;
   let _parameterLibrarySelectedInstance = '';
@@ -620,6 +621,9 @@ const App = (() => {
     carbonFlow: 'sustainability',
     reliability: 'sustainability',
     resilience: 'sustainability',
+    proactiveDefense: 'sustainability',
+    rapidRecovery: 'sustainability',
+    resilienceMetrics: 'sustainability',
   };
   const WORKFLOW_DEFAULT_MODULE = {
     modeling: 'modelIO',
@@ -662,6 +666,13 @@ const App = (() => {
     marketSecurity: 'market',
     marketSettlement: 'market',
   };
+  const HASH_MODULES = Object.freeze({
+    '#market-operation': 'marketOperation', '#southern-market': 'marketBoundary',
+    '#market-study': 'marketStudy', '#market-ancillary': 'marketAncillary',
+    '#market-realtime': 'marketRealtime', '#market-behavior': 'marketBehavior',
+    '#market-inputs': 'marketInputs', '#market-clearing': 'market',
+    '#market-security': 'marketSecurity', '#market-settlement': 'marketSettlement',
+  });
   const subsectionForModule = (m) => SUBSECTION_FOR_MODULE[m] || m;
   const resultGroupForModule = (m) => RESULT_GROUP_FOR_MODULE[m] || m;
 
@@ -681,16 +692,409 @@ const App = (() => {
     weakLinks: 'weak_link_identification',
   };
 
-  async function loadEditionProfile() {
-    try {
-      const response = await fetch(`${API_BASE}/api/edition`, { cache: 'no-store' });
-      if (response.ok) {
-        const profile = await response.json();
-        if (profile?.schema === 'hacdcpf.edition-profile.v1') _editionProfile = profile;
-      }
-    } catch (_) {
-      // A full-edition server predating the profile endpoint remains usable.
+  const EDITION_PROFILE_SCHEMA = 'hacdcpf.edition-profile.v1';
+  // Kept short enough to fail closed promptly, including a response whose JSON
+  // body stalls after the HTTP headers have arrived.
+  const EDITION_PROFILE_TIMEOUT_MS = 3000;
+  const EDITION_PRODUCTS = Object.freeze({
+    full: 'HySim-XJTU-HRPES',
+    trial: 'HySim-XJTU-HRPES Trial',
+    resilience: 'PowerSystemResilience',
+  });
+  const EDITION_PROFILE_KEYS = Object.freeze({
+    full: Object.freeze([
+      'schema', 'edition', 'product_name', 'analyses', 'analysis_catalog', 'workflow', 'indicators',
+      'enabled_modules', 'frontend_modules', 'enabled_io_formats', 'disabled_features',
+    ]),
+    trial: Object.freeze([
+      'schema', 'edition', 'product_name', 'analyses', 'analysis_catalog', 'workflow', 'indicators',
+      'enabled_modules', 'frontend_modules', 'enabled_io_formats', 'disabled_features',
+      'route_policy',
+    ]),
+    resilience: Object.freeze([
+      'schema', 'edition', 'product_name', 'analyses', 'analysis_catalog', 'workflow', 'indicators',
+      'enabled_modules', 'frontend_modules', 'enabled_io_formats', 'disabled_features',
+      'solver_capabilities', 'model_scope', 'limitations', 'restoration_certification',
+      'route_policy',
+    ]),
+  });
+  const EDITION_FRONTEND_MODULES = Object.freeze({
+    full: Object.freeze(['*']),
+    trial: Object.freeze([
+      'modelIO', 'parameterLibrary', 'topologyAnalysis', 'indicatorDesign',
+      'scenarioGeneration', 'powerFlow', 'opf', 'shortCircuit', 'hosting',
+      'reliability', 'resilience', 'carbonFlow', 'weakLinks',
+    ]),
+    resilience: Object.freeze([
+      'modelIO', 'parameterLibrary', 'topologyAnalysis',
+      'scenarioGeneration', 'powerFlow', 'opf', 'resilience',
+      'proactiveDefense', 'rapidRecovery', 'resilienceMetrics',
+    ]),
+  });
+  const EDITION_ANALYSES = Object.freeze(['power_flow', 'optimal_power_flow']);
+  const EDITION_ENABLED_MODULES = Object.freeze({
+    full: Object.freeze(['*']),
+    trial: Object.freeze([
+      'model_io', 'parameter_validation', 'topology_analysis', 'indicator_design',
+      'scenario_generation', 'power_flow', 'opf', 'line_loss', 'carbon_flow',
+      'voltage_compliance', 'hosting_capacity', 'reliability', 'resilience',
+      'short_circuit', 'multidimensional_weak_links',
+    ]),
+    resilience: Object.freeze([
+      'model', 'model_io', 'parameter_validation', 'projection', 'attribution',
+      'graph', 'topology', 'power_flow', 'optimal_power_flow', 'reliability',
+      'resilience', 'network_reconfiguration', 'scenario_generation',
+      'typhoon_faults', 'short_circuit', 'resilience_profiles', 'mipsolvers',
+    ]),
+  });
+  const EDITION_IO_FORMATS = Object.freeze({
+    full: Object.freeze(['*']),
+    trial: Object.freeze(['json', 'matpower', 'gridlabd', 'opendss']),
+    resilience: Object.freeze(['json', 'matpower']),
+  });
+  const EDITION_DISABLED_FEATURES = Object.freeze({
+    full: Object.freeze([]),
+    trial: Object.freeze([
+      'reactive_power_optimization', 'harmonics', 'dynamics', 'market',
+      'integrated_energy', 'ev_traffic', 'time_series', 'network_reconfiguration',
+      'counterfactual_planning', 'sppt_agent', 'advanced_io',
+    ]),
+    resilience: Object.freeze([
+      'reactive_power_optimization', 'harmonics', 'dynamics', 'market', 'carbon',
+      'integrated_energy', 'ev_traffic', 'time_series', 'hosting_capacity',
+      'weak_links', 'counterfactual_planning', 'sppt_agent', 'advanced_io',
+    ]),
+  });
+  const RESILIENCE_SOLVER_CAPABILITIES = Object.freeze([
+    'ac_power_flow', 'dc_optimal_power_flow', 'ac_optimal_power_flow',
+    'highs', 'native_branch_and_cut', 'aml',
+  ]);
+  const KNOWN_FRONTEND_MODULES = new Set([
+    'modelIO', 'parameterLibrary', 'powerFlow', 'opf', 'rpo', 'shortCircuit',
+    'harmonics', 'transient', 'tspf', 'topology', 'topologyAnalysis',
+    'timeSeries', 'marketOperation', 'marketBoundary', 'marketStudy',
+    'marketAncillary', 'marketRealtime', 'marketBehavior', 'marketInputs',
+    'market', 'marketSecurity', 'marketSettlement', 'integratedEnergy',
+    'evTraffic', 'hosting', 'reliability', 'scenarioGeneration', 'weakLinks',
+    'resilience', 'carbonFlow', 'indicatorDesign',
+    'proactiveDefense', 'rapidRecovery', 'resilienceMetrics',
+  ]);
+  const EDITION_WORKFLOW = Object.freeze([
+    Object.freeze({ id: 'modeling', label: '模型建立' }),
+    Object.freeze({ id: 'parameter_validation', label: '参数校核' }),
+    Object.freeze({ id: 'indicator_design', label: '指标设计' }),
+    Object.freeze({ id: 'panoramic_simulation', label: '全景仿真' }),
+    Object.freeze({ id: 'weak_link_identification', label: '薄弱辨识' }),
+  ]);
+  const BASE_INDICATORS = Object.freeze([
+    Object.freeze({ id: 'system_economic', level: 'system', dimension: 'economic', label: '系统经济性' }),
+    Object.freeze({ id: 'user_economic', level: 'user', dimension: 'economic', label: '用户经济性' }),
+    Object.freeze({ id: 'system_carbon', level: 'system', dimension: 'carbon', label: '系统碳指标' }),
+    Object.freeze({ id: 'user_carbon', level: 'user', dimension: 'carbon', label: '用户碳指标' }),
+    Object.freeze({ id: 'system_reliability', level: 'system', dimension: 'reliability', label: '系统可靠性' }),
+    Object.freeze({ id: 'user_reliability', level: 'user', dimension: 'reliability', label: '用户可靠性' }),
+    Object.freeze({ id: 'system_resilience', level: 'system', dimension: 'resilience', label: '系统弹性' }),
+    Object.freeze({ id: 'user_resilience', level: 'user', dimension: 'resilience', label: '用户弹性' }),
+  ]);
+  const EDITION_INDICATORS = Object.freeze({
+    full: BASE_INDICATORS,
+    trial: BASE_INDICATORS,
+    resilience: Object.freeze(BASE_INDICATORS.filter(row => row.dimension !== 'carbon')),
+  });
+
+  // Every shared DOM surface has explicit module owners. A surface survives only
+  // when at least one owner is enabled; there are no special-case exceptions.
+  // In particular, carbonFlow owns both the carbonFlow and carbonAnalysis views.
+  const SUBSECTION_MODULE_OWNERS = Object.freeze({
+    modelIO: ['modelIO'], parameterLibrary: ['parameterLibrary'], powerFlow: ['powerFlow'],
+    opf: ['opf'], rpo: ['rpo'], carbonFlow: ['carbonFlow'], shortCircuit: ['shortCircuit'],
+    harmonics: ['harmonics'], transient: ['transient'], topology: ['topology'],
+    topologyAnalysis: ['topologyAnalysis'], timeSeries: ['tspf', 'timeSeries'],
+    market: ['marketOperation', 'marketBoundary', 'marketStudy', 'marketAncillary',
+      'marketRealtime', 'marketBehavior', 'marketInputs', 'market', 'marketSecurity',
+      'marketSettlement'],
+    integratedEnergy: ['integratedEnergy'], evTraffic: ['evTraffic'], hosting: ['hosting'],
+    reliability: ['reliability'], scenarioGeneration: ['scenarioGeneration'],
+    resilience: ['resilience'], carbonAnalysis: ['carbonFlow'], weakLinks: ['weakLinks'],
+    indicatorDesign: ['indicatorDesign'],
+  });
+  const RESULT_GROUP_MODULE_OWNERS = Object.freeze({
+    powerFlow: ['powerFlow'], opf: ['opf'], rpo: ['rpo'], carbonFlow: ['carbonFlow'],
+    shortCircuit: ['shortCircuit'], harmonics: ['harmonics'], transient: ['transient'],
+    modelIO: ['modelIO'], parameterLibrary: ['parameterLibrary'], topology: ['topology'],
+    topologyAnalysis: ['topologyAnalysis'], hosting: ['hosting'],
+    timeSeries: ['tspf', 'timeSeries'],
+    market: ['marketOperation', 'marketBoundary', 'marketStudy', 'marketAncillary',
+      'marketRealtime', 'marketBehavior', 'marketInputs', 'market', 'marketSecurity',
+      'marketSettlement'],
+    integratedEnergy: ['integratedEnergy'], evTraffic: ['evTraffic'],
+    reliability: ['reliability'], scenarioGeneration: ['scenarioGeneration'],
+    resilience: ['resilience'], weakLinks: ['weakLinks'], carbonAnalysis: ['carbonFlow'],
+    indicatorDesign: ['indicatorDesign'],
+  });
+  const WORKFLOW_MODULE_OWNERS = Object.freeze({
+    modeling: ['modelIO', 'parameterLibrary', 'topologyAnalysis'],
+    steady: ['powerFlow', 'opf', 'rpo', 'harmonics', 'hosting'],
+    security: ['shortCircuit', 'transient', 'tspf'],
+    planning: ['topology', 'timeSeries', 'scenarioGeneration', 'weakLinks'],
+    market: ['marketOperation', 'marketBoundary', 'marketStudy', 'marketAncillary',
+      'marketRealtime', 'marketBehavior', 'marketInputs', 'market', 'marketSecurity',
+      'marketSettlement'],
+    ies: ['integratedEnergy', 'evTraffic'],
+    sustainability: ['carbonFlow', 'reliability', 'resilience'],
+    parameter_validation: ['parameterLibrary', 'topologyAnalysis'],
+    indicator_design: ['indicatorDesign'],
+    panoramic_simulation: ['scenarioGeneration', 'powerFlow', 'opf', 'shortCircuit',
+      'hosting', 'reliability', 'resilience', 'carbonFlow'],
+    weak_link_identification: ['weakLinks'],
+  });
+
+  function profileContractError(message) {
+    return new Error(`能力配置无效：${message}`);
+  }
+
+  function assertExactKeys(row, expectedKeys, path) {
+    if (!row || typeof row !== 'object' || Array.isArray(row)) {
+      throw profileContractError(`${path} 必须是对象`);
     }
+    const actualKeys = Object.keys(row).sort();
+    const required = [...expectedKeys].sort();
+    if (JSON.stringify(actualKeys) !== JSON.stringify(required)) {
+      throw profileContractError(`${path} 字段必须精确为 ${required.join(', ')}`);
+    }
+  }
+
+  function assertString(value, path, { nonempty = true } = {}) {
+    if (typeof value !== 'string' || (nonempty && !value.trim())) {
+      throw profileContractError(`${path} 必须是${nonempty ? '非空' : ''}字符串`);
+    }
+  }
+
+  function assertUniqueStringArray(value, path, { allowWildcard = false } = {}) {
+    if (!Array.isArray(value)) throw profileContractError(`${path} 必须是数组`);
+    const seen = new Set();
+    value.forEach((entry, index) => {
+      assertString(entry, `${path}[${index}]`);
+      if (entry !== entry.trim()) throw profileContractError(`${path}[${index}] 不允许首尾空白`);
+      if (!allowWildcard && entry === '*') throw profileContractError(`${path} 不允许通配符`);
+      if (seen.has(entry)) throw profileContractError(`${path} 包含重复条目: ${entry}`);
+      seen.add(entry);
+    });
+    return seen;
+  }
+
+  function assertExactObject(row, expected, path) {
+    assertExactKeys(row, Object.keys(expected), path);
+    const expectedKeys = Object.keys(expected).sort();
+    for (const key of expectedKeys) {
+      if (row[key] !== expected[key]) {
+        throw profileContractError(`${path}.${key} 不匹配`);
+      }
+    }
+  }
+
+  function assertExactRows(value, expected, path) {
+    if (!Array.isArray(value)) throw profileContractError(`${path} 必须是数组`);
+    const ids = new Set();
+    value.forEach((row, index) => {
+      if (row && typeof row === 'object' && !Array.isArray(row) && typeof row.id === 'string') {
+        if (ids.has(row.id)) throw profileContractError(`${path} 包含重复 id: ${row.id}`);
+        ids.add(row.id);
+      }
+      const canonical = expected[index];
+      if (!canonical) throw profileContractError(`${path} 包含未知条目`);
+      assertExactObject(row, canonical, `${path}[${index}]`);
+    });
+    if (value.length !== expected.length) {
+      throw profileContractError(`${path} 条目数应为 ${expected.length}`);
+    }
+  }
+
+  function assertExactStringArray(value, expected, path, { allowWildcard = false } = {}) {
+    assertUniqueStringArray(value, path, { allowWildcard });
+    if (JSON.stringify(value) !== JSON.stringify(expected)) {
+      throw profileContractError(`${path} 与 ${path === 'frontend_modules' ? '界面' : '后端'}契约不匹配`);
+    }
+  }
+
+  function assertAnalysisCatalog(value) {
+    assertExactKeys(value, ['schema', 'entries'], 'analysis_catalog');
+    if (value.schema !== 'hacdcpf.edition-analysis-catalog.v1') {
+      throw profileContractError('analysis_catalog.schema 不匹配');
+    }
+    if (!Array.isArray(value.entries)) throw profileContractError('analysis_catalog.entries 必须是数组');
+    const identities = new Set();
+    value.entries.forEach((entry, index) => {
+      assertExactKeys(entry, ['name', 'method', 'route', 'enabled'], `analysis_catalog.entries[${index}]`);
+      for (const key of ['name', 'method', 'route']) {
+        assertString(entry[key], `analysis_catalog.entries[${index}].${key}`);
+      }
+      if (typeof entry.enabled !== 'boolean') {
+        throw profileContractError(`analysis_catalog.entries[${index}].enabled 必须是布尔值`);
+      }
+      const identity = `${entry.method} ${entry.route} ${entry.name}`;
+      if (identities.has(identity)) throw profileContractError(`analysis_catalog.entries 包含重复条目: ${identity}`);
+      identities.add(identity);
+    });
+  }
+
+  function normalizeEditionProfile(profile) {
+    if (!profile || typeof profile !== 'object' || Array.isArray(profile)) {
+      throw profileContractError('响应必须是 JSON 对象');
+    }
+    if (profile.schema !== EDITION_PROFILE_SCHEMA) {
+      throw profileContractError(`schema 必须为 ${EDITION_PROFILE_SCHEMA}`);
+    }
+    if (!Object.hasOwn(EDITION_PRODUCTS, profile.edition)) {
+      throw profileContractError(`未知 edition: ${String(profile.edition)}`);
+    }
+    const edition = profile.edition;
+    assertExactKeys(profile, EDITION_PROFILE_KEYS[edition], 'profile');
+    assertString(profile.product_name, 'product_name');
+    if (profile.product_name !== EDITION_PRODUCTS[edition]) {
+      throw profileContractError(`product_name 与 ${edition} edition 不匹配`);
+    }
+
+    const modules = profile.frontend_modules;
+    assertUniqueStringArray(modules, 'frontend_modules', { allowWildcard: edition === 'full' });
+    modules.forEach(module => {
+      if (module !== '*' && !KNOWN_FRONTEND_MODULES.has(module)) {
+        throw profileContractError(`frontend_modules 包含未知模块: ${module}`);
+      }
+    });
+    assertExactStringArray(modules, EDITION_FRONTEND_MODULES[edition], 'frontend_modules', {
+      allowWildcard: edition === 'full',
+    });
+    assertExactStringArray(profile.analyses, EDITION_ANALYSES, 'analyses');
+    assertExactStringArray(profile.enabled_modules, EDITION_ENABLED_MODULES[edition], 'enabled_modules', {
+      allowWildcard: edition === 'full',
+    });
+    assertExactStringArray(profile.enabled_io_formats, EDITION_IO_FORMATS[edition], 'enabled_io_formats', {
+      allowWildcard: edition === 'full',
+    });
+    assertExactStringArray(profile.disabled_features, EDITION_DISABLED_FEATURES[edition], 'disabled_features');
+    assertAnalysisCatalog(profile.analysis_catalog);
+    if (edition !== 'full') {
+      assertExactObject(profile.route_policy, { mode: 'fail_closed', unknown_api_routes: 'disabled' }, 'route_policy');
+    }
+    if (edition === 'resilience') {
+      assertExactStringArray(profile.solver_capabilities, RESILIENCE_SOLVER_CAPABILITIES, 'solver_capabilities');
+      assertUniqueStringArray(profile.limitations, 'limitations');
+      if (profile.limitations.length === 0) throw profileContractError('limitations 不得为空');
+      assertString(profile.model_scope, 'model_scope');
+      assertExactObject(profile.restoration_certification, {
+        ordinary_feasibility_is_certified_safe: false,
+        dynamic_certification: 'not_exposed_in_first_release',
+      }, 'restoration_certification');
+    }
+    assertExactRows(profile.workflow, EDITION_WORKFLOW, 'workflow');
+    assertExactRows(profile.indicators, EDITION_INDICATORS[edition], 'indicators');
+    return Object.freeze({
+      ...profile,
+      frontend_modules: Object.freeze([...modules]),
+      workflow: Object.freeze(profile.workflow.map(row => Object.freeze({ ...row }))),
+      indicators: Object.freeze(profile.indicators.map(row => Object.freeze({ ...row }))),
+    });
+  }
+
+  async function fetchEditionProfile(timeoutMs = EDITION_PROFILE_TIMEOUT_MS) {
+    const controller = new AbortController();
+    const effectiveTimeout = Math.max(1, Number(timeoutMs) || EDITION_PROFILE_TIMEOUT_MS);
+    const timer = setTimeout(() => controller.abort(), effectiveTimeout);
+    try {
+      const response = await fetch(`${API_BASE}/api/edition`, {
+        cache: 'no-store',
+        headers: { Accept: 'application/json' },
+        signal: controller.signal,
+      });
+      if (!response.ok) throw new Error(`能力配置请求失败（HTTP ${response.status}）`);
+      let profile;
+      try {
+        profile = await response.json();
+      } catch (_) {
+        throw new Error('能力配置不是有效 JSON');
+      }
+      return normalizeEditionProfile(profile);
+    } catch (error) {
+      if (error?.name === 'AbortError') {
+        throw new Error(`能力配置请求超时（${effectiveTimeout} ms）`);
+      }
+      throw error;
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+
+  function hasFrontendModule(moduleName) {
+    if (!_editionProfile || typeof moduleName !== 'string' || !KNOWN_FRONTEND_MODULES.has(moduleName)) {
+      return false;
+    }
+    const enabled = _editionProfile.frontend_modules;
+    return enabled.length === 1 && enabled[0] === '*' ? true : enabled.includes(moduleName);
+  }
+
+  function initialModuleFromQuarantinedHash() {
+    const hash = typeof window.__HACDCPF_INITIAL_HASH === 'string'
+      ? window.__HACDCPF_INITIAL_HASH
+      : '';
+    delete window.__HACDCPF_INITIAL_HASH;
+    const candidate = HASH_MODULES[hash];
+    return candidate && hasFrontendModule(candidate) &&
+      document.querySelector(`.module-btn[data-module="${candidate}"]`)
+      ? candidate
+      : null;
+  }
+
+  function resolveDefaultModule() {
+    const hashModule = initialModuleFromQuarantinedHash();
+    if (hashModule) return hashModule;
+    const preferred = _editionProfile.edition === 'full' ? 'powerFlow' : 'modelIO';
+    if (hasFrontendModule(preferred) && document.querySelector(`.module-btn[data-module="${preferred}"]`)) {
+      return preferred;
+    }
+    return document.querySelector('.module-btn[data-module]')?.dataset.module || null;
+  }
+
+  function restoreAllowedHash(moduleName) {
+    const hash = Object.entries(HASH_MODULES).find(([, module]) => module === moduleName)?.[0];
+    if (hash && location.hash !== hash) history.replaceState(null, '', hash);
+  }
+
+  function setStartupState(state, detail = '') {
+    _startupState = state;
+    document.body.dataset.startupState = state;
+    const status = document.getElementById('startupStatus');
+    const title = document.getElementById('startupStatusTitle');
+    const message = document.getElementById('startupStatusDetail');
+    const shell = document.getElementById('appShell');
+    if (status) {
+      status.dataset.state = state;
+      status.hidden = state === 'ready';
+    }
+    if (title) title.textContent = state === 'unavailable' ? '应用不可用' : '正在验证产品能力';
+    if (message) message.textContent = detail || (state === 'unavailable'
+      ? '无法验证本机服务提供的能力配置。为防止暴露未授权功能，工作区未启动。'
+      : '正在从本机服务读取能力配置。验证完成前工作区保持锁定。');
+    if (shell) {
+      shell.hidden = state !== 'ready';
+      shell.inert = state !== 'ready';
+      if (state === 'ready') shell.removeAttribute('aria-hidden');
+      else shell.setAttribute('aria-hidden', 'true');
+    }
+  }
+
+  function loadCapabilityScripts(urls) {
+    return (urls || []).reduce((promise, src) => promise.then(() => new Promise((resolve, reject) => {
+      const script = document.createElement('script');
+      script.src = src;
+      script.onload = resolve;
+      script.onerror = () => reject(new Error(`功能脚本加载失败: ${src}`));
+      document.body.append(script);
+    })), Promise.resolve());
+  }
+
+  async function loadEditionProfile() {
+    _editionProfile = await fetchEditionProfile();
     return _editionProfile;
   }
 
@@ -802,42 +1206,17 @@ const App = (() => {
     resultsContent.append(resultGroup);
   }
 
-  function applyTrialEditionProfile() {
-    if (_editionProfile.edition !== 'trial') return;
-    document.body.dataset.edition = 'trial';
-    document.title = _editionProfile.product_name || 'HySim Trial';
-    const logo = document.querySelector('.logo-mini');
-    if (logo && !document.getElementById('editionBadge')) {
-      const badge = document.createElement('span');
-      badge.id = 'editionBadge';
-      badge.className = 'edition-badge';
-      badge.textContent = 'TRIAL';
-      logo.append(badge);
-    }
-    const workflowBar = document.getElementById('workflowBar');
-    if (workflowBar) {
-      workflowBar.replaceChildren();
-      (_editionProfile.workflow || []).forEach(step => {
-        const button = document.createElement('button');
-        button.className = 'workflow-btn';
-        button.dataset.workflow = step.id;
-        button.textContent = step.label;
-        button.addEventListener('click', () => setActiveWorkflow(step.id));
-        workflowBar.append(button);
-      });
-    }
-    const enabled = new Set(_editionProfile.frontend_modules || []);
-    document.querySelectorAll('.module-btn').forEach(button => {
-      if (!enabled.has(button.dataset.module)) button.remove();
-      else if (TRIAL_MODULE_WORKFLOWS[button.dataset.module]) {
-        button.dataset.group = TRIAL_MODULE_WORKFLOWS[button.dataset.module];
-      }
-    });
-    document.querySelectorAll('.sub-section, .result-group').forEach(element => {
-      const module = element.dataset.sub || element.dataset.resultGroup;
-      if (module && !enabled.has(module) && module !== 'carbonAnalysis') element.remove();
-    });
-    const advancedIoIds = [
+  function surfaceOwnedByEnabledModule(element, ownership) {
+    const key = element.dataset.sub || element.dataset.resultGroup;
+    const owners = ownership[key];
+    if (!owners) throw profileContractError(`DOM surface 缺少 ownership: ${key || '(empty)'}`);
+    return owners.some(hasFrontendModule);
+  }
+
+  function pruneUnsupportedIo() {
+    if (_editionProfile.enabled_io_formats[0] === '*') return;
+    const formats = new Set(_editionProfile.enabled_io_formats);
+    const removeIds = [
       'btnExportEtap', 'btnExportEtapXml', 'btnImportEtapXlsxCase',
       'btnImportEtapXmlCase', 'btnIoImportEtapXlsx', 'btnIoImportEtapXml',
       'btnIoImportBpaDat', 'btnIoImportCimDist', 'btnIoImportCimDistProject',
@@ -847,11 +1226,246 @@ const App = (() => {
       'fileImportPsdJulia', 'fileImportCimDist', 'fileImportCimDistProject',
       'fileImportSvgDistribution', 'fileImportEtapXlsx', 'fileImportEtapXml',
     ];
-    advancedIoIds.forEach(id => document.getElementById(id)?.remove());
+    if (!formats.has('gridlabd')) {
+      removeIds.push('btnIoImportGridlabd', 'btnIoExportGridlabd', 'fileImportGridlabd');
+    }
+    if (!formats.has('opendss')) {
+      removeIds.push('btnIoImportOpendss', 'btnIoImportOpendssProject',
+        'btnIoExportOpendss', 'fileImportOpendss', 'fileImportOpendssProject');
+    }
+    removeIds.forEach(id => document.getElementById(id)?.remove());
     document.getElementById('ioSvgAutoComplete')?.closest('label')?.remove();
     document.querySelector('.io-group-out-cim')?.remove();
-    installTrialIndicatorDesign();
-    updateTrialAnalysisPlan();
+    if (!formats.has('gridlabd')) document.querySelector('.io-group-cim')?.remove();
+    if (!formats.has('opendss')) document.querySelector('.io-group-dss')?.remove();
+  }
+
+  function pruneResilienceScenarioGenerationUi() {
+    if (_editionProfile.edition !== 'resilience') return;
+    ['scenRegularClusters', 'scenReliabilityClusters'].forEach(id =>
+      document.getElementById(id)?.closest('label')?.remove());
+    [
+      'btnExportRegularScenarioJson', 'btnExportReliabilityScenarioJson',
+      'btnExportScenarioResults',
+      'btnScenarioJsonToExcel', 'fileScenarioJsonToExcel',
+      'btnScenarioExcelToJson', 'fileScenarioExcelToJson',
+    ].forEach(id => document.getElementById(id)?.remove());
+    const formatTitle = Array.from(document.querySelectorAll('.control-param-title'))
+      .find(element => element.textContent?.trim() === '格式转换');
+    formatTitle?.closest('.control-param-group')?.remove();
+    const exportTitle = Array.from(document.querySelectorAll('.control-param-title'))
+      .find(element => element.textContent?.trim() === '场景导出');
+    const exportGroup = exportTitle?.closest('.control-param-group');
+    if (exportGroup) {
+      exportGroup.title = '导出弹性代表场景、弹性场景生成结果与图表';
+      exportTitle.textContent = '弹性场景导出';
+    }
+    const scenarioGroup = document.getElementById('scenResilienceClusters')?.closest('.control-param-group');
+    if (scenarioGroup) {
+      scenarioGroup.title = '弹性台风场景的聚类规模与场景约减方法';
+      const title = scenarioGroup.querySelector('.control-param-title');
+      if (title) title.textContent = '弹性场景聚类与约减';
+    }
+    const hint = document.querySelector('[data-result-group="scenarioGeneration"] #scenarioGenerationResults .empty-hint');
+    if (hint) hint.textContent = '生成场景后查看弹性台风聚类结果';
+  }
+
+  // Resilience-edition navigation framework: the two surviving workflow groups
+  // become 场景生成 / 弹性分析, and the resilience analysis is presented as four
+  // sibling modules (完整弹性分析 + three view modules) that all share the same
+  // backend run. Placeholder modules are disabled buttons on purpose; they are
+  // not registered in KNOWN_FRONTEND_MODULES, so setActiveModule rejects them
+  // even if triggered programmatically.
+  const RESILIENCE_VIEW_MODULES = Object.freeze([
+    Object.freeze({
+      module: 'proactiveDefense', buttonId: 'moduleProactiveDefense', label: '主动防御',
+      subTitle: '主动防御', resultTitle: '主动防御 · 灾中抵御过程',
+      emptyHint: '运行弹性分析后在此查看灾中抵御过程',
+      runTitle: '运行与完整弹性分析相同的求解，结果按灾中防御视角展示',
+    }),
+    Object.freeze({
+      module: 'rapidRecovery', buttonId: 'moduleRapidRecovery', label: '快速恢复',
+      subTitle: '快速恢复', resultTitle: '快速恢复 · 灾后恢复过程',
+      emptyHint: '运行弹性分析后在此查看灾后快速恢复过程',
+      runTitle: '运行与完整弹性分析相同的求解，结果按灾后恢复视角展示',
+    }),
+    Object.freeze({
+      module: 'resilienceMetrics', buttonId: 'moduleResilienceMetrics', label: '弹性指标',
+      subTitle: '弹性指标', resultTitle: '弹性指标 · 指标汇总与运行对比',
+      emptyHint: '运行弹性分析后在此查看弹性指标汇总',
+      runTitle: '运行与完整弹性分析相同的求解，结果按指标汇总视角展示',
+    }),
+  ]);
+
+  function applyResilienceNavigation() {
+    if (_editionProfile.edition !== 'resilience') return;
+    const planningWorkflow = document.querySelector('.workflow-btn[data-workflow="planning"]');
+    if (planningWorkflow) {
+      planningWorkflow.textContent = '场景生成';
+      planningWorkflow.title = '台风致灾场景生成与极端灾害场景模拟';
+    }
+    const sustainabilityWorkflow = document.querySelector('.workflow-btn[data-workflow="sustainability"]');
+    if (sustainabilityWorkflow) {
+      sustainabilityWorkflow.textContent = '弹性分析';
+      sustainabilityWorkflow.title = '完整弹性分析、主动防御、快速恢复与弹性指标';
+    }
+    WORKFLOW_DEFAULT_MODULE.planning = 'scenarioGeneration';
+    WORKFLOW_DEFAULT_MODULE.sustainability = 'resilience';
+    const scenarioButton = document.getElementById('moduleScenarioGeneration');
+    if (scenarioButton) scenarioButton.textContent = '台风致灾场景生成';
+    const resilienceButton = document.getElementById('moduleResilience');
+    if (resilienceButton) resilienceButton.textContent = '完整弹性分析';
+    const solverSelect = document.getElementById('resSolverSelect');
+    if (solverSelect && Array.from(solverSelect.options).some(o => o.value === 'HiGHS')) {
+      solverSelect.value = 'HiGHS';
+    }
+    const scenarioHeading = document.querySelector('[data-result-group="scenarioGeneration"] .topo-section > h4');
+    if (scenarioHeading) scenarioHeading.textContent = '台风致灾场景生成结果';
+    const resilienceHeading = document.querySelector('[data-result-group="resilience"] .topo-section > h4');
+    if (resilienceHeading) resilienceHeading.textContent = '完整弹性分析结果';
+    const moduleBar = document.getElementById('moduleBar');
+    const subToolbar = document.getElementById('subToolbar');
+    const resultsContent = document.getElementById('resultsContent');
+    if (!moduleBar || !subToolbar || !resultsContent) return;
+
+    const makePlaceholderButton = (id, group, label) => {
+      const button = document.createElement('button');
+      button.id = id;
+      button.className = 'module-btn module-btn-disabled';
+      button.dataset.group = group;
+      button.textContent = label;
+      button.disabled = true;
+      button.setAttribute('aria-disabled', 'true');
+      button.title = '该模块正在制作中，暂不可用';
+      return button;
+    };
+
+    if (scenarioButton && !document.getElementById('moduleExtremeScenarios')) {
+      scenarioButton.insertAdjacentElement('afterend',
+        makePlaceholderButton('moduleExtremeScenarios', 'planning', '更多极端灾害场景模拟（制作中…）'));
+    }
+    if (resilienceButton && !document.getElementById('moduleProactiveDefense')) {
+      let anchor = resilienceButton;
+      RESILIENCE_VIEW_MODULES.forEach(view => {
+        const button = document.createElement('button');
+        button.id = view.buttonId;
+        button.className = 'module-btn';
+        button.dataset.module = view.module;
+        button.dataset.group = 'sustainability';
+        button.textContent = view.label;
+        button.addEventListener('click', () => setActiveModule(view.module));
+        anchor.insertAdjacentElement('afterend', button);
+        anchor = button;
+      });
+      anchor.insertAdjacentElement('afterend',
+        makePlaceholderButton('moduleResilienceWeakLinks', 'sustainability', '薄弱环节（制作中…）'));
+    }
+
+    RESILIENCE_VIEW_MODULES.forEach(view => {
+      if (!document.querySelector(`.sub-section[data-sub="${view.module}"]`)) {
+        const section = document.createElement('div');
+        section.className = 'sub-section';
+        section.dataset.sub = view.module;
+        section.hidden = true;
+        const group = document.createElement('div');
+        group.className = 'control-param-group res-param-group';
+        group.title = '故障事件、时序与求解参数在「完整弹性分析」模块中配置；本视图与完整弹性分析共享同一次运行结果';
+        const title = document.createElement('span');
+        title.className = 'control-param-title';
+        title.textContent = view.subTitle;
+        const note = document.createElement('span');
+        note.className = 'sub-static';
+        note.style.opacity = '.8';
+        note.textContent = '参数见完整弹性分析';
+        const run = document.createElement('button');
+        run.className = 'toolbar-btn run-btn';
+        run.textContent = '运行弹性分析';
+        run.title = view.runTitle;
+        // runResilience() lives in a nested scope that is not visible here;
+        // trigger the canonical 完整弹性分析 run button instead — identical
+        // wiring, and every resilience view is populated by that one run.
+        run.addEventListener('click', () => document.getElementById('btnRunResilience')?.click());
+        group.append(title, note, run);
+        section.append(group);
+        subToolbar.append(section);
+      }
+      if (!document.querySelector(`.result-group[data-result-group="${view.module}"]`)) {
+        const resultGroup = document.createElement('div');
+        resultGroup.className = 'result-group';
+        resultGroup.dataset.resultGroup = view.module;
+        const resultSection = document.createElement('div');
+        resultSection.className = 'topo-section';
+        const heading = document.createElement('h4');
+        heading.textContent = view.resultTitle;
+        const container = document.createElement('div');
+        container.id = `${view.module}Results`;
+        container.className = 'topo-table-wrap';
+        const hint = document.createElement('p');
+        hint.className = 'empty-hint';
+        hint.textContent = view.emptyHint;
+        container.append(hint);
+        resultSection.append(heading, container);
+        resultGroup.append(resultSection);
+        resultsContent.append(resultGroup);
+      }
+    });
+    // The new buttons were added after the initial visibility pass; re-apply
+    // the active workflow filter so they show/hide with their group.
+    if (_activeWorkflow) setActiveWorkflow(_activeWorkflow, { preserveModule: true });
+  }
+
+  function resetResilienceViewPanels() {
+    RESILIENCE_VIEW_MODULES.forEach(view => {
+      const container = document.getElementById(`${view.module}Results`);
+      if (container) container.innerHTML = `<p class="empty-hint">${view.emptyHint}</p>`;
+    });
+  }
+
+  function applyEditionProfile() {
+    if (!_editionProfile) throw profileContractError('profile 尚未加载');
+    const trial = _editionProfile.edition === 'trial';
+    document.body.dataset.edition = _editionProfile.edition;
+    document.title = _editionProfile.product_name;
+    const logo = document.querySelector('.logo-mini');
+    if (logo && _editionProfile.edition !== 'full' && !document.getElementById('editionBadge')) {
+      const badge = document.createElement('span');
+      badge.id = 'editionBadge';
+      badge.className = 'edition-badge';
+      badge.textContent = trial ? 'TRIAL' : 'RESILIENCE';
+      logo.append(badge);
+    }
+    const workflowBar = document.getElementById('workflowBar');
+    if (workflowBar && trial) {
+      workflowBar.replaceChildren();
+      _editionProfile.workflow.forEach(step => {
+        const button = document.createElement('button');
+        button.className = 'workflow-btn';
+        button.dataset.workflow = step.id;
+        button.textContent = step.label;
+        button.addEventListener('click', () => setActiveWorkflow(step.id));
+        workflowBar.append(button);
+      });
+    }
+    if (trial) installTrialIndicatorDesign();
+    document.querySelectorAll('.module-btn').forEach(button => {
+      if (!hasFrontendModule(button.dataset.module)) button.remove();
+      else if (trial && TRIAL_MODULE_WORKFLOWS[button.dataset.module]) {
+        button.dataset.group = TRIAL_MODULE_WORKFLOWS[button.dataset.module];
+      }
+    });
+    document.querySelectorAll('.sub-section').forEach(element => {
+      if (!surfaceOwnedByEnabledModule(element, SUBSECTION_MODULE_OWNERS)) element.remove();
+    });
+    document.querySelectorAll('.result-group').forEach(element => {
+      if (!surfaceOwnedByEnabledModule(element, RESULT_GROUP_MODULE_OWNERS)) element.remove();
+    });
+    document.querySelectorAll('.workflow-btn').forEach(button => {
+      const owners = WORKFLOW_MODULE_OWNERS[button.dataset.workflow];
+      if (!owners || !owners.some(hasFrontendModule)) button.remove();
+    });
+    pruneUnsupportedIo();
+    pruneResilienceScenarioGenerationUi();
+    applyResilienceNavigation();
     HySimCore.Accessibility?.syncNavigation();
   }
 
@@ -910,6 +1524,7 @@ const App = (() => {
     _lastTransientData = null;
     _lastReliabilityData = null;
     _lastResilienceData = null;
+    resetResilienceViewPanels();
     _lastWeakLinkData = null;
     _lastCounterfactualData = null;
     _marketParticipantRows = null;
@@ -1447,7 +2062,9 @@ const App = (() => {
     document.body?.setAttribute('data-active-result-group', active);
     const panel = document.getElementById('rightPanel');
     if (panel) {
-      if (active === 'transient' || active === 'modelIO' || active === 'parameterLibrary' || active === 'rpo') {
+      const wideGroups = ['transient', 'modelIO', 'parameterLibrary', 'rpo',
+        'resilience', 'proactiveDefense', 'rapidRecovery', 'resilienceMetrics'];
+      if (wideGroups.includes(active)) {
         const target = window.innerWidth <= 900 ? window.innerWidth : Math.round(Math.min(window.innerWidth * 0.66, 1180));
         const minUseful = window.innerWidth <= 900 ? window.innerWidth : Math.min(target, Math.max(560, window.innerWidth - 420));
         if (!panel.style.width || panel.offsetWidth < minUseful) {
@@ -3196,6 +3813,30 @@ const App = (() => {
     return apiClient().postResult(path, body, options);
   }
 
+  function describeError(error, fallback = '未知错误') {
+    if (typeof error === 'string' && error.trim()) return error;
+    if (error instanceof Error && typeof error.message === 'string' && error.message.trim()) {
+      return describeError(error.message, fallback);
+    }
+    if (error && typeof error === 'object') {
+      for (const key of ['message', 'detail', 'error']) {
+        if (error[key] !== undefined && error[key] !== error) {
+          const message = describeError(error[key], '');
+          if (message) return message;
+        }
+      }
+      try {
+        const serialized = JSON.stringify(error);
+        if (serialized && serialized !== '{}') return serialized;
+      } catch (_) {}
+    }
+    if (error !== undefined && error !== null) {
+      const text = String(error);
+      if (text && text !== '[object Object]') return text;
+    }
+    return fallback;
+  }
+
   async function apiGet(path, options = {}) {
     const url = `${API_BASE}${path}`;
     try {
@@ -3478,8 +4119,13 @@ const App = (() => {
     const extended = structured
       ? data.cases.filter(c => c.featured === false).map(c => ({ ...toItem(c), group: '更多算例（扩展）' }))
       : [];
-    fillSelectOptions('caseSelect', [...featured, ...extended], '-- 加载算例 --', data.default_case);
-    fillSelectOptions('ioCaseSelect', featured, '-- 选择算例 --', data.default_case);
+    // Resilience Edition defaults to its resilience flagship case; other
+    // editions keep the server-provided default.
+    const defaultCase = _editionProfile?.edition === 'resilience'
+      ? 'dist33_microgrid_der'
+      : data.default_case;
+    fillSelectOptions('caseSelect', [...featured, ...extended], '-- 加载算例 --', defaultCase);
+    fillSelectOptions('ioCaseSelect', featured, '-- 选择算例 --', defaultCase);
     log(`已加载 ${featured.length} 个旗舰算例（共 ${items.length} 个内置算例）`, 'success');
   }
 
@@ -14070,12 +14716,19 @@ const App = (() => {
   // dynamic_model JSON back into the raw textarea that the property save reads.
   let _dynSchema = null;
   let _dynSchemaPromise = null;
+  function emptyDynSchema() {
+    return { models: [], components: [] };
+  }
+  function canUseDynamics() {
+    return _startupState === 'ready' && hasFrontendModule('transient');
+  }
   function ensureDynSchema() {
+    if (!canUseDynamics()) return Promise.resolve(emptyDynSchema());
     if (_dynSchema) return Promise.resolve(_dynSchema);
     if (!_dynSchemaPromise) {
       _dynSchemaPromise = apiGet('/api/dynamics/model_schema')
-        .then(d => { _dynSchema = d && d.models ? d : { models: [], components: [] }; return _dynSchema; })
-        .catch(() => { _dynSchema = { models: [], components: [] }; return _dynSchema; });
+        .then(d => { _dynSchema = d && d.models ? d : emptyDynSchema(); return _dynSchema; })
+        .catch(() => { _dynSchema = emptyDynSchema(); return _dynSchema; });
     }
     return _dynSchemaPromise;
   }
@@ -14282,7 +14935,9 @@ const App = (() => {
       if (el) host.appendChild(el);
       else host.innerHTML = '<div class="dyn-editor-none">该元件类型暂无结构化动态模型目录，请使用下方原始 JSON。</div>';
     };
-    if (_dynSchema) build();
+    if (!canUseDynamics()) {
+      host.innerHTML = '<div class="dyn-editor-none">当前版本不提供结构化动态模型目录；原始 JSON 将保持不变。</div>';
+    } else if (_dynSchema) build();
     else { host.innerHTML = '<div class="dyn-editor-none">加载动态模型目录…</div>'; ensureDynSchema().then(build); }
   }
 
@@ -15346,8 +16001,11 @@ const App = (() => {
     });
   }
   function setActiveModule(moduleName) {
+    if (_startupState !== 'ready' || !hasFrontendModule(moduleName)) return false;
+    const moduleButton = document.querySelector(`.module-btn[data-module="${moduleName}"]`);
+    if (!moduleButton) return false;
     const isMarket = subsectionForModule(moduleName) === 'market';
-    const family = document.querySelector(`.module-btn[data-module="${moduleName}"]`)?.dataset.marketFamily;
+    const family = moduleButton.dataset.marketFamily;
     document.body.classList.toggle('market-active', isMarket);
     document.body.classList.toggle('market-generic-active', isMarket && family === 'generic');
     document.body.classList.toggle('market-operation-active', moduleName === 'marketOperation');
@@ -15393,6 +16051,7 @@ const App = (() => {
       if (event) document.dispatchEvent(new CustomEvent(event));
     }
     HySimCore.Accessibility?.syncNavigation();
+    return true;
   }
   function renderSubToolbar(moduleName) {
     const bar = document.getElementById('subToolbar');
@@ -18506,8 +19165,15 @@ const App = (() => {
   }
 
   async function init() {
-    await loadEditionProfile();
-    // Apply the saved light/dark theme before anything renders.
+    setStartupState('loading');
+    try {
+      await loadEditionProfile();
+      applyEditionProfile();
+
+      const initialModule = resolveDefaultModule();
+      if (!initialModule) throw new Error('能力配置未提供任何可用界面模块');
+      // Initialize capability-independent shell services only after strict profile
+      // success and pruning, while the shell remains locked and inaccessible.
     initThemeMode();
     initWorkspaceLayout();
     HySimCore.RuntimeDiagnostics?.init({ chipId: 'runtimeHealthChip', log });
@@ -18523,12 +19189,21 @@ const App = (() => {
     // Initialize component library
     initComponentLibrary();
 
-    // Load case list
+    if (hasFrontendModule('market')) {
+      await loadCapabilityScripts(window.__HACDCPF_MARKET_SCRIPTS);
+    }
+    delete window.__HACDCPF_MARKET_SCRIPTS;
+
+    setStartupState('ready');
+    setActiveModule(initialModule);
+    restoreAllowedHash(initialModule);
+
+    // Load case lists only after the capability-validated shell is ready.
     loadCaseList();
     loadMatpowerFileList();
-    // Warm the transient model catalog so the per-component dynamic-model editor
-    // is ready as soon as a component is selected.
-    if (_editionProfile.edition !== 'trial') ensureDynSchema();
+    // Warm the transient model catalog only after a positive frontend capability
+    // check. ensureDynSchema repeats the check to protect future call sites.
+    if (hasFrontendModule('transient')) ensureDynSchema();
 
     // ---- Toolbar Events ----
     // Bar 1: 加载算例 -> open case-load modal
@@ -22059,12 +22734,9 @@ const App = (() => {
     async function runResilience() {
       setStatus('弹性分析中...', 'busy');
       if (!await syncToBackend(true)) { setStatus('同步失败', 'error'); return; }
-      // Resilience assessment always uses imported scenario 48h profiles when available.
-      const resScenarioCase = getImportedGeneratedScenarioCase('resilience');
-      if (hasUsableGeneratedScenarioTimeSeries('resilience')) {
-        try { await applyGeneratedScenarioTimeSeries(resScenarioCase); }
-        catch (e) { log(`应用生成场景时序失败：${e.message || e}`, 'warn'); }
-      }
+      // Resilience assessment consumes imported 48h profiles directly through
+      // the resilience request. The restricted edition intentionally does not
+      // call the standalone time-series configuration endpoint.
       if (!validateFaultBranchIds()) return;
       markResilienceFaultBranches();
       const p = collectResilienceParams();
@@ -22125,6 +22797,12 @@ const App = (() => {
         _lastResilienceData = data;
         renderComponentCurveTargets('resilience');
         showResilienceResults(data);
+        renderProactiveDefenseView(data);
+        renderRapidRecoveryView(data);
+        renderResilienceMetricsView(data);
+        const activeModule = document.querySelector('.module-btn.active')?.dataset.module;
+        const resilienceViewModules = ['proactiveDefense', 'rapidRecovery', 'resilienceMetrics'];
+        setActiveResultGroup(resilienceViewModules.includes(activeModule) ? activeModule : 'resilience');
         switchTab('results');
         setStatus('弹性分析完成');
       } else {
@@ -22150,8 +22828,8 @@ const App = (() => {
       return Array.isArray(series) ? series.map(v => Array.isArray(v) ? v.length : 0) : [];
     }
 
-    function renderResilienceCharts(data) {
-      if (typeof Plotly === 'undefined' || !Array.isArray(data.hours) || !data.hours.length) return;
+    function resilienceChartContext(data) {
+      if (typeof Plotly === 'undefined' || !Array.isArray(data.hours) || !data.hours.length) return null;
       const x = data.hours;
       const cfg = { responsive: true, displaylogo: false };
       const asArray = (v) => Array.isArray(v) ? v : [];
@@ -22175,60 +22853,92 @@ const App = (() => {
         margin: { l: 55, r: 15, t: 32, b: 38 },
         legend: { orientation: 'h', y: -0.18 },
       });
-
-      Plotly.newPlot('resTimeChart', [
-        ...(Array.isArray(data.demand_mw) ? [{ x, y: numberSeries(data.demand_mw), mode: 'lines+markers', name: '需求', line: { color: '#61afef' } }] : []),
-        ...(Array.isArray(data.served_mw) ? [{ x, y: numberSeries(data.served_mw), mode: 'lines+markers', name: '供电', line: { color: '#98c379' } }] : []),
-        ...(Array.isArray(data.shed_mw) ? [{ x, y: numberSeries(data.shed_mw), mode: 'lines+markers', name: '切负荷', line: { color: '#e06c75' } }] : []),
-      ], chartLayout('恢复过程：需求/供电/切负荷', 'MW'), cfg);
-
-      Plotly.newPlot('resRestorationChart', [
-        { x, y: numberSeries(data.restoration_ratio).map(v => v * 100), mode: 'lines+markers', name: '供电率', line: { color: '#0f766e', width: 2 } },
-      ], { ...chartLayout('供电率时序', '%'), yaxis: { title: '%', gridcolor: '#d1d5db', linecolor: '#111827', tickcolor: '#111827', zerolinecolor: '#9ca3af', range: [0, 105] } }, cfg);
-
-      Plotly.newPlot('resFaultSwitchChart', [
-        { x, y: numberSeries(data.active_faults), type: 'bar', name: '活动故障', marker: { color: '#f59e0b' } },
-        { x, y: numberSeries(data.repaired_faults_arr), type: 'bar', name: '已修复', marker: { color: '#22c55e' } },
-        { x, y: numberSeries(data.switch_actions), mode: 'lines+markers', name: '开关动作', yaxis: 'y2', line: { color: '#a78bfa' } },
-      ], { ...chartLayout('故障 / 修复 / 开关动作', '数量'), barmode: 'group', yaxis2: { title: '动作数', overlaying: 'y', side: 'right', gridcolor: '#d1d5db', linecolor: '#111827', tickcolor: '#111827', zerolinecolor: '#9ca3af' } }, cfg);
-
-      Plotly.newPlot('resPriorityChart', [
-        { x, y: numberSeries(data.shed_critical), type: 'bar', name: '关键', marker: { color: '#dc2626' } },
-        { x, y: numberSeries(data.shed_high), type: 'bar', name: '高', marker: { color: '#f59e0b' } },
-        { x, y: numberSeries(data.shed_medium), type: 'bar', name: '中', marker: { color: '#3b82f6' } },
-        { x, y: numberSeries(data.shed_low), type: 'bar', name: '低', marker: { color: '#94a3b8' } },
-      ], { ...chartLayout('分优先级切负荷', 'MW'), barmode: 'stack' }, cfg);
-
       const stageMap = { Normal: 0, DisasterIsolation: 1, DisasterPostFaultReconfig: 2, PostDisasterRepair: 3 };
       const stageNames = ['预先准备', '抵御与吸收', '响应与适应', '快速恢复'];
-      Plotly.newPlot('resStageChart', [
-        { x, y: stageSeries.map(s => stageMap[s] ?? 0), mode: 'lines+markers', name: '灾害阶段', line: { color: '#56b6c2', shape: 'hv' }, text: stageSeries.map(s => stageNames[stageMap[s] ?? 0]), hovertemplate: '%{x} h<br>%{text}<extra></extra>' },
-      ], { ...chartLayout('灾害阶段时间线', '阶段'), yaxis: { title: '阶段', gridcolor: '#d1d5db', linecolor: '#111827', tickcolor: '#111827', zerolinecolor: '#9ca3af', tickmode: 'array', tickvals: [0,1,2,3], ticktext: stageNames } }, cfg);
+      return { x, cfg, numberSeries, stageSeries, branchStateCounts, chartLayout, stageMap, stageNames };
+    }
 
-      const mess = asArray(data.mess_traces);
+    function plotResilienceChart(elementId, traces, layout, cfg) {
+      if (typeof Plotly === 'undefined' || !document.getElementById(elementId)) return;
+      Plotly.newPlot(elementId, traces, layout, cfg);
+    }
+
+    function plotResilienceTimeChart(elementId, data, h) {
+      plotResilienceChart(elementId, [
+        ...(Array.isArray(data.demand_mw) ? [{ x: h.x, y: h.numberSeries(data.demand_mw), mode: 'lines+markers', name: '需求', line: { color: '#61afef' } }] : []),
+        ...(Array.isArray(data.served_mw) ? [{ x: h.x, y: h.numberSeries(data.served_mw), mode: 'lines+markers', name: '供电', line: { color: '#98c379' } }] : []),
+        ...(Array.isArray(data.shed_mw) ? [{ x: h.x, y: h.numberSeries(data.shed_mw), mode: 'lines+markers', name: '切负荷', line: { color: '#e06c75' } }] : []),
+      ], h.chartLayout('恢复过程：需求/供电/切负荷', 'MW'), h.cfg);
+    }
+
+    function plotResilienceRestorationChart(elementId, data, h) {
+      plotResilienceChart(elementId, [
+        { x: h.x, y: h.numberSeries(data.restoration_ratio).map(v => v * 100), mode: 'lines+markers', name: '供电率', line: { color: '#0f766e', width: 2 } },
+      ], { ...h.chartLayout('供电率时序', '%'), yaxis: { title: '%', gridcolor: '#d1d5db', linecolor: '#111827', tickcolor: '#111827', zerolinecolor: '#9ca3af', range: [0, 105] } }, h.cfg);
+    }
+
+    function plotResilienceFaultSwitchChart(elementId, data, h) {
+      plotResilienceChart(elementId, [
+        { x: h.x, y: h.numberSeries(data.active_faults), type: 'bar', name: '活动故障', marker: { color: '#f59e0b' } },
+        { x: h.x, y: h.numberSeries(data.repaired_faults_arr), type: 'bar', name: '已修复', marker: { color: '#22c55e' } },
+        { x: h.x, y: h.numberSeries(data.switch_actions), mode: 'lines+markers', name: '开关动作', yaxis: 'y2', line: { color: '#a78bfa' } },
+      ], { ...h.chartLayout('故障 / 修复 / 开关动作', '数量'), barmode: 'group', yaxis2: { title: '动作数', overlaying: 'y', side: 'right', gridcolor: '#d1d5db', linecolor: '#111827', tickcolor: '#111827', zerolinecolor: '#9ca3af' } }, h.cfg);
+    }
+
+    function plotResiliencePriorityChart(elementId, data, h) {
+      plotResilienceChart(elementId, [
+        { x: h.x, y: h.numberSeries(data.shed_critical), type: 'bar', name: '关键', marker: { color: '#dc2626' } },
+        { x: h.x, y: h.numberSeries(data.shed_high), type: 'bar', name: '高', marker: { color: '#f59e0b' } },
+        { x: h.x, y: h.numberSeries(data.shed_medium), type: 'bar', name: '中', marker: { color: '#3b82f6' } },
+        { x: h.x, y: h.numberSeries(data.shed_low), type: 'bar', name: '低', marker: { color: '#94a3b8' } },
+      ], { ...h.chartLayout('分优先级切负荷', 'MW'), barmode: 'stack' }, h.cfg);
+    }
+
+    function plotResilienceStageChart(elementId, data, h) {
+      plotResilienceChart(elementId, [
+        { x: h.x, y: h.stageSeries.map(s => h.stageMap[s] ?? 0), mode: 'lines+markers', name: '灾害阶段', line: { color: '#56b6c2', shape: 'hv' }, text: h.stageSeries.map(s => h.stageNames[h.stageMap[s] ?? 0]), hovertemplate: '%{x} h<br>%{text}<extra></extra>' },
+      ], { ...h.chartLayout('灾害阶段时间线', '阶段'), yaxis: { title: '阶段', gridcolor: '#d1d5db', linecolor: '#111827', tickcolor: '#111827', zerolinecolor: '#9ca3af', tickmode: 'array', tickvals: [0,1,2,3], ticktext: h.stageNames } }, h.cfg);
+    }
+
+    function plotResilienceMessChart(elementId, data, h) {
+      const mess = Array.isArray(data.mess_traces) ? data.mess_traces : [];
       const messTraces = [];
       mess.forEach((tr, idx) => {
         const name = tr.name || `MESS ${tr.storage_index ?? idx + 1}`;
         if (Array.isArray(tr.dispatch_mw)) {
-          messTraces.push({ x, y: tr.dispatch_mw, mode: 'lines+markers', name: `${name} 充放电功率`, yaxis: 'y' });
+          messTraces.push({ x: h.x, y: tr.dispatch_mw, mode: 'lines+markers', name: `${name} 充放电功率`, yaxis: 'y' });
         }
         if (Array.isArray(tr.energy_mwh)) {
-          messTraces.push({ x, y: tr.energy_mwh, mode: 'lines+markers', name: `${name} 剩余电量`, yaxis: 'y2', line: { dash: 'dot' } });
+          messTraces.push({ x: h.x, y: tr.energy_mwh, mode: 'lines+markers', name: `${name} 剩余电量`, yaxis: 'y2', line: { dash: 'dot' } });
         }
       });
       const messLayout = {
-        ...chartLayout('移动储能：充放电功率 / 剩余电量', '功率 (MW)'),
+        ...h.chartLayout('移动储能：充放电功率 / 剩余电量', '功率 (MW)'),
         yaxis2: { title: '剩余电量 (MWh)', overlaying: 'y', side: 'right', gridcolor: '#d1d5db', linecolor: '#111827', tickcolor: '#111827', zerolinecolor: '#9ca3af', rangemode: 'tozero' },
         annotations: messTraces.length ? [] : [{ text: '无移动储能出力/电量数据', xref: 'paper', yref: 'paper', x: 0.5, y: 0.5, showarrow: false, font: { color: '#111827' } }],
       };
-      Plotly.newPlot('resMessChart', messTraces, messLayout, cfg);
+      plotResilienceChart(elementId, messTraces, messLayout, h.cfg);
+    }
 
-      Plotly.newPlot('resOpenBranchChart', [
-        { x, y: branchStateCounts(data.open_ac_branch_ids), type: 'bar', name: 'AC当前断开支路', marker: { color: '#e06c75' } },
-        { x, y: branchStateCounts(data.open_dc_branch_ids), type: 'bar', name: 'DC当前断开支路', marker: { color: '#c678dd' } },
-        { x, y: branchStateCounts(data.closed_tie_branch_ids), type: 'bar', name: 'AC闭合联络', marker: { color: '#98c379' } },
-        { x, y: branchStateCounts(data.closed_dc_tie_branch_ids), type: 'bar', name: 'DC闭合联络', marker: { color: '#56b6c2' } },
-      ], { ...chartLayout('AC/DC 拓扑状态统计', '数量'), barmode: 'group' }, cfg);
+    function plotResilienceOpenBranchChart(elementId, data, h) {
+      plotResilienceChart(elementId, [
+        { x: h.x, y: h.branchStateCounts(data.open_ac_branch_ids), type: 'bar', name: 'AC当前断开支路', marker: { color: '#e06c75' } },
+        { x: h.x, y: h.branchStateCounts(data.open_dc_branch_ids), type: 'bar', name: 'DC当前断开支路', marker: { color: '#c678dd' } },
+        { x: h.x, y: h.branchStateCounts(data.closed_tie_branch_ids), type: 'bar', name: 'AC闭合联络', marker: { color: '#98c379' } },
+        { x: h.x, y: h.branchStateCounts(data.closed_dc_tie_branch_ids), type: 'bar', name: 'DC闭合联络', marker: { color: '#56b6c2' } },
+      ], { ...h.chartLayout('AC/DC 拓扑状态统计', '数量'), barmode: 'group' }, h.cfg);
+    }
+
+    function renderResilienceCharts(data) {
+      const h = resilienceChartContext(data);
+      if (!h) return;
+      plotResilienceTimeChart('resTimeChart', data, h);
+      plotResilienceRestorationChart('resRestorationChart', data, h);
+      plotResilienceFaultSwitchChart('resFaultSwitchChart', data, h);
+      plotResiliencePriorityChart('resPriorityChart', data, h);
+      plotResilienceStageChart('resStageChart', data, h);
+      plotResilienceMessChart('resMessChart', data, h);
+      plotResilienceOpenBranchChart('resOpenBranchChart', data, h);
     }
 
     function resilienceModelLabel(model) {
@@ -22314,24 +23024,25 @@ const App = (() => {
       return html;
     }
 
-    function showResilienceResults(data) {
-      document.getElementById('resultsEmpty').style.display = 'none';
-      document.getElementById('resultsContent').style.display = 'block';
-      setActiveResultGroup('resilience');
-      const nf = (v, d = 2) => {
-        const n = Number(v);
-        return Number.isFinite(n) ? n.toFixed(d) : '—';
-      };
-      updateResilienceComparisonRuns(data);
+    function resilienceNumFmt(v, d = 2) {
+      const n = Number(v);
+      return Number.isFinite(n) ? n.toFixed(d) : '—';
+    }
+
+    function resilienceMinSupplyRatio(data) {
+      const supplyRatios = Array.isArray(data.restoration_ratio) ? data.restoration_ratio.map(Number).filter(Number.isFinite) : [];
+      return supplyRatios.length ? Math.min(...supplyRatios) : (data.avg_restoration_ratio ?? 0);
+    }
+
+    function buildResilienceKpiRows(data) {
+      const nf = resilienceNumFmt;
       const ms = data.model_stats || {};
       const eqCount = Number(ms.num_eq_constraints);
       const ineqCount = Number(ms.num_ineq_constraints);
       const constraintCount = (Number.isFinite(eqCount) || Number.isFinite(ineqCount))
         ? `${Number.isFinite(eqCount) ? eqCount : 0} / ${Number.isFinite(ineqCount) ? ineqCount : 0}` : '—';
       const resilienceIndexTip = '弹性指数 = 评估时段内总供电电量 / 总需求电量，取值 0–1；越接近 1 表示灾害期间整体供电保持得越好。它是全时段能量积分指标；最低供电率是单个最差时刻指标。';
-      const supplyRatios = Array.isArray(data.restoration_ratio) ? data.restoration_ratio.map(Number).filter(Number.isFinite) : [];
-      const minSupplyRatio = supplyRatios.length ? Math.min(...supplyRatios) : (data.avg_restoration_ratio ?? 0);
-      const kpis = [
+      return [
         ['评估模型', resilienceModelLabel(data.effective_model || data.model)],
         ['请求求解器', data.requested_solver || '—'],
         ['实际求解器', data.effective_solver || ms.solver_name || '—'],
@@ -22350,28 +23061,390 @@ const App = (() => {
         ['加权未供 (MWh)', nf(data.weighted_unserved_mwh, 2)],
         ['峰值切负荷 (MW)', nf(data.peak_shed_mw, 2)],
         ['最终供电率 (%)', nf((data.final_restoration_ratio ?? 0) * 100, 2)],
-        ['最低供电率 (%)', nf(minSupplyRatio * 100, 2)],
+        ['最低供电率 (%)', nf(resilienceMinSupplyRatio(data) * 100, 2)],
         ['移储供能 (MWh)', nf(data.mess_energy_delivered_mwh, 2)],
         ['移储行程 (km)', nf(data.mess_travel_distance_km, 1)],
         ['开关操作次数', data.total_switch_actions ?? '—'],
         ['修复故障数', data.total_repaired_faults ?? '—'],
       ];
-      let summaryHtml = '<table><thead><tr><th>指标</th><th>数值</th></tr></thead><tbody>';
-      for (const [k, v, tip] of kpis) summaryHtml += `<tr><td${tip ? ` title="${escapeHtml(tip)}" class="metric-help"` : ''}>${k}</td><td class="result-value">${v}</td></tr>`;
-      summaryHtml += '</tbody></table>';
+    }
+
+    function resilienceKpiTableHtml(rows) {
+      let html = '<table><thead><tr><th>指标</th><th>数值</th></tr></thead><tbody>';
+      for (const [k, v, tip] of rows) html += `<tr><td${tip ? ` title="${escapeHtml(tip)}" class="metric-help"` : ''}>${k}</td><td class="result-value">${v}</td></tr>`;
+      html += '</tbody></table>';
+      return html;
+    }
+
+    function renderResilienceFaultSequenceTable(data) {
+      if (!Array.isArray(data.fault_sequence) || !data.fault_sequence.length) return '';
+      const nf = resilienceNumFmt;
+      let html = '<h4 style="margin:0 0 4px;">故障序列</h4><table><thead><tr><th>#</th><th>类型</th><th>支路</th><th>开始(h)</th><th>修复(h)</th></tr></thead><tbody>';
+      const resBusMap = (typeof Canvas !== 'undefined' && Canvas.getCompBusMap) ? Canvas.getCompBusMap() : null;
+      data.fault_sequence.slice(0, 20).forEach((f, i) => {
+        const clk = busClickAttr(busIdFromComponentName(f.name), resBusMap);
+        html += `<tr${clk}><td>${i + 1}</td><td>${f.branch_type || f.branch_kind || 'AC'}</td><td>${f.name ?? f.branch_id ?? f.branch_index ?? f.branch ?? '—'}</td><td>${nf(f.start_hr, 1)}</td><td>${nf(f.repair_hr ?? f.repair_time_hr, 1)}</td></tr>`;
+      });
+      html += '</tbody></table>';
+      return html;
+    }
+
+    function resilienceViewChartsHtml(entries) {
+      return `<div class="resilience-charts-grid">${entries
+        .map(([id, wide]) => `<div id="${id}" class="resilience-chart${wide ? ' wide' : ''}"></div>`)
+        .join('')}</div>`;
+    }
+
+    // ---- Dedicated charts for the resilience view modules (主动防御 / 快速恢复 /
+    // 弹性指标). These are intentionally NOT copies of the 完整弹性分析 charts:
+    // each view gets visualizations specific to its own aspect of the same run.
+    const RES_STAGE_COLORS = Object.freeze({
+      Normal: '#22c55e', DisasterIsolation: '#ef4444',
+      DisasterPostFaultReconfig: '#f59e0b', PostDisasterRepair: '#3b82f6',
+    });
+
+    function resilienceStageBands(h) {
+      const shapes = [];
+      const annotations = [];
+      let segStart = 0;
+      const stages = h.stageSeries;
+      for (let i = 1; i <= stages.length; i++) {
+        if (i === stages.length || stages[i] !== stages[segStart]) {
+          const stage = stages[segStart];
+          const x0 = h.x[segStart];
+          const x1 = h.x[i - 1];
+          shapes.push({
+            type: 'rect', xref: 'x', yref: 'paper', x0, x1: x1 + 0.4, y0: 0, y1: 1,
+            fillcolor: RES_STAGE_COLORS[stage] || '#9ca3af', opacity: 0.12,
+            line: { width: 0 }, layer: 'below',
+          });
+          annotations.push({
+            x: (x0 + x1) / 2, y: 1, xref: 'x', yref: 'paper', yanchor: 'bottom',
+            showarrow: false, text: h.stageNames[h.stageMap[stage] ?? 0],
+            font: { size: 10, color: '#111827' },
+          });
+          segStart = i;
+        }
+      }
+      return { shapes, annotations };
+    }
+
+    function resilienceFaultWindows(data) {
+      return (Array.isArray(data.fault_sequence) ? data.fault_sequence : []).map((f, i) => {
+        const start = Number(f.start_hr) || 0;
+        const raw = Number(f.repair_hr ?? f.repair_time_hr);
+        let end;
+        if (Number.isFinite(raw)) end = raw > start ? raw : start + Math.max(raw, 0.5);
+        else end = start + 1;
+        return {
+          name: f.name ?? f.branch_id ?? `故障${i + 1}`,
+          type: String(f.branch_type || f.branch_kind || 'AC').toUpperCase() === 'DC' ? 'DC' : 'AC',
+          start, end,
+        };
+      });
+    }
+
+    function plotDefenseGapChart(elementId, data, h) {
+      const demand = h.numberSeries(data.demand_mw);
+      const served = h.numberSeries(data.served_mw);
+      const gap = demand.map((d, i) => Math.max(0, d - served[i]));
+      const bands = resilienceStageBands(h);
+      plotResilienceChart(elementId, [
+        { x: h.x, y: demand, mode: 'lines', name: '需求', line: { color: '#6b7280', dash: 'dash' } },
+        { x: h.x, y: served, mode: 'lines', name: '实际供电', line: { color: '#0f766e', width: 2 } },
+        { x: h.x, y: gap, mode: 'lines', name: '供电缺口', fill: 'tozeroy', fillcolor: 'rgba(224,108,117,0.35)', line: { color: '#e06c75', width: 1 } },
+      ], { ...h.chartLayout('灾中供电缺口与灾害阶段', 'MW'), ...bands }, h.cfg);
+    }
+
+    function plotFaultGanttChart(elementId, data) {
+      const faults = resilienceFaultWindows(data);
+      const mkTrace = (rows, name, color) => ({
+        x: rows.map(f => Math.max(0.2, f.end - f.start)),
+        base: rows.map(f => f.start),
+        y: rows.map(f => String(f.name)),
+        type: 'bar', orientation: 'h', name, marker: { color },
+        text: rows.map(f => `${f.start}–${f.end} h`),
+        hovertemplate: '%{y}<br>%{text}<extra></extra>',
+      });
+      const ac = faults.filter(f => f.type !== 'DC');
+      const dc = faults.filter(f => f.type === 'DC');
+      plotResilienceChart(elementId, [
+        ...(ac.length ? [mkTrace(ac, 'AC 故障', '#e06c75')] : []),
+        ...(dc.length ? [mkTrace(dc, 'DC 故障', '#c678dd')] : []),
+      ], {
+        ...plotThemeRes('故障发生—修复生命周期', '时间 (h)'),
+        barmode: 'stack',
+        yaxis: { autorange: 'reversed', automargin: true, gridcolor: '#d1d5db', linecolor: '#111827', tickcolor: '#111827' },
+      }, { responsive: true, displaylogo: false });
+    }
+
+    function plotCriticalShedChart(elementId, data, h) {
+      plotResilienceChart(elementId, [
+        { x: h.x, y: h.numberSeries(data.shed_critical), type: 'bar', name: '关键负荷缺供', marker: { color: '#dc2626' } },
+        { x: h.x, y: h.numberSeries(data.shed_high), type: 'bar', name: '高优先级缺供', marker: { color: '#f59e0b' } },
+      ], { ...h.chartLayout('关键与高优先级负荷缺供时序', 'MW'), barmode: 'stack' }, h.cfg);
+    }
+
+    function plotPriorityShedDonut(elementId, data, h) {
+      const sum = arr => h.numberSeries(arr).reduce((a, b) => a + b, 0);
+      const values = [sum(data.shed_critical), sum(data.shed_high), sum(data.shed_medium), sum(data.shed_low)];
+      plotResilienceChart(elementId, [{
+        labels: ['关键', '高', '中', '低'], values, type: 'pie', hole: 0.45,
+        marker: { colors: ['#dc2626', '#f59e0b', '#3b82f6', '#94a3b8'] },
+        textinfo: 'label+percent', hovertemplate: '%{label}: %{value:.2f} MWh<extra></extra>',
+      }], { ...plotThemeRes('灾中分级切负荷构成'), showlegend: false }, h.cfg);
+    }
+
+    function plotRecoveryCurveChart(elementId, data, h) {
+      const ratio = h.numberSeries(data.restoration_ratio).map(v => v * 100);
+      const faults = resilienceFaultWindows(data).slice(0, 12);
+      const shapes = faults.map(f => ({
+        type: 'line', xref: 'x', yref: 'paper', x0: f.end, x1: f.end, y0: 0, y1: 1,
+        line: { color: '#22c55e', width: 1, dash: 'dot' },
+      }));
+      const annotations = faults.map(f => ({
+        x: f.end, y: 1, xref: 'x', yref: 'paper', yanchor: 'bottom', showarrow: false,
+        text: `${f.name} 修复`, textangle: -90, font: { size: 9, color: '#15803d' },
+      }));
+      plotResilienceChart(elementId, [
+        { x: h.x, y: ratio, mode: 'lines+markers', name: '供电率', line: { color: '#0f766e', width: 2 }, fill: 'tozeroy', fillcolor: 'rgba(15,118,110,0.12)' },
+      ], {
+        ...h.chartLayout('供电恢复轨迹与修复事件', '%'),
+        yaxis: { title: '%', gridcolor: '#d1d5db', linecolor: '#111827', tickcolor: '#111827', zerolinecolor: '#9ca3af', range: [0, 105] },
+        shapes, annotations,
+      }, h.cfg);
+    }
+
+    function plotRepairProgressChart(elementId, data, h) {
+      const faults = resilienceFaultWindows(data);
+      const total = faults.length;
+      const done = h.x.map(t => faults.filter(f => f.end <= t).length);
+      plotResilienceChart(elementId, [
+        { x: h.x, y: done, mode: 'lines', name: '累计修复故障数', line: { color: '#22c55e', shape: 'hv', width: 2 } },
+        { x: [h.x[0], h.x[h.x.length - 1]], y: [total, total], mode: 'lines', name: '故障总数', line: { color: '#6b7280', dash: 'dash' } },
+      ], { ...h.chartLayout('修复进度', '个'), yaxis: { ...h.chartLayout('', '个').yaxis, rangemode: 'tozero' } }, h.cfg);
+    }
+
+    function plotUnservedEnergyChart(elementId, data, h) {
+      const shed = h.numberSeries(data.shed_mw);
+      const cum = [];
+      shed.reduce((acc, v, i) => (cum[i] = acc + v, acc + v), 0);
+      plotResilienceChart(elementId, [
+        { x: h.x, y: cum, mode: 'lines', name: '累计未供电量', line: { color: '#e06c75', width: 2 }, fill: 'tozeroy', fillcolor: 'rgba(224,108,117,0.25)' },
+      ], h.chartLayout('累计未供电量', 'MWh'), h.cfg);
+    }
+
+    function plotMessPositionChart(elementId, data, h) {
+      const mess = Array.isArray(data.mess_traces) ? data.mess_traces : [];
+      const traces = mess.map((tr, idx) => ({
+        x: h.x.slice(0, (Array.isArray(tr.bus) ? tr.bus : []).length),
+        y: Array.isArray(tr.bus) ? tr.bus : [],
+        mode: 'lines+markers',
+        name: tr.name || `MESS ${tr.storage_index ?? idx + 1}`,
+        line: { shape: 'hv' },
+      })).filter(t => t.y.length);
+      plotResilienceChart(elementId, traces, {
+        ...h.chartLayout('移动储能位置轨迹', '母线 ID'),
+        annotations: traces.length ? [] : [{ text: '无移动储能位置数据', xref: 'paper', yref: 'paper', x: 0.5, y: 0.5, showarrow: false, font: { color: '#111827' } }],
+      }, h.cfg);
+    }
+
+    function plotMessEnergyChart(elementId, data, h) {
+      const mess = Array.isArray(data.mess_traces) ? data.mess_traces : [];
+      const traces = mess.map((tr, idx) => {
+        const name = tr.name || `MESS ${tr.storage_index ?? idx + 1}`;
+        const dispatch = Array.isArray(tr.dispatch_mw) ? tr.dispatch_mw.map(Number) : [];
+        const cum = [];
+        dispatch.reduce((acc, v, i) => (cum[i] = acc + Math.max(0, Number.isFinite(v) ? v : 0), cum[i]), 0);
+        return { x: h.x.slice(0, cum.length), y: cum, mode: 'lines', name: `${name} 累计供能` };
+      }).filter(t => t.y.length);
+      plotResilienceChart(elementId, traces, {
+        ...h.chartLayout('移动储能累计供能', 'MWh'),
+        annotations: traces.length ? [] : [{ text: '无移动储能出力数据', xref: 'paper', yref: 'paper', x: 0.5, y: 0.5, showarrow: false, font: { color: '#111827' } }],
+      }, h.cfg);
+    }
+
+    function plotResilienceRadarChart(elementId, data) {
+      const demand = Number(data.total_demand_mwh) || 0;
+      const faultCount = Array.isArray(data.fault_sequence) ? data.fault_sequence.length : 0;
+      const clamp01 = v => Math.max(0, Math.min(1, Number.isFinite(v) ? v : 0));
+      const dims = ['弹性指数', '最低供电率', '最终供电率', '修复完成率', '移储贡献率'];
+      const values = [
+        clamp01(Number(data.resilience_index)),
+        clamp01(resilienceMinSupplyRatio(data)),
+        clamp01(Number(data.final_restoration_ratio)),
+        faultCount ? clamp01((Number(data.total_repaired_faults) || 0) / faultCount) : 1,
+        demand > 0 ? clamp01((Number(data.mess_energy_delivered_mwh) || 0) / demand) : 0,
+      ];
+      plotResilienceChart(elementId, [{
+        type: 'scatterpolar', r: [...values, values[0]], theta: [...dims, dims[0]],
+        fill: 'toself', fillcolor: 'rgba(15,118,110,0.25)', line: { color: '#0f766e' },
+        hovertemplate: '%{theta}: %{r:.3f}<extra></extra>',
+      }], {
+        ...plotThemeRes('弹性指标雷达'),
+        polar: { radialaxis: { range: [0, 1], tickvals: [0.2, 0.4, 0.6, 0.8, 1.0], gridcolor: '#d1d5db', linecolor: '#111827', tickcolor: '#111827' } },
+        showlegend: false,
+      }, { responsive: true, displaylogo: false });
+    }
+
+    function plotEnergyWaterfallChart(elementId, data) {
+      const sumArr = arr => (Array.isArray(arr) ? arr : []).reduce((a, b) => a + (Number(b) || 0), 0);
+      const demand = Number(data.total_demand_mwh) || sumArr(data.demand_mw);
+      const totalShed = Number(data.total_shed_mwh) || sumArr(data.shed_mw);
+      const parts = [
+        ['关键切负荷', sumArr(data.shed_critical)],
+        ['高优先级切负荷', sumArr(data.shed_high)],
+        ['中优先级切负荷', sumArr(data.shed_medium)],
+        ['低优先级切负荷', sumArr(data.shed_low)],
+      ].filter(([, v]) => v > 0);
+      const drops = parts.length ? parts : (totalShed > 0 ? [['总切负荷', totalShed]] : []);
+      const labels = ['总需求', ...drops.map(([l]) => l), '实际供电'];
+      const values = [demand, ...drops.map(([, v]) => -v), Math.max(0, demand - totalShed)];
+      const measure = ['absolute', ...drops.map(() => 'relative'), 'total'];
+      plotResilienceChart(elementId, [{
+        type: 'waterfall', x: labels, y: values, measure,
+        increasing: { marker: { color: '#98c379' } },
+        decreasing: { marker: { color: '#e06c75' } },
+        totals: { marker: { color: '#61afef' } },
+        hovertemplate: '%{x}: %{y:.2f} MWh<extra></extra>',
+      }], { ...plotThemeRes('灾害期能量平衡', 'MWh'), showlegend: false }, { responsive: true, displaylogo: false });
+    }
+
+    function plotResilienceRunsChart(elementId) {
+      const runs = _resilienceComparisonRuns.slice(0, 8).reverse();
+      plotResilienceChart(elementId, [
+        { x: runs.map(r => r.time), y: runs.map(r => Number(r.resilience_index)), type: 'bar', name: '弹性指数', marker: { color: '#0f766e' } },
+        { x: runs.map(r => r.time), y: runs.map(r => Number(r.total_shed_mwh)), mode: 'lines+markers', name: '切负荷 (MWh)', yaxis: 'y2', line: { color: '#e06c75' } },
+      ], {
+        ...plotThemeRes('最近运行指标对比', '弹性指数'),
+        yaxis: { title: '弹性指数', gridcolor: '#d1d5db', linecolor: '#111827', tickcolor: '#111827', zerolinecolor: '#9ca3af', range: [0, 1.05] },
+        yaxis2: { title: 'MWh', overlaying: 'y', side: 'right', gridcolor: '#d1d5db', linecolor: '#111827', tickcolor: '#111827', rangemode: 'tozero' },
+        xaxis: { title: '', gridcolor: '#d1d5db', linecolor: '#111827', tickcolor: '#111827', zerolinecolor: '#9ca3af' },
+      }, { responsive: true, displaylogo: false });
+    }
+
+    function renderProactiveDefenseView(data) {
+      const container = document.getElementById('proactiveDefenseResults');
+      if (!container) return;
+      const nf = resilienceNumFmt;
+      const h = resilienceChartContext(data);
+      const faults = resilienceFaultWindows(data);
+      const faultCount = Array.isArray(data.fault_sequence) ? data.fault_sequence.length : null;
+      const sumArr = arr => (Array.isArray(arr) ? arr : []).reduce((a, b) => a + (Number(b) || 0), 0);
+      // 主动防御只覆盖灾中抵御本身：故障冲击、供电缺口与负荷缺供；
+      // 拓扑恢复/重构（开关动作、隔离与重构阶段）不在本视图呈现。
+      const kpiRows = [
+        ['故障总数', faultCount ?? '—'],
+        ['修复故障数', data.total_repaired_faults ?? '—'],
+        ['关键负荷缺供 (MWh)', nf(sumArr(data.shed_critical), 2)],
+        ['峰值切负荷 (MW)', nf(data.peak_shed_mw, 2)],
+        ['最低供电率 (%)', nf(resilienceMinSupplyRatio(data) * 100, 2)],
+      ];
+      const chartEntries = [];
+      if (h) chartEntries.push(['pdDefenseGapChart', true]);
+      if (faults.length) chartEntries.push(['pdFaultGanttChart', true]);
+      if (h && ['shed_critical', 'shed_high'].some(k => Array.isArray(data[k]))) {
+        chartEntries.push(['pdCriticalShedChart', false]);
+      }
+      if (h && ['shed_critical', 'shed_high', 'shed_medium', 'shed_low'].some(k => Array.isArray(data[k]))) {
+        chartEntries.push(['pdPriorityDonutChart', false]);
+      }
+      container.innerHTML = `
+        <div class="resilience-result-layout">
+          <div class="resilience-chart-pane">${chartEntries.length ? resilienceViewChartsHtml(chartEntries) : '<p class="empty-hint">暂无时序图表</p>'}</div>
+          <div class="resilience-detail-pane">
+            <h4 style="margin:0 0 4px;">灾中防御指标</h4>
+            <div class="resilience-detail-grid">
+              <div>${resilienceKpiTableHtml(kpiRows)}</div>
+              <div>${renderResilienceFaultSequenceTable(data) || '<p class="empty-hint compact-hint">暂无故障序列明细</p>'}</div>
+            </div>
+          </div>
+        </div>`;
+      if (h) {
+        plotDefenseGapChart('pdDefenseGapChart', data, h);
+        plotCriticalShedChart('pdCriticalShedChart', data, h);
+        plotPriorityShedDonut('pdPriorityDonutChart', data, h);
+      }
+      if (faults.length) plotFaultGanttChart('pdFaultGanttChart', data);
+    }
+
+    function renderRapidRecoveryView(data) {
+      const container = document.getElementById('rapidRecoveryResults');
+      if (!container) return;
+      const nf = resilienceNumFmt;
+      const h = resilienceChartContext(data);
+      const faults = resilienceFaultWindows(data);
+      const mess = Array.isArray(data.mess_traces) ? data.mess_traces : [];
+      const messHasDispatch = mess.some(tr => Array.isArray(tr.dispatch_mw) && tr.dispatch_mw.length);
+      const messHasBus = mess.some(tr => Array.isArray(tr.bus) && tr.bus.length);
+      const kpiRows = [
+        ['修复故障数', data.total_repaired_faults ?? '—'],
+        ['最终供电率 (%)', nf((data.final_restoration_ratio ?? 0) * 100, 2)],
+        ['总切负荷 (MWh)', nf(data.total_shed_mwh, 2)],
+        ['加权未供 (MWh)', nf(data.weighted_unserved_mwh, 2)],
+        ['移储供能 (MWh)', nf(data.mess_energy_delivered_mwh, 2)],
+        ['移储行程 (km)', nf(data.mess_travel_distance_km, 1)],
+      ];
+      const chartEntries = [];
+      if (h) chartEntries.push(['rrRecoveryCurveChart', true]);
+      if (h && faults.length) chartEntries.push(['rrRepairProgressChart', false]);
+      if (h) chartEntries.push(['rrUnservedEnergyChart', false]);
+      if (h && messHasDispatch) chartEntries.push(['rrMessEnergyChart', false]);
+      if (h && messHasBus) chartEntries.push(['rrMessPositionChart', false]);
+      container.innerHTML = `
+        <div class="resilience-result-layout">
+          <div class="resilience-chart-pane">${chartEntries.length ? resilienceViewChartsHtml(chartEntries) : '<p class="empty-hint">暂无时序图表</p>'}</div>
+          <div class="resilience-detail-pane">
+            <h4 style="margin:0 0 4px;">灾后恢复指标</h4>
+            <div class="resilience-detail-grid">
+              <div>${resilienceKpiTableHtml(kpiRows)}</div>
+              <div>${renderMessTrajectoryTable(data, nf)}</div>
+            </div>
+          </div>
+        </div>`;
+      if (!h) return;
+      plotRecoveryCurveChart('rrRecoveryCurveChart', data, h);
+      if (faults.length) plotRepairProgressChart('rrRepairProgressChart', data, h);
+      plotUnservedEnergyChart('rrUnservedEnergyChart', data, h);
+      if (messHasDispatch) plotMessEnergyChart('rrMessEnergyChart', data, h);
+      if (messHasBus) plotMessPositionChart('rrMessPositionChart', data, h);
+    }
+
+    function renderResilienceMetricsView(data) {
+      const container = document.getElementById('resilienceMetricsResults');
+      if (!container) return;
+      const nf = resilienceNumFmt;
+      const hasRuns = _resilienceComparisonRuns.length > 0;
+      const chartEntries = [['rmRadarChart', false], ['rmEnergyWaterfallChart', false]];
+      if (hasRuns) chartEntries.push(['rmRunsChart', true]);
+      container.innerHTML = `
+        <div class="resilience-result-layout">
+          <div class="resilience-chart-pane">${resilienceViewChartsHtml(chartEntries)}</div>
+          <div class="resilience-detail-pane">
+            <h4 style="margin:0 0 4px;">评估指标</h4>
+            <div class="resilience-detail-grid">
+              <div>${resilienceKpiTableHtml(buildResilienceKpiRows(data))}</div>
+              <div>${renderResilienceComparisonTable(nf) || '<p class="empty-hint compact-hint">暂无对比记录</p>'}</div>
+            </div>
+          </div>
+        </div>`;
+      plotResilienceRadarChart('rmRadarChart', data);
+      plotEnergyWaterfallChart('rmEnergyWaterfallChart', data);
+      if (hasRuns) plotResilienceRunsChart('rmRunsChart');
+    }
+
+    function showResilienceResults(data) {
+      document.getElementById('resultsEmpty').style.display = 'none';
+      document.getElementById('resultsContent').style.display = 'block';
+      setActiveResultGroup('resilience');
+      const nf = resilienceNumFmt;
+      updateResilienceComparisonRuns(data);
+      const summaryHtml = resilienceKpiTableHtml(buildResilienceKpiRows(data));
 
       let detailHtml = '';
       detailHtml += renderMessTrajectoryTable(data, nf);
       detailHtml += renderResilienceComparisonTable(nf);
-      if (Array.isArray(data.fault_sequence) && data.fault_sequence.length) {
-        detailHtml += '<h4 style="margin:0 0 4px;">故障序列</h4><table><thead><tr><th>#</th><th>类型</th><th>支路</th><th>开始(h)</th><th>修复(h)</th></tr></thead><tbody>';
-        const resBusMap = (typeof Canvas !== 'undefined' && Canvas.getCompBusMap) ? Canvas.getCompBusMap() : null;
-        data.fault_sequence.slice(0, 20).forEach((f, i) => {
-          const clk = busClickAttr(busIdFromComponentName(f.name), resBusMap);
-          detailHtml += `<tr${clk}><td>${i + 1}</td><td>${f.branch_type || f.branch_kind || 'AC'}</td><td>${f.name ?? f.branch_id ?? f.branch_index ?? f.branch ?? '—'}</td><td>${nf(f.start_hr, 1)}</td><td>${nf(f.repair_hr ?? f.repair_time_hr, 1)}</td></tr>`;
-        });
-        detailHtml += '</tbody></table>';
-      }
+      detailHtml += renderResilienceFaultSequenceTable(data);
       let chartsHtml = '';
       if (Array.isArray(data.hours) && data.hours.length) {
         chartsHtml = `
@@ -23372,9 +24445,10 @@ const App = (() => {
       const intensityLevels = ['TD', 'TS', 'STS', 'TY', 'STY', 'SuperTY'];
       const sspLevels = ['ssp126', 'ssp245', 'ssp370', 'ssp585'];
       const years = [2050, 2080];
+      const resilienceOnly = _editionProfile?.edition === 'resilience';
       return {
         regular: {
-          enabled: scenChecked('scenRegularEnabled', true),
+          enabled: resilienceOnly ? false : scenChecked('scenRegularEnabled', true),
           candidate_count: regularClusters * 10 * sspLevels.length * years.length,
           cluster_count: regularClusters,
           num_steps: 8760,
@@ -23384,7 +24458,7 @@ const App = (() => {
           years,
         },
         reliability: {
-          enabled: scenChecked('scenReliabilityEnabled', true),
+          enabled: resilienceOnly ? false : scenChecked('scenReliabilityEnabled', true),
           candidates_per_contingency: reliabilityClusters * 10,
           cluster_count_per_contingency: reliabilityClusters,
           num_steps: 1,
@@ -23402,7 +24476,7 @@ const App = (() => {
           max_contingencies: 0,
         },
         resilience: {
-          enabled: scenChecked('scenResilienceEnabled', true),
+          enabled: true,
           intensity_levels: intensityLevels,
           candidates_per_intensity: resilienceClusters * 10,
           default_cluster_count: resilienceClusters,
@@ -24041,9 +25115,12 @@ const App = (() => {
     }
 
     function chooseGeneratedScenarioCase(cases, targetFamily) {
-      const matched = cases.filter(c => !targetFamily || generatedScenarioCaseMetadata(c)?.family === targetFamily);
-      const choices = matched.length ? matched : cases;
-      if (!choices.length) throw new Error('生成场景文件中没有可导入 case');
+      const choices = cases.filter(c => !targetFamily || generatedScenarioCaseMetadata(c)?.family === targetFamily);
+      if (!choices.length) {
+        throw new Error(targetFamily
+          ? `生成场景文件中没有 ${targetFamily} 类型的可导入场景`
+          : '生成场景文件中没有可导入 case');
+      }
       if (choices.length === 1) return choices[0];
 
       const defaultIndex = targetFamily === 'resilience'
@@ -24074,10 +25151,35 @@ const App = (() => {
     function firstCaseFromGeneratedScenarioJson(obj, targetFamily) {
       const allowedBundleFormats = new Set(['generated_scenario_case_bundle_v1', 'generated_scenario_case_bundle_v2', 'generated_scenario_case_bundle_v3']);
       if (allowedBundleFormats.has(obj?.format) && Array.isArray(obj.cases)) {
+        if (targetFamily && typeof obj.family === 'string' && obj.family !== targetFamily) {
+          throw new Error(`生成场景文件类型不匹配：需要 ${targetFamily}，实际为 ${obj.family}`);
+        }
         return normalizeGeneratedScenarioCaseShape(chooseGeneratedScenarioCase(obj.cases, targetFamily));
       }
-      if (obj && (obj.ac || obj.dc || obj.system)) return normalizeGeneratedScenarioCaseShape(obj);
+      if (obj && (obj.ac || obj.dc || obj.system)) {
+        const normalized = normalizeGeneratedScenarioCaseShape(obj);
+        const family = generatedScenarioCaseMetadata(normalized)?.family;
+        if (targetFamily && family !== targetFamily) {
+          throw new Error(`生成场景文件类型不匹配：需要 ${targetFamily}，实际为 ${family || 'unknown'}`);
+        }
+        return normalized;
+      }
       throw new Error('不是有效的生成场景 JSON 或系统算例 JSON');
+    }
+
+    function generatedScenarioSystemForBackend(caseJson) {
+      const systemJson = deepCloneJson(generatedScenarioCaseSystem(caseJson) || {});
+      if (!systemJson || (!systemJson.ac && !systemJson.dc)) {
+        throw new Error('生成场景缺少可导入的 AC/DC 系统模型');
+      }
+      delete systemJson._generated_scenario;
+      delete systemJson.generated_scenario;
+      delete systemJson._time_series;
+      delete systemJson.standard_time_series;
+      delete systemJson.resilience_event;
+      delete systemJson.generated_faults;
+      delete systemJson.manual_faults;
+      return systemJson;
     }
 
     function fillResilienceInputsFromScenario(caseJson) {
@@ -24116,45 +25218,45 @@ const App = (() => {
         const text = await readFileAsText(file);
         const parsed = JSON.parse(text);
         const caseJson = deepCloneJson(firstCaseFromGeneratedScenarioJson(parsed, targetFamily));
-        normalizeGeneratedScenarioCarbonFields(caseJson);
-        const family = caseJson?._generated_scenario?.family || 'unknown';
-        const data = await apiPost('/api/session/load_json_string', { json_string: JSON.stringify(caseJson) });
-        if (!data) throw new Error('导入系统失败');
-        Canvas.loadFromSystemJson(caseJson);
+        const systemJson = generatedScenarioSystemForBackend(caseJson);
+        normalizeGeneratedScenarioCarbonFields(systemJson);
+        const family = generatedScenarioCaseMetadata(caseJson)?.family || 'unknown';
+        const result = await apiPostResult('/api/session/load_json_string', {
+          json_string: JSON.stringify(systemJson),
+        }, { quiet: true });
+        if (!result?.ok) throw new Error(describeError(result?.error ?? result?.data, '导入系统失败'));
+        Canvas.loadFromSystemJson(systemJson);
         _canvasDirty = false;
         updateResilienceSwitchDefault();
         _importedGeneratedScenario = { family, case: caseJson };
-        _lastImportedGeneratedScenarioKey = caseJson?._generated_scenario?.representative_id || caseJson?.name || '';
+        _lastImportedGeneratedScenarioKey = generatedScenarioCaseMetadata(caseJson)?.representative_id || systemJson.name || '';
         _lastTspfData = null;
         const target = targetFamily || family;
+        const hasScenarioTimeSeries = isUsableScenarioTimeSeries(generatedScenarioCaseTimeSeries(caseJson));
         let restoredTs = false;
-        const targetUsesScenarioTs = target === 'regular' || target === 'resilience';
-        if (targetUsesScenarioTs) {
+        if (_editionProfile?.edition === 'full' && hasScenarioTimeSeries &&
+            (target === 'regular' || target === 'resilience')) {
           restoredTs = await applyGeneratedScenarioTimeSeries(caseJson);
-        }
-        if (!targetUsesScenarioTs) {
-          const regCb = document.getElementById('regUseScenarioTimeSeries');
-          if (regCb) regCb.checked = false;
         }
         if (target === 'regular' || family === 'regular') {
           const cb = document.getElementById('regUseScenarioTimeSeries');
-          if (cb) cb.checked = restoredTs;
-          if (!restoredTs) log('导入的常规生成场景不含可用时序，已保持“使用场景时序”未勾选', 'warn');
+          if (cb) cb.checked = _editionProfile?.edition === 'full' ? restoredTs : hasScenarioTimeSeries;
+          if (!hasScenarioTimeSeries) log('导入的常规生成场景不含可用时序，已保持“使用场景时序”未勾选', 'warn');
         }
         if (family === 'resilience' || targetFamily === 'resilience') {
           fillResilienceInputsFromScenario(caseJson);
           const cb = document.getElementById('resUseScenarioTimeSeries');
-          if (cb) cb.checked = true;
-          if (!restoredTs) log('导入的弹性生成场景不含可用时序；弹性分析仍将按 48h 默认时域运行', 'warn');
+          if (cb) cb.checked = hasScenarioTimeSeries;
+          if (!hasScenarioTimeSeries) log('导入的弹性生成场景不含可用时序；弹性分析仍将按 48h 默认时域运行', 'warn');
         }
         if (family === 'reliability' || targetFamily === 'reliability') {
-          const cont = caseJson?._generated_scenario?.contingency;
+          const cont = generatedScenarioCaseMetadata(caseJson)?.contingency;
           if (cont) log(`已导入可靠性代表场景（N-1 静态断面）：${cont.type || ''} ${cont.display_name || cont.id || ''}`, 'info');
         }
-        log(`已导入生成场景：${caseJson?._generated_scenario?.representative_id || caseJson.name || file.name}${restoredTs ? '，并恢复时序配置' : ''}`, 'success');
+        log(`已导入生成场景：${generatedScenarioCaseMetadata(caseJson)?.representative_id || systemJson.name || file.name}${hasScenarioTimeSeries ? '，并保留场景时序' : ''}`, 'success');
         setStatus('生成场景已导入');
       } catch (err) {
-        log(`导入生成场景失败：${err.message || err}`, 'error');
+        log(`导入生成场景失败：${describeError(err)}`, 'error');
         setStatus('导入生成场景失败', 'error');
       }
     }
@@ -24162,16 +25264,22 @@ const App = (() => {
     function renderScenarioGenerationCharts(data) {
       const chartsDiv = document.getElementById('scenarioGenerationCharts');
       if (!chartsDiv) return;
-      chartsDiv.innerHTML = `
-        <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(320px,1fr));gap:12px;margin-bottom:16px;">
-          <div id="scenarioChartRegular" class="tspf-chart" style="min-height:340px;"></div>
-          <div id="scenarioChartReliability" class="tspf-chart" style="min-height:340px;"></div>
-          <div id="scenarioChartResilience" class="tspf-chart" style="min-height:340px;"></div>
-          <div id="scenarioChartRegularCurves" class="tspf-chart" style="min-height:360px;"></div>
-          <div id="scenarioChartReliabilityBars" class="tspf-chart" style="min-height:360px;"></div>
-          <div id="scenarioChartResilienceCurves" class="tspf-chart" style="min-height:360px;"></div>
-          <div id="scenarioChartFaultSequence" class="tspf-chart" style="min-height:360px;"></div>
-        </div>`;
+      const resilienceOnly = _editionProfile?.edition === 'resilience';
+      chartsDiv.innerHTML = resilienceOnly
+        ? `<div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(320px,1fr));gap:12px;margin-bottom:16px;">
+            <div id="scenarioChartResilience" class="tspf-chart" style="min-height:340px;"></div>
+            <div id="scenarioChartResilienceCurves" class="tspf-chart" style="min-height:360px;"></div>
+            <div id="scenarioChartFaultSequence" class="tspf-chart" style="min-height:360px;"></div>
+          </div>`
+        : `<div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(320px,1fr));gap:12px;margin-bottom:16px;">
+            <div id="scenarioChartRegular" class="tspf-chart" style="min-height:340px;"></div>
+            <div id="scenarioChartReliability" class="tspf-chart" style="min-height:340px;"></div>
+            <div id="scenarioChartResilience" class="tspf-chart" style="min-height:340px;"></div>
+            <div id="scenarioChartRegularCurves" class="tspf-chart" style="min-height:360px;"></div>
+            <div id="scenarioChartReliabilityBars" class="tspf-chart" style="min-height:360px;"></div>
+            <div id="scenarioChartResilienceCurves" class="tspf-chart" style="min-height:360px;"></div>
+            <div id="scenarioChartFaultSequence" class="tspf-chart" style="min-height:360px;"></div>
+          </div>`;
       if (!window.Plotly) {
         chartsDiv.insertAdjacentHTML('afterbegin', '<p class="empty-hint">Plotly 未加载，无法展示图表。</p>');
         return;
@@ -24260,11 +25368,13 @@ const App = (() => {
           features: s.features || {},
         };
       });
-      plotCoverage('scenarioChartRegular', regularAll, regularSelected, {
-        allName: '全部候选样本',
-        renewableTitle: '常规场景二维覆盖：负荷不确定性 × 新能源不确定性（小圈=全部样本，红圈=聚类代表）',
-        loadOnlyTitle: '常规场景负荷聚类覆盖：负荷总量 × 峰值负荷（当前算例无新能源）',
-      });
+      if (!resilienceOnly) {
+        plotCoverage('scenarioChartRegular', regularAll, regularSelected, {
+          allName: '全部候选样本',
+          renewableTitle: '常规场景二维覆盖：负荷不确定性 × 新能源不确定性（小圈=全部样本，红圈=聚类代表）',
+          loadOnlyTitle: '常规场景负荷聚类覆盖：负荷总量 × 峰值负荷（当前算例无新能源）',
+        });
+      }
 
       const relGroups = data.reliability?.contingencies || [];
       const relSamples = data.reliability?.audit?.coverage_samples || [];
@@ -24295,11 +25405,13 @@ const App = (() => {
         name: s.contingency?.display_name || s.contingency?.id || s.id || '',
         features: s.features || {},
       }));
-      plotCoverage('scenarioChartReliability', relAll, relSelected, {
-        allName: '全部N-1候选样本',
-        renewableTitle: '可靠性场景二维覆盖：负荷不确定性 × 新能源不确定性（小圈=全部样本，红圈=聚类代表）',
-        loadOnlyTitle: '可靠性场景负荷扰动覆盖：负荷总量 × 峰值负荷（当前算例无新能源）',
-      });
+      if (!resilienceOnly) {
+        plotCoverage('scenarioChartReliability', relAll, relSelected, {
+          allName: '全部N-1候选样本',
+          renewableTitle: '可靠性场景二维覆盖：负荷不确定性 × 新能源不确定性（小圈=全部样本，红圈=聚类代表）',
+          loadOnlyTitle: '可靠性场景负荷扰动覆盖：负荷总量 × 峰值负荷（当前算例无新能源）',
+        });
+      }
 
       const resGroups = data.resilience?.intensities || [];
       const resSamples = data.resilience?.audit?.coverage_samples || [];
@@ -24356,7 +25468,7 @@ const App = (() => {
 
       const regularRepresentatives = regularClusters.map(c => c.representative).filter(Boolean);
       const relRepresentatives = relGroups.flatMap(g => (g.clusters || []).map(c => c.representative).filter(Boolean));
-      const firstRegular = regularClusters[0]?.representative;
+      const firstRegular = resilienceOnly ? null : regularClusters[0]?.representative;
       if (firstRegular) {
         const load = scenarioCandidateProfileValues(firstRegular, 'total_load_mw').slice(0, 168);
         const pv = scenarioCandidateProfileValues(firstRegular, 'pv_mw').slice(0, 168);
@@ -24372,7 +25484,7 @@ const App = (() => {
           { ...theme, title: hasRenCurve ? '常规代表场景风/光/负荷曲线（前168小时）' : '常规代表场景负荷曲线（前168小时，当前算例无新能源）', xaxis: { title: '小时' }, yaxis: { title: 'MW', rangemode: 'tozero' } }, { responsive: true });
       }
 
-      const firstRel = relGroups.find(g => (g.clusters || []).length)?.clusters?.[0]?.representative;
+      const firstRel = resilienceOnly ? null : relGroups.find(g => (g.clusters || []).length)?.clusters?.[0]?.representative;
       if (firstRel) {
         const names = ['负荷', '光伏', '风电'];
         const values = ['total_load_mw', 'pv_mw', 'wind_mw'].map(name => scenarioCandidateProfileValues(firstRel, name)[0] || 0);
@@ -24443,12 +25555,6 @@ const App = (() => {
       const regularAudit = data.regular?.audit || {};
       const regularPerGroup = regularAudit.requested_cluster_count_per_ssp_year ?? '-';
       const regularGroups = regularAudit.group_count ?? '-';
-      summaryDiv.innerHTML = `
-        <div class="result-item"><span class="result-label">常规候选/总聚类</span><span class="result-value">${summary.regular_candidate_count ?? 0} / ${summary.regular_cluster_count ?? 0}</span></div>
-        <div class="result-item"><span class="result-label">常规每组×组数</span><span class="result-value">${regularPerGroup} × ${regularGroups}</span></div>
-        <div class="result-item"><span class="result-label">可靠性FMEA N-1/聚类</span><span class="result-value">${summary.reliability_contingency_count ?? 0} / ${summary.reliability_cluster_total ?? 0}</span></div>
-        <div class="result-item"><span class="result-label">台风划分集合/聚类</span><span class="result-value">${summary.resilience_intensity_count ?? 0} / ${summary.resilience_cluster_total ?? 0}</span></div>
-      `;
       const warningHtml = Array.isArray(data.warnings) && data.warnings.length
         ? `<div style="margin-bottom:10px;color:#b45309;"><strong>Warnings:</strong> ${data.warnings.map(escapeHtml).join('；')}</div>`
         : '';
@@ -24475,17 +25581,28 @@ const App = (() => {
         const faultTimeText = faultTimes.length ? faultTimes.slice(0, 6).map(v => v.toFixed(1)).join(', ') + (faultTimes.length > 6 ? '...' : '') : '-';
         return `<tr><td>${escapeHtml(g.intensity || '')}</td><td>${g.candidate_count ?? 0}</td><td>${g.cluster_count ?? 0}</td><td>${escapeHtml(top.representative_id || '')}</td><td>${escapeHtml(event.selected_intensity || '')}</td><td>${maxWind > 0 ? maxWind.toFixed(2) : '-'}</td><td>${escapeHtml(String(event.month || '-'))} / ${escapeHtml(event.selected_sample_id || '-')}</td><td>${faultCount}</td><td>${firstFault}</td><td>${escapeHtml(faultTimeText)}</td></tr>`;
       })).join('');
-      div.innerHTML = `
-        ${warningHtml}
-        <h4>常规全年代表场景（8760h）</h4>
-        <table><thead><tr><th>簇</th><th>代表场景</th><th>概率</th><th>成员数</th><th>负荷总量/峰值</th><th>新能源总量/峰值</th></tr></thead><tbody>${regularRows || '<tr><td colspan="6" style="color:#888">未生成常规场景</td></tr>'}</tbody></table>
-        <h4>可靠性 N-1 单断面场景</h4>
-        <p class="empty-hint">可靠性覆盖图采用二维映射：x=负荷特征，y=新能源出力特征。</p>
-        ${relMore}
-        <table><thead><tr><th>N-1 ID</th><th>类型</th><th>元件</th><th>候选</th><th>聚类</th><th>首簇概率</th><th>首簇负荷摘要</th><th>首簇新能源摘要</th></tr></thead><tbody>${relRows || '<tr><td colspan="8" style="color:#888">未生成可靠性场景</td></tr>'}</tbody></table>
+      const resilienceTable = `
         <h4>弹性台风代表场景（48h，一次扰动+台风二次扰动）</h4>
-        <table><thead><tr><th>划分后强度集合</th><th>候选</th><th>聚类</th><th>代表场景</th><th>分类强度</th><th>最大风速(m/s，不含t0)</th><th>月份/sample</th><th>故障数</th><th>首故障(h)</th><th>故障时刻(h)</th></tr></thead><tbody>${resRows || '<tr><td colspan="10" style="color:#888">未生成弹性场景</td></tr>'}</tbody></table>
-      `;
+        <table><thead><tr><th>划分后强度集合</th><th>候选</th><th>聚类</th><th>代表场景</th><th>分类强度</th><th>最大风速(m/s，不含t0)</th><th>月份/sample</th><th>故障数</th><th>首故障(h)</th><th>故障时刻(h)</th></tr></thead><tbody>${resRows || '<tr><td colspan="10" style="color:#888">未生成弹性场景</td></tr>'}</tbody></table>`;
+      const resilienceOnly = _editionProfile?.edition === 'resilience';
+      summaryDiv.innerHTML = resilienceOnly
+        ? `<div class="result-item"><span class="result-label">台风划分集合/聚类</span><span class="result-value">${summary.resilience_intensity_count ?? 0} / ${summary.resilience_cluster_total ?? 0}</span></div>`
+        : `
+          <div class="result-item"><span class="result-label">常规候选/总聚类</span><span class="result-value">${summary.regular_candidate_count ?? 0} / ${summary.regular_cluster_count ?? 0}</span></div>
+          <div class="result-item"><span class="result-label">常规每组×组数</span><span class="result-value">${regularPerGroup} × ${regularGroups}</span></div>
+          <div class="result-item"><span class="result-label">可靠性FMEA N-1/聚类</span><span class="result-value">${summary.reliability_contingency_count ?? 0} / ${summary.reliability_cluster_total ?? 0}</span></div>
+          <div class="result-item"><span class="result-label">台风划分集合/聚类</span><span class="result-value">${summary.resilience_intensity_count ?? 0} / ${summary.resilience_cluster_total ?? 0}</span></div>`;
+      div.innerHTML = resilienceOnly
+        ? `${warningHtml}${resilienceTable}`
+        : `
+          ${warningHtml}
+          <h4>常规全年代表场景（8760h）</h4>
+          <table><thead><tr><th>簇</th><th>代表场景</th><th>概率</th><th>成员数</th><th>负荷总量/峰值</th><th>新能源总量/峰值</th></tr></thead><tbody>${regularRows || '<tr><td colspan="6" style="color:#888">未生成常规场景</td></tr>'}</tbody></table>
+          <h4>可靠性 N-1 单断面场景</h4>
+          <p class="empty-hint">可靠性覆盖图采用二维映射：x=负荷特征，y=新能源出力特征。</p>
+          ${relMore}
+          <table><thead><tr><th>N-1 ID</th><th>类型</th><th>元件</th><th>候选</th><th>聚类</th><th>首簇概率</th><th>首簇负荷摘要</th><th>首簇新能源摘要</th></tr></thead><tbody>${relRows || '<tr><td colspan="8" style="color:#888">未生成可靠性场景</td></tr>'}</tbody></table>
+          ${resilienceTable}`;
       renderScenarioCurveSelectors(data);
       renderComponentCurveTargets('scenario');
       const renderCharts = () => renderScenarioGenerationCharts(data);
@@ -24504,7 +25621,7 @@ const App = (() => {
       try {
         payload = collectScenarioGenerationOptions();
       } catch (err) {
-        log(`场景参数错误：${err.message}`, 'warn');
+        log(`场景参数错误：${describeError(err)}`, 'warn');
         setStatus('场景参数错误', 'error');
         return;
       }
@@ -24536,10 +25653,13 @@ const App = (() => {
         }, 200);
         const totalElapsedMs = performance.now() - startedAt;
         const backendMs = Number(data._performance?.generation_ms);
-        log(`场景生成完成：常规${data.summary?.regular_cluster_count ?? 0}簇，可靠性${data.summary?.reliability_contingency_count ?? 0}个N-1，弹性${data.summary?.resilience_cluster_total ?? 0}簇；请求${requestElapsedMs.toFixed(0)}ms${Number.isFinite(backendMs) ? `，后端${backendMs.toFixed(0)}ms` : ''}，总计${totalElapsedMs.toFixed(0)}ms`, 'success');
+        const generationText = _editionProfile?.edition === 'resilience'
+          ? `弹性${data.summary?.resilience_cluster_total ?? 0}簇`
+          : `常规${data.summary?.regular_cluster_count ?? 0}簇，可靠性${data.summary?.reliability_contingency_count ?? 0}个N-1，弹性${data.summary?.resilience_cluster_total ?? 0}簇`;
+        log(`场景生成完成：${generationText}；请求${requestElapsedMs.toFixed(0)}ms${Number.isFinite(backendMs) ? `，后端${backendMs.toFixed(0)}ms` : ''}，总计${totalElapsedMs.toFixed(0)}ms`, 'success');
         setStatus('场景生成完成');
       } catch (err) {
-        log(`场景生成失败：${err.message || err}`, 'error');
+        log(`场景生成失败：${describeError(err)}`, 'error');
         setStatus('场景生成失败', 'error');
       } finally {
         if (button) button.disabled = false;
@@ -24552,7 +25672,7 @@ const App = (() => {
         const ok = downloadJsonFile(`${family}_generated_scenarios_${tsTagForFilename()}.json`, bundle, { compact: family === 'regular' });
         if (ok) log(`${label}可导入场景已生成：${bundle.case_count} 个代表场景`, 'success');
       } catch (err) {
-        log(`${label}场景导出失败：${err.message || err}`, 'warn');
+        log(`${label}场景导出失败：${describeError(err)}`, 'warn');
       }
     }
 
@@ -25286,17 +26406,21 @@ const App = (() => {
     // ---- Toolbar default state ----
     Canvas.setMode('select');
     setActiveCanvasTool('btnSelect');
-    if (_editionProfile.edition === 'trial') {
-      applyTrialEditionProfile();
-      setActiveModule('modelIO');
-    } else {
-      setActiveModule(window.HySimMarketNavigation?.moduleFromHash() || 'powerFlow');
-    }
+    // Capability pruning and the initial module were resolved before the shell
+    // became interactive. Re-applying the validated module is harmless and keeps
+    // canvas-derived result controls synchronized after Canvas.init().
+    setActiveModule(initialModule);
     updateDependencyChips();
+    if (_editionProfile.edition === 'trial') void updateTrialAnalysisPlan();
 
     // First-visit onboarding tour (skipped once localStorage marks it done;
     // replayable anytime from the 帮助 menu).
     maybeStartTour();
+    } catch (error) {
+      const message = error?.message || '应用初始化失败';
+      console.error(message);
+      setStartupState('unavailable', message);
+    }
   }
 
   // ========== Onboarding Tour & Help Menu ==========

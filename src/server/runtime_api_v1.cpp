@@ -1,5 +1,7 @@
 #include "runtime_api_v1.hpp"
 
+#include "edition_profile.hpp"
+
 #include <algorithm>
 #include <array>
 #include <chrono>
@@ -1178,6 +1180,15 @@ opf::DCOPFOptions dc_opf_options(const json& request) {
 json execute_analysis(const HybridPowerSystem& system,
                       const std::string& analysis,
                       const json& request) {
+  const auto decision = classify_v1_analysis(analysis);
+  if (decision.access != V1AnalysisAccess::Enabled) {
+    throw std::invalid_argument(
+        decision.access == V1AnalysisAccess::KnownDisabled
+            ? "analysis is not enabled in the " +
+                  std::string(edition_name(current_edition())) +
+                  " edition: " + analysis
+            : "unsupported v1 analysis: " + analysis);
+  }
   if (analysis == "power_flow") {
     const std::string method =
         request.value("method", std::string("ac_newton"));
@@ -1655,6 +1666,15 @@ class JobManager {
         ++job->version;
       }
       try {
+        const auto decision = classify_v1_analysis(job->analysis);
+        if (decision.access != V1AnalysisAccess::Enabled) {
+          throw std::runtime_error(
+              decision.access == V1AnalysisAccess::KnownDisabled
+                  ? "analysis was disabled by the active edition before execution: " +
+                        job->analysis
+                  : "unknown runtime API v1 analysis reached the worker: " +
+                        job->analysis);
+        }
         json result = executor_(job->system_snapshot, job->analysis, job->request);
         std::lock_guard<std::mutex> lock(job->mutex);
         job->finished_at = utc_now();
@@ -1782,7 +1802,8 @@ void RuntimeApiV1::register_routes(httplib::Server& server) {
                {"multi_session", "model_revision", "etag",
                 "asynchronous_jobs", "topology_lod", "spatial_chunks",
                 "time_chunks"}},
-              {"analyses", {"power_flow", "optimal_power_flow"}},
+              {"analyses", edition_analyses_json()},
+              {"known_disabled_analyses", edition_known_disabled_analyses_json()},
               {"limits",
                {{"sessions", kMaxSessions}, {"retained_jobs", kMaxJobs}}}});
   });
@@ -1950,9 +1971,18 @@ void RuntimeApiV1::register_routes(httplib::Server& server) {
       }
       const json body = parse_body(request);
       const std::string analysis = body.value("analysis", std::string());
-      if (analysis != "power_flow" && analysis != "optimal_power_flow") {
+      const auto analysis_decision = classify_v1_analysis(analysis);
+      if (analysis_decision.access == V1AnalysisAccess::KnownDisabled) {
+        set_error(response, 403, "edition_feature_disabled",
+                  "analysis is not enabled in this edition",
+                  {{"edition", edition_name(current_edition())},
+                   {"feature", analysis_decision.feature}});
+        return;
+      }
+      if (analysis_decision.access == V1AnalysisAccess::Unknown) {
         set_error(response, 400, "unsupported_analysis",
-                  "analysis must be power_flow or optimal_power_flow");
+                  "analysis is not supported by runtime API v1",
+                  {{"supported_analyses", edition_analyses_json()}});
         return;
       }
       const json analysis_request = body.value("request", json::object());

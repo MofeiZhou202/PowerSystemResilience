@@ -27,6 +27,21 @@ endif()
 option(HACDCPF_BUILD_TESTS    "Build unit/integration tests"               ON)
 option(HACDCPF_TRIAL_EDITION
        "Build the capability-gated Trial GUI server"                       OFF)
+option(HACDCPF_RESILIENCE_EDITION
+       "Build the capability-gated Resilience GUI server"                  OFF)
+option(HACDCPF_ENABLE_SOURCE_RESOURCE_FALLBACK
+       "Allow development binaries to resolve runtime resources from the source tree"
+       ON)
+if((HACDCPF_TRIAL_EDITION OR HACDCPF_RESILIENCE_EDITION) AND
+   HACDCPF_ENABLE_SOURCE_RESOURCE_FALLBACK)
+  message(FATAL_ERROR
+    "Restricted editions must set HACDCPF_ENABLE_SOURCE_RESOURCE_FALLBACK=OFF.")
+endif()
+if(HACDCPF_TRIAL_EDITION AND HACDCPF_RESILIENCE_EDITION)
+  message(FATAL_ERROR
+    "HACDCPF_TRIAL_EDITION and HACDCPF_RESILIENCE_EDITION are mutually "
+    "exclusive. Configure one edition per build directory.")
+endif()
 option(HACDCPF_ENABLE_IPO
        "Enable IPO for a dedicated production build without tests"        OFF)
 if(HACDCPF_ENABLE_IPO AND HACDCPF_BUILD_TESTS)
@@ -596,9 +611,10 @@ if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang|AppleClang")
 endif()
 
 # ── Compile definitions ───────────────────────────────────────────────────────
-target_compile_definitions(hacdcpf PRIVATE
-  HACDCPF_PROJECT_ROOT="${CMAKE_SOURCE_DIR}"
-)
+if(HACDCPF_ENABLE_SOURCE_RESOURCE_FALLBACK)
+  target_compile_definitions(hacdcpf PRIVATE
+    HACDCPF_PROJECT_ROOT="${CMAKE_SOURCE_DIR}")
+endif()
 foreach(_hacdcpf_mipsolvers_capability
         HACDCPF_MIPSOLVERS_HAVE_SCUC_CROSS_ROUND_STATE
         HACDCPF_MIPSOLVERS_HAVE_STRICT_HIGHS_ADAPTER

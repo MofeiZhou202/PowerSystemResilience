@@ -20,7 +20,7 @@
         "HACDCPF_USE_SUITESPARSE": "ON",
         "HACDCPF_USE_GUROBI": "ON",
         "HACDCPF_USE_PAPILO": "ON",
-        "MIPSOLVERS_SOURCE_DIR": "${sourceDir}/../MIPSolvers"
+        "MIPSOLVERS_SOURCE_DIR": "${sourceDir}/MIPSolvers"
       }
     },
     {
@@ -56,8 +56,11 @@
         "MIPSOLVERS_MKL_THREADING": "SEQUENTIAL",
         "MIPSOLVERS_ENABLE_IPO": "OFF",
         "HACDCPF_TRIAL_EDITION": "OFF",
+        "HACDCPF_RESILIENCE_EDITION": "OFF",
         "MIPSOLVERS_USE_PREBUILT_THIRD_PARTY": "ON",
-        "MIPSOLVERS_PREBUILT_THIRD_PARTY_PREFIX": "${sourceDir}/../MIPSolvers/third_party/install",
+        "MIPSOLVERS_PREBUILT_THIRD_PARTY_PREFIX": "${sourceDir}/build/windows-dependencies/mipsolvers-third-party",
+        "MIPSOLVERS_MKL_ROOT": "${sourceDir}/build/windows-dependencies/oneapi-mkl",
+        "ZLIB_ROOT": "${sourceDir}/build/windows-dependencies/zlib",
         "CMAKE_MSVC_RUNTIME_LIBRARY": "MultiThreaded$<$<CONFIG:Debug>:Debug>DLL"
       },
       "environment": {
@@ -70,9 +73,18 @@
       "inherits": "windows-msvc-release",
       "binaryDir": "${sourceDir}/build/windows-source-release",
       "cacheVariables": {
-        "MIPSOLVERS_USE_PREBUILT_THIRD_PARTY": "OFF",
-        "MIPSOLVERS_MKL_ROOT": "${sourceDir}/../MIPSolvers/third_party/oneapi-mkl",
-        "ZLIB_ROOT": "${sourceDir}/../MIPSolvers/third_party/zlib-install"
+        "MIPSOLVERS_USE_PREBUILT_THIRD_PARTY": "OFF"
+      }
+    },
+    {
+      "name": "windows-resilience-release",
+      "displayName": "Windows Resilience Edition Release",
+      "inherits": "windows-source-release",
+      "binaryDir": "${sourceDir}/build/windows-resilience-release",
+      "cacheVariables": {
+        "HACDCPF_RESILIENCE_EDITION": "ON",
+        "HACDCPF_TRIAL_EDITION": "OFF",
+        "HACDCPF_ENABLE_SOURCE_RESOURCE_FALLBACK": "OFF"
       }
     },
     {
@@ -95,6 +107,8 @@
       "binaryDir": "${sourceDir}/build/windows-trial-release",
       "cacheVariables": {
         "HACDCPF_TRIAL_EDITION": "ON",
+        "HACDCPF_RESILIENCE_EDITION": "OFF",
+        "HACDCPF_ENABLE_SOURCE_RESOURCE_FALLBACK": "OFF",
         "HACDCPF_ENABLE_IPO": "OFF",
         "HACDCPF_ENABLE_ETAP": "OFF",
         "HACDCPF_ENABLE_OPENDSS": "ON",
@@ -134,6 +148,12 @@
     {
       "name": "windows-source-release",
       "configurePreset": "windows-source-release",
+      "configuration": "Release",
+      "jobs": 6
+    },
+    {
+      "name": "windows-resilience-release",
+      "configurePreset": "windows-resilience-release",
       "configuration": "Release",
       "jobs": 6
     },
@@ -181,6 +201,14 @@
     {
       "name": "windows-source-release",
       "configurePreset": "windows-source-release",
+      "configuration": "Release",
+      "output": {
+        "outputOnFailure": true
+      }
+    },
+    {
+      "name": "windows-resilience-release",
+      "configurePreset": "windows-resilience-release",
       "configuration": "Release",
       "output": {
         "outputOnFailure": true

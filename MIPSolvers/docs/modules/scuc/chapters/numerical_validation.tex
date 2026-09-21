@@ -1,0 +1,145 @@
+% numerical_validation.tex —— scuc 数值验证证据
+% 规范：docs/modules/README.md 数值证据规范——只引用真实存在的测试目标、
+% 基线文件与可复现命令；未执行的交叉验证不得写成已完成。
+
+\section{数值验证}
+
+\subsection{测试目标注册（CMake 事实）}
+
+根 \texttt{CMakeLists.txt} 注册两个覆盖本模块的测试可执行文件（均要求
+\texttt{MIPSOLVERS\_BUILD\_SCUC=ON}，默认开；运行时目录为 \texttt{tests/}）：
+
+\begin{center}
+\begin{footnotesize}
+\begin{tabular}{@{}llll@{}}
+\toprule
+\textbf{目标} & \textbf{源文件} & \textbf{ctest 标签} & \textbf{说明}\\
+\midrule
+\texttt{test\_scuc\_module} & \srcpath{tests/test\_scuc\_module.cpp} &
+\texttt{integration} & 模块级单元/集成测试\\
+\texttt{test\_market\_simulation} & \srcpath{tests/test\_market\_simulation.cpp} &
+\texttt{benchmark}（\texttt{TIMEOUT 600}） & 多求解器基准与物理一致性\\
+\bottomrule
+\end{tabular}
+\end{footnotesize}
+\end{center}
+
+两者都直接编译 \srcpath{src/scuc/scuc.cpp}（后者还编译
+\srcpath{src/scuc/case\_builder.cpp}）并链接 \texttt{mipsolvers} 与 Catch2。
+复现命令（在已配置的构建目录下）：
+
+\begin{verbatim}
+ctest -R test_scuc_module --output-on-failure
+ctest -R test_market_simulation --output-on-failure
+# 或直接运行（Catch2 标签过滤）：
+./tests/test_scuc_module "[scuc]"
+./tests/test_market_simulation "[market][physics]"
+\end{verbatim}
+
+\subsection{覆盖矩阵：\texttt{test\_scuc\_module}}
+
+\srcpath{tests/test\_scuc\_module.cpp} 以 2 母线、2 机组、3 时段、限额 150 MW
+单支路的小问题（\srcpath{tests/test\_scuc\_module.cpp:make\_small\_problem\_json}，
+\fld{mip\_gap}=0.005、时限 60 s）覆盖：
+
+\begin{center}
+\begin{footnotesize}
+\begin{tabular}{@{}ll@{}}
+\toprule
+\textbf{TEST\_CASE（标签）} & \textbf{断言内容}\\
+\midrule
+JSON round-trip（\texttt{[scuc][unit]}） &
+解析无异常；机组/支路/负荷数、\fld{num\_periods}、\fld{num\_buses}、
+分段报价读回正确\\
+small 2-bus problem converges（\texttt{[scuc][integration]}） &
+SCUC 收敛、目标 $>0$、组合矩阵形状 $[2][3]$、切负荷 $|P^{shed}|<1$ MW、
+时段 0 功率平衡（容差 5 MW）、能量/总成本 $>0$\\
+SCED LP refines dispatch（\texttt{[scuc][integration]}） &
+SCED 收敛且组合与 SCUC 一致（固定二进制口径，容差 0.01）\\
+LMP values are physically consistent（\texttt{[scuc][integration]}） &
+$0\le$ avg LMP $\le 300$ \$/MWh、min $\le$ avg $\le$ max、矩阵形状
+$[n_b][T]$、高负荷时段 LMP 不低于低负荷时段（容差 0.1）\\
+output JSON serialisation round-trips（\texttt{[scuc][unit]}） &
+输出 JSON 可解析、含 \texttt{scuc}/\texttt{meta}/\texttt{lmp} 块且
+收敛标志一致\\
+\bottomrule
+\end{tabular}
+\end{footnotesize}
+\end{center}
+
+\subsection{覆盖矩阵：\texttt{test\_market\_simulation}}
+
+\srcpath{tests/test\_market\_simulation.cpp} 基于 case\_builder 算例组织
+（基准族对所有\textbf{当前构建可用}的 MILP 后端逐一运行，
+\srcpath{tests/test\_market\_simulation.cpp:available\_milp\_solvers}；单后端
+失败不致命、只记录，Auto 模式必须收敛）：
+
+\begin{center}
+\begin{footnotesize}
+\begin{tabular}{@{}ll@{}}
+\toprule
+\textbf{TEST\_CASE（标签）} & \textbf{内容}\\
+\midrule
+3-bus 全求解器性能基准 T=6（\texttt{[market][benchmark]}） &
+各后端测速对比；Auto 必须收敛\\
+6-bus 风电+储能 全求解器基准 T=8（\texttt{[market][benchmark]}） &
+含 \fld{use\_binary\_indicators} 之外全部储能路径（$M_2=50$）\\
+IEEE 39-bus 快速基准 T=4 / 24h 风光 / 24h 全资源
+（\texttt{[market][benchmark][ieee39]}） & 39 母线规模收敛与用时\\
+备用约束验证（\texttt{[market][physics]}） &
+$r^{spin}=0.10$、$r^{up}=r^{dn}=0.05$、$r^{neg}=0.10$、$R^{pfr}=10$ MW
+下逐时段旋转备用 $\ge r^{spin}D_t-1$ MW\\
+Gantt/出力/LMP 热图/SOC 时序（\texttt{[market][viz]}） &
+ASCII 可视化 + 物理一致性抽查\\
+IEEE 39-bus 24h 完整流程（\texttt{[market][viz][ieee39]}） &
+三阶段全跑通 + JSON 导出\\
+MIP Gap 收敛速度分析（\texttt{[market][benchmark]}） & 间隙-时间曲线记录\\
+StrictHiGHS 39-bus root IPM + crossover 正确性
+（\texttt{[market][strict\_highs][ipm\_root][ieee39]}） &
+经 \srcpath{src/scuc/scuc.cpp:build\_scuc\_mip} 取裸模型直调
+\texttt{solve\_milp\_bc}：IPM 根 + crossover 与单纯形根目标相对差 $<0.5\%$\\
+StrictHiGHS 纯 IPM（无 crossover）（\texttt{...},\texttt{[pure\_ipm]}） &
+记录无暖启动的节点 LP 代价；与 IPM+crossover 目标差 $<0.5\%$\\
+\bottomrule
+\end{tabular}
+\end{footnotesize}
+\end{center}
+
+\subsection{CLI 冒烟用法}
+
+构建后（可执行文件在构建输出目录；安装后经 \texttt{bin/}）：
+
+\begin{verbatim}
+# 生成算例 JSON
+scuc_case_builder --case 3bus --T 6 --output case_3bus.json
+scuc_case_builder --case ieee39 --T 24 --wind --solar --output case_39.json
+# 求解（stderr 打印配置摘要与各阶段收敛状态）
+scuc_solve case_3bus.json result_3bus.json --solver Auto --indent 2
+scuc_solve case_39.json  result_39.json  --solver StrictHiGHS
+# 仅 SCUC 阶段：--no-sced --no-lmp
+\end{verbatim}
+
+\texttt{scuc\_solve} 在 SCUC 未收敛时返回非零退出码（
+\srcpath{src/scuc/main.cpp:main}），可直接接入调度脚本做失败告警；
+\texttt{--solver} 覆盖 JSON 中的 \fld{solver} 字段。
+
+\subsection{已知覆盖边界}
+
+\begin{boundarynote}
+\begin{itemize}
+  \item 上述测试覆盖：JSON 往返、小规模收敛与功率平衡、SCED 组合一致性、
+        LMP 数量级与单调性、备用需求、多后端基准、StrictHiGHS 根 LP 内核
+        交叉校核（0.5\% 容差）；
+  \item \textbf{未覆盖}：IEEE 118 母线规模无 \texttt{tests/} 注册测试
+        （其求解器对比由 \srcpath{benchmark/bench\_01\_ieee118\_solvers.py}
+        等 benchmark 脚本承载，不属于 ctest 套件）；无与外部参考求解器
+        （如商业 MILP）在本仓库内的系统性目标值比对记录；N-1、多场景、
+        交流潮流无实现亦无测试；断面（\fld{sections}）、机组群
+        （\fld{generator\_groups}）、直流线、二进制储能模式
+        （\fld{use\_binary\_indicators}）、热/温/冷启动字段无专门断言；
+  \item 基准族对单后端失败\textbf{宽容}（仅记录），只有 Auto 模式的收敛是
+        硬断言；阅读基准输出时须区分"求解器不可用"与"求解失败"；
+  \item 容差口径：功率平衡 5 MW、LMP 单调性 0.1 \$/MWh、IPM/单纯形目标
+        比对 0.5\%，均为小算例口径，不外推到大算例。
+\end{itemize}
+\end{boundarynote}
