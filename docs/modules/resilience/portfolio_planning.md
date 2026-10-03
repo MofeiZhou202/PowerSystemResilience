@@ -14,6 +14,8 @@ $$w_{gc}=\frac{1}{G}\frac{p_{gc}}{\sum_k p_{gk}},\qquad \sum_{g,c}w_{gc}=1.$$
 
 对每个代表场景，用原始网络及同一规划网络分别运行 `RAStyleStageMILP`，原样使用生成的 AC/DC 故障及修复时间、48 h 标准负荷/风/光曲线和分设备负荷绑定。输出各场景切负荷电量 $E_{gc}^{0},E_{gc}^{1}$（MWh），设计加权结果 $\sum w_{gc}E_{gc}$ 和最差代表场景 $\max E_{gc}$。若场景资料不完整、求解未完成或不可行，规划请求报错，不用零值替代。规划评估启用移动储能调度；快速恢复的唯一用户开关允许关闭该调度，因此单场景恢复值可能与规划表中的该场景值不同。规划评估的 MIP 时间限制为每次 10 s；当前不报告投资回收、年可靠性或动态安全认证。
 
+生成的零故障代表场景明确设置 `default_fault_count=0`，不会继承恢复模块默认的两个合成故障。各代表场景互相独立，规划最多并行评估 4 个场景，每个场景的求解器设为单线程；结果按原场景顺序归并并在任何场景失败时整体报错。这只改变执行安排，不删减本批次中的场景，也不改变权重公式。用户在界面选择更多簇或更多台风等级时，仍会增加评估次数。
+
 当前求解器尚未在这一规划口径中纳入固定储能扩容、V2G、燃料供应与可靠投资价格。未规划设备保持原算例配置。规划资源只添加到评估和恢复请求的系统副本，不修改用户原始网络。结果 `limitations` 明确报告这些范围。
 
 ## HTTP 与身份
@@ -31,6 +33,6 @@ $$w_{gc}=\frac{1}{G}\frac{p_{gc}}{\sum_k p_{gk}},\qquad \sum_{g,c}w_{gc}=1.$$
 - 模型与公式：`include/hacdcpf/resilience/resilience_portfolio.hpp`、`src/resilience/resilience_portfolio.cpp`。
 - 会话与 JSON：`tests/run_gui_server.cpp`，Edition 能力声明在 `src/server/edition_profile.cpp`。
 - Web：`web/js/core/resilience_portal.js`、`web/js/app.js`。
-- 自动化：`tests/test_resilience_portfolio.cpp` 检查两灾害组中全部三簇的权重、稳定资源 ID、加权算式和缺失事件拒绝；`tests/e2e/resilience_edition_gui_e2e.mjs` 检查完整方案 ID 流；`tests/e2e/weather_scenario_gui_e2e.mjs` 用暴雨及雷击真实算例检查生成→规划→恢复。
+- 自动化：`tests/test_resilience_portfolio.cpp` 检查两灾害组中全部三簇的权重、稳定资源 ID、加权算式、缺失事件拒绝与零故障不注入合成故障；`tests/e2e/resilience_edition_gui_e2e.mjs` 检查完整方案 ID 流；`tests/e2e/weather_scenario_gui_e2e.mjs` 用暴雨及雷击真实算例检查生成→规划→恢复。
 
 数值验证状态和任何未通过项以 `docs/overview/development_status.md` 的最新记录为准。

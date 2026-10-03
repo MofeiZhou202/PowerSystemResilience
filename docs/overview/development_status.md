@@ -8,6 +8,18 @@ the current Git worktree remains authoritative.
 
 ## All-cluster resource planning (current worktree)
 
+- Planning performance/correctness update: zero-fault generated typhoon
+  representatives now set `default_fault_count=0` instead of inheriting two
+  synthetic faults. Independent representatives run through a bounded
+  four-worker pool with one solver thread each. On the mixed 33-bus case,
+  measured server-side planning was 0.30 s for five undamaged TD clusters,
+  10.54 s for five SuperTY clusters, 14.31 s for 15 TD/TY/SuperTY clusters,
+  and 19.35 s for the default 30 clusters across six intensity groups. Scenario
+  generation itself took 5.0–7.3 s in those runs. These are local measurements,
+  not a fixed time guarantee. The zero-fault regression and parallel
+  multi-cluster unit test passed five consecutive runs; mocked Resilience GUI
+  and real rainstorm/lightning browser workflows passed again.
+
 - The Resilience workflow now generates the representative cluster set, plans
   one backup-generator/mobile-storage configuration against every representative,
   then selects one representative in rapid recovery. Session IDs bind the

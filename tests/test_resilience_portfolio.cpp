@@ -88,3 +88,18 @@ TEST_CASE("Portfolio rejects incomplete generated evidence before planning", "[r
   generated.intensities = {group};
   CHECK_THROWS_AS(plan_resilience_portfolio(system, generated, true, false), std::invalid_argument);
 }
+
+TEST_CASE("Undamaged representatives do not acquire legacy synthetic faults", "[resilience][portfolio]") {
+  const auto system = test_system();
+  ResilienceScenarioResult generated;
+  ResilienceIntensityScenarioGroup group;
+  group.hazard_type = "typhoon";
+  group.intensity = TyphoonIntensityCategory::TD;
+  group.clusters.push_back(cluster("undamaged", system.ac.branches.front().index, 1.0));
+  group.clusters.front().representative.resilience_event->hazard_type = "typhoon";
+  group.clusters.front().representative.resilience_event->faults.clear();
+  generated.intensities.push_back(group);
+  const auto result = plan_resilience_portfolio(system, generated, true, false);
+  REQUIRE(result.scenarios.size() == 1);
+  CHECK(result.scenarios.front().baseline_shed_mwh == Catch::Approx(0.0));
+}

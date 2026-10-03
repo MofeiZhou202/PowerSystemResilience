@@ -1,10 +1,14 @@
 #include "hacdcpf/resilience/resilience_portfolio.hpp"
 
 #include <algorithm>
+#include <atomic>
 #include <cmath>
+#include <exception>
 #include <map>
+#include <mutex>
 #include <numeric>
 #include <stdexcept>
+#include <thread>
 #include <unordered_map>
 #include <unordered_set>
 
@@ -64,6 +68,12 @@ DistributionResilienceOptions options_for(const ScenarioCandidate& representativ
   opts.mip.solver = DistributionResilienceMIPSolver::HiGHS;
   opts.mip.mip_gap = 0.03;
   opts.mip.max_time_s = 10;
+  // Each independent representative owns one worker. Avoid the solver's
+  // automatic 8-thread setting multiplying across concurrent assessments.
+  opts.mip.num_threads = 1;
+  // A generated zero-fault representative is an undamaged scenario. Leaving
+  // the legacy default (two synthetic faults) would change its meaning.
+  opts.default_fault_count = 0;
   opts.respect_fault_windows = representative.resilience_event->hazard_type == "rainstorm" ||
                                representative.resilience_event->hazard_type == "lightning";
   opts.faults = representative.resilience_event->faults;
@@ -277,28 +287,56 @@ ResiliencePortfolioResult plan_resilience_portfolio(
   }
   HybridPowerSystem planned_system = system;
   apply_resilience_portfolio_plan(planned_system, plan);
-  output.scenarios.reserve(clusters.size());
-  for (const auto& item : clusters) {
-    if (should_cancel && should_cancel()) throw std::runtime_error("portfolio planning cancelled");
-    auto opts = options_for(item.cluster->representative);
-    const auto baseline = run_distribution_resilience_assessment(system, opts);
-    const auto planned = run_distribution_resilience_assessment(planned_system, opts);
-    if (!baseline.feasible || !planned.feasible || !baseline.completed || !planned.completed)
-      throw std::runtime_error("portfolio assessment did not complete for " +
-                               item.cluster->representative_id);
-    ResiliencePortfolioScenarioScore row;
-    row.scenario_id = item.cluster->representative_id;
-    row.group = item.group;
-    row.design_weight = item.weight;
-    row.baseline_shed_mwh = baseline.total_shed_mwh;
-    row.planned_shed_mwh = planned.total_shed_mwh;
-    row.baseline_weighted_unserved_mwh = baseline.weighted_unserved_mwh;
-    row.planned_weighted_unserved_mwh = planned.weighted_unserved_mwh;
-    output.baseline_design_weighted_shed_mwh += item.weight * baseline.total_shed_mwh;
-    output.planned_design_weighted_shed_mwh += item.weight * planned.total_shed_mwh;
-    output.baseline_worst_shed_mwh = std::max(output.baseline_worst_shed_mwh, baseline.total_shed_mwh);
-    output.planned_worst_shed_mwh = std::max(output.planned_worst_shed_mwh, planned.total_shed_mwh);
-    output.scenarios.push_back(std::move(row));
+  output.scenarios.resize(clusters.size());
+  std::atomic<std::size_t> next_index{0};
+  std::atomic<bool> stop{false};
+  std::exception_ptr failure;
+  std::mutex failure_mu;
+  const auto worker = [&] {
+    while (!stop.load(std::memory_order_relaxed)) {
+      const auto index = next_index.fetch_add(1, std::memory_order_relaxed);
+      if (index >= clusters.size()) return;
+      try {
+        if (should_cancel && should_cancel())
+          throw std::runtime_error("portfolio planning cancelled");
+        const auto& item = clusters[index];
+        const auto opts = options_for(item.cluster->representative);
+        const auto baseline = run_distribution_resilience_assessment(system, opts);
+        if (should_cancel && should_cancel())
+          throw std::runtime_error("portfolio planning cancelled");
+        const auto planned = run_distribution_resilience_assessment(planned_system, opts);
+        if (!baseline.feasible || !planned.feasible || !baseline.completed || !planned.completed)
+          throw std::runtime_error("portfolio assessment did not complete for " +
+                                   item.cluster->representative_id);
+        auto& row = output.scenarios[index];
+        row.scenario_id = item.cluster->representative_id;
+        row.group = item.group;
+        row.design_weight = item.weight;
+        row.baseline_shed_mwh = baseline.total_shed_mwh;
+        row.planned_shed_mwh = planned.total_shed_mwh;
+        row.baseline_weighted_unserved_mwh = baseline.weighted_unserved_mwh;
+        row.planned_weighted_unserved_mwh = planned.weighted_unserved_mwh;
+      } catch (...) {
+        std::lock_guard<std::mutex> guard(failure_mu);
+        if (!failure) failure = std::current_exception();
+        stop.store(true, std::memory_order_relaxed);
+        return;
+      }
+    }
+  };
+  const unsigned hw = std::thread::hardware_concurrency();
+  const std::size_t workers = std::min<std::size_t>(
+      clusters.size(), hw <= 1 ? 1 : std::min<unsigned>(hw, 4));
+  std::vector<std::thread> threads;
+  threads.reserve(workers);
+  for (std::size_t i = 0; i < workers; ++i) threads.emplace_back(worker);
+  for (auto& thread : threads) thread.join();
+  if (failure) std::rethrow_exception(failure);
+  for (const auto& row : output.scenarios) {
+    output.baseline_design_weighted_shed_mwh += row.design_weight * row.baseline_shed_mwh;
+    output.planned_design_weighted_shed_mwh += row.design_weight * row.planned_shed_mwh;
+    output.baseline_worst_shed_mwh = std::max(output.baseline_worst_shed_mwh, row.baseline_shed_mwh);
+    output.planned_worst_shed_mwh = std::max(output.planned_worst_shed_mwh, row.planned_shed_mwh);
   }
   output.limitations = {
       "The shared siting decision is a weighted exposure heuristic, not a proven global optimum.",

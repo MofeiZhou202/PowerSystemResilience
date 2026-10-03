@@ -776,7 +776,7 @@
       const generationId = this.state.scenarioGeneration.data?.scenario_generation_id;
       if (!generationId || (!planning.addGenerator && !planning.addMobileStorage)) return;
       planning.status = 'running'; planning.error = null; planning.result = null;
-      this.render(); this.setStatus('正在对全部代表簇计算整体规划…', 'busy');
+      this.render(); this.setStatus(`正在评估 ${this.state.scenarioGeneration.candidates.length} 个代表簇，较多场景可能需要几十秒…`, 'busy');
       try {
         const result = await this.adapter.planning.run({ scenario_generation_id: generationId, add_generator: planning.addGenerator, add_mobile_storage: planning.addMobileStorage });
         if (generationId !== this.state.scenarioGeneration.data?.scenario_generation_id) return;
