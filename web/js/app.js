@@ -807,7 +807,7 @@ const App = (() => {
     ]),
     resilience: Object.freeze([
       Object.freeze({ id: 'metric_selection', label: '指标选择' }),
-      Object.freeze({ id: 'scenario_selection', label: '场景生成与选择' }),
+      Object.freeze({ id: 'scenario_selection', label: '场景生成' }),
       Object.freeze({ id: 'proactive_defense', label: '主动防御' }),
       Object.freeze({ id: 'rapid_recovery', label: '快速恢复' }),
       Object.freeze({ id: 'metric_output', label: '指标输出' }),
@@ -1516,6 +1516,15 @@ const App = (() => {
         select: async candidate => {
           if (!_portalOperations?.selectScenario) throw new Error('弹性场景选择服务尚未初始化');
           return _portalOperations.selectScenario(candidate);
+        },
+      },
+      planning: {
+        run: async request => {
+          const result = await apiPostResult('/api/session/resilience/portfolio_plan', request, { quiet: true });
+          if (!result.ok || !result.data || result.data.error) {
+            throw new Error(describeError(result.error ?? result.data?.error ?? result.data, '整体规划请求失败'));
+          }
+          return result.data;
         },
       },
       recovery: {
@@ -22960,7 +22969,7 @@ const App = (() => {
     async function runResilience(options = {}) {
       try {
         setStatus('弹性分析中...', 'busy');
-        if (!await syncToBackend(true)) throw new Error('当前模型同步到后端失败');
+        if (!await syncToBackend(options.portal ? false : true)) throw new Error('当前模型同步到后端失败');
       // Resilience assessment consumes imported 48h profiles directly through
       // the resilience request. The restricted edition intentionally does not
       // call the standalone time-series configuration endpoint.
@@ -23034,6 +23043,11 @@ const App = (() => {
           ? Number(options.context.scenarioRevision)
           : _resilienceScenarioRevision;
         params.scenario_digest = _resilienceScenarioDigest;
+      }
+      if (options.portal && options.context?.portfolioPlanId) {
+        params.portfolio_plan_id = options.context.portfolioPlanId;
+        params.apply_demo_data = false;
+        params.use_strict_mip_for_mess = false;
       }
       const result = await apiPostResult('/api/session/run_distribution_resilience', params, { quiet: !!options.portal });
       if (!result.ok || !result.data) {

@@ -6,6 +6,8 @@
 
 [多灾害场景调研与接入设计](multi_hazard_sources.md)：书中灾种、开源模型、接口扩展和后续覆盖计划。
 
+[多代表场景整体规划契约](portfolio_planning.md)：规划权重、共享资源方案、HTTP 身份、计算范围与验证。
+
 本目录是 `src/resilience/` 的唯一模块文档目录。
 
 本目录对应源码 `src/resilience/`，主手册按“理论—实现—接口—数值—审计”闭环组织，覆盖：

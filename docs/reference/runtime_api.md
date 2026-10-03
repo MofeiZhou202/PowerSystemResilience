@@ -74,6 +74,20 @@ the
 [Resilience Edition contract](../operations/resilience_edition_design.md) for
 the complete client, build, and packaging boundary.
 
+## Resilience session planning routes
+
+`POST /api/session/generate_scenarios` returns `scenario_generation_id` and
+`model_revision` with the generated clusters. `POST
+/api/session/resilience/portfolio_plan` accepts that ID and boolean
+`add_generator`/`add_mobile_storage`; it evaluates one shared resource
+configuration over every cached representative, returning `plan_id`, stable
+resource and AC-bus indices, per-scenario MWh, design-weighted/worst MWh and
+`limitations`. `POST /api/session/run_distribution_resilience` may receive
+`portfolio_plan_id` to apply the cached plan to its local system copy and echoes
+the ID. Model replacement and new scenario generation invalidate plans. See
+[the portfolio contract](../modules/resilience/portfolio_planning.md) for
+weights, formulas and scope.
+
 ## Version 1 multi-session API
 
 New automation and AI clients should use `/api/v1`. These resources are

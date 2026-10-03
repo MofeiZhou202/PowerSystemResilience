@@ -69,7 +69,7 @@ TEST_CASE("Edition profile matches the build mode", "[edition]") {
   CHECK(profile.at("workflow") ==
         nlohmann::json::array({
             {{"id", "metric_selection"}, {"label", "指标选择"}},
-            {{"id", "scenario_selection"}, {"label", "场景生成与选择"}},
+            {{"id", "scenario_selection"}, {"label", "场景生成"}},
             {{"id", "proactive_defense"}, {"label", "主动防御"}},
             {{"id", "rapid_recovery"}, {"label", "快速恢复"}},
             {{"id", "metric_output"}, {"label", "指标输出"}},
@@ -119,7 +119,7 @@ TEST_CASE("Edition route manifest is unique and strictly structured",
 
 TEST_CASE("Edition analysis catalog matches canonical Python IDs",
           "[edition]") {
-  static constexpr std::array<std::string_view, 69> expected_names{
+  static constexpr std::array<std::string_view, 70> expected_names{
       "power_flow", "optimal_power_flow", "opf_ac", "opf_parity", "opf_dc",
       "reactive_power_optimization", "rpo_inputs", "short_circuit",
       "detailed_short_circuit", "dc_short_circuit", "harmonics",
@@ -129,7 +129,7 @@ TEST_CASE("Edition analysis catalog matches canonical Python IDs",
       "annual_production", "lifecycle_simulation", "lifecycle_compare",
       "carbon_flow", "dynamic_carbon_flow", "reliability_nonsequential",
       "reliability_sequential", "reliability_fmea", "reliability_fd",
-      "reliability_three_stage", "reliability", "distribution_resilience",
+       "reliability_three_stage", "reliability", "distribution_resilience", "resilience_portfolio",
       "market_clearing", "real_time_market", "repeated_market_game",
       "southern_market", "market_ptdf", "campus_ies", "ev_power_traffic",
       "reconfiguration", "hosting_capacity", "counterfactual_planning",

@@ -551,6 +551,7 @@ set(HACDCPF_SOURCES
   src/reliability/online_protection.cpp
   src/resilience/resilience_assessment.cpp
   src/resilience/resilience_metrics.cpp
+  src/resilience/resilience_portfolio.cpp
   src/resilience/resilience_stage_milp.cpp
   src/resilience/resilience_restoration_mip.cpp
   src/resilience/certified_restoration.cpp

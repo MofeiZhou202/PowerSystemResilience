@@ -6,9 +6,9 @@
   const core = global.HySimCore = global.HySimCore || {};
   const STEPS = Object.freeze([
     { id: 'metric_selection', label: '指标选择', meta: '书中指标与运行指标', chapter: 'Chapter 3 · 多维弹性评估' },
-    { id: 'scenario_selection', label: '场景生成与选择', meta: '台风、暴雨内涝、雷击', chapter: '场景工程 · 候选与证据' },
-    { id: 'proactive_defense', label: '主动防御', meta: '当前边界：跳过', chapter: '能力边界 · 主动防御' },
-    { id: 'rapid_recovery', label: '快速恢复', meta: '唯一恢复执行入口', chapter: '恢复评估 · 后端运行' },
+    { id: 'scenario_selection', label: '场景生成', meta: '完整聚类场景集', chapter: '场景工程 · 候选与证据' },
+    { id: 'proactive_defense', label: '主动防御', meta: '聚类场景集整体规划', chapter: '资源配置 · 跨场景规划' },
+    { id: 'rapid_recovery', label: '快速恢复', meta: '选择代表场景查看过程', chapter: '恢复评估 · 后端运行' },
     { id: 'metric_output', label: '指标输出', meta: '后端 evaluator 结果', chapter: '结果证据 · 指标输出' },
   ]);
   const STEP_INDEX = new Map(STEPS.map((step, index) => [step.id, index]));
@@ -22,7 +22,7 @@
     idle: '待开始', loading: '加载中', ready: '就绪', running: '运行中',
     computed: '已计算', approximate: '近似', unavailable: '不可用',
     not_applicable: '不适用', not_requested: '未请求', invalid: '无效',
-    stale: '已过期', skipped_unavailable: '跳过 · 当前不可用', success: '完成', error: '错误',
+    stale: '已过期', success: '完成', error: '错误',
   });
   const SCENARIO_RECOVERY_FIELDS = Object.freeze([
     'fault_count', 'ac_fault_branch_ids_text', 'dc_fault_branch_ids_text',
@@ -77,7 +77,7 @@
         scenarioOverrides: {},
         userOverrides: {},
         scenarioGeneration: { status: 'idle', requestId: null, data: null, candidates: [], selectedScenario: null, scenarioRevision: 0, error: null },
-        proactiveDefense: { status: 'skipped_unavailable', blocking: false, executionCreated: false, reason: 'capability_unavailable' },
+        proactiveDefense: { status: 'idle', addGenerator: true, addMobileStorage: true, result: null, error: null },
         recovery: { status: 'idle', requestId: null, runId: null, runRevision: null, modelRevision: null, scenarioRevision: null, artifact: null, error: null },
         metrics: { status: 'idle', requestId: null, runId: null, selectionRevision: null, result: null, error: null },
         currentModelRevision: Number(adapter.getModelRevision?.() || 0), portalRequestRevision: 0,
@@ -270,6 +270,7 @@
       this.state.scenarioGeneration = { status: 'idle', requestId: null, data: null, candidates: [], selectedScenario: null, scenarioRevision: this.state.scenarioGeneration.scenarioRevision + 1, error: null };
       this.state.scenarioDerived = { fields: {}, structuredFaults: [], profiles: null, identity: null, provenance: {} };
       this.state.scenarioOverrides = {};
+      this.state.proactiveDefense = { ...this.state.proactiveDefense, status: 'idle', result: null, error: null };
       this.state.recovery = { status: 'idle', requestId: null, runId: null, runRevision: null, modelRevision: null, scenarioRevision: null, artifact: null, error: null };
       this.state.metrics = { status: 'idle', requestId: null, runId: null, selectionRevision: null, result: null, error: null };
     }
@@ -277,6 +278,10 @@
       const next = Number(revision);
       if (!Number.isFinite(next) || next === this.state.currentModelRevision) return;
       this.state.currentModelRevision = next;
+      if (this.state.proactiveDefense.result) {
+        this.state.proactiveDefense.status = 'stale';
+        this.state.proactiveDefense.error = '电网模型已修改，请重新生成场景集并规划';
+      }
       if (this.state.recovery.artifact) {
         this.state.recovery.stale = true;
         this.state.metrics.status = 'stale';
@@ -417,8 +422,8 @@
 
     stepMeta(id) {
       if (id === 'metric_selection') return `${this.state.selectedMetricIds.length} 项已选 · v${this.state.selectionRevision}`;
-      if (id === 'scenario_selection') return `${this.state.scenarioGeneration.selectedScenario ? '已选场景' : '待选择'} · v${this.state.scenarioGeneration.scenarioRevision}`;
-      if (id === 'proactive_defense') return 'skipped_unavailable · non-blocking';
+      if (id === 'scenario_selection') return `${this.state.scenarioGeneration.candidates.length} 个代表簇 · v${this.state.scenarioGeneration.scenarioRevision}`;
+      if (id === 'proactive_defense') return STATUS_LABELS[this.state.proactiveDefense.status] || this.state.proactiveDefense.status;
       if (id === 'rapid_recovery') return STATUS_LABELS[this.state.recovery.status] || this.state.recovery.status;
       if (id === 'metric_output') return STATUS_LABELS[this.state.metrics.status] || this.state.metrics.status;
       return '';
@@ -448,7 +453,7 @@
     currentStepStatus() {
       if (this.state.activeStep === 'metric_selection') return this.state.metricCatalog.length ? 'ready' : 'loading';
       if (this.state.activeStep === 'scenario_selection') return this.state.scenarioGeneration.status;
-      if (this.state.activeStep === 'proactive_defense') return 'skipped_unavailable';
+      if (this.state.activeStep === 'proactive_defense') return this.state.proactiveDefense.status;
       if (this.state.activeStep === 'rapid_recovery') return this.state.recovery.status;
       return this.state.metrics.status;
     }
@@ -636,7 +641,7 @@
     }
 
     renderScenarioSelection() {
-      this.lead('先加载电网模型，设置并生成弹性候选场景，再明确选择一个稳定场景身份。普通场景和可靠性场景不会在 Resilience Edition 中暴露。');
+      this.lead('加载电网模型并生成聚类场景集。全部代表簇将共同参与下一步资源规划；具体场景在快速恢复时选择。');
       this.renderModelControls();
       this.renderScenarioConfig();
       const prerequisite = document.createElement('div'); prerequisite.className = 'resilience-portal__callout';
@@ -647,28 +652,19 @@
       button.addEventListener('click', () => this.generateScenarios(button));
       actions.append(button); this.panelEl.append(actions);
       if (this.state.scenarioGeneration.error) { const error = document.createElement('div'); error.className = 'resilience-portal__callout resilience-portal__callout--danger'; error.textContent = this.state.scenarioGeneration.error; this.panelEl.append(error); }
-      this.sectionHeading('候选场景', this.state.scenarioGeneration.candidates.length ? `${this.state.scenarioGeneration.candidates.length} 项 · 在下方选择` : '尚未生成');
+      this.sectionHeading('规划使用的代表场景集', this.state.scenarioGeneration.candidates.length ? `${this.state.scenarioGeneration.candidates.length} 个代表簇` : '尚未生成');
       if (!this.state.scenarioGeneration.candidates.length) {
-        const empty = document.createElement('div'); empty.className = 'resilience-portal__empty'; empty.textContent = '生成结果将在此显示。选择候选后才能进入快速恢复。'; this.panelEl.append(empty);
+        const empty = document.createElement('div'); empty.className = 'resilience-portal__empty'; empty.textContent = '生成结果将在此显示。生成后即可进入主动防御规划。'; this.panelEl.append(empty);
       } else {
-        const chooser = document.createElement('section'); chooser.className = 'resilience-portal__scenario-chooser'; chooser.dataset.portalScenarioChooser = '';
-        chooser.setAttribute('aria-label', '选择代表场景');
-        chooser.tabIndex = -1;
-        const guidance = document.createElement('div'); guidance.className = 'resilience-portal__callout'; guidance.textContent = '请从下列后端代表场景中明确选择一项。选择后，故障与 48 h profile 会加载到“快速恢复”。'; chooser.append(guidance);
-        const grid = document.createElement('div'); grid.className = 'resilience-portal__grid';
+        const list = document.createElement('div'); list.className = 'resilience-portal__table-wrap';
+        const table = document.createElement('table'); table.className = 'resilience-portal__table';
+        const head = document.createElement('tr'); ['代表场景', '灾害等级/类型', '簇内样本权重', '成员数'].forEach(label => { const th = document.createElement('th'); th.textContent = label; head.append(th); }); table.append(head);
         this.state.scenarioGeneration.candidates.forEach(candidate => {
-          const selected = this.state.scenarioGeneration.selectedScenario?.id === candidate.id;
-          const card = document.createElement('article'); card.className = 'resilience-portal__card resilience-portal__scenario-card'; card.dataset.selected = String(selected);
-          const body = document.createElement('div'); body.className = 'resilience-portal__card-body';
-          const header = document.createElement('div'); header.className = 'resilience-portal__card-header';
-          const h = document.createElement('h3'); h.className = 'resilience-portal__card-title'; h.textContent = candidate.label;
-          const badge = document.createElement('span'); badge.className = 'resilience-portal__status-badge'; badge.textContent = selected ? '已选' : '候选'; badge.dataset.status = selected ? 'computed' : '';
-          header.append(h, badge); body.append(header);
-          const p = document.createElement('p'); p.className = 'resilience-portal__hint'; p.textContent = `scenario_ref: ${candidate.id} · ${candidate.intensity || '—'} · cluster ${candidate.cluster_id ?? '—'}`; body.append(p);
-          const choose = document.createElement('button'); choose.type = 'button'; choose.className = 'resilience-portal__button resilience-portal__button--primary'; choose.textContent = selected ? '当前场景' : '选择此场景'; choose.setAttribute('aria-label', selected ? `当前场景：${candidate.label}` : `选择此场景：${candidate.label}`); choose.disabled = selected;
-          choose.addEventListener('click', () => this.selectScenario(candidate)); body.append(choose); card.append(body); grid.append(card);
+          const row = document.createElement('tr');
+          [candidate.id, candidate.intensity || '—', candidate.probability == null ? '—' : Number(candidate.probability).toFixed(3), candidate.member_count ?? '—'].forEach(value => { const td = document.createElement('td'); td.textContent = String(value); row.append(td); });
+          table.append(row);
         });
-        chooser.append(grid); this.panelEl.append(chooser);
+        list.append(table); this.panelEl.append(list);
       }
       if (this.state.scenarioGeneration.data) {
         this.sectionHeading('场景生成结果与证据', '后端返回数据 · 不重新生成科学结果');
@@ -692,6 +688,7 @@
         this.state.scenarioGeneration.data = clone(data);
         this.state.scenarioGeneration.candidates = clone(candidates);
         this.state.scenarioGeneration.selectedScenario = null;
+        this.state.proactiveDefense = { ...this.state.proactiveDefense, status: 'idle', result: null, error: null };
         this.state.scenarioDerived = { fields: {}, structuredFaults: [], profiles: null, identity: null, provenance: {} };
         this.state.scenarioOverrides = {};
         this.state.scenarioGeneration.status = candidates.length ? 'ready' : 'empty';
@@ -699,14 +696,7 @@
         this.state.recovery = { status: 'idle', requestId: null, runId: null, runRevision: null, modelRevision: null, scenarioRevision: null, artifact: null, error: null };
         this.state.metrics = { status: 'idle', requestId: null, runId: null, selectionRevision: null, result: null, error: null };
         this.render();
-        this.setStatus(candidates.length ? `候选场景已生成：${candidates.length} 项，请在候选场景区域选择一项` : '场景生成完成，但没有可选弹性候选', candidates.length ? 'success' : '');
-        if (candidates.length) {
-          requestAnimationFrame(() => {
-            const chooser = this.panelEl?.querySelector('[data-portal-scenario-chooser]');
-            chooser?.scrollIntoView({ block: 'start', behavior: 'auto' });
-            chooser?.focus({ preventScroll: true });
-          });
-        }
+        this.setStatus(candidates.length ? `已生成 ${candidates.length} 个代表簇，可进入主动防御规划` : '场景生成完成，但没有可用于规划的代表簇', candidates.length ? 'success' : '');
       } catch (error) {
         this.state.scenarioGeneration.status = 'error';
         this.state.scenarioGeneration.error = error.message || String(error);
@@ -716,6 +706,7 @@
     }
 
     async selectScenario(candidate) {
+      if (this.state.proactiveDefense.status !== 'success') return;
       this.setStatus('正在载入所选弹性场景...', 'busy');
       try {
         const selected = await this.adapter.scenario.select(candidate);
@@ -736,13 +727,71 @@
     }
 
     renderProactiveDefense() {
-      this.lead('主动防御保留为产品流程位置，但当前 edition 边界没有可执行的主动防御算法。此步骤不会创建分析请求、任务或伪结果。');
-      const callout = document.createElement('div'); callout.className = 'resilience-portal__callout resilience-portal__callout--warning';
-      callout.textContent = 'skipped_unavailable · blocking=false · execution_created=false'; this.panelEl.append(callout);
-      const card = document.createElement('article'); card.className = 'resilience-portal__card'; const body = document.createElement('div'); body.className = 'resilience-portal__card-body';
-      const h = document.createElement('h3'); h.className = 'resilience-portal__card-title'; h.textContent = '能力状态';
-      const p = document.createElement('p'); p.className = 'resilience-portal__hint'; p.textContent = '当前没有主动防御 canonical route。普通恢复可行性也不等于 certified dynamic safety；请继续进入快速恢复查看现有恢复内核。';
-      body.append(h, p); card.append(body); this.panelEl.append(card);
+      const candidates = this.state.scenarioGeneration.candidates;
+      const planning = this.state.proactiveDefense;
+      this.lead('对全部代表场景采用同一套灾前资源配置，再分别计算其恢复损失。规划完成后，在快速恢复中挑选一个场景查看详细过程。');
+      const prerequisite = document.createElement('div'); prerequisite.className = 'resilience-portal__callout';
+      prerequisite.textContent = candidates.length
+        ? `${candidates.length} 个代表簇参与整体规划。各灾害等级组等权，组内采用聚类样本权重；这些权重不代表真实灾害发生概率。`
+        : '请先生成聚类场景集。';
+      this.panelEl.append(prerequisite);
+      const card = document.createElement('section'); card.className = 'resilience-portal__card';
+      const body = document.createElement('div'); body.className = 'resilience-portal__card-body';
+      const title = document.createElement('h3'); title.className = 'resilience-portal__card-title'; title.textContent = '规划资源'; body.append(title);
+      [['addGenerator', '配置一台备用电源'], ['addMobileStorage', '配置一台移动储能并预部署']].forEach(([key, label]) => {
+        const row = document.createElement('label'); row.className = 'resilience-portal__check-field';
+        const input = document.createElement('input'); input.type = 'checkbox'; input.checked = planning[key] === true; input.dataset.portalField = `planning-${key}`;
+        input.addEventListener('change', () => {
+          planning[key] = input.checked;
+          if (planning.result) { planning.status = 'stale'; planning.result = null; this.state.recovery.status = 'stale'; this.state.metrics.status = 'stale'; }
+          this.render();
+        });
+        const copy = document.createElement('span'); copy.textContent = label; row.append(input, copy); body.append(row);
+      });
+      const assumptions = document.createElement('p'); assumptions.className = 'resilience-portal__hint'; assumptions.textContent = '首版按算例总负荷派生演示容量；选址基于全部代表场景的负荷与故障暴露。规划评分按启用移动储能调度计算；快速恢复可用开关单独关闭。投资价格缺少数据时保持未知。固定储能扩容、V2G 和燃料供应规划尚未进入此求解范围。'; body.append(assumptions);
+      card.append(body); this.panelEl.append(card);
+      const actions = document.createElement('div'); actions.className = 'resilience-portal__actions';
+      const run = document.createElement('button'); run.type = 'button'; run.className = 'resilience-portal__button resilience-portal__button--primary'; run.dataset.portalPlanningRun = '';
+      run.textContent = planning.status === 'running' ? '整体规划中…' : '计算整体规划';
+      run.disabled = !candidates.length || !this.state.scenarioGeneration.data?.scenario_generation_id || (!planning.addGenerator && !planning.addMobileStorage) || planning.status === 'running';
+      run.addEventListener('click', () => this.runProactivePlanning(run)); actions.append(run); this.panelEl.append(actions);
+      if (planning.error) { const error = document.createElement('div'); error.className = 'resilience-portal__callout resilience-portal__callout--danger'; error.textContent = planning.error; this.panelEl.append(error); }
+      if (!planning.result) return;
+      const result = planning.result;
+      this.sectionHeading('跨场景规划结果', `${result.cluster_count} 个代表簇 · ${result.plan_id}`);
+      const summary = document.createElement('article'); summary.className = 'resilience-portal__card';
+      const summaryBody = document.createElement('div'); summaryBody.className = 'resilience-portal__card-body';
+      const summaryText = document.createElement('p'); summaryText.textContent = `设计权重下失供电量：${Number(result.baseline_design_weighted_shed_mwh).toFixed(3)} → ${Number(result.planned_design_weighted_shed_mwh).toFixed(3)} MWh；最差代表场景：${Number(result.baseline_worst_shed_mwh).toFixed(3)} → ${Number(result.planned_worst_shed_mwh).toFixed(3)} MWh。`; summaryBody.append(summaryText);
+      const planText = document.createElement('p'); planText.textContent = `备用电源：${result.plan.ac_generator_mw ? `AC 节点 ${result.plan.ac_generator_bus}，${Number(result.plan.ac_generator_mw).toFixed(3)} MW` : '未配置'}；移动储能：${result.plan.mobile_storage_mw ? `AC 节点 ${result.plan.mobile_storage_bus}，${Number(result.plan.mobile_storage_mw).toFixed(3)} MW / ${Number(result.plan.mobile_storage_mwh).toFixed(3)} MWh` : '未配置'}；投资成本：${result.investment_cost == null ? '缺少可靠价格数据' : result.investment_cost}。`; summaryBody.append(planText);
+      summary.append(summaryBody); this.panelEl.append(summary);
+      this.sectionHeading('逐场景效果', '同一资源配置 · 原故障与负荷曲线');
+      const wrap = document.createElement('div'); wrap.className = 'resilience-portal__table-wrap'; const table = document.createElement('table'); table.className = 'resilience-portal__table';
+      const header = document.createElement('tr'); ['代表场景', '设计权重', '原方案失供 MWh', '规划后失供 MWh', '改善 MWh'].forEach(label => { const th = document.createElement('th'); th.textContent = label; header.append(th); }); table.append(header);
+      (result.scenarios || []).forEach(item => { const row = document.createElement('tr'); [item.scenario_id, Number(item.design_weight).toFixed(4), Number(item.baseline_shed_mwh).toFixed(3), Number(item.planned_shed_mwh).toFixed(3), (Number(item.baseline_shed_mwh) - Number(item.planned_shed_mwh)).toFixed(3)].forEach(value => { const td = document.createElement('td'); td.textContent = value; row.append(td); }); table.append(row); }); wrap.append(table); this.panelEl.append(wrap);
+      const details = document.createElement('details'); const detailsTitle = document.createElement('summary'); detailsTitle.textContent = '模型范围与规划假设'; const list = document.createElement('ul'); (result.limitations || []).forEach(item => { const li = document.createElement('li'); li.textContent = item; list.append(li); }); details.append(detailsTitle, list); this.panelEl.append(details);
+    }
+
+    async runProactivePlanning(button) {
+      const planning = this.state.proactiveDefense;
+      const generationId = this.state.scenarioGeneration.data?.scenario_generation_id;
+      if (!generationId || (!planning.addGenerator && !planning.addMobileStorage)) return;
+      planning.status = 'running'; planning.error = null; planning.result = null;
+      this.render(); this.setStatus('正在对全部代表簇计算整体规划…', 'busy');
+      try {
+        const result = await this.adapter.planning.run({ scenario_generation_id: generationId, add_generator: planning.addGenerator, add_mobile_storage: planning.addMobileStorage });
+        if (generationId !== this.state.scenarioGeneration.data?.scenario_generation_id) return;
+        if (!result || result.status !== 'computed' || !result.plan_id || result.scenario_generation_id !== generationId || !Array.isArray(result.scenarios)) throw new Error('规划响应缺少有效方案或场景集身份');
+        const expected = this.state.scenarioGeneration.candidates.map(item => item.id).sort();
+        const actual = result.scenarios.map(item => item.scenario_id).sort();
+        if (expected.length !== actual.length || expected.some((id, index) => id !== actual[index])) throw new Error('规划响应未覆盖完整代表场景集');
+        planning.result = clone(result); planning.status = 'success'; planning.error = null;
+        this.state.recovery = { status: 'idle', requestId: null, runId: null, runRevision: null, modelRevision: null, scenarioRevision: null, artifact: null, error: null };
+        this.state.metrics = { status: 'idle', requestId: null, runId: null, selectionRevision: null, result: null, error: null };
+        this.render(); this.setStatus(`整体规划完成：${result.cluster_count} 个代表簇 · ${result.plan_id}`, 'success');
+      } catch (error) {
+        planning.status = 'error'; planning.error = error.message || String(error);
+        this.render(); this.setStatus(`整体规划失败：${planning.error}`, 'error');
+      } finally { if (button) button.disabled = false; }
     }
 
     renderRecoveryConfig() {
@@ -758,17 +807,29 @@
       const label = document.createElement('span'); label.textContent = '考虑移动储能调度';
       row.append(input, label); body.append(row);
       const note = document.createElement('p'); note.className = 'resilience-portal__hint';
-      note.textContent = '故障、修复时间和负荷曲线来自已选场景；其余恢复参数使用平台默认值。';
+      note.textContent = '故障、修复时间和负荷曲线来自已选代表场景；灾前资源配置来自整体规划，其余恢复参数使用平台默认值。';
       body.append(note);
       card.append(body); this.panelEl.append(card);
     }
     renderRapidRecovery() {
       const selected = this.state.scenarioGeneration.selectedScenario;
-      this.lead('运行所选场景的快速恢复。可选择是否考虑移动储能调度；计算完成后查看供电恢复曲线。');
+      const plan = this.state.proactiveDefense.result;
+      this.lead('从参与整体规划的代表场景中选择一个，查看同一资源方案下的详细恢复过程。');
+      this.sectionHeading('选择代表场景', plan ? `整体规划 ${plan.plan_id}` : '请先完成整体规划');
+      const chooser = document.createElement('div'); chooser.className = 'resilience-portal__scenario-list';
+      this.state.scenarioGeneration.candidates.forEach(candidate => {
+        const button = document.createElement('button'); button.type = 'button'; button.className = 'resilience-portal__button';
+        button.dataset.portalScenarioSelect = candidate.id;
+        button.textContent = `${candidate.id} · ${candidate.intensity || '场景'} · 簇权重 ${candidate.probability == null ? '—' : Number(candidate.probability).toFixed(3)}`;
+        button.disabled = !plan || this.state.proactiveDefense.status !== 'success';
+        if (selected?.id === candidate.id) button.setAttribute('aria-pressed', 'true');
+        button.addEventListener('click', () => this.selectScenario(candidate)); chooser.append(button);
+      });
+      this.panelEl.append(chooser);
       this.renderRecoveryConfig();
-      const prereq = document.createElement('div'); prereq.className = 'resilience-portal__callout'; prereq.textContent = !this.state.selectedMetricIds.length ? '前置条件：至少选择一项指标。' : !selected ? '前置条件：先在场景步骤中明确选择一个候选场景。' : `当前场景：${selected.id} · scenario_revision ${this.state.scenarioGeneration.scenarioRevision}`; this.panelEl.append(prereq);
+      const prereq = document.createElement('div'); prereq.className = 'resilience-portal__callout'; prereq.textContent = !plan ? '前置条件：先完成全部代表场景的整体规划。' : !this.state.selectedMetricIds.length ? '前置条件：至少选择一项指标。' : !selected ? '请选择一个代表场景。' : `当前场景：${selected.id} · scenario_revision ${this.state.scenarioGeneration.scenarioRevision}`; this.panelEl.append(prereq);
       const actions = document.createElement('div'); actions.className = 'resilience-portal__actions';
-      const run = document.createElement('button'); run.type = 'button'; run.className = 'resilience-portal__button resilience-portal__button--primary'; run.textContent = this.state.recovery.status === 'running' ? '恢复运行中…' : '运行快速恢复'; run.disabled = !this.state.selectedMetricIds.length || !selected || this.state.recovery.status === 'running' || this.state.scenarioDerived?.profiles?.valid === false; run.addEventListener('click', () => this.runRecovery(run)); actions.append(run); this.panelEl.append(actions);
+      const run = document.createElement('button'); run.type = 'button'; run.className = 'resilience-portal__button resilience-portal__button--primary'; run.textContent = this.state.recovery.status === 'running' ? '恢复运行中…' : '运行快速恢复'; run.disabled = !plan || this.state.proactiveDefense.status !== 'success' || !this.state.selectedMetricIds.length || !selected || this.state.recovery.status === 'running' || this.state.scenarioDerived?.profiles?.valid === false; run.addEventListener('click', () => this.runRecovery(run)); actions.append(run); this.panelEl.append(actions);
       if (this.state.recovery.error) { const error = document.createElement('div'); error.className = 'resilience-portal__callout resilience-portal__callout--danger'; error.textContent = this.state.recovery.error; this.panelEl.append(error); }
       if (!this.state.recovery.artifact) { const empty = document.createElement('div'); empty.className = 'resilience-portal__empty'; empty.textContent = '尚未运行恢复。运行完成后将在此显示 run identity、time axis、steps 和科学限制。'; this.panelEl.append(empty); return; }
       this.renderRunArtifact(this.state.recovery.artifact);
@@ -776,7 +837,8 @@
 
     async runRecovery(button) {
       const scenario = this.state.scenarioGeneration.selectedScenario;
-      if (!scenario || !this.state.selectedMetricIds.length) return;
+      const plan = this.state.proactiveDefense.result;
+      if (!scenario || !plan || this.state.proactiveDefense.status !== 'success' || !this.state.selectedMetricIds.length) return;
       if (this.state.scenarioDerived?.profiles?.valid === false) {
         this.state.recovery.status = 'error';
         this.state.recovery.error = `所选场景 profile 无效：${this.state.scenarioDerived.profiles.warnings?.join('；') || '长度、步长或样本不符合契约'}`;
@@ -789,6 +851,7 @@
       try {
         const data = await this.adapter.recovery.run({
           scenario,
+          portfolioPlanId: plan.plan_id,
           params: clone(this.effectiveRecoveryConfig()),
           scenarioContext: clone(this.state.scenarioDerived),
           scenarioRevision: this.state.scenarioGeneration.scenarioRevision,
@@ -796,6 +859,7 @@
         });
         if (requestRevision !== this.state.portalRequestRevision) return;
         if (!data || data.error) throw new Error(data?.error?.message || data?.error || '恢复结果为空');
+        if (data.portfolio_plan_id !== plan.plan_id) throw new Error('恢复响应未使用当前整体规划方案');
         if (data.scenario_revision !== undefined &&
             Number(data.scenario_revision) !== this.state.scenarioGeneration.scenarioRevision) {
           const legacyResponseOmittedRequestRevision = Number(data.scenario_revision) === 0 &&
@@ -825,7 +889,7 @@
       const card = document.createElement('article'); card.className = 'resilience-portal__card'; const body = document.createElement('div'); body.className = 'resilience-portal__card-body';
       const h = document.createElement('h3'); h.className = 'resilience-portal__card-title'; h.textContent = '运行证据'; body.append(h);
       const tableWrap = document.createElement('div'); tableWrap.className = 'resilience-portal__table-wrap'; const table = document.createElement('table'); table.className = 'resilience-portal__table';
-      const rows = [['run_id', data.run_id], ['run_revision', data.run_revision], ['model_revision', data.model_revision], ['scenario_revision', data.scenario_revision], ['scenario_digest', data.scenario_digest], ['execution_mode', data.execution_mode || 'legacy_full_distribution_resilience'], ['outcome', data.result_outcome || data.outcome], ['scientific_usability', data.scientific_usability || data.usability], ['stale', data.stale === true ? 'true' : 'false']];
+      const rows = [['run_id', data.run_id], ['portfolio_plan_id', data.portfolio_plan_id], ['run_revision', data.run_revision], ['model_revision', data.model_revision], ['scenario_revision', data.scenario_revision], ['scenario_digest', data.scenario_digest], ['execution_mode', data.execution_mode || 'legacy_full_distribution_resilience'], ['outcome', data.result_outcome || data.outcome], ['scientific_usability', data.scientific_usability || data.usability], ['stale', data.stale === true ? 'true' : 'false']];
       rows.forEach(([key, value]) => { const tr = document.createElement('tr'); const th = document.createElement('th'); th.textContent = key; const td = document.createElement('td'); td.textContent = text(value); tr.append(th, td); table.append(tr); });
       tableWrap.append(table); body.append(tableWrap);
       const note = document.createElement('div'); note.className = 'resilience-portal__callout resilience-portal__callout--warning'; note.textContent = '普通 restoration feasibility 不是 certified dynamic safety；run artifact 仅在服务进程内有界保存，重启或 eviction 后可能失效。'; body.append(note);

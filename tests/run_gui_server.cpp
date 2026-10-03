@@ -94,6 +94,7 @@
 #include "hacdcpf/analysis/hosting_capacity.hpp"
 #include "hacdcpf/analysis/multidimensional_weak_link.hpp"
 #include "hacdcpf/analysis/counterfactual_planning.hpp"
+#include "hacdcpf/resilience/resilience_portfolio.hpp"
 #include "hacdcpf/optimal_power_flow/reactive_power_opt.hpp"
 #include "hacdcpf/power_flow/island_detector.hpp"
 #include "hacdcpf/graph/graph.hpp"
@@ -3061,6 +3062,11 @@ struct Session {
   // cached power flow was solved against; result_window compares the two to
   // declare whether the cached result may lag behind current edits.
   std::uint64_t system_revision{0};
+  std::optional<hacdcpf::analysis::ResilienceScenarioResult> resilience_scenario_clusters;
+  std::uint64_t resilience_scenario_generation_revision{0};
+  std::string resilience_scenario_generation_id;
+  std::optional<hacdcpf::analysis::ResiliencePortfolioPlan> resilience_portfolio_plan;
+  std::uint64_t resilience_portfolio_revision{0};
   std::deque<json> resilience_run_artifacts;
   std::optional<json> last_resilience_run;
   std::uint64_t resilience_run_revision{0};
@@ -3146,6 +3152,9 @@ Session g_session;
 // resident topology graph and bus spatial index once, and drops the stale
 // serialization cache.  This is the ONLY write path for current_system.
 void session_replace_system(Session& s, hacdcpf::HybridPowerSystem sys) {
+  s.resilience_scenario_clusters.reset();
+  s.resilience_scenario_generation_id.clear();
+  s.resilience_portfolio_plan.reset();
   s.southern_boundary.reset();
   s.southern_baseline.reset();
   s.southern_latest.reset();
@@ -26423,6 +26432,17 @@ int main(int argc, char** argv) {
                 .count();
         auto response =
             hacdcpf::analysis::scenario_generation_result_to_json(result);
+        if (hacdcpf::server::resilience_edition_enabled()) {
+          std::lock_guard<std::mutex> lk(g_session.mu);
+          if (g_session.current_system != sys_snap)
+            throw std::runtime_error("Model changed during scenario generation");
+          g_session.resilience_scenario_clusters = result.resilience;
+          g_session.resilience_portfolio_plan.reset();
+          g_session.resilience_scenario_generation_id =
+              "rsg-" + std::to_string(++g_session.resilience_scenario_generation_revision);
+          response["scenario_generation_id"] = g_session.resilience_scenario_generation_id;
+          response["model_revision"] = g_session.system_revision;
+        }
         response["_performance"] = {
             {"generation_ms", generation_ms},
             {"regular_load_granularity",
@@ -26438,6 +26458,90 @@ int main(int argc, char** argv) {
         res.set_header("X-Scenario-Response-Bytes",
                        std::to_string(body.size()));
         res.set_content(body, "application/json");
+        analysis_lease.release();
+      } catch (const std::exception& e) {
+        analysis_lease.release();
+        res.status = 400;
+        res.set_content(json{{"error", e.what()}}.dump(), "application/json");
+      }
+    });
+
+    // One shared resource plan evaluated against every stored representative.
+    svr.Post("/api/session/resilience/portfolio_plan",
+             [](const httplib::Request& req, httplib::Response& res) {
+      hacdcpf::util::AtomicFlagLease analysis_lease(g_session.busy);
+      try {
+        if (!hacdcpf::server::resilience_edition_enabled())
+          throw std::invalid_argument("Resilience portfolio planning requires Resilience Edition");
+        if (!analysis_lease.try_acquire()) {
+          res.status = 409;
+          res.set_content(json{{"error", "Another analysis is already running"}}.dump(),
+                          "application/json");
+          return;
+        }
+        const auto request = json::parse(req.body.empty() ? "{}" : req.body);
+        if (!request.is_object() || !request.contains("scenario_generation_id") ||
+            !request["scenario_generation_id"].is_string() ||
+            !request.contains("add_generator") || !request["add_generator"].is_boolean() ||
+            !request.contains("add_mobile_storage") || !request["add_mobile_storage"].is_boolean())
+          throw std::invalid_argument("portfolio request requires generation ID and boolean resource choices");
+        const std::string generation_id = request.at("scenario_generation_id").get<std::string>();
+        const bool add_generator = request.at("add_generator").get<bool>();
+        const bool add_mobile_storage = request.at("add_mobile_storage").get<bool>();
+        std::shared_ptr<const hacdcpf::HybridPowerSystem> system;
+        hacdcpf::analysis::ResilienceScenarioResult clusters;
+        std::uint64_t model_revision = 0;
+        {
+          std::lock_guard<std::mutex> lk(g_session.mu);
+          if (!g_session.current_system || !g_session.resilience_scenario_clusters ||
+              generation_id.empty() || generation_id != g_session.resilience_scenario_generation_id)
+            throw std::invalid_argument("generated cluster set is missing or stale");
+          system = g_session.current_system;
+          clusters = *g_session.resilience_scenario_clusters;
+          model_revision = g_session.system_revision;
+        }
+        g_session.cancel.store(false);
+        auto result = hacdcpf::analysis::plan_resilience_portfolio(
+            *system, clusters, add_generator, add_mobile_storage,
+            [] { return g_session.cancel.load(); });
+        json output;
+        {
+          std::lock_guard<std::mutex> lk(g_session.mu);
+          if (g_session.current_system != system || g_session.system_revision != model_revision ||
+              g_session.resilience_scenario_generation_id != generation_id)
+            throw std::runtime_error("Model or scenario cluster set changed during planning");
+          result.plan.id = "rplan-" + std::to_string(++g_session.resilience_portfolio_revision);
+          g_session.resilience_portfolio_plan = result.plan;
+          output = {{"schema", result.schema}, {"status", "computed"},
+                    {"plan_id", result.plan.id}, {"scenario_generation_id", generation_id},
+                    {"model_revision", model_revision},
+                    {"model_scope", "shared-resource-portfolio-v1:RAStyleStageMILP+stage-mess-dispatch"},
+                    {"planning_method", "weighted_fault_exposure_siting_heuristic"},
+                    {"investment_cost", nullptr},
+                    {"plan", {{"ac_generator_bus", result.plan.ac_generator_bus},
+                              {"ac_generator_index", result.plan.ac_generator_index},
+                              {"ac_generator_mw", result.plan.ac_generator_mw},
+                              {"mobile_storage_bus", result.plan.mobile_storage_bus},
+                              {"mobile_storage_index", result.plan.mobile_storage_index},
+                              {"mobile_storage_mw", result.plan.mobile_storage_mw},
+                              {"mobile_storage_mwh", result.plan.mobile_storage_mwh}}},
+                    {"baseline_design_weighted_shed_mwh", result.baseline_design_weighted_shed_mwh},
+                    {"planned_design_weighted_shed_mwh", result.planned_design_weighted_shed_mwh},
+                    {"baseline_worst_shed_mwh", result.baseline_worst_shed_mwh},
+                    {"planned_worst_shed_mwh", result.planned_worst_shed_mwh},
+                    {"cluster_count", result.scenarios.size()},
+                    {"limitations", result.limitations}, {"scenarios", json::array()}};
+          for (const auto& row : result.scenarios) {
+            output["scenarios"].push_back({{"scenario_id", row.scenario_id},
+                                            {"group", row.group},
+                                            {"design_weight", row.design_weight},
+                                            {"baseline_shed_mwh", row.baseline_shed_mwh},
+                                            {"planned_shed_mwh", row.planned_shed_mwh},
+                                            {"baseline_weighted_unserved_mwh", row.baseline_weighted_unserved_mwh},
+                                            {"planned_weighted_unserved_mwh", row.planned_weighted_unserved_mwh}});
+          }
+        }
+        res.set_content(output.dump(), "application/json");
         analysis_lease.release();
       } catch (const std::exception& e) {
         analysis_lease.release();
@@ -26560,6 +26664,21 @@ int main(int argc, char** argv) {
         }
         g_session.cancel.store(false);
         const auto j = json::parse(req.body.empty() ? "{}" : req.body);
+        std::string portfolio_plan_id;
+        if (j.contains("portfolio_plan_id") && !j["portfolio_plan_id"].is_null()) {
+          if (!j["portfolio_plan_id"].is_string())
+            throw std::invalid_argument("portfolio_plan_id must be a string");
+          portfolio_plan_id = j["portfolio_plan_id"].get<std::string>();
+          if (portfolio_plan_id.empty() || j.value("apply_demo_data", false))
+            throw std::invalid_argument("portfolio recovery requires a nonempty plan ID and no demo-data injection");
+          std::lock_guard<std::mutex> lk(g_session.mu);
+          if (!g_session.resilience_portfolio_plan ||
+              g_session.resilience_portfolio_plan->id != portfolio_plan_id ||
+              g_session.system_revision != run_model_revision)
+            throw std::invalid_argument("portfolio plan is missing or stale");
+          hacdcpf::analysis::apply_resilience_portfolio_plan(sys,
+                                                              *g_session.resilience_portfolio_plan);
+        }
         auto optional_nonnegative_hour = [&](const char* key) -> std::optional<double> {
           if (!j.contains(key) || j[key].is_null()) return std::nullopt;
           if (!j[key].is_number()) {
@@ -27028,11 +27147,16 @@ int main(int argc, char** argv) {
         out["scenario_revision"] = j.value("scenario_revision", 0ULL);
         out["scenario_ref"] = j.value("scenario_ref", json(nullptr));
         out["scenario_digest"] = j.value("scenario_digest", json(nullptr));
+        out["portfolio_plan_id"] = portfolio_plan_id.empty() ? json(nullptr) : json(portfolio_plan_id);
         out["execution_mode"] = "legacy_full_distribution_resilience";
         out["scientific_usability"] = "valid_with_limitations";
         out["limitations"] = json::array({
             "Ordinary restoration feasibility is not certified dynamic safety.",
             "Metric results must be requested through the backend evaluator."});
+        if (!portfolio_plan_id.empty()) {
+          out["limitations"].push_back(
+              "The selected shared resource portfolio was applied to this request-local model; generated fault schedules were unchanged.");
+        }
 
         out["feasible"] = result.feasible;
         out["status"] = result.status;

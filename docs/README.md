@@ -6,9 +6,11 @@
 
 [多灾害场景调研与接入设计](modules/resilience/multi_hazard_sources.md)：参考书灾种对照、开源候选、许可证及后续接口规划。
 
+[多代表场景整体规划契约](modules/resilience/portfolio_planning.md)：全部聚类代表场景共同规划，单场景快速恢复与当前模型边界。
+
 [弹性 Web 工作区使用说明](guides/resilience_workspace.zh.md)：首页、演示、版本保存、任务记录、指标对比和存储边界。
 
-最后核实：2026-09-27
+最后核实：2026-10-03
 
 新能源样本工厂已补充可执行的 PyTorch 多任务 surrogate（CAS 标签、早停训练、
 固定承诺 LP 可行性投影与 checkpoint 验证），入口见

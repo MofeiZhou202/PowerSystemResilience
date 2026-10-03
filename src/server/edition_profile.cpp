@@ -211,6 +211,9 @@ constexpr auto kRouteManifest = std::to_array<EditionRouteRule>({
     {"POST", "/api/session/generate_scenarios", "scenario_generation",
      EditionRouteShape::Literal, EditionRouteAccess::Retained,
      EditionRouteAccess::Retained, "scenario_generation"},
+    {"POST", "/api/session/resilience/portfolio_plan", "resilience_portfolio",
+     EditionRouteShape::Literal, EditionRouteAccess::Disabled,
+     EditionRouteAccess::Retained, "resilience_portfolio"},
     {"POST", "/api/session/generate_typhoon_faults", "typhoon_faults",
      EditionRouteShape::Literal, EditionRouteAccess::Retained,
      EditionRouteAccess::Retained, "typhoon_faults"},
@@ -511,7 +514,7 @@ json workflow_json(Edition edition) {
   if (edition == Edition::Resilience) {
     return json::array({
         {{"id", "metric_selection"}, {"label", "指标选择"}},
-        {{"id", "scenario_selection"}, {"label", "场景生成与选择"}},
+        {{"id", "scenario_selection"}, {"label", "场景生成"}},
         {{"id", "proactive_defense"}, {"label", "主动防御"}},
         {{"id", "rapid_recovery"}, {"label", "快速恢复"}},
         {{"id", "metric_output"}, {"label", "指标输出"}},

@@ -134,8 +134,26 @@ try {
     assert(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth + 1), 'Mobile overflow');
     await page.screenshot({ path: path.join(root, `build/weather-gui/${hazard}-mobile.png`), fullPage: true });
     await page.setViewportSize({ width: 1440, height: 1000 });
-    await page.getByRole('button', { name: /^选择此场景/ }).first().click();
+    await go('proactive_defense');
+    await page.locator('[data-portal-planning-run]').click();
+    await page.waitForFunction(() => {
+      const p = document.getElementById('resiliencePortalRoot').__resiliencePortal;
+      return ['success', 'error'].includes(p.state.proactiveDefense.status);
+    }, null, { timeout: 180000 });
+    const planning = await page.evaluate(() => document.getElementById('resiliencePortalRoot').__resiliencePortal.state.proactiveDefense);
+    assert(planning.result, planning.error || 'Portfolio plan missing');
+    assert.equal(planning.result.cluster_count, generated.candidates.length);
+    const stalePlan = await page.evaluate(async () => {
+      const response = await fetch('/api/session/run_distribution_resilience', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ portfolio_plan_id: 'rplan-stale', apply_demo_data: false }),
+      });
+      return { status: response.status, body: await response.json() };
+    });
+    assert.equal(stalePlan.status, 400);
+    assert.match(stalePlan.body.error, /missing or stale/);
     await go('rapid_recovery');
+    await page.locator('[data-portal-scenario-select]').first().click();
     assert.equal(await page.locator('[data-portal-field^="recovery-"]').count(), 1);
     assert(await page.locator('[data-portal-field="recovery-allow_mess_dispatch"]').isVisible());
     await page.getByRole('button', { name: '运行快速恢复', exact: true }).click();
@@ -145,6 +163,7 @@ try {
     }, null, { timeout: 180000 });
     const recovery = await page.evaluate(() => document.getElementById('resiliencePortalRoot').__resiliencePortal.state.recovery);
     assert(recovery.artifact, recovery.error || 'Recovery artifact missing');
+    assert.equal(recovery.artifact.portfolio_plan_id, planning.result.plan_id);
     assert.equal(recovery.artifact.fault_sequence.length, event.faults.length);
     assert.equal(recovery.artifact.disaster_end_hr, Math.max(...event.faults.map(f => f.start_hr)));
     assert.equal(recovery.artifact.steps.at(-1).active_faults, 0);
@@ -161,7 +180,7 @@ try {
       !Object.hasOwn(metricRequest, 'allow_res_approximation'),
     'Web metric request must use backend defaults');
     assert.equal(metrics.result.results.find(x => x.id === 'run.ens').status, 'computed');
-    evidence.push({ hazard, generated, recovery, metrics });
+    evidence.push({ hazard, generated, planning, recovery, metrics });
     // The workspace saves configuration and results; reload/restore must preserve hazard parameters.
     await page.waitForFunction(() => !document.getElementById('resiliencePortalRoot').__resiliencePortal.workspace.busy);
     const saved = await page.evaluate(() => document.getElementById('resiliencePortalRoot').__resiliencePortal.workspace.versions);

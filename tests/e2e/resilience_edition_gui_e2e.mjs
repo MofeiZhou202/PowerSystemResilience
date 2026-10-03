@@ -118,6 +118,8 @@ function mockScenarioResponse() {
   });
   return {
     success: true,
+    scenario_generation_id: 'rgen-mock-1',
+    model_revision: 41,
     generation_ms: 4.5,
     warnings: ['Mock generation warning'],
     summary: { regular_cluster_count: 0, reliability_contingency_count: 0, resilience_cluster_total: 2 },
@@ -156,7 +158,7 @@ function profile(edition) {
     analysis_catalog: { schema: 'hacdcpf.edition-analysis-catalog.v1', entries: [] },
     workflow: structuredClone(edition === 'resilience' ? [
       { id: 'metric_selection', label: '指标选择' },
-      { id: 'scenario_selection', label: '场景生成与选择' },
+      { id: 'scenario_selection', label: '场景生成' },
       { id: 'proactive_defense', label: '主动防御' },
       { id: 'rapid_recovery', label: '快速恢复' },
       { id: 'metric_output', label: '指标输出' },
@@ -355,12 +357,28 @@ async function installMocks(page, scenario) {
       }
       return;
     }
+    if (url.pathname === '/api/session/resilience/portfolio_plan') {
+      const body = request.postDataJSON() || {};
+      await fulfillJson(route, {
+        schema: 'hacdcpf.resilience_portfolio.v1', status: 'computed', plan_id: 'rplan-mock-1',
+        scenario_generation_id: body.scenario_generation_id, cluster_count: 2,
+        baseline_design_weighted_shed_mwh: 2.6, planned_design_weighted_shed_mwh: 1.8,
+        baseline_worst_shed_mwh: 3.0, planned_worst_shed_mwh: 2.2,
+        plan: { ac_generator_bus: 2, ac_generator_mw: body.add_generator ? 0.5 : 0,
+          mobile_storage_bus: 3, mobile_storage_mw: body.add_mobile_storage ? 0.5 : 0,
+          mobile_storage_mwh: body.add_mobile_storage ? 2 : 0 },
+        scenarios: [
+          { scenario_id: 'resilience:SuperTY:A', design_weight: 0.6, baseline_shed_mwh: 3, planned_shed_mwh: 2.2 },
+          { scenario_id: 'resilience:SuperTY:B', design_weight: 0.4, baseline_shed_mwh: 2, planned_shed_mwh: 1.2 },
+        ], limitations: ['演示选址容量'], investment_cost: null,
+      }); return;
+    }
     if (url.pathname === '/api/session/run_distribution_resilience') {
       const body = request.postDataJSON() || {};
       traffic.runSequence = (traffic.runSequence || 0) + 1;
       await fulfillJson(route, {
         run_id: `rrun-${traffic.runSequence}`, run_revision: traffic.runSequence,
-        model_revision: 41, scenario_ref: body.scenario_ref,
+        model_revision: 41, scenario_ref: body.scenario_ref, portfolio_plan_id: body.portfolio_plan_id,
         scenario_revision: body.scenario_revision, scenario_digest: body.scenario_digest,
         execution_mode: 'legacy_full_distribution_resilience', scientific_usability: 'valid_with_limitations',
         outcome: 'feasible', stale: false,
@@ -504,8 +522,7 @@ async function exerciseResilienceWorkflow(page, scenario) {
     'resilience workflow: intended SuperTY intensity was not retained');
 
   await Promise.all([
-    page.waitForFunction(() => document.querySelectorAll('.resilience-portal__card button').length > 0 &&
-      [...document.querySelectorAll('.resilience-portal__card button')].some(button => button.textContent?.includes('选择此场景'))),
+    page.waitForFunction(() => document.querySelectorAll('.resilience-portal__table tr').length > 1),
     generate.dblclick(),
   ]);
   const generationRequests = recorded(traffic, '/api/session/generate_scenarios', 'POST');
@@ -541,24 +558,30 @@ async function exerciseResilienceWorkflow(page, scenario) {
     scrollHeight: element.scrollHeight,
     scrollTop: element.scrollTop,
     overflowY: getComputedStyle(element).overflowY,
-    chooserTop: element.querySelector('[data-portal-scenario-chooser]')?.getBoundingClientRect().top ?? null,
+    tableTop: element.querySelector('.resilience-portal__table-wrap')?.getBoundingClientRect().top ?? null,
   }));
   check(scenarioScrollState.scrollHeight > scenarioScrollState.clientHeight &&
     ['auto', 'scroll'].includes(scenarioScrollState.overflowY),
     `resilience workflow: generated candidates are not reachable by scrolling ${JSON.stringify(scenarioScrollState)}`);
-  check(scenarioScrollState.scrollTop > 0 && scenarioScrollState.chooserTop !== null &&
-    scenarioScrollState.chooserTop >= 0 && scenarioScrollState.chooserTop < scenarioScrollState.clientHeight + 250,
-    `resilience workflow: generation did not reveal the candidate chooser ${JSON.stringify(scenarioScrollState)}`);
+  check(scenarioScrollState.tableTop !== null,
+    `resilience workflow: generated representative table missing ${JSON.stringify(scenarioScrollState)}`);
   check(await page.locator('[data-portal-results="scenario-generation"]').evaluate(root => {
     const summary = root.querySelector('[data-portal-calculation-summary="scenario-generation"]');
     return summary === root.lastElementChild && summary?.open === false;
   }), 'scenario calculation summary must be collapsed after the results');
-  const firstScenarioButton = page.getByRole('button', { name: '选择此场景' }).first();
-  await firstScenarioButton.scrollIntoViewIfNeeded();
-  check(await firstScenarioButton.evaluate(element => {
-    const rect = element.getBoundingClientRect();
-    return rect.top >= 0 && rect.bottom <= window.innerHeight;
-  }), 'resilience workflow: first scenario selection control could not be brought into the viewport');
+  await portalStep(page, 'proactive_defense');
+  check(await page.locator('[data-portal-planning-run]').isEnabled(), 'planning cannot run on generated representatives');
+  await page.locator('[data-portal-planning-run]').click();
+  await page.waitForFunction(() => document.getElementById('resiliencePortalRoot').__resiliencePortal.state.proactiveDefense.status === 'success');
+  const planningRequests = recorded(traffic, '/api/session/resilience/portfolio_plan', 'POST');
+  check(planningRequests.length === 1 && planningRequests[0].body.scenario_generation_id === 'rgen-mock-1' &&
+    planningRequests[0].body.add_generator === true && planningRequests[0].body.add_mobile_storage === true,
+    'all-cluster planning request was missing or malformed');
+  check(await page.locator('#resiliencePortalPanel').getByText('resilience:SuperTY:A').count() > 0 &&
+    await page.locator('#resiliencePortalPanel').getByText('resilience:SuperTY:B').count() > 0,
+    'planning result did not cover both representative scenarios');
+  await portalStep(page, 'rapid_recovery');
+  const firstScenarioButton = page.locator('[data-portal-scenario-select="resilience:SuperTY:A"]');
   await firstScenarioButton.click();
   await page.waitForFunction(() => document.querySelector('.resilience-portal__status')?.textContent?.includes('已选择场景'));
   const selected = await page.evaluate(() => document.getElementById('resiliencePortalRoot').__resiliencePortal.state.scenarioGeneration.selectedScenario);
@@ -566,15 +589,6 @@ async function exerciseResilienceWorkflow(page, scenario) {
     selected.scenario_revision > 0 && /^fnv1a32:[0-9a-f]{8}$/.test(selected.scenario_digest),
     `resilience workflow: stable scenario identity missing ${JSON.stringify(selected)}`);
 
-  const beforeProactive = traffic.requests.length;
-  await portalStep(page, 'proactive_defense');
-  check(traffic.requests.length === beforeProactive, 'resilience workflow: proactive defense created an HTTP request');
-  check(await page.getByText('skipped_unavailable · blocking=false · execution_created=false').count() === 1,
-    'resilience workflow: proactive skip evidence missing');
-  check(await page.locator('#resiliencePortalPanel').getByRole('button', { name: /运行/ }).count() === 0,
-    'resilience workflow: proactive defense exposes a run button');
-
-  await portalStep(page, 'rapid_recovery');
   for (const domain of ['AC', 'DC']) {
     await page.getByText('在电网中查看故障（2 条）', { exact: true }).click();
     await page.getByRole('button', { name: `${domain} 支路 25`, exact: true }).click();
@@ -595,8 +609,7 @@ async function exerciseResilienceWorkflow(page, scenario) {
       c.dc_fault_start_hours_text === '20' && c.ac_repair_durations_text === '19' &&
       c.dc_repair_durations_text === '11';
   }), 'selected AC/DC fault identities and schedules were not hydrated');
-  await portalStep(page, 'scenario_selection');
-  await page.getByRole('button', { name: '选择此场景' }).last().click();
+  await page.locator('[data-portal-scenario-select="resilience:SuperTY:B"]').click();
   await page.waitForFunction(() => document.querySelector('.resilience-portal__status')?.textContent?.includes('resilience:SuperTY:B'));
   await portalStep(page, 'rapid_recovery');
   check(await page.evaluate(() => {
@@ -605,8 +618,7 @@ async function exerciseResilienceWorkflow(page, scenario) {
       c.dc_fault_branch_ids_text === '' && c.ac_fault_start_hours_text === '8' &&
       c.ac_repair_durations_text === '7';
   }), 'selecting scenario B did not replace scenario A fault data');
-  await portalStep(page, 'scenario_selection');
-  await page.getByRole('button', { name: '选择此场景' }).first().click();
+  await page.locator('[data-portal-scenario-select="resilience:SuperTY:A"]').click();
   await page.waitForFunction(() => document.querySelector('.resilience-portal__status')?.textContent?.includes('resilience:SuperTY:A'));
   await portalStep(page, 'rapid_recovery');
   await page.locator('[data-portal-field="recovery-allow_mess_dispatch"]').check();
@@ -630,7 +642,8 @@ async function exerciseResilienceWorkflow(page, scenario) {
   const selectedForRecovery = await page.evaluate(() =>
     document.getElementById('resiliencePortalRoot').__resiliencePortal.state.scenarioGeneration.selectedScenario);
   check(recovery.scenario_ref === 'resilience:SuperTY:A' && recovery.scenario_revision === selectedForRecovery.scenario_revision &&
-    recovery.scenario_digest === selectedForRecovery.scenario_digest,
+    recovery.scenario_digest === selectedForRecovery.scenario_digest &&
+    recovery.portfolio_plan_id === 'rplan-mock-1' && recovery.apply_demo_data === false,
     `resilience workflow: scenario identity was not forwarded ${JSON.stringify(recovery)}`);
   check(recovery.scenario_profiles?.length === 36 && recovery.horizon_hours === 48,
     `resilience workflow: profiles or repair-aware horizon missing ${JSON.stringify({ profiles: recovery.scenario_profiles?.length, horizon: recovery.horizon_hours })}`);
@@ -729,7 +742,7 @@ async function exerciseResilienceWorkflow(page, scenario) {
   const json = JSON.stringify({ ...MOCK_SYSTEM, name: 'Imported resilience JSON' });
   await page.locator('[data-portal-field="json-import"]').setInputFiles({ name: 'resilience.json', mimeType: 'application/json', buffer: Buffer.from(json) });
   await page.waitForFunction(() => document.querySelector('.resilience-portal__model-state')?.textContent?.includes('Imported resilience JSON'));
-  check(recorded(traffic, '/api/session/load_json_string', 'POST').length >= 3,
+  check(recorded(traffic, '/api/session/load_json_string', 'POST').length >= 2,
     'resilience workflow: JSON import request missing');
   await exerciseWorkspace(page, traffic);
 }
@@ -768,6 +781,14 @@ async function exerciseWorkspace(page, traffic) {
     'workspace: legacy metric calculation settings survived restore');
   check(recorded(traffic, '/api/session/run_distribution_resilience', 'POST').length === counts.recovery && recorded(traffic, '/api/session/resilience/metrics', 'POST').length === counts.metrics,
     'workspace: reopening a version triggered a calculation');
+  await portalStep(page, 'scenario_selection');
+  await page.getByRole('button', { name: '生成弹性候选场景' }).click();
+  await page.waitForFunction(() => document.getElementById('resiliencePortalRoot').__resiliencePortal.state.scenarioGeneration.status === 'ready');
+  await portalStep(page, 'proactive_defense');
+  await page.locator('[data-portal-planning-run]').click();
+  await page.waitForFunction(() => document.getElementById('resiliencePortalRoot').__resiliencePortal.state.proactiveDefense.status === 'success');
+  await portalStep(page, 'rapid_recovery');
+  await page.locator('[data-portal-scenario-select="resilience:SuperTY:A"]').click();
   await page.getByRole('button', { name: '运行快速恢复', exact: true }).click();
   await page.waitForFunction(() => {
     const p = document.getElementById('resiliencePortalRoot').__resiliencePortal;
