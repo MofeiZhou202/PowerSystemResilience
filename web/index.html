@@ -5,6 +5,7 @@
 <meta name="viewport" content="width=device-width,initial-scale=1.0"/>
 <title>HySim-XJTU-HRPES</title>
 <link rel="stylesheet" href="css/style.css?v=20260910-uc-threads"/>
+<link rel="stylesheet" href="css/resilience_portal.css?v=20260927-workspace"/>
 <script src="https://cdn.plot.ly/plotly-2.27.0.min.js" defer></script>
 </head>
 <body data-startup-state="loading">
@@ -4273,6 +4274,62 @@
 <div id="toastContainer" class="toast-container" aria-live="polite" aria-label="通知"></div>
 </div><!-- /appShell -->
 
+<div id="resiliencePortalRoot" class="resilience-portal" hidden inert aria-hidden="true" aria-labelledby="resiliencePortalTitle">
+  <header class="resilience-portal__header">
+    <div>
+      <p class="resilience-portal__eyebrow">PowerSystemResilience · Resilience Edition</p>
+      <h1 id="resiliencePortalTitle">弹性仿真平台</h1>
+      <p class="resilience-portal__description">灾害场景 · 供电恢复 · 弹性评估</p>
+    </div>
+    <div class="resilience-portal__header-actions">
+      <span id="resiliencePortalEdition" class="resilience-portal__badge">RESILIENCE</span>
+      <button id="resiliencePortalTheme" type="button" class="resilience-portal__icon-button" aria-label="切换主题">◐</button>
+    </div>
+  </header>
+  <nav class="resilience-portal__view-switcher" role="tablist" aria-label="产品视图">
+    <button id="resiliencePortalWorkflowTab" class="resilience-portal__view-tab" type="button"
+            role="tab" aria-selected="true" aria-controls="resiliencePortalWorkflowSurface"
+            data-resilience-view="workflow">工作流</button>
+    <button id="resiliencePortalArchitectureTab" class="resilience-portal__view-tab" type="button"
+            role="tab" aria-selected="false" aria-controls="resiliencePortalArchitectureSurface"
+            data-resilience-view="architecture" tabindex="-1">配电系统架构</button>
+  </nav>
+  <div id="resiliencePortalStatus" class="resilience-portal__status" role="status" aria-live="polite"></div>
+  <div id="resiliencePortalWorkflowSurface" class="resilience-portal__surface" role="tabpanel"
+       aria-labelledby="resiliencePortalWorkflowTab">
+  <div class="resilience-portal__workspace">
+    <nav class="resilience-portal__stepper" aria-label="弹性分析工作流">
+      <ol id="resiliencePortalSteps" class="resilience-portal__steps" role="tablist" aria-orientation="vertical"></ol>
+    </nav>
+    <main class="resilience-portal__main" aria-labelledby="resiliencePortalTitle">
+      <div class="resilience-portal__context">
+        <span id="resiliencePortalChapter" class="resilience-portal__chapter"></span>
+        <span id="resiliencePortalState" class="resilience-portal__state"></span>
+      </div>
+      <div id="resiliencePortalPanel" class="resilience-portal__panel" tabindex="-1"></div>
+    </main>
+    <aside id="resiliencePortalEvidence" class="resilience-portal__evidence" aria-label="结论与证据">
+      <div class="resilience-portal__evidence-heading">
+        <span>结论与证据</span>
+        <button id="resiliencePortalEvidenceToggle" type="button" class="resilience-portal__icon-button" aria-label="展开或折叠证据">⌄</button>
+      </div>
+      <div id="resiliencePortalEvidenceBody" class="resilience-portal__evidence-body"></div>
+    </aside>
+  </div>
+  <div id="resiliencePortalMobileSteps" class="resilience-portal__mobile-steps" hidden></div>
+  </div>
+  <section id="resiliencePortalArchitectureSurface" class="resilience-portal__surface resilience-portal__architecture-surface"
+           role="tabpanel" aria-labelledby="resiliencePortalArchitectureTab" hidden inert aria-hidden="true">
+    <div class="resilience-portal__architecture-heading">
+      <div>
+        <h2>配电系统架构</h2>
+        <p>复用当前模型的唯一 Canvas / WebGL 总览；切换视图不会重新加载模型或重置布局。</p>
+      </div>
+    </div>
+    <div id="resiliencePortalArchitectureHost" class="resilience-portal__architecture-host"></div>
+  </section>
+</div>
+
   <script src="js/components.js?v=20260712-cb-source-flow-v2"></script>
   <script src="js/search_registry.js?v=20260709-phase5"></script>
   <script src="js/core/local_bus_diagram.js?v=20260910-scale-first"></script>
@@ -4289,9 +4346,11 @@
   <script src="vendor/elk.bundled.js?v=0.9.3"></script>
   <script src="js/core/layout_engine.js?v=20260910-perf-hardening"></script>
   <script src="js/core/accessibility.js?v=20260712-hysim-phase5-v1"></script>
+  <script src="js/core/resilience_workspace.js?v=20260927-metric-defaults"></script>
+  <script src="js/core/resilience_portal.js?v=20260927-metric-defaults"></script>
   <script src="js/core/runtime_diagnostics.js?v=20260712-hysim-phase6-v1"></script>
   <script src="vendor/sql-wasm.js?v=1.10.3"></script>
-  <script src="js/app.js?v=20260910-uc-threads"></script>
+  <script src="js/app.js?v=20260927-weather"></script>
   <script>
     // Load market-only extensions after a strict Full-edition profile succeeds.
     // Restricted/unavailable startup therefore cannot execute eager market code.

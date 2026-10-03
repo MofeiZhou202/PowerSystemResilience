@@ -24,6 +24,9 @@
 
   function setupTablist(container, selector) {
     if (!container) return;
+    // The portal owns selection and arrow-key handling for its tablists.
+    // Binding again advances twice and overwrites its aria-selected state.
+    if (container.closest('#resiliencePortalRoot')) return;
     container.setAttribute('role', 'tablist');
     const buttons = Array.from(container.querySelectorAll(selector));
     const visible = buttons.filter(isVisible);

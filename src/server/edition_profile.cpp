@@ -1,5 +1,8 @@
 #include "edition_profile.hpp"
 
+#include "hacdcpf/resilience/resilience_metrics.hpp"
+#include "hacdcpf/analysis/weather_hazards.hpp"
+
 #include <algorithm>
 #include <array>
 #include <cctype>
@@ -165,6 +168,12 @@ constexpr auto kRouteManifest = std::to_array<EditionRouteRule>({
     {"POST", "/api/session/run_distribution_resilience", "resilience",
      EditionRouteShape::Literal, EditionRouteAccess::Retained,
      EditionRouteAccess::Retained, "distribution_resilience"},
+    {"GET", "/api/session/resilience/metric_catalog", "resilience_metrics",
+     EditionRouteShape::Literal, EditionRouteAccess::Disabled,
+     EditionRouteAccess::Retained},
+    {"POST", "/api/session/resilience/metrics", "resilience_metrics",
+     EditionRouteShape::Literal, EditionRouteAccess::Disabled,
+     EditionRouteAccess::Retained},
     {"POST", "/api/session/run_market_clearing", "market",
      EditionRouteShape::Literal, EditionRouteAccess::Disabled,
      EditionRouteAccess::Disabled, "market_clearing"},
@@ -498,7 +507,16 @@ EditionRouteDecision classify_route_for(Edition edition, std::string_view method
   return {EditionRouteAccess::Unclassified, "unclassified_api"};
 }
 
-json workflow_json() {
+json workflow_json(Edition edition) {
+  if (edition == Edition::Resilience) {
+    return json::array({
+        {{"id", "metric_selection"}, {"label", "指标选择"}},
+        {{"id", "scenario_selection"}, {"label", "场景生成与选择"}},
+        {{"id", "proactive_defense"}, {"label", "主动防御"}},
+        {{"id", "rapid_recovery"}, {"label", "快速恢复"}},
+        {{"id", "metric_output"}, {"label", "指标输出"}},
+    });
+  }
   return json::array({
       {{"id", "modeling"}, {"label", "模型建立"}},
       {{"id", "parameter_validation"}, {"label", "参数校核"}},
@@ -508,6 +526,30 @@ json workflow_json() {
   });
 }
 
+json resilience_metric_catalog_json() {
+  json entries = json::array();
+  for (const auto& definition : hacdcpf::analysis::resilience_metric_catalog()) {
+    entries.push_back({
+        {"id", definition.id},
+        {"name_zh", definition.name_zh},
+        {"name_en", definition.name_en},
+        {"symbol", definition.symbol},
+        {"phase", definition.phase},
+        {"topic", definition.topic},
+        {"formula_ref", definition.formula_ref},
+        {"unit", definition.unit},
+        {"direction", definition.direction},
+        {"calculation_scope", definition.calculation_scope},
+        {"availability", definition.availability},
+        {"required_inputs", definition.required_inputs},
+        {"source_notes", definition.source_notes},
+        {"limitations", definition.limitations},
+    });
+  }
+  return {{"schema", "resilience_metric_catalog_v1"},
+          {"definition_version", hacdcpf::analysis::resilience_metric_definition_version},
+          {"entries", std::move(entries)}};
+}
 json indicators_json(Edition edition) {
   const json indicators = json::array({
       {{"id", "system_economic"}, {"level", "system"},
@@ -646,8 +688,12 @@ json edition_profile_json() {
                                           : "HySim-XJTU-HRPES"},
                {"analyses", edition_analyses_json()},
                {"analysis_catalog", edition_analysis_catalog_json()},
-               {"workflow", workflow_json()},
+               {"workflow", workflow_json(edition)},
                {"indicators", indicators_json(edition)}};
+  if (edition == Edition::Resilience) {
+    profile["scenario_hazards"] = hacdcpf::analysis::weather_hazard_schema();
+    profile["resilience_metric_catalog"] = resilience_metric_catalog_json();
+  }
   if (edition == Edition::Full) {
     profile["enabled_modules"] = json::array({"*"});
     profile["frontend_modules"] = json::array({"*"});
@@ -740,6 +786,15 @@ json edition_analysis_plan_json(const json& request) {
     dimensions.insert(std::move(indicator));
   }
 
+  if (resilience_edition_enabled()) {
+    return {{"schema", "hacdcpf.edition-analysis-plan.v1"},
+            {"indicators", selected},
+            {"steps", workflow_json(Edition::Resilience)},
+            {"automatic_execution", false},
+            {"model_scope",
+             "Resilience workflow: metric selection, scenario selection, proactive defense skipped when unavailable, rapid recovery, and metric output."}};
+  }
+
   json steps = json::array();
   auto add = [&steps](const char* module, const char* label,
                       const char* scenario) {
@@ -747,16 +802,14 @@ json edition_analysis_plan_json(const json& request) {
                      {"scenario_family", scenario},
                      {"execution", "user_confirmed"}});
   };
-  const bool resilience = resilience_edition_enabled();
-  if (!resilience &&
-      (dimensions.contains("economic") || dimensions.contains("carbon"))) {
+  if (dimensions.contains("economic") || dimensions.contains("carbon")) {
     add("powerFlow", "潮流/线损/电压", "normal");
   }
   if (dimensions.contains("economic")) {
     add("opf", "最优潮流", "normal");
-    if (!resilience) add("hosting", "承载力", "normal");
+    add("hosting", "承载力", "normal");
   }
-  if (!resilience && dimensions.contains("carbon")) {
+  if (dimensions.contains("carbon")) {
     add("carbonFlow", "碳流", "normal");
   }
   if (dimensions.contains("reliability") || dimensions.contains("resilience")) {
@@ -769,7 +822,7 @@ json edition_analysis_plan_json(const json& request) {
     add("resilience", "弹性", "unexpected_fault");
   }
   if (!dimensions.empty()) add("shortCircuit", "短路", "fault_evidence");
-  if (!resilience && dimensions.size() > 1) {
+  if (dimensions.size() > 1) {
     add("weakLinks", "多维薄弱环节", "cross_scenario");
   }
   return {{"schema", "hacdcpf.edition-analysis-plan.v1"},

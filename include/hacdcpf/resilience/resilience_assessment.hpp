@@ -167,6 +167,11 @@ struct DistributionResilienceFault {
   double outage_start_hr{0.0};
   double repair_duration_hr{6.0};
   std::string name;
+  // Physical origin of a branch outage. The electrical target remains the
+  // domain-qualified branch_kind + branch_index pair.
+  std::string equipment_type;
+  int equipment_index{0};
+  std::string failure_cause;
 };
 
 /// @brief Explicit road-network edge for MESS routing.
@@ -253,6 +258,9 @@ struct DistributionResilienceOptions {
   std::unordered_map<int, std::vector<double>> dc_bus_load_profiles_by_bus;
 
   std::vector<DistributionResilienceFault> faults;
+  /// Honor authored outage windows in the RA stage solver, including access waits.
+  /// Repair-crew scheduling is not optimized in this mode.
+  bool respect_fault_windows{false};
   std::vector<TransportEdge> transport_edges;
   /// Earliest time at which an externally routed mobile-storage resource can
   /// participate in restoration, keyed by the resource's stable index.  The

@@ -474,6 +474,53 @@ TEST_CASE("Resilience stage MILP: greedy repair restores repaired line", "[resil
   }
 }
 
+TEST_CASE("Resilience stage MILP: authored weather windows prevent early repair and clear temporary trips", "[resilience][weather]") {
+  auto sys = make_radial_3bus();
+  DistributionResilienceOptions opts;
+  opts.model=DistributionResilienceModel::RAStyleStageMILP;
+  opts.use_ra_style_stage_milp=true; opts.enable_disaster_stages=true;
+  opts.respect_fault_windows=true;
+  opts.horizon_hours=8; opts.time_step_hr=1;
+  opts.allow_mess_dispatch=false; opts.default_fault_count=0;
+  opts.faults={{1,1,6,"Flood access wait and repair"},{2,3,1,"Temporary lightning trip"}};
+  const auto r=run_distribution_resilience_assessment(sys,opts);
+  INFO(r.status); REQUIRE(r.feasible); REQUIRE(r.steps.size()==8);
+  REQUIRE(r.fault_sequence.size()==2);
+  CHECK(r.fault_sequence[0].repair_hr==6);
+  CHECK(r.fault_sequence[1].repair_hr==1);
+  CHECK(r.model_stats.model_scope.find("authored-fault-windows")!=std::string::npos);
+  const std::vector<int> active{0,1,1,2,1,1,1,0};
+  for(std::size_t i=0;i<active.size();++i) {
+    CHECK(r.steps[i].active_faults==active[i]);
+    if(i>=4 && i<7) CHECK(r.steps[i].repaired_faults==1);
+  }
+  CHECK(r.steps[7].repaired_faults==2);
+  CHECK(r.steps[7].restoration_ratio==Approx(1.0).margin(1e-6));
+}
+
+TEST_CASE("Branch-backed transformer outage removes its feeder edge and later restores supply", "[resilience][weather]") {
+  auto sys=make_radial_3bus();
+  Transformer2W tr; tr.index=9001; tr.hv_bus=1; tr.lv_bus=2;
+  tr.source_branch_idx=1; tr.weather_moisture_vulnerable=true;
+  sys.ac.transformers_2w.push_back(tr);
+  DistributionResilienceOptions opts;
+  opts.model=DistributionResilienceModel::RAStyleStageMILP;
+  opts.use_ra_style_stage_milp=true; opts.enable_disaster_stages=true;
+  opts.respect_fault_windows=true; opts.horizon_hours=5; opts.time_step_hr=1;
+  opts.allow_mess_dispatch=false; opts.default_fault_count=0;
+  DistributionResilienceFault fault; fault.branch_kind=ResilienceBranchKind::AC;
+  fault.branch_index=1; fault.ac_branch_index=1;
+  fault.outage_start_hr=1; fault.repair_duration_hr=2;
+  fault.equipment_type="transformer_2w"; fault.equipment_index=9001;
+  opts.faults={fault};
+  const auto r=run_distribution_resilience_assessment(sys,opts);
+  INFO(r.status); REQUIRE(r.feasible); REQUIRE(r.steps.size()==5);
+  CHECK(r.steps[1].active_faults==1);
+  CHECK(r.steps[1].restoration_ratio<1.0);
+  CHECK(r.steps[3].active_faults==0);
+  CHECK(r.steps[4].restoration_ratio==Approx(1.0).margin(1e-6));
+}
+
 TEST_CASE("Resilience stage MILP: custom scenario profiles are sampled", "[resilience]") {
   auto sys = make_radial_3bus();
   DistributionResilienceOptions opts;

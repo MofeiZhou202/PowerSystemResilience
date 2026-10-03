@@ -1,10 +1,206 @@
 # Development Status
 
-Updated: 2026-09-20
+Updated: 2026-09-27
 
 This is the living handoff for verified build state and active engineering work.
 Update it in place; do not create dated copies. Source, registered tests, and
 the current Git worktree remains authoritative.
+
+## Asset-aware rainstorm and lightning update (current worktree)
+
+- The Web metric-selection step no longer renders the editable metric calculation
+  settings card. It sends metric ID/revision/run identity only; the backend now
+  resolves its existing 0.9 t_sp target, fault-onset disaster-end convention,
+  inferred recovery start and false APDA/RES proxy consents. Restoring an older
+  workspace version clears its saved metric overrides for new calculations,
+  while archived results keep their original provenance. Browser regression
+  asserts that legacy values are absent from the new request and reset on
+  restore. Backend API support for explicit values remains available.
+
+- The mixed `dist33_weather_mixed` case is now the guided 33-bus Web demo. AC
+  branches have authored overhead/cable classifications; DC branches are cables;
+  branch 1 is the electrical equivalent of moisture-vulnerable transformer
+  9001. Entry heights, wet withstand references and moisture parameters are
+  synthetic demonstration data. The case is available in the built-in catalog.
+- Rainstorm generation now screens only authored cable accessories by critical
+  inundation height, overhead-line insulators by wet flashover voltage and
+  branch-backed transformers by book-shaped oil/paper moisture accumulation.
+  Lightning is limited to classified overhead lines. Generated faults carry
+  `equipment_type`, stable `equipment_index` and `failure_cause` through the
+  scenario, recovery API and Web tables. A branch-backed transformer no longer
+  creates a parallel edge that bypasses its own outage. Canvas import/export
+  retains all new asset fields; this fixed a real-browser loss of transformer
+  metadata when the editor synchronized the model before generation.
+- Release builds for `test_weather_hazards` and `test_resilience_assessment`
+  passed. Focused runs passed **133 assertions / 8 cases** and **25 assertions /
+  2 weather-tagged cases**. The complete `resilience_edition_e2e.py` passed
+  with the mixed case (rainstorm 14 faults, 45.965892 MWh ENS; lightning 21
+  faults, 12.287059 MWh ENS). Real Chromium weather E2E passed for both hazards:
+  selected representative scenarios had 8/9 faults, 25 computed metrics each,
+  and final hour supply ratio 1.0. The mocked desktop/mobile edition GUI matrix,
+  one-line store round-trip, JS syntax checks and Python compilation passed.
+  These figures are synthetic regression examples, not regional risk estimates.
+- `run_gui_server` compiled, but the build's final copy into the root build
+  directory was denied because the earlier live server (PID 48692) still holds
+  that executable. API/browser checks used the new binary at
+  `build/resilience-verify/tests/Release/run_gui_server.exe` on isolated ports.
+  The updated binary is also running on `http://127.0.0.1:8098/xjtu/`
+  (PID 22644); the homepage returned HTTP 200, the edition profile lists all
+  three hazards and the built-in catalog includes the mixed case. The older
+  service on 8097 remains untouched and serves the previous binary. Windows
+  denied a shell request to open a browser window, so the user can open 8098
+  manually.
+  No full-library C++ regression, SWMM/OpenETran cross-check or field-data
+  calibration was run.
+
+## Earlier Web resilience metric and weather implementation (historical evidence)
+
+- Fixed the weather-window RA topology carry-over: when no authored outage is
+  active, the model returns to its initial intact topology. The real-browser
+  rainstorm/lightning cases now both have zero active faults and final supply
+  ratio **1.0** at hour 47. Their revised 48 h ENS values are **48.254269** and
+  **22.217986 MWh**. This is the RA topological supply result, not power-flow
+  certification. `test_weather_hazards` now passes **124 assertions / 6 cases**;
+  `test_resilience_assessment` passes **383 / 40**. The real weather browser
+  run passed again with 25 computed metrics per hazard.
+- Rapid recovery now exposes only the mobile-storage scheduling switch. Selected
+  fault IDs/timing and profiles still bind automatically; all other request
+  parameters use platform defaults, including after restoring an older saved
+  version. Weather result tables now give exposed/failed AC and DC branch
+  counts, temporary/permanent counts and domain-qualified stable branch IDs.
+  The recovered-run view labels fault counts as branch counts.
+  The mocked Resilience desktop/mobile GUI matrix passed after its recovery
+  contract assertions were updated. Node syntax checks and `git diff --check`
+  passed.
+- The earlier rainstorm/lightning implementation was verified before this asset-aware update; see
+  [weather scenarios](../modules/resilience/weather_scenarios.md). Added typed
+  hazard options, backend-owned UI schemas, 5-minute normalized rain/storage,
+  Poisson/current-threshold lightning, generic hazard evidence and existing
+  candidate/clustering/profile integration. Its former homogeneous AC/DC branch
+  exposure proxy was replaced by the asset-specific rules above.
+- Final Release builds in `build/resilience-verify` passed for `run_gui_server`,
+  `test_weather_hazards`, `test_resilience_assessment`, `test_scenario_generation`
+  and `test_edition_profile`. Direct runs passed **118 assertions / 6 cases**,
+  **383 / 40**, **4,214 / 12**, and **1,458 / 6**, respectively. The complete
+  mocked desktop/mobile Full/Trial/Resilience GUI matrix passed.
+- Real API integration exposed legacy RA greedy repairs overriding generated
+  flood access delays. Added opt-in `respect_fault_windows` to enforce authored
+  availability masks and permit temporary trips to clear during the storm;
+  the existing default RA path is retained. Added a numerical window regression.
+  Real API verification now passes, including exact preservation of every AC/DC
+  fault window, default disaster-end convention and independent ENS comparison.
+  Fixed severe configurations produced 33 faults each: rainstorm ENS
+   **90.926228 MWh**, lightning ENS **10.918395 MWh** before the later topology
+   carry-over correction. These are synthetic
+  regression examples, not calibrated regional risk estimates.
+- Real-browser startup also exposed the strict profile-key validator rejecting
+  the new schema. Backend, validator and mocked profile were synchronized;
+  the extra schema is confined to the Resilience edition.
+- Registered `weather_scenario_gui_e2e` passed against the real server: edit,
+  switch/reset parameters, generate/select rainstorm and lightning, 48 h RA
+  recovery, metric evaluation, saved versions, page reload and restore of
+  lightning density 5 with no active historical run ID. The browser examples
+   returned 30/18 faults and 25 computed recommended metrics each; ENS was
+   **109.755099 / 103.288731 MWh** before the later topology correction. This sequence uses demo settings and different
+  hazard parameters from the API examples above. No browser errors or page-level
+  horizontal overflow at 1440x1000 or 390x844. Visually inspected process charts
+  and mobile fault tables; numeric display precision was shortened while raw
+  results remain unchanged. Evidence and screenshots: `build/weather-gui/`.
+- Failed intermediate checks exposed real integration gaps (JavaScript scope,
+  strict profile-key validation and early RA repairs), all corrected and rerun.
+  Browser test waits were also corrected for asynchronous task-record creation;
+  restored run IDs may be absent or null. No external SWMM/OpenETran oracle,
+  disaster-data calibration, full-library regression or release package was run.
+  Node syntax checks, Python compilation and `git diff --check` passed.
+- The rebuilt GUI server is running at `http://127.0.0.1:8097/xjtu/`
+  (PID 48692). The page returned HTTP 200 and `/api/edition` lists typhoon,
+  rainstorm and lightning.
+  Static page returned HTTP 200 and the live profile lists all three hazards.
+  Opening the URL through the Windows shell was denied; the server remains
+  available for the user to open manually. LaTeX source notes were synchronized
+  but the manual PDF was not rebuilt.
+
+- Multi-hazard source review: [book coverage and integration design](../modules/resilience/multi_hazard_sources.md) distinguishes the book's detailed typhoon/rain/lightning/human-event models from other mentioned hazards. Reviewed current typhoon-specific event/branch fault contracts, existing rainfall-road effects, upstream repositories, selected source files and licenses. No new hazard generator or external solver was installed, implemented or numerically validated in this review.
+
+- Definition `book_ch3_2026.2`: 18 Chapter 3 metrics plus 24 operational metrics. The single backend catalog drives profile/API/portal. Formula and field ledger, PDF page references and numeric evidence: [Web resilience metrics](../modules/resilience/metrics.md).
+- User-directed disaster-end default is the last fault onset; explicit input wins, and last repair completion remains separate. CLLP uses the final observation, ARSS the initial interrupted-load baseline, RES the weighted loss series, and t_sp measures interrupted-load recovery from disaster end. APDA's explicit proxy consent now works. Event times can be supplied on the metric page without rerunning recovery.
+- Operational interval energy includes the final interval and nonuniform durations. Zero denominators, missing optional series, incomplete/infeasible artifacts and invalid time/power data do not become fabricated zeros. The portal provides recommended selection, 42-entry output, value-first ordering, expandable provenance, filtering and JSON/CSV export.
+- Release build in `build/resilience-verify`: `test_resilience_metrics`, `test_edition_profile`, `run_gui_server` built successfully. Direct unit runs passed **961 assertions / 10 cases** and **1,458 assertions / 6 cases**. An intermediate server copy failed because this task's live process held the executable; stopping that process and rebuilding resolved it.
+- `python tools/resilience_edition_e2e.py --server build/resilience-verify/tests/Release/run_gui_server.exe` passed, including new real `dist33_microgrid_der` recovery integration comparisons, priority-energy sum, 42 results, default/explicit event timing, invalid event order and the existing PF/OPF, route/revision/cancellation checks.
+- `node tests/e2e/resilience_edition_gui_e2e.mjs` passed the desktop/mobile Resilience/Full/Trial matrix, now including 24 recommended operational selections, backend-value display, null filtering, CSV raw values and no recovery rerun. A generic accessibility handler previously rebound the portal tablists; the portal now retains sole ownership of its tab selection and keyboard handling.
+- Actual Chromium inspection on `http://127.0.0.1:8097/xjtu/` used a real API-created 4-hour, 0.5-hour-step heuristic recovery artifact, loaded into the portal for result inspection (not a fresh scenario-generation browser traversal). It returned 27 computed, 1 approximate, 13 unavailable and 1 not-applicable metrics. No page errors or page-level horizontal overflow at 1440×1000 or 390×844. Local screenshots: `build/metrics-results-desktop.png`, `build/metrics-results-mobile.png`; evidence: `build/metrics-live-evidence.json`. The live server is retained on port 8097.
+- Initial real-browser inspection found a duplicate required-input entry in the generated duration metric catalog. This was corrected, catalog uniqueness assertions were added, and the real API/browser checks were rerun successfully. No external-oracle or full C++ regression claim is made. REI/RSE, multi-scenario risk and active-defense optimization remain outside this change; LaTeX sources were synchronized but not compiled.
+
+## Resilience portal summary placement and home review
+
+- User-facing portal title is now `弹性仿真平台` in `web/index.html`.
+  This is a wording-only change; source search confirmed the previous title no
+  longer appears in the current Web UI, documentation or tests.
+
+- The home/workspace migration is now implemented. Default home, guided 33-node
+  demonstration, recommended metric selection, state-dependent next action,
+  basic/advanced parameters, help, immutable local versions, transfer, task
+  records, comparison curves and stable AC/DC fault links are available. See the
+  [workspace guide](../guides/resilience_workspace.zh.md). Storage is IndexedDB
+  local to browser/origin, not shared backend persistence; internal solver progress
+  is not fabricated. Reopening imports configuration and requires a new recovery.
+- The registered mocked desktop/mobile Full/Trial/Resilience matrix passed with
+  home/default route, save/export/reload/restore/recompute, retained task records,
+  comparison boundary, valid/invalid file import, imported provenance,
+  guided-demo setup and mobile navigation assertions. AC and
+  DC faults with the same stable index 25 selected different correct Canvas
+  components. Existing recovery/metric single-request and footer checks still pass.
+- Real Chromium on isolated port 8098 completed the actual UI sequence: homepage
+  demonstration, one TD representative cluster, explicit selection, 48 h recovery
+  (MIP limit set to 10 s), metric evaluation, automatic version save, page reload
+  and configuration restore. This mild scenario contained no selected faults and
+  returned 25 computed recommended metrics; it verifies the workflow, not severe
+  disaster recovery quality. Restored configuration retained the selected scenario
+  and had a null active run handle. No page errors were observed. Evidence:
+  `build/workspace-live-evidence.json`; screenshots `build/workspace-home-desktop.png`,
+  `build/workspace-home-mobile.png`, `build/workspace-recovery-settings.png`,
+  `build/workspace-tasks-running.png`, `build/workspace-results.png`, and
+  `build/workspace-projects.png`. The test served a cached, unmodified Plotly
+  2.27.0 asset after the external CDN delayed the initial browser attempt.
+- Visual inspection found the legacy global 48px header clipping the portal title;
+  the portal now explicitly uses automatic header height. Long profile provenance
+  and fault text controls were folded into details after the initial inspection.
+  The Windows package resource allowlist now includes both portal JavaScript
+  modules and its CSS. No new numerical algorithm or C++ backend was introduced.
+  JavaScript syntax checks, PowerShell packaging-script parsing and
+  `git diff --check` passed. The isolated 8098 test server was stopped; the user's
+  8097 GUI remains available (HTTP 200). No release package or full C++ regression
+  was run for this UI change; solver cancellation was wired to the existing
+  manager but not separately exercised against a long-running real solver.
+
+- Scenario generation, rapid recovery and metric output now put calculation
+  summaries last and collapsed by default. Recovery metadata and backend run
+  evidence share the footer; charts remain visible outside it. Request errors
+  remain near the controls. Static asset cache version is
+  `20260927-summary-footer`; no backend rebuild is required for this UI change.
+- JavaScript syntax checks passed for `web/js/app.js` and
+  `web/js/core/resilience_portal.js`. The complete
+  `node tests/e2e/resilience_edition_gui_e2e.mjs` desktop/mobile mocked
+  Full/Trial/Resilience matrix passed with new footer order, collapsed-state and
+  chart-visibility assertions.
+- Isolated real-browser inspection on port 8098 used a real API-created 4-hour,
+  0.5-hour-step heuristic recovery artifact injected into portal state for result
+  inspection, not a full scenario-generation browser traversal. Recovery footer
+  was last and closed, charts remained visible, and the 42 metric rows retained
+  27 computed, 1 approximate, 13 unavailable and 1 not-applicable results. No page
+  errors or desktop/mobile horizontal overflow were observed. Evidence:
+  `build/summary-footer-live-evidence.json`, `build/summary-footer-recovery.png`,
+  `build/summary-footer-metrics.png`, `build/summary-footer-mobile.png`.
+  The isolated server was stopped; the user's port 8097 server was retained.
+- CoPlanning's `mac` branch was reviewed at
+  `966947339444d585a3db0aef26d4211bd3d3852a` in the isolated
+  `build/coplanning-mac-review` checkout. It contains a default project welcome
+  page, demonstration walkthrough, next-action guidance, planner/expert modes,
+  task records, persistent project versions, comparison and help. The local
+  `D:/CoPlanning` checkout was older and did not represent that branch. Proposed
+  adaptations and their implementation boundary are recorded in the
+  [Resilience Edition Contract](../operations/resilience_edition_design.md#calculation-summaries-and-home-navigation).
+  This review preceded the implementation and verification recorded above.
 
 ## Current Resilience Edition handoff
 
@@ -15,6 +211,17 @@ an explicit-allowlist Windows package path. The stable living contract is
 This is current-worktree state, not a committed release baseline.
 
 Current source facts:
+
+- The current Resilience product contract is five steps: 指标选择 → 场景生成与选择 → 主动防御 → 快速恢复 → 指标输出. The proactive-defense step is explicitly non-blocking `skipped_unavailable`; it creates no canonical analysis request because no active-defense algorithm is implemented in this boundary. The existing `distribution_resilience` endpoint remains the sole recovery execution entry and is presented as rapid recovery with `legacy_full_distribution_resilience` disclosed in the response.
+- Historical 2026-09-22 baseline (superseded by the expansion above): the backend exposes the Chapter 3 metric catalog at `GET /api/session/resilience/metric_catalog` and an independent evaluator at `POST /api/session/resilience/metrics`. The catalog contains 18 entries (8 pre-disaster, 3 during-disaster, 7 post-disaster) under definition version `book_ch3_2026.1`. Metric requests reference a stored run artifact and do not rerun recovery; unavailable values remain JSON `null` with explicit status, reason, assumptions, limitations, approximation, censoring, and missing dependencies. Strict disaster/recovery interval metrics use optional explicit `disaster_end_hr` and `recovery_start_hr` request metadata; absent metadata remains unavailable rather than being inferred from a solver stage or repair completion.
+- Recovery responses now retain a bounded in-process artifact history (at most 16 run artifacts, oldest-first eviction) and return a stable `run_id`/revision, time axis, normalized `steps`, explicit fault timing fields, model revision, and dynamic-safety limitations. Unknown/evicted artifacts and model revision mismatches fail closed. This is not cross-restart persistence.
+- Focused verification on 2026-09-22: the Resilience `test_edition_profile` passed 6/6 with 1,458 assertions; `test_resilience_metrics` passed 6/6 with 166 assertions; the GUI server source compiled and linked, but its post-build copy to the running server path was blocked by the existing process lock. `tools/resilience_edition_e2e.py` passed with the five-step plan, catalog admission, unknown-run rejection, disabled-route checks, PF/OPF, cancellation, stale metadata, and cleanup checks. A direct real-server smoke request also returned 18 catalog entries, `rrun-1`, eight 0.5-hour steps, and backend metric statuses (`computed`/`unavailable`) with unavailable value `null`.
+- The browser-side Resilience portal is now implemented in `web/js/core/resilience_portal.js` with the isolated `#resiliencePortalRoot`, catalog-driven 18-entry selection, distinct selection/scenario/model/run revisions, explicit APDA/RES approximation consent, scenario candidate selection, non-blocking `skipped_unavailable` proactive defense, one recovery entry, and backend-only metric output. `场景生成与选择` now includes fresh-session model loading/import (default `dist33_microgrid_der`, MATPOWER, JSON), the full resilience scenario-generation controls, structured backend errors, explicit representative-only candidate derivation, and portal-scoped summary/warning/audit, cluster/fault, wind/fault-coverage, and profile evidence. `快速恢复` now displays the semantic recovery controls and layers base defaults, atomic scenario-derived faults/profiles/identity, current-scenario fault overrides, and persistent non-scenario user overrides. Reselecting a representative clears only scenario overrides and invalidates old recovery/metric artifacts; invalid profiles fail explicitly; requested and repair-aware effective horizons are both shown. The final request still goes through the one canonical collector. Recovery results are rendered only inside the portal with element-target Plotly calls and readable backend-evidence tables; nonuniform backend time axes are retained, missing data is not filled with zero, and Chapter 3 values remain backend-evaluator-only. The top-level `工作流 / 配电系统架构` switch reparents the one existing Canvas/WebGL container and uses resize-only activation without model reload or camera/selection/layout reset. Full/Trial keep their original Canvas ownership. `web/css/resilience_portal.css` provides scoped desktop/mobile/light/dark styling; its three-series light/dark chart palettes passed the dataviz validator against the actual portal surfaces (the light aqua slot has the documented table-view contrast relief).
+- On 2026-09-23 the registered mocked Chromium GUI script passed the desktop/mobile Full/Trial/Resilience matrix after these changes. The executable workflow assertions now include fresh-state prerequisite locking, default built-in case, built-in/MATPOWER/JSON model entry, Resilience-only scenario payload, edited cluster/intensity/reduction controls, duplicate-submit suppression, stable selected-scenario identity, proactive-defense zero-request behavior, same-number AC/DC fault hydration, 36 profiles, scenario A→B→A atomic replacement and scenario-override clearing, persistence of a non-scenario MIP override, exactly one canonical recovery POST, exactly one metric POST without rerunning recovery, actual-element portal Plotly targets outside the legacy shell, untouched legacy result containers, preserved `[0, 0.5, 1, 1.75]` backend x-coordinates, multi-series legends, MESS evidence, Plotly purge on step revisit, zero revisit requests, duplicate-ID audit, top presentation-tab keyboard/ARIA behavior, unique Canvas ownership, architecture switching without HTTP requests, mobile overflow, nullable unavailable output, and immediate backend scenario-error text. Syntax checks and `git diff --check` passed for the edited JS/CSS/E2E files. The focused Release targets rebuilt successfully, and direct execution passed `test_edition_profile` (1,458 assertions / 6 cases) and `test_resilience_metrics` (166 assertions / 6 cases); this existing build directory had no discoverable CTest entries, so those two executables were run directly. This remains mocked browser/static plus focused unit evidence for the dirty current worktree; no server restart, real HTTP run, or current real-browser screenshot inspection was performed for the scoped renderer/architecture additions.
+- On 2026-09-23, after launching the current Resilience executable on `127.0.0.1:8088`, live Chromium inspection found that generated representative cards and their “选择此场景” controls existed but were below the viewport and unreachable: the workflow surface did not establish a bounded flex/grid height, so `.resilience-portal__main` expanded to the full result height despite `overflow:auto`, while the portal root clipped the excess. The workflow surface is now a bounded flex column and the workspace clips at its viewport boundary, making the center main region the actual vertical scroll owner. Generation now scrolls and focuses a named representative chooser, presents explicit selection guidance and candidate-specific accessible labels, visibly marks the selected card, and unhides the mobile workflow selector. Live 1440×1000 verification generated a one-cluster TD result, brought the first selection button into view automatically, selected it, and observed `已选场景 · v2` with no page/console errors; 390×844 and 1440×1000 both retained zero page-level horizontal overflow. The complete mocked desktop/mobile Full/Trial/Resilience Chromium matrix passed after adding explicit assertions that the generated chooser is automatically revealed, scroll-reachable, and selectable.
+- A live headless-Chromium run against the already-running Resilience server on 2026-09-22 completed the portal sequence with `dist33_microgrid_der`: one TD intensity, one representative cluster, explicit scenario selection, zero requests while entering proactive defense, exactly one recovery POST, and exactly one metric-evaluator POST. The recovery request carried the edited 4 h horizon, 10 s MIP limit, scenario ref/revision, a deterministic content digest, and 36 scenario profile bindings; the backend evaluator returned LOLP as `unavailable` with JSON `null`. Separate live portal smokes loaded `case14.m` through the MATPOWER entry and imported `data/dsp/2DC.json` through the JSON file entry, each updating the displayed model counts and revision without console/page errors. The running executable predates the new scenario-identity echo fields and returned revision 0/null identity, so the portal used an explicit compatibility marker for that legacy response while preserving the request identity. This is live browser evidence for the existing running binary plus current static assets, not evidence that the newly linked executable was copied over the process lock.
+- The legacy shell remains a hidden/inert compatibility host only for Resilience; Full/Trial continue using the legacy surface. The portal adapter currently bridges existing scenario controls and recovery parameter collection while preserving the single canonical recovery route. The backend recovery response now echoes portal `scenario_ref`, `scenario_revision`, and `scenario_digest` metadata; the recovery solver does not independently validate scenario identity, so the GUI must keep the selected scenario artifact and digest visible as provenance.
+- The earlier legacy-view description below is historical current-worktree context and is not the Resilience product surface: `applyResilienceNavigation()` no longer creates the three shared result views for Resilience. Do not use the historical module/result assertions as evidence for the portal contract.
 
 - The Resilience GUI navigation is reshaped at runtime by
   `applyResilienceNavigation()` (`web/js/app.js`, gated on

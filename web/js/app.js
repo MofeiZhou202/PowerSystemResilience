@@ -393,6 +393,12 @@ const App = (() => {
   let _lastWeakLinkData = null;
   let _lastCounterfactualData = null;
   let _lastScenarioGenerationData = null;
+  let _lastScenarioGenerationError = null;
+  let _resilienceScenarioGenerationPending = false;
+  let _resilienceScenarioRevision = 0;
+  let _resilienceScenarioRef = '';
+  let _resilienceScenarioDigest = null;
+  let _selectedResilienceScenario = null;
   let _lastTopoAnalysisData = null;
   let _lastNetReductionData = null;
   let _lastScenarioBaseSystemJson = null;
@@ -429,7 +435,12 @@ const App = (() => {
   const _canvasPlaybackControllers = new Map();
   let _activeWorkflow = 'steady';
   let _editionProfile = null;
+  let _resiliencePortalAdapter = null;
+  let _portalOperations = null;
+  let _portalCanvasAnchor = null;
   let _startupState = 'loading';
+  const _modelRevisionListeners = new Set();
+  const _portalStatusListeners = new Set();
   let _trialAnalysisPlanRequest = 0;
   let _parameterLibraryData = null;
   let _parameterLibrarySelectedInstance = '';
@@ -715,7 +726,7 @@ const App = (() => {
       'schema', 'edition', 'product_name', 'analyses', 'analysis_catalog', 'workflow', 'indicators',
       'enabled_modules', 'frontend_modules', 'enabled_io_formats', 'disabled_features',
       'solver_capabilities', 'model_scope', 'limitations', 'restoration_certification',
-      'route_policy',
+      'route_policy', 'resilience_metric_catalog', 'scenario_hazards',
     ]),
   });
   const EDITION_FRONTEND_MODULES = Object.freeze({
@@ -779,13 +790,29 @@ const App = (() => {
     'resilience', 'carbonFlow', 'indicatorDesign',
     'proactiveDefense', 'rapidRecovery', 'resilienceMetrics',
   ]);
-  const EDITION_WORKFLOW = Object.freeze([
-    Object.freeze({ id: 'modeling', label: '模型建立' }),
-    Object.freeze({ id: 'parameter_validation', label: '参数校核' }),
-    Object.freeze({ id: 'indicator_design', label: '指标设计' }),
-    Object.freeze({ id: 'panoramic_simulation', label: '全景仿真' }),
-    Object.freeze({ id: 'weak_link_identification', label: '薄弱辨识' }),
-  ]);
+  const EDITION_WORKFLOW = Object.freeze({
+    full: Object.freeze([
+      Object.freeze({ id: 'modeling', label: '模型建立' }),
+      Object.freeze({ id: 'parameter_validation', label: '参数校核' }),
+      Object.freeze({ id: 'indicator_design', label: '指标设计' }),
+      Object.freeze({ id: 'panoramic_simulation', label: '全景仿真' }),
+      Object.freeze({ id: 'weak_link_identification', label: '薄弱辨识' }),
+    ]),
+    trial: Object.freeze([
+      Object.freeze({ id: 'modeling', label: '模型建立' }),
+      Object.freeze({ id: 'parameter_validation', label: '参数校核' }),
+      Object.freeze({ id: 'indicator_design', label: '指标设计' }),
+      Object.freeze({ id: 'panoramic_simulation', label: '全景仿真' }),
+      Object.freeze({ id: 'weak_link_identification', label: '薄弱辨识' }),
+    ]),
+    resilience: Object.freeze([
+      Object.freeze({ id: 'metric_selection', label: '指标选择' }),
+      Object.freeze({ id: 'scenario_selection', label: '场景生成与选择' }),
+      Object.freeze({ id: 'proactive_defense', label: '主动防御' }),
+      Object.freeze({ id: 'rapid_recovery', label: '快速恢复' }),
+      Object.freeze({ id: 'metric_output', label: '指标输出' }),
+    ]),
+  });
   const BASE_INDICATORS = Object.freeze([
     Object.freeze({ id: 'system_economic', level: 'system', dimension: 'economic', label: '系统经济性' }),
     Object.freeze({ id: 'user_economic', level: 'user', dimension: 'economic', label: '用户经济性' }),
@@ -950,6 +977,24 @@ const App = (() => {
     }
     const edition = profile.edition;
     assertExactKeys(profile, EDITION_PROFILE_KEYS[edition], 'profile');
+    if (edition === 'resilience') {
+      const hazards = profile.scenario_hazards;
+      if (!Array.isArray(hazards) || hazards.length !== 3 ||
+          ['typhoon', 'rainstorm', 'lightning'].some(id => hazards.filter(row => row?.id === id).length !== 1))
+        throw profileContractError('scenario_hazards 灾害目录不完整');
+      hazards.forEach(hazard => {
+        assertString(hazard.label, 'scenario_hazards.label');
+        if (!Array.isArray(hazard.fields)) throw profileContractError('scenario_hazards.fields 必须为数组');
+        const keys = new Set();
+        hazard.fields.forEach(field => {
+          assertExactKeys(field, ['key', 'label', 'unit', 'default', 'min', 'max', 'advanced'], 'hazard field');
+          for (const key of ['key', 'label', 'unit']) assertString(field[key], `hazard field.${key}`);
+          if (keys.has(field.key) || ![field.default, field.min, field.max].every(Number.isFinite) || field.default < field.min || field.default > field.max || typeof field.advanced !== 'boolean')
+            throw profileContractError('灾害参数 schema 无效');
+          keys.add(field.key);
+        });
+      });
+    }
     assertString(profile.product_name, 'product_name');
     if (profile.product_name !== EDITION_PRODUCTS[edition]) {
       throw profileContractError(`product_name 与 ${edition} edition 不匹配`);
@@ -987,7 +1032,42 @@ const App = (() => {
         dynamic_certification: 'not_exposed_in_first_release',
       }, 'restoration_certification');
     }
-    assertExactRows(profile.workflow, EDITION_WORKFLOW, 'workflow');
+    if (edition === 'resilience') {
+      assertExactKeys(profile.resilience_metric_catalog,
+        ['schema', 'definition_version', 'entries'], 'resilience_metric_catalog');
+      if (profile.resilience_metric_catalog.schema !== 'resilience_metric_catalog_v1' ||
+          profile.resilience_metric_catalog.definition_version !== 'book_ch3_2026.2') {
+        throw profileContractError('resilience_metric_catalog 版本不匹配');
+      }
+      if (!Array.isArray(profile.resilience_metric_catalog.entries) ||
+          profile.resilience_metric_catalog.entries.length !== 42) {
+        throw profileContractError('resilience_metric_catalog.entries 必须包含 42 项');
+      }
+      const metricIds = new Set();
+      profile.resilience_metric_catalog.entries.forEach((entry, index) => {
+        assertExactKeys(entry, [
+          'id', 'name_zh', 'name_en', 'symbol', 'phase', 'topic', 'formula_ref',
+          'unit', 'direction', 'calculation_scope', 'availability', 'required_inputs',
+          'source_notes', 'limitations',
+        ], `resilience_metric_catalog.entries[${index}]`);
+        assertString(entry.id, `resilience_metric_catalog.entries[${index}].id`);
+        if (metricIds.has(entry.id)) {
+          throw profileContractError(`resilience_metric_catalog 包含重复 ID: ${entry.id}`);
+        }
+        metricIds.add(entry.id);
+        for (const field of ['name_zh', 'name_en', 'symbol', 'phase', 'topic',
+          'formula_ref', 'unit', 'direction', 'calculation_scope', 'availability']) {
+          assertString(entry[field], `resilience_metric_catalog.entries[${index}].${field}`);
+        }
+        assertUniqueStringArray(entry.required_inputs,
+          `resilience_metric_catalog.entries[${index}].required_inputs`);
+        assertUniqueStringArray(entry.source_notes,
+          `resilience_metric_catalog.entries[${index}].source_notes`);
+        assertUniqueStringArray(entry.limitations,
+          `resilience_metric_catalog.entries[${index}].limitations`);
+      });
+    }
+    assertExactRows(profile.workflow, EDITION_WORKFLOW[edition], 'workflow');
     assertExactRows(profile.indicators, EDITION_INDICATORS[edition], 'indicators');
     return Object.freeze({
       ...profile,
@@ -1038,6 +1118,10 @@ const App = (() => {
       ? window.__HACDCPF_INITIAL_HASH
       : '';
     delete window.__HACDCPF_INITIAL_HASH;
+    if (_editionProfile?.edition === 'resilience' && /^#resilience\/(home|workflow|architecture|projects|tasks|compare|help)(?:\/[a-z_]+)?$/.test(hash)) {
+      const portalRoot = document.getElementById('resiliencePortalRoot');
+      if (portalRoot) portalRoot.dataset.initialRoute = hash;
+    }
     const candidate = HASH_MODULES[hash];
     return candidate && hasFrontendModule(candidate) &&
       document.querySelector(`.module-btn[data-module="${candidate}"]`)
@@ -1067,6 +1151,8 @@ const App = (() => {
     const title = document.getElementById('startupStatusTitle');
     const message = document.getElementById('startupStatusDetail');
     const shell = document.getElementById('appShell');
+    const portal = document.getElementById('resiliencePortalRoot');
+    const resilienceReady = state === 'ready' && _editionProfile?.edition === 'resilience';
     if (status) {
       status.dataset.state = state;
       status.hidden = state === 'ready';
@@ -1076,10 +1162,16 @@ const App = (() => {
       ? '无法验证本机服务提供的能力配置。为防止暴露未授权功能，工作区未启动。'
       : '正在从本机服务读取能力配置。验证完成前工作区保持锁定。');
     if (shell) {
-      shell.hidden = state !== 'ready';
-      shell.inert = state !== 'ready';
-      if (state === 'ready') shell.removeAttribute('aria-hidden');
+      shell.hidden = state !== 'ready' || resilienceReady;
+      shell.inert = state !== 'ready' || resilienceReady;
+      if (state === 'ready' && !resilienceReady) shell.removeAttribute('aria-hidden');
       else shell.setAttribute('aria-hidden', 'true');
+    }
+    if (portal) {
+      portal.hidden = !resilienceReady;
+      portal.inert = !resilienceReady;
+      if (resilienceReady) portal.removeAttribute('aria-hidden');
+      else portal.setAttribute('aria-hidden', 'true');
     }
   }
 
@@ -1297,121 +1389,14 @@ const App = (() => {
     }),
   ]);
 
+  // Legacy navigation is retained for Full/Trial compatibility. Resilience uses
+  // the isolated portal surface and must not mutate the old module/result graph.
   function applyResilienceNavigation() {
     if (_editionProfile.edition !== 'resilience') return;
-    const planningWorkflow = document.querySelector('.workflow-btn[data-workflow="planning"]');
-    if (planningWorkflow) {
-      planningWorkflow.textContent = '场景生成';
-      planningWorkflow.title = '台风致灾场景生成与极端灾害场景模拟';
-    }
-    const sustainabilityWorkflow = document.querySelector('.workflow-btn[data-workflow="sustainability"]');
-    if (sustainabilityWorkflow) {
-      sustainabilityWorkflow.textContent = '弹性分析';
-      sustainabilityWorkflow.title = '完整弹性分析、主动防御、快速恢复与弹性指标';
-    }
-    WORKFLOW_DEFAULT_MODULE.planning = 'scenarioGeneration';
-    WORKFLOW_DEFAULT_MODULE.sustainability = 'resilience';
-    const scenarioButton = document.getElementById('moduleScenarioGeneration');
-    if (scenarioButton) scenarioButton.textContent = '台风致灾场景生成';
-    const resilienceButton = document.getElementById('moduleResilience');
-    if (resilienceButton) resilienceButton.textContent = '完整弹性分析';
     const solverSelect = document.getElementById('resSolverSelect');
     if (solverSelect && Array.from(solverSelect.options).some(o => o.value === 'HiGHS')) {
       solverSelect.value = 'HiGHS';
     }
-    const scenarioHeading = document.querySelector('[data-result-group="scenarioGeneration"] .topo-section > h4');
-    if (scenarioHeading) scenarioHeading.textContent = '台风致灾场景生成结果';
-    const resilienceHeading = document.querySelector('[data-result-group="resilience"] .topo-section > h4');
-    if (resilienceHeading) resilienceHeading.textContent = '完整弹性分析结果';
-    const moduleBar = document.getElementById('moduleBar');
-    const subToolbar = document.getElementById('subToolbar');
-    const resultsContent = document.getElementById('resultsContent');
-    if (!moduleBar || !subToolbar || !resultsContent) return;
-
-    const makePlaceholderButton = (id, group, label) => {
-      const button = document.createElement('button');
-      button.id = id;
-      button.className = 'module-btn module-btn-disabled';
-      button.dataset.group = group;
-      button.textContent = label;
-      button.disabled = true;
-      button.setAttribute('aria-disabled', 'true');
-      button.title = '该模块正在制作中，暂不可用';
-      return button;
-    };
-
-    if (scenarioButton && !document.getElementById('moduleExtremeScenarios')) {
-      scenarioButton.insertAdjacentElement('afterend',
-        makePlaceholderButton('moduleExtremeScenarios', 'planning', '更多极端灾害场景模拟（制作中…）'));
-    }
-    if (resilienceButton && !document.getElementById('moduleProactiveDefense')) {
-      let anchor = resilienceButton;
-      RESILIENCE_VIEW_MODULES.forEach(view => {
-        const button = document.createElement('button');
-        button.id = view.buttonId;
-        button.className = 'module-btn';
-        button.dataset.module = view.module;
-        button.dataset.group = 'sustainability';
-        button.textContent = view.label;
-        button.addEventListener('click', () => setActiveModule(view.module));
-        anchor.insertAdjacentElement('afterend', button);
-        anchor = button;
-      });
-      anchor.insertAdjacentElement('afterend',
-        makePlaceholderButton('moduleResilienceWeakLinks', 'sustainability', '薄弱环节（制作中…）'));
-    }
-
-    RESILIENCE_VIEW_MODULES.forEach(view => {
-      if (!document.querySelector(`.sub-section[data-sub="${view.module}"]`)) {
-        const section = document.createElement('div');
-        section.className = 'sub-section';
-        section.dataset.sub = view.module;
-        section.hidden = true;
-        const group = document.createElement('div');
-        group.className = 'control-param-group res-param-group';
-        group.title = '故障事件、时序与求解参数在「完整弹性分析」模块中配置；本视图与完整弹性分析共享同一次运行结果';
-        const title = document.createElement('span');
-        title.className = 'control-param-title';
-        title.textContent = view.subTitle;
-        const note = document.createElement('span');
-        note.className = 'sub-static';
-        note.style.opacity = '.8';
-        note.textContent = '参数见完整弹性分析';
-        const run = document.createElement('button');
-        run.className = 'toolbar-btn run-btn';
-        run.textContent = '运行弹性分析';
-        run.title = view.runTitle;
-        // runResilience() lives in a nested scope that is not visible here;
-        // trigger the canonical 完整弹性分析 run button instead — identical
-        // wiring, and every resilience view is populated by that one run.
-        run.addEventListener('click', () => document.getElementById('btnRunResilience')?.click());
-        group.append(title, note, run);
-        section.append(group);
-        subToolbar.append(section);
-      }
-      if (!document.querySelector(`.result-group[data-result-group="${view.module}"]`)) {
-        const resultGroup = document.createElement('div');
-        resultGroup.className = 'result-group';
-        resultGroup.dataset.resultGroup = view.module;
-        const resultSection = document.createElement('div');
-        resultSection.className = 'topo-section';
-        const heading = document.createElement('h4');
-        heading.textContent = view.resultTitle;
-        const container = document.createElement('div');
-        container.id = `${view.module}Results`;
-        container.className = 'topo-table-wrap';
-        const hint = document.createElement('p');
-        hint.className = 'empty-hint';
-        hint.textContent = view.emptyHint;
-        container.append(hint);
-        resultSection.append(heading, container);
-        resultGroup.append(resultSection);
-        resultsContent.append(resultGroup);
-      }
-    });
-    // The new buttons were added after the initial visibility pass; re-apply
-    // the active workflow filter so they show/hide with their group.
-    if (_activeWorkflow) setActiveWorkflow(_activeWorkflow, { preserveModule: true });
   }
 
   function resetResilienceViewPanels() {
@@ -1424,6 +1409,7 @@ const App = (() => {
   function applyEditionProfile() {
     if (!_editionProfile) throw profileContractError('profile 尚未加载');
     const trial = _editionProfile.edition === 'trial';
+    const resilience = _editionProfile.edition === 'resilience';
     document.body.dataset.edition = _editionProfile.edition;
     document.title = _editionProfile.product_name;
     const logo = document.querySelector('.logo-mini');
@@ -1434,6 +1420,151 @@ const App = (() => {
       badge.textContent = trial ? 'TRIAL' : 'RESILIENCE';
       logo.append(badge);
     }
+    applyResilienceNavigation();
+    _resiliencePortalAdapter = resilience ? {
+      getProfile: () => ({ ..._editionProfile, resilience_metric_catalog: {
+        ..._editionProfile.resilience_metric_catalog,
+        entries: _editionProfile.resilience_metric_catalog.entries.map(entry => ({
+          ...entry, required_inputs: [...entry.required_inputs], source_notes: [...entry.source_notes], limitations: [...entry.limitations],
+        })),
+      } }),
+      getMetricCatalog: () => _editionProfile.resilience_metric_catalog.entries.map(entry => ({
+        ...entry, required_inputs: [...entry.required_inputs], source_notes: [...entry.source_notes], limitations: [...entry.limitations],
+      })),
+      refreshMetricCatalog: async () => {
+        const data = await apiGet('/api/session/resilience/metric_catalog', { quiet: true });
+        if (!data || !Array.isArray(data.entries)) return _editionProfile.resilience_metric_catalog.entries;
+        return data.entries;
+      },
+      model: {
+        exportSnapshot: async () => {
+          // Same rich-model serialization used by syncToBackend, without replacing
+          // the server model and invalidating the recovery artifact during a save.
+          return JSON.parse(JSON.stringify(Canvas.buildSystemJson()));
+        },
+        listCases: async () => {
+          const data = await apiGet('/api/cases', { quiet: true });
+          const rows = Array.isArray(data?.cases) ? data.cases : [];
+          return {
+            defaultCase: data?.default_case || 'dist33_microgrid_der',
+            cases: rows.map(row => typeof row === 'string'
+              ? { id: row, label: row, group: '' }
+              : { id: row.name, label: row.label || row.name, group: row.group || '', blurb: row.blurb || '', scale: row.scale || '' })
+              .filter(row => row.id),
+          };
+        },
+        listMatpower: async () => {
+          const data = await apiGet('/api/matpower_files', { quiet: true });
+          return Array.isArray(data?.files) ? [...data.files] : [];
+        },
+        loadBuiltin: async caseName => {
+          const data = await loadBuiltinCase(caseName);
+          if (!data) throw new Error(`内置算例加载失败：${caseName || '未选择算例'}`);
+          _portalOperations?.clearSelectedScenario?.();
+          return { caseName, modelRevision: _modelRevision, counts: data.counts || null, name: data.name || caseName };
+        },
+        loadMatpower: async filename => {
+          const data = await loadMatpowerCase(filename);
+          if (!data) throw new Error(`MATPOWER 算例加载失败：${filename || '未选择文件'}`);
+          _portalOperations?.clearSelectedScenario?.();
+          return { filename, modelRevision: _modelRevision, counts: data.counts || null, name: data.name || filename };
+        },
+        importJson: async file => {
+          if (!file) throw new Error('未选择 JSON 文件');
+          let system;
+          try { system = JSON.parse(await file.text()); }
+          catch (error) { throw new Error(`JSON 解析失败：${error.message || error}`); }
+          const data = await importSystemJson(system, file.name);
+          if (!data) throw new Error(`JSON 系统文件导入失败：${file.name}`);
+          _portalOperations?.clearSelectedScenario?.();
+          return { filename: file.name, modelRevision: _modelRevision, name: system?.name || file.name, counts: data.counts || null };
+        },
+      },
+      scenario: {
+        getHazardSchema: () => JSON.parse(JSON.stringify(_editionProfile?.scenario_hazards || [])),
+        getConfig: () => _portalOperations?.readScenarioConfig?.() || {
+          resilience_cluster_count: 5,
+          clustering_method: 'hybrid_kmedoids_tail_5pct',
+          compare_baseline: true,
+          intensity_levels: ['TD', 'TS', 'STS', 'TY', 'STY', 'SuperTY'],
+        },
+        generate: async config => {
+          if (!_portalOperations?.generateScenarios) throw new Error('弹性场景生成服务尚未初始化');
+          return _portalOperations.generateScenarios(config || {});
+        },
+        getCandidates: data => {
+          const rows = [];
+          (data?.resilience?.intensities || []).forEach(group =>
+            (group.clusters || []).forEach(cluster => {
+              const representativeId = cluster.representative_id || cluster.representative?.id;
+              if (!representativeId || !cluster.representative) return;
+              rows.push({
+                id: String(representativeId),
+                label: String(representativeId),
+                digest: cluster.representative?.digest || cluster.digest || null,
+                intensity: group.intensity || cluster.representative?.resilience_event?.selected_intensity || null,
+                cluster_id: cluster.cluster_id ?? null,
+                probability: cluster.probability ?? cluster.representative?.probability ?? null,
+                member_count: cluster.member_count ?? null,
+                member_ids: [...(cluster.member_ids || [])],
+                anchor_reasons: [...(cluster.anchor_reasons || cluster.representative?.anchor_reasons || [])],
+                raw: cluster,
+              });
+            }));
+          return rows;
+        },
+        select: async candidate => {
+          if (!_portalOperations?.selectScenario) throw new Error('弹性场景选择服务尚未初始化');
+          return _portalOperations.selectScenario(candidate);
+        },
+      },
+      recovery: {
+        getConfig: () => _portalOperations?.readRecoveryConfig?.() || {},
+        run: context => {
+          if (!_portalOperations?.runRecovery) throw new Error('快速恢复服务尚未初始化');
+          return _portalOperations.runRecovery(context || {});
+        },
+        cancel: cancelActiveTask,
+      },
+      presentation: {
+        renderScenarioGeneration: (root, data, options = {}) => _portalOperations?.renderScenarioGeneration?.(root, data, options),
+        renderRapidRecovery: (root, data, options = {}) => _portalOperations?.renderRapidRecovery?.(root, data, options),
+        dispose: root => _portalOperations?.disposePresentation?.(root),
+      },
+      architecture: {
+        mount: () => _portalOperations?.mountArchitecture?.(),
+        setActive: active => _portalOperations?.setArchitectureActive?.(active),
+        locateFault: fault => {
+          const domain = String(fault.branch_type || fault.domain || '').toUpperCase();
+          const index = Number(fault.branch_id ?? fault.branch_index);
+          if (!['AC', 'DC'].includes(domain) || !Number.isInteger(index)) throw new Error('故障缺少有效的域与支路 ID');
+          if (Canvas.isHeadless?.()) throw new Error('当前大系统总览不支持单支路定位');
+          const system = Canvas.buildSystemJson();
+          const rows = domain === 'DC' ? system.dc?.branches : system.ac?.branches;
+          if (!Array.isArray(rows) || rows.filter(row => Number(row.index) === index).length !== 1) throw new Error('当前电网中无法唯一定位该支路');
+          const maps = Canvas.getCompBusMap(); const componentId = maps[domain === 'DC' ? 'dcBranch' : 'branch']?.[index];
+          if (componentId === undefined || !Canvas.getComponent(componentId)) throw new Error('该支路没有可定位的图形');
+          Canvas.panToComponent(componentId);
+        },
+      },
+      metrics: {
+        evaluate: async request => {
+          const result = await apiPostResult('/api/session/resilience/metrics', request, { quiet: true });
+          return { ...result, requestId: _taskStatus.requestId };
+        },
+      },
+      getModelRevision: () => _modelRevision,
+      onModelRevisionChange: listener => {
+        if (typeof listener !== 'function') return () => {};
+        _modelRevisionListeners.add(listener);
+        return () => _modelRevisionListeners.delete(listener);
+      },
+      onStatusChange: listener => {
+        if (typeof listener !== 'function') return () => {};
+        _portalStatusListeners.add(listener);
+        return () => _portalStatusListeners.delete(listener);
+      },
+    } : null;
     const workflowBar = document.getElementById('workflowBar');
     if (workflowBar && trial) {
       workflowBar.replaceChildren();
@@ -1465,7 +1596,6 @@ const App = (() => {
     });
     pruneUnsupportedIo();
     pruneResilienceScenarioGenerationUi();
-    applyResilienceNavigation();
     HySimCore.Accessibility?.syncNavigation();
   }
 
@@ -4007,6 +4137,12 @@ const App = (() => {
     };
   }
 
+  function portalStatus(message, state = '') {
+    _portalStatusListeners.forEach(listener => {
+      try { listener(message, state); } catch (_) { /* status observers are advisory */ }
+    });
+  }
+
   function setStatus(text, type = '') {
     const state = taskStateFromLegacy(text, type);
     const now = performance.now();
@@ -4018,6 +4154,7 @@ const App = (() => {
     }
     _lastStatusText = text || '';
     _lastStatusType = type || '';
+    portalStatus(_lastStatusText, type || '');
     const wasRunning = _taskStatus.state === 'running';
     if (state === 'running' && !wasRunning) {
       _taskStatus.sequence += 1;
@@ -4148,7 +4285,7 @@ const App = (() => {
   }
 
   async function loadMatpowerCase(filename) {
-    if (!filename) return;
+    if (!filename) return null;
     return trackActiveLoad(async () => {
       setStatus('加载MATPOWER...', 'busy');
       const data = await apiPost('/api/session/load_matpower', { filename });
@@ -4183,7 +4320,7 @@ const App = (() => {
   }
 
   async function loadBuiltinCase(caseName) {
-    if (!caseName) return;
+    if (!caseName) return null;
     setStatus('加载中...', 'busy');
     const data = await apiPost('/api/session/load_builtin', { case: caseName });
     if (data) {
@@ -4215,6 +4352,7 @@ const App = (() => {
     } else {
       setStatus('加载失败', 'error');
     }
+    return data || null;
   }
 
   // Render a freshly-loaded backend system onto the canvas (shared by the ETAP
@@ -4989,6 +5127,7 @@ const App = (() => {
       ['文件', sourceLabel],
       ['系统名', loadedName],
     ], { subtitle: `JSON 已同步到后端${noteHeadlessAfterLoad() || '并恢复画布'}` });
+    return data;
   }
 
   function importJson(file) {
@@ -14306,6 +14445,12 @@ const App = (() => {
     updateAnalysisParameterVisibility();
   }
 
+  function notifyModelRevisionListeners() {
+    _modelRevisionListeners.forEach(listener => {
+      try { listener(_modelRevision); } catch (error) { log(`Resilience portal revision listener failed: ${error.message || error}`, 'warn', { skipToast: true }); }
+    });
+  }
+
   function onSystemLoaded() {
     if (_subDiagramModel) {
       closeSubDiagram();
@@ -14320,6 +14465,7 @@ const App = (() => {
     // Any previously stored auto-draft is stale once a model is (re)loaded.
     clearCanvasDraft();
     _modelRevision += 1;
+    notifyModelRevisionListeners();
     if (_taskStatus.state !== 'running') _taskStatus.modelRevision = _modelRevision;
     renderTaskStatus();
     if (Canvas.syncConnectivity) Canvas.syncConnectivity();
@@ -14332,6 +14478,7 @@ const App = (() => {
   function onTopologyChanged() {
     _canvasDirty = true;
     _modelRevision += 1;
+    notifyModelRevisionListeners();
     renderTaskStatus();
     _pfInvalidated = _pfInvalidated || !!_lastPfData;
     _tspfInvalidated = _tspfInvalidated || !!_lastTspfData;
@@ -19171,7 +19318,9 @@ const App = (() => {
       applyEditionProfile();
 
       const initialModule = resolveDefaultModule();
-      if (!initialModule) throw new Error('能力配置未提供任何可用界面模块');
+      if (!initialModule && _editionProfile.edition !== 'resilience') {
+        throw new Error('能力配置未提供任何可用界面模块');
+      }
       // Initialize capability-independent shell services only after strict profile
       // success and pruning, while the shell remains locked and inaccessible.
     initThemeMode();
@@ -19195,19 +19344,30 @@ const App = (() => {
     delete window.__HACDCPF_MARKET_SCRIPTS;
 
     setStartupState('ready');
-    setActiveModule(initialModule);
-    restoreAllowedHash(initialModule);
+    if (_editionProfile.edition === 'resilience') {
+      if (!_resiliencePortalAdapter) {
+        throw new Error('Resilience portal adapter 未初始化');
+      }
+      ensurePortalOperations();
+      HySimCore.ResiliencePortal.mount({ adapter: _resiliencePortalAdapter });
+    } else {
+      setActiveModule(initialModule);
+      restoreAllowedHash(initialModule);
+    }
 
-    // Load case lists only after the capability-validated shell is ready.
-    loadCaseList();
-    loadMatpowerFileList();
+    // Load case lists only for the legacy shell; Resilience keeps the old DOM as a
+    // hidden compatibility host and must not trigger legacy startup I/O.
+    if (_editionProfile.edition !== 'resilience') {
+      loadCaseList();
+      loadMatpowerFileList();
+    }
     // Warm the transient model catalog only after a positive frontend capability
     // check. ensureDynSchema repeats the check to protect future call sites.
     if (hasFrontendModule('transient')) ensureDynSchema();
 
     // ---- Toolbar Events ----
     // Bar 1: 加载算例 -> open case-load modal
-    document.getElementById('btnLoadCase').addEventListener('click', showCaseLoadModal);
+    document.getElementById('btnLoadCase')?.addEventListener('click', showCaseLoadModal);
     document.getElementById('resAcFaultLocations')?.addEventListener('input', markResilienceFaultBranches);
     document.getElementById('resDcFaultLocations')?.addEventListener('input', markResilienceFaultBranches);
 
@@ -19270,7 +19430,7 @@ const App = (() => {
     // Bar 1: 帮助 menu (replay tour / shortcut cheat sheet / example templates)
     initHelpMenu();
 
-    document.getElementById('btnNewSystem').addEventListener('click', createNewSystem);
+    document.getElementById('btnNewSystem')?.addEventListener('click', createNewSystem);
     // Legacy buttons may have been replaced; guard with optional chaining.
     document.getElementById('btnLoadMatpower')?.addEventListener('click', () => {
       const filename = document.getElementById('matpowerSelect').value;
@@ -22639,17 +22799,62 @@ const App = (() => {
     });
 
     // Bar 3: Resilience — collect AC/DC inline parameters into a typed payload.
-    function collectResilienceParams() {
+    function collectResilienceParams(overrides = {}) {
+      // Portal controls use semantic field names. Legacy callers may still pass
+      // DOM IDs, so this mapper keeps both call shapes on one canonical path.
+      const semanticById = {
+        resFaultCount: 'fault_count',
+        resAcFaultLocations: 'ac_fault_branch_ids_text',
+        resDcFaultLocations: 'dc_fault_branch_ids_text',
+        resAcFaultStartHour: 'ac_fault_start_hours_text',
+        resDcFaultStartHour: 'dc_fault_start_hours_text',
+        resAcRepairDuration: 'ac_repair_durations_text',
+        resDcRepairDuration: 'dc_repair_durations_text',
+        resHorizonHours: 'horizon_hours',
+        resLoadScale: 'load_scale_factor',
+        resApplyDemoData: 'apply_demo_data',
+        resConsiderSwitches: 'consider_switches',
+        resPostFaultWindow: 'post_fault_reconfig_window_hr',
+        resUseRemoteSwitchOnly: 'use_remote_switch_only',
+        resAllowBranchWithoutSwitch: 'allow_branch_operation_without_switch',
+        resAllowMess: 'allow_mess_dispatch',
+        resMobileSpeed: 'mobile_storage_speed_kmh',
+        resMipTimeLimit: 'mip_time_limit_s',
+        resMipGap: 'mip_gap',
+        resModelSelect: 'resilience_model',
+        resSolverSelect: 'resilience_solver',
+      };
+      const overrideValue = id => overrides[id] !== undefined
+        ? overrides[id]
+        : (semanticById[id] && overrides[semanticById[id]] !== undefined
+          ? overrides[semanticById[id]] : undefined);
       const num = (id, dflt) => {
+        const override = overrideValue(id);
+        if (override !== undefined) {
+          const value = Number(override);
+          return Number.isFinite(value) ? value : dflt;
+        }
         const v = parseFloat(document.getElementById(id)?.value);
         return Number.isFinite(v) ? v : dflt;
       };
+      const rawValue = id => {
+        const override = overrideValue(id);
+        return override !== undefined
+          ? String(override ?? '')
+          : String(document.getElementById(id)?.value || '');
+      };
+      const checked = (id, dflt = false) => {
+        const override = overrideValue(id);
+        return override !== undefined
+          ? override === true
+          : (document.getElementById(id)?.checked ?? dflt);
+      };
       const parseIntList = (id) => {
-        const raw = (document.getElementById(id)?.value || '').trim();
+        const raw = rawValue(id).trim();
         return raw ? raw.split(/[,，\s]+/).map(s => parseInt(s, 10)).filter(n => Number.isFinite(n) && n >= 0) : [];
       };
       const parseNumList = (id) => {
-        const raw = (document.getElementById(id)?.value || '').trim();
+        const raw = rawValue(id).trim();
         return raw ? raw.split(/[,，\s]+/).map(s => Number(s)).filter(Number.isFinite) : [];
       };
       const atOr = (arr, idx, dflt) => arr.length ? (Number.isFinite(arr[Math.min(idx, arr.length - 1)]) ? arr[Math.min(idx, arr.length - 1)] : dflt) : dflt;
@@ -22659,17 +22864,34 @@ const App = (() => {
       const dcStarts = parseNumList('resDcFaultStartHour');
       const acRepairs = parseNumList('resAcRepairDuration');
       const dcRepairs = parseNumList('resDcRepairDuration');
-      const resilienceModel = document.getElementById('resModelSelect')?.value || 'RAStyleStageMILP';
-      const resilienceSolver = document.getElementById('resSolverSelect')?.value || 'Gurobi';
-      const considerSwitches = !!document.getElementById('resConsiderSwitches')?.checked;
-      const allowMess = !!document.getElementById('resAllowMess')?.checked;
-      const allowBranchWithoutSwitch = !!document.getElementById('resAllowBranchWithoutSwitch')?.checked;
+      const modelOverride = overrideValue('resModelSelect');
+      const solverOverride = overrideValue('resSolverSelect');
+      const resilienceModel = modelOverride || document.getElementById('resModelSelect')?.value || 'RAStyleStageMILP';
+      const resilienceSolver = solverOverride || document.getElementById('resSolverSelect')?.value || 'HiGHS';
+      const considerSwitches = checked('resConsiderSwitches', false);
+      const allowMess = checked('resAllowMess', false);
+      const allowBranchWithoutSwitch = checked('resAllowBranchWithoutSwitch', false);
       const manual_faults = [];
       acIds.forEach((id, i) => manual_faults.push({ branch_type: 'AC', branch_id: id, start_hr: atOr(acStarts, i, 0), repair_hr: atOr(acRepairs, i, 6), label: `AC branch ${id}` }));
       dcIds.forEach((id, i) => manual_faults.push({ branch_type: 'DC', branch_id: id, start_hr: atOr(dcStarts, i, 0), repair_hr: atOr(dcRepairs, i, 8), label: `DC branch ${id}` }));
+      const authoredFaults = _selectedResilienceScenario?.raw?.representative?.resilience_event?.faults || [];
+      manual_faults.forEach(fault => {
+        const origin = authoredFaults.find(row => String(row.branch_type || row.branch_kind || 'AC').toUpperCase() === fault.branch_type &&
+          Number(row.branch_index ?? row.branch_id) === Number(fault.branch_id) &&
+          Number(row.start_hr ?? row.outage_start_hr ?? 0) === Number(fault.start_hr));
+        if (origin) {
+          fault.label = origin.name || fault.label;
+          fault.equipment_type = origin.equipment_type || '';
+          fault.equipment_index = Number(origin.equipment_index || 0);
+          fault.failure_cause = origin.failure_cause || '';
+        }
+      });
       const latestEnd = manual_faults.reduce((m, f) => Math.max(m, Number(f.start_hr || 0) + Number(f.repair_hr || 0)), 0);
       const requestedHorizon = Math.max(1, Math.ceil(num('resHorizonHours', 48)));
       const postFaultWindow = Math.max(0, num('resPostFaultWindow', 2.0));
+      const weatherWindows = overrides.respect_fault_windows === true || ['rainstorm', 'lightning'].includes(_selectedResilienceScenario?.raw?.representative?.resilience_event?.hazard_type);
+      if (weatherWindows && requestedHorizon > 48) throw new Error('暴雨/雷击场景仅生成 48 h 时序，请将恢复时域设为不超过 48 h；未完成恢复的故障会保留到观测窗末尾。');
+      const effectiveHorizon = weatherWindows ? requestedHorizon : Math.max(requestedHorizon, Math.ceil(latestEnd + 4));
       return {
         fault_count:     num('resFaultCount', manual_faults.length || 1),
         ac_fault_branch_ids: acIds,
@@ -22678,16 +22900,20 @@ const App = (() => {
         load_scale_factor: Math.max(0, num('resLoadScale', 1.0)),
         mobile_storage_speed_kmh: num('resMobileSpeed', 40),
         allow_mess_dispatch: allowMess,
-        apply_demo_data: document.getElementById('resApplyDemoData')?.checked !== false,
+        apply_demo_data: checked('resApplyDemoData', true),
         mip_time_limit_s: Math.max(10, Math.round(num('resMipTimeLimit', 180))),
         mip_gap: Math.max(0, num('resMipGap', 0.03)),
         resilience_model: resilienceModel,
         resilience_solver: resilienceSolver,
         consider_switches: considerSwitches,
-        use_remote_switch_only: !!document.getElementById('resUseRemoteSwitchOnly')?.checked,
+        use_remote_switch_only: checked('resUseRemoteSwitchOnly', false),
         allow_branch_operation_without_switch: allowBranchWithoutSwitch,
         post_fault_reconfig_window_hr: postFaultWindow,
-        horizon_hours: Math.max(requestedHorizon, Math.ceil(latestEnd + 4)),
+        requested_horizon_hours: requestedHorizon,
+        effective_horizon_reason: effectiveHorizon > requestedHorizon
+          ? `extended_to_cover_latest_repair_end_${latestEnd}_plus_4h`
+          : 'requested_horizon_sufficient',
+        horizon_hours: effectiveHorizon,
       };
     }
     document.getElementById('btnGenExtremeScenario')?.addEventListener('click', async () => {
@@ -22731,17 +22957,36 @@ const App = (() => {
       log(`${selectedLabel}台风场景已生成：AC 故障 ${acFaults.length} 个，DC 故障 ${dcFaults.length} 个，已填入弹性分析输入${vmaxText}${fallbackText}。${data.status || ''}`, 'success');
       setStatus('台风故障序列已填入');
     });
-    async function runResilience() {
-      setStatus('弹性分析中...', 'busy');
-      if (!await syncToBackend(true)) { setStatus('同步失败', 'error'); return; }
+    async function runResilience(options = {}) {
+      try {
+        setStatus('弹性分析中...', 'busy');
+        if (!await syncToBackend(true)) throw new Error('当前模型同步到后端失败');
       // Resilience assessment consumes imported 48h profiles directly through
       // the resilience request. The restricted edition intentionally does not
       // call the standalone time-series configuration endpoint.
-      if (!validateFaultBranchIds()) return;
+      const overrides = options.params || {};
+      const selectedScenario = options.context?.scenario || _selectedResilienceScenario;
+      const selectedScenarioContext = options.context?.scenarioContext || null;
+      if (selectedScenario && !selectedScenarioContext && _portalOperations?.applySelectedScenario) {
+        _portalOperations.applySelectedScenario(selectedScenario);
+      }
+      if (selectedScenarioContext?.fields) {
+        applyScenarioRecoveryFieldsToLegacy(selectedScenarioContext.fields);
+      }
+      if (!validateFaultBranchIds()) throw new Error('故障支路 ID 与当前模型不一致');
       markResilienceFaultBranches();
-      const p = collectResilienceParams();
+      const p = collectResilienceParams(overrides);
       const isRaStageModel = p.resilience_model === 'RAStyleStageMILP';
-      const scenarioProfiles = getResilienceScenarioProfiles();
+      const scenarioProfiles = selectedScenarioContext?.profiles?.timeSeries
+        ? resolveResilienceScenarioProfiles(selectedScenarioContext.profiles.timeSeries)
+        : getResilienceScenarioProfiles();
+      if (selectedScenarioContext?.profiles && selectedScenarioContext.profiles.valid === false) {
+        const reasons = selectedScenarioContext.profiles.warnings?.join('；') || 'profile 元数据或样本无效';
+        throw new Error(`所选场景的 48 h profile 无法用于快速恢复：${reasons}`);
+      }
+      if (selectedScenarioContext?.profiles?.timeSeries && scenarioProfiles.valid !== true) {
+        throw new Error('所选场景的 profile 长度、步长或数值不一致，已拒绝静默回退');
+      }
       const params = {
         model: p.resilience_model,
         resilience_model: p.resilience_model,
@@ -22749,11 +22994,14 @@ const App = (() => {
         resilience_solver: p.resilience_solver,
         default_fault_count: p.fault_count,
         manual_faults: p.manual_faults,
+        respect_fault_windows: ['rainstorm', 'lightning'].includes(selectedScenarioContext?.identity?.hazard_type || selectedScenario?.raw?.representative?.resilience_event?.hazard_type),
         ac_fault_branch_ids: p.ac_fault_branch_ids,
         dc_fault_branch_ids: p.dc_fault_branch_ids,
         mess_travel_speed_kmph: p.mobile_storage_speed_kmh,
         horizon_hours: p.horizon_hours,
-        time_step_hr: 1.0,
+        requested_horizon_hours: p.requested_horizon_hours,
+        effective_horizon_reason: p.effective_horizon_reason,
+        time_step_hr: scenarioProfiles.valid === true ? scenarioProfiles.stepDurationHr : 1.0,
         load_scale_factor: p.load_scale_factor,
         apply_demo_data: p.apply_demo_data,
         mip_time_limit_s: p.mip_time_limit_s,
@@ -22774,40 +23022,49 @@ const App = (() => {
         post_fault_reconfig_window_hr: p.post_fault_reconfig_window_hr,
         disaster_post_fault_reconfig_window_hr: p.post_fault_reconfig_window_hr,
       };
-      if (Array.isArray(scenarioProfiles.loadProfile) && scenarioProfiles.loadProfile.length) {
-        params.load_profile = scenarioProfiles.loadProfile;
+      if (Array.isArray(scenarioProfiles.loadProfile) && scenarioProfiles.loadProfile.length) params.load_profile = scenarioProfiles.loadProfile;
+      if (Array.isArray(scenarioProfiles.tsProfiles) && scenarioProfiles.tsProfiles.length) params.scenario_profiles = scenarioProfiles.tsProfiles;
+      if (Array.isArray(scenarioProfiles.loadProfileMap) && scenarioProfiles.loadProfileMap.length) params.load_profile_map = scenarioProfiles.loadProfileMap;
+      if (Array.isArray(scenarioProfiles.renewableProfile) && scenarioProfiles.renewableProfile.length) params.renewable_profile = scenarioProfiles.renewableProfile;
+      if (Array.isArray(scenarioProfiles.pvProfile) && scenarioProfiles.pvProfile.length) params.pv_profile = scenarioProfiles.pvProfile;
+      if (Array.isArray(scenarioProfiles.windProfile) && scenarioProfiles.windProfile.length) params.wind_profile = scenarioProfiles.windProfile;
+      if (_editionProfile?.edition === 'resilience') {
+        params.scenario_ref = _resilienceScenarioRef || null;
+        params.scenario_revision = Number.isFinite(Number(options.context?.scenarioRevision))
+          ? Number(options.context.scenarioRevision)
+          : _resilienceScenarioRevision;
+        params.scenario_digest = _resilienceScenarioDigest;
       }
-      if (Array.isArray(scenarioProfiles.tsProfiles) && scenarioProfiles.tsProfiles.length) {
-        params.scenario_profiles = scenarioProfiles.tsProfiles;
+      const result = await apiPostResult('/api/session/run_distribution_resilience', params, { quiet: !!options.portal });
+      if (!result.ok || !result.data) {
+        throw new Error(describeError(
+          result.error ?? result.data?.error ?? result.data,
+          '快速恢复请求失败'
+        ));
       }
-      if (Array.isArray(scenarioProfiles.loadProfileMap) && scenarioProfiles.loadProfileMap.length) {
-        params.load_profile_map = scenarioProfiles.loadProfileMap;
+      const data = result.data;
+      if (data.error) {
+        throw new Error(describeError(data.error, '快速恢复请求失败'));
       }
-      if (Array.isArray(scenarioProfiles.renewableProfile) && scenarioProfiles.renewableProfile.length) {
-        params.renewable_profile = scenarioProfiles.renewableProfile;
-      }
-      if (Array.isArray(scenarioProfiles.pvProfile) && scenarioProfiles.pvProfile.length) {
-        params.pv_profile = scenarioProfiles.pvProfile;
-      }
-      if (Array.isArray(scenarioProfiles.windProfile) && scenarioProfiles.windProfile.length) {
-        params.wind_profile = scenarioProfiles.windProfile;
-      }
-      const data = await apiPost('/api/session/run_distribution_resilience', params);
-      if (data && !data.error) {
-        _lastResilienceData = data;
-        renderComponentCurveTargets('resilience');
-        showResilienceResults(data);
-        renderProactiveDefenseView(data);
-        renderRapidRecoveryView(data);
-        renderResilienceMetricsView(data);
-        const activeModule = document.querySelector('.module-btn.active')?.dataset.module;
-        const resilienceViewModules = ['proactiveDefense', 'rapidRecovery', 'resilienceMetrics'];
-        setActiveResultGroup(resilienceViewModules.includes(activeModule) ? activeModule : 'resilience');
-        switchTab('results');
-        setStatus('弹性分析完成');
-      } else {
-        setStatus('计算失败', 'error');
-      }
+      _lastResilienceData = data;
+      if (options.portal) return data;
+      renderComponentCurveTargets('resilience');
+      showResilienceResults(data);
+      renderProactiveDefenseView(data);
+      renderRapidRecoveryView(data);
+      renderResilienceMetricsView(data);
+      const activeModule = document.querySelector('.module-btn.active')?.dataset.module;
+      const resilienceViewModules = ['proactiveDefense', 'rapidRecovery', 'resilienceMetrics'];
+      setActiveResultGroup(resilienceViewModules.includes(activeModule) ? activeModule : 'resilience');
+      switchTab('results');
+      setStatus('弹性分析完成');
+      return data;
+    } catch (error) {
+      log(`快速恢复失败：${describeError(error)}`, 'error');
+      setStatus('计算失败', 'error');
+      if (options.portal) throw error;
+      return null;
+    }
     }
 
     function plotThemeRes(title, yTitle = '') {
@@ -24438,11 +24695,15 @@ const App = (() => {
       return el ? el.checked === true : dflt;
     }
 
-    function collectScenarioGenerationOptions() {
-      const regularClusters = Math.max(1, Math.round(scenNum('scenRegularClusters', 8)));
-      const reliabilityClusters = Math.max(1, Math.round(scenNum('scenReliabilityClusters', 4)));
-      const resilienceClusters = Math.max(1, Math.round(scenNum('scenResilienceClusters', 5)));
-      const intensityLevels = ['TD', 'TS', 'STS', 'TY', 'STY', 'SuperTY'];
+    function collectScenarioGenerationOptions(overrides = {}) {
+      const regularClusters = Math.max(1, Math.round(Number(overrides.regular_cluster_count ?? scenNum('scenRegularClusters', 8))));
+      const reliabilityClusters = Math.max(1, Math.round(Number(overrides.reliability_cluster_count ?? scenNum('scenReliabilityClusters', 4))));
+      const resilienceClusters = Math.max(1, Math.round(Number(overrides.resilience_cluster_count ?? scenNum('scenResilienceClusters', 5))));
+      const defaultIntensityLevels = ['TD', 'TS', 'STS', 'TY', 'STY', 'SuperTY'];
+      const requestedIntensityLevels = Array.isArray(overrides.intensity_levels)
+        ? overrides.intensity_levels.filter(level => defaultIntensityLevels.includes(level))
+        : defaultIntensityLevels;
+      const intensityLevels = requestedIntensityLevels.length ? requestedIntensityLevels : defaultIntensityLevels;
       const sspLevels = ['ssp126', 'ssp245', 'ssp370', 'ssp585'];
       const years = [2050, 2080];
       const resilienceOnly = _editionProfile?.edition === 'resilience';
@@ -24477,6 +24738,9 @@ const App = (() => {
         },
         resilience: {
           enabled: true,
+          hazard_type: overrides.hazard_type || 'typhoon',
+          ...(overrides.hazard_type === 'rainstorm' ? { rainstorm: deepCloneJson(overrides.rainstorm || {}) } : {}),
+          ...(overrides.hazard_type === 'lightning' ? { lightning: deepCloneJson(overrides.lightning || {}) } : {}),
           intensity_levels: intensityLevels,
           candidates_per_intensity: resilienceClusters * 10,
           default_cluster_count: resilienceClusters,
@@ -24506,13 +24770,15 @@ const App = (() => {
           load_max_reduction: 0.4,
         },
         clustering: {
-          method: document.getElementById('scenClusteringMethod')?.value || 'hybrid_kmedoids_tail_5pct',
+          method: overrides.clustering_method || document.getElementById('scenClusteringMethod')?.value || 'hybrid_kmedoids_tail_5pct',
           max_iterations: 50,
           robust_scale: true,
           continuous_weight: 1.0,
           outage_hamming_weight: 1.0,
           include_tail_anchors: true,
-          compare_baseline: scenChecked('scenCompareBaseline', true),
+          compare_baseline: overrides.compare_baseline !== undefined
+            ? overrides.compare_baseline === true
+            : scenChecked('scenCompareBaseline', true),
           freeze_anchors: true,
           tail_fraction: 0.05,
           source_tail_quantile: 0.95,
@@ -24522,6 +24788,830 @@ const App = (() => {
         },
       };
     }
+
+    function readScenarioPortalConfig() {
+      return {
+        resilience_cluster_count: Math.max(1, Math.round(scenNum('scenResilienceClusters', 5))),
+        clustering_method: document.getElementById('scenClusteringMethod')?.value || 'hybrid_kmedoids_tail_5pct',
+        compare_baseline: scenChecked('scenCompareBaseline', true),
+        intensity_levels: ['TD', 'TS', 'STS', 'TY', 'STY', 'SuperTY'],
+      };
+    }
+
+    function selectedScenarioCase(candidate) {
+      const representative = candidate?.raw?.representative || candidate?.raw || {};
+      const timeSeries = representative.standard_time_series || representative.time_series || null;
+      const resilienceEvent = representative.resilience_event || candidate?.raw?.resilience_event || null;
+      return {
+        _generated_scenario: {
+          family: 'resilience',
+          representative_id: candidate?.id || null,
+          resilience_event: resilienceEvent,
+        },
+        ...(timeSeries ? { _time_series: deepCloneJson(timeSeries) } : {}),
+        ...(resilienceEvent ? { resilience_event: deepCloneJson(resilienceEvent) } : {}),
+      };
+    }
+
+    function scenarioRecoveryContext(candidate, identity = {}) {
+      const caseJson = selectedScenarioCase(candidate);
+      const event = generatedScenarioCaseMetadata(caseJson)?.resilience_event || caseJson?.resilience_event || {};
+      const faultSources = [
+        ['resilience_event.faults', event.faults],
+        ['resilience_event.generated_faults', event.generated_faults],
+        ['resilience_event.manual_faults', event.manual_faults],
+        ['case.generated_faults', caseJson?.generated_faults],
+        ['case.manual_faults', caseJson?.manual_faults],
+      ];
+      const selectedFaultSource = faultSources.find(([, rows]) => Array.isArray(rows) && rows.length);
+      const structuredFaults = (selectedFaultSource?.[1] || []).map((fault, position) => {
+        const domain = String(fault.branch_type || fault.branch_kind || fault.type || 'AC').toUpperCase() === 'DC' ? 'DC' : 'AC';
+        const branchId = Number(fault.branch_index ?? fault.branch_id ?? fault.branch);
+        const startHr = Number(fault.start_hr ?? fault.outage_start_hr ?? 0);
+        const repairHr = Number(fault.repair_hr ?? fault.repair_duration_hr ?? fault.repair_time_hr ?? (domain === 'DC' ? 8 : 6));
+        if (!Number.isFinite(branchId)) return null;
+        return {
+          domain,
+          branch_id: branchId,
+          start_hr: Number.isFinite(startHr) ? startHr : 0,
+          repair_hr: Number.isFinite(repairHr) ? repairHr : (domain === 'DC' ? 8 : 6),
+          name: fault.name || fault.label || `${domain} branch ${branchId}`,
+          equipment_type: fault.equipment_type || '',
+          equipment_index: Number(fault.equipment_index || 0),
+          failure_cause: fault.failure_cause || '',
+          source_position: position,
+        };
+      }).filter(Boolean);
+      const ac = structuredFaults.filter(fault => fault.domain === 'AC');
+      const dc = structuredFaults.filter(fault => fault.domain === 'DC');
+      const recoveryFields = {
+        respect_fault_windows: ['rainstorm', 'lightning'].includes(event.hazard_type),
+        fault_count: structuredFaults.length,
+        ac_fault_branch_ids_text: ac.map(fault => fault.branch_id).join(','),
+        dc_fault_branch_ids_text: dc.map(fault => fault.branch_id).join(','),
+        ac_fault_start_hours_text: ac.map(fault => fault.start_hr).join(','),
+        dc_fault_start_hours_text: dc.map(fault => fault.start_hr).join(','),
+        ac_repair_durations_text: ac.map(fault => fault.repair_hr).join(','),
+        dc_repair_durations_text: dc.map(fault => fault.repair_hr).join(','),
+      };
+      const timeSeries = generatedScenarioCaseTimeSeries(caseJson);
+      const timeSeriesProfiles = Array.isArray(timeSeries?.profiles) ? timeSeries.profiles : [];
+      const inferredSteps = Number(timeSeries?.num_steps ?? timeSeriesProfiles[0]?.values?.length ?? 0);
+      const stepDurationHr = Number(timeSeries?.step_duration_hr ?? timeSeries?.time_step_hr ?? 1);
+      const profileWarnings = [...(timeSeries?.warnings || [])];
+      if (!Number.isInteger(inferredSteps) || inferredSteps <= 0) {
+        profileWarnings.push('场景 profile 缺少有效的正整数 num_steps');
+      }
+      if (!Number.isFinite(stepDurationHr) || stepDurationHr <= 0) {
+        profileWarnings.push('场景 profile 缺少有效的正数 step_duration_hr');
+      }
+      timeSeriesProfiles.forEach(profile => {
+        if (!Array.isArray(profile?.values) || profile.values.length !== inferredSteps ||
+            profile.values.some(value => !Number.isFinite(Number(value)))) {
+          profileWarnings.push(`profile ${profile?.name || profile?.id || '?'} 的样本长度或数值无效`);
+        }
+      });
+      const profiles = timeSeries ? {
+        num_steps: Number.isFinite(inferredSteps) ? inferredSteps : null,
+        step_duration_hr: Number.isFinite(stepDurationHr) ? stepDurationHr : null,
+        horizon_hours: Number.isFinite(inferredSteps) && Number.isFinite(stepDurationHr) ? inferredSteps * stepDurationHr : null,
+        count: timeSeriesProfiles.length,
+        ids: timeSeriesProfiles.map(profile => profile.id).filter(value => value !== undefined && value !== null),
+        names: timeSeriesProfiles.map(profile => profile.name || String(profile.id ?? '')).filter(Boolean),
+        binding: deepCloneJson(timeSeries.binding || {}),
+        load_profile_map: deepCloneJson(timeSeries.binding?.load_profile_map || []),
+        source: candidate?.raw?.representative?.standard_time_series ? 'standard_time_series' : 'time_series',
+        warnings: profileWarnings,
+        valid: profileWarnings.length === 0 && Number.isInteger(inferredSteps) && inferredSteps > 0 && stepDurationHr > 0,
+        timeSeries: deepCloneJson(timeSeries),
+      } : null;
+      const scenarioIdentity = {
+        hazard_type: event.hazard_type || 'typhoon',
+        scenario_ref: String(identity.scenario_ref || candidate?.id || ''),
+        scenario_revision: Number(identity.scenario_revision || 0),
+        scenario_digest: identity.scenario_digest || scenarioDigest(candidate),
+        representative_id: String(candidate?.id || ''),
+        intensity: candidate?.intensity || event.selected_intensity || event.requested_intensity || null,
+        cluster_id: candidate?.cluster_id ?? candidate?.raw?.cluster_id ?? null,
+      };
+      const provenance = {};
+      Object.keys(recoveryFields).forEach(key => { provenance[key] = selectedFaultSource?.[0] || 'selected_representative'; });
+      return { identity: scenarioIdentity, fields: recoveryFields, structuredFaults, profiles, provenance };
+    }
+
+    function applyScenarioRecoveryFieldsToLegacy(fields) {
+      const mapping = {
+        fault_count: 'resFaultCount', ac_fault_branch_ids_text: 'resAcFaultLocations',
+        dc_fault_branch_ids_text: 'resDcFaultLocations', ac_fault_start_hours_text: 'resAcFaultStartHour',
+        dc_fault_start_hours_text: 'resDcFaultStartHour', ac_repair_durations_text: 'resAcRepairDuration',
+        dc_repair_durations_text: 'resDcRepairDuration',
+      };
+      Object.entries(mapping).forEach(([key, id]) => {
+        const element = document.getElementById(id);
+        if (element) element.value = String(fields?.[key] ?? '');
+      });
+      markResilienceFaultBranches();
+    }
+
+    function applySelectedScenario(candidate) {
+      if (!candidate) return null;
+      const caseJson = selectedScenarioCase(candidate);
+      _importedGeneratedScenario = { family: 'resilience', case: caseJson };
+      _lastImportedGeneratedScenarioKey = candidate.id || '';
+      const context = scenarioRecoveryContext(candidate, {
+        scenario_ref: _resilienceScenarioRef || candidate.id,
+        scenario_revision: _resilienceScenarioRevision,
+        scenario_digest: _resilienceScenarioDigest || scenarioDigest(candidate),
+      });
+      applyScenarioRecoveryFieldsToLegacy(context.fields);
+      return context;
+    }
+
+    function clearSelectedPortalScenario() {
+      _resilienceScenarioRef = '';
+      _resilienceScenarioDigest = null;
+      _selectedResilienceScenario = null;
+      _importedGeneratedScenario = null;
+      _lastImportedGeneratedScenarioKey = '';
+    }
+
+    function scenarioDigest(candidate) {
+      if (candidate?.digest !== undefined && candidate?.digest !== null && candidate.digest !== '') {
+        return String(candidate.digest);
+      }
+      const stable = JSON.stringify({
+        scenario_ref: candidate?.id || null,
+        representative: candidate?.raw?.representative || candidate?.raw || null,
+      });
+      let hash = 2166136261;
+      for (let i = 0; i < stable.length; ++i) {
+        hash ^= stable.charCodeAt(i);
+        hash = Math.imul(hash, 16777619);
+      }
+      return `fnv1a32:${(hash >>> 0).toString(16).padStart(8, '0')}`;
+    }
+
+    async function selectPortalScenario(candidate) {
+      if (!candidate?.id || !candidate?.raw?.representative) throw new Error('候选场景缺少稳定 representative identity');
+      _resilienceScenarioRevision += 1;
+      _resilienceScenarioRef = String(candidate.id);
+      _resilienceScenarioDigest = scenarioDigest(candidate);
+      _selectedResilienceScenario = deepCloneJson(candidate);
+      const scenarioDerived = applySelectedScenario(candidate);
+      scenarioDerived.identity = {
+        ...scenarioDerived.identity,
+        scenario_ref: _resilienceScenarioRef,
+        scenario_digest: _resilienceScenarioDigest,
+        scenario_revision: _resilienceScenarioRevision,
+      };
+      const scenario = {
+        ...candidate,
+        scenario_ref: _resilienceScenarioRef,
+        scenario_digest: _resilienceScenarioDigest,
+        scenario_revision: _resilienceScenarioRevision,
+      };
+      return { scenario, identity: deepCloneJson(scenarioDerived.identity), scenarioDerived: deepCloneJson(scenarioDerived) };
+    }
+
+    async function generateScenarioOperation(overrides = {}) {
+      if (_resilienceScenarioGenerationPending) throw new Error('弹性场景生成任务已在运行');
+      const payload = collectScenarioGenerationOptions(overrides);
+      const button = document.getElementById('btnGenerateScenarios');
+      const startedAt = performance.now();
+      _resilienceScenarioGenerationPending = true;
+      _lastScenarioGenerationError = null;
+      if (button) button.disabled = true;
+      try {
+        setStatus('场景生成中...', 'busy');
+        _lastScenarioBaseSystemJson = Canvas.buildSystemJson();
+        if (!await syncToBackend(true)) throw new Error('当前模型同步到后端失败');
+        const requestStartedAt = performance.now();
+        const result = await apiPostResult('/api/session/generate_scenarios', payload, { quiet: _editionProfile?.edition === 'resilience' });
+        const requestElapsedMs = performance.now() - requestStartedAt;
+        if (!result.ok || !result.data) {
+          throw new Error(describeError(result.error ?? result.data, '场景生成请求失败'));
+        }
+        const data = result.data;
+        _lastScenarioGenerationData = data;
+        if (_editionProfile?.edition === 'resilience') {
+          _resilienceScenarioRevision += 1;
+          _resilienceScenarioRef = '';
+          _resilienceScenarioDigest = null;
+          _selectedResilienceScenario = null;
+          _importedGeneratedScenario = null;
+          _lastImportedGeneratedScenarioKey = '';
+        } else {
+          setActiveResultGroup('scenarioGeneration');
+          const empty = document.getElementById('resultsEmpty');
+          const content = document.getElementById('resultsContent');
+          if (empty) empty.style.display = 'none';
+          if (content) content.style.display = 'block';
+          switchTab('results');
+          renderScenarioGenerationResults(data);
+        }
+        const totalElapsedMs = performance.now() - startedAt;
+        const backendMs = Number(data._performance?.generation_ms);
+        const generationText = _editionProfile?.edition === 'resilience'
+          ? `弹性${data.summary?.resilience_cluster_total ?? 0}簇`
+          : `常规${data.summary?.regular_cluster_count ?? 0}簇，可靠性${data.summary?.reliability_contingency_count ?? 0}个N-1，弹性${data.summary?.resilience_cluster_total ?? 0}簇`;
+        log(`场景生成完成：${generationText}；请求${requestElapsedMs.toFixed(0)}ms${Number.isFinite(backendMs) ? `，后端${backendMs.toFixed(0)}ms` : ''}，总计${totalElapsedMs.toFixed(0)}ms`, 'success');
+        setStatus('场景生成完成');
+        return data;
+      } catch (error) {
+        _lastScenarioGenerationError = describeError(error, '场景生成失败');
+        setStatus(`场景生成失败：${_lastScenarioGenerationError}`, 'error');
+        throw new Error(_lastScenarioGenerationError);
+      } finally {
+        _resilienceScenarioGenerationPending = false;
+        if (button) button.disabled = false;
+      }
+    }
+
+    function readRecoveryPortalConfig() {
+      return {
+        fault_count: 1,
+        ac_fault_branch_ids_text: '', dc_fault_branch_ids_text: '',
+        ac_fault_start_hours_text: '', dc_fault_start_hours_text: '',
+        ac_repair_durations_text: '', dc_repair_durations_text: '',
+        horizon_hours: 48, load_scale_factor: 1,
+        apply_demo_data: true, consider_switches: false,
+        post_fault_reconfig_window_hr: 2,
+        use_remote_switch_only: false, allow_branch_operation_without_switch: false,
+        allow_mess_dispatch: false, mobile_storage_speed_kmh: 40,
+        mip_time_limit_s: 180, mip_gap: 0.03,
+        resilience_model: 'RAStyleStageMILP', resilience_solver: 'HiGHS',
+      };
+    }
+
+    function mountPortalArchitecture() {
+      if (_editionProfile?.edition !== 'resilience') return false;
+      const host = document.getElementById('resiliencePortalArchitectureHost');
+      const container = document.getElementById('canvasContainer');
+      if (!host || !container) return false;
+      if (!_portalCanvasAnchor && container.parentNode) {
+        _portalCanvasAnchor = document.createComment('resilience-canvas-origin');
+        container.parentNode.insertBefore(_portalCanvasAnchor, container);
+      }
+      if (container.parentNode !== host) host.appendChild(container);
+      container.inert = true;
+      container.setAttribute('aria-hidden', 'true');
+      return true;
+    }
+
+    function setPortalArchitectureActive(active) {
+      if (_editionProfile?.edition !== 'resilience') return;
+      const container = document.getElementById('canvasContainer');
+      if (active) {
+        mountPortalArchitecture();
+        if (container) {
+          container.inert = false;
+          container.removeAttribute('aria-hidden');
+        }
+        requestAnimationFrame(() => Canvas.refreshHostViewport?.());
+      } else if (container) {
+        container.inert = true;
+        container.setAttribute('aria-hidden', 'true');
+      }
+    }
+
+    function disposePortalPresentation(root) {
+      if (!root || typeof Plotly === 'undefined') return;
+      root.querySelectorAll('.js-plotly-plot, [data-portal-chart]').forEach(element => Plotly.purge?.(element));
+    }
+
+    const PORTAL_SERIES_COLORS = Object.freeze(['#2a78d6', '#eb6834', '#1baf7a']);
+
+    function requirePortalPresentationRoot(root) {
+      const RootElement = root?.ownerDocument?.defaultView?.HTMLElement;
+      if (!RootElement || !(root instanceof RootElement)) {
+        throw new TypeError('Portal renderer root must be an HTMLElement');
+      }
+      return root;
+    }
+
+    function portalFiniteNumber(value) {
+      if (value === null || value === undefined || value === '') return null;
+      const number = Number(value);
+      return Number.isFinite(number) ? number : null;
+    }
+
+    function portalValueText(value, digits = null) {
+      if (value === null || value === undefined || value === '') return '—';
+      if (digits !== null) {
+        const number = portalFiniteNumber(value);
+        return number === null ? String(value) : number.toFixed(digits);
+      }
+      if (Array.isArray(value)) return value.length ? value.join(', ') : '—';
+      if (typeof value === 'object') return JSON.stringify(value);
+      return String(value);
+    }
+
+    function portalElement(root, tag, className = '', text = null) {
+      const element = root.ownerDocument.createElement(tag);
+      if (className) element.className = className;
+      if (text !== null && text !== undefined) element.textContent = String(text);
+      return element;
+    }
+
+    function portalSection(root, title, note = '') {
+      const section = portalElement(root, 'section', 'resilience-portal__result-section');
+      const heading = portalElement(root, 'h4', '', title);
+      section.append(heading);
+      if (note) section.append(portalElement(root, 'p', 'resilience-portal__hint', note));
+      root.append(section);
+      return section;
+    }
+
+    function portalTable(root, headers, rows, options = {}) {
+      const wrap = portalElement(root, 'div', 'resilience-portal__table-wrap');
+      const table = portalElement(root, 'table', 'resilience-portal__table');
+      const thead = portalElement(root, 'thead');
+      const headingRow = portalElement(root, 'tr');
+      headers.forEach(header => headingRow.append(portalElement(root, 'th', '', header)));
+      thead.append(headingRow);
+      const tbody = portalElement(root, 'tbody');
+      const limited = rows.slice(0, options.limit || 200);
+      limited.forEach(row => {
+        const tr = portalElement(root, 'tr');
+        row.forEach(value => tr.append(portalElement(root, 'td', '', portalValueText(value))));
+        tbody.append(tr);
+      });
+      table.append(thead, tbody);
+      wrap.append(table);
+      root.append(wrap);
+      if (limited.length < rows.length) {
+        root.append(portalElement(root, 'p', 'resilience-portal__hint', `表格仅显示前 ${limited.length}/${rows.length} 行；图表仍使用全部有效后端样本。`));
+      }
+      return table;
+    }
+
+    function portalChartColors(root) {
+      const style = root.ownerDocument.defaultView?.getComputedStyle(root);
+      return [1, 2, 3].map(index =>
+        style?.getPropertyValue(`--rp-series-${index}`).trim() || PORTAL_SERIES_COLORS[index - 1]);
+    }
+
+    function portalPlot(root, parent, title, traces, yTitle, options = {}) {
+      if (!traces.length) return null;
+      const chart = portalElement(root, 'div', `resilience-portal__chart${options.wide ? ' resilience-portal__chart--wide' : ''}`);
+      chart.dataset.portalChart = '';
+      chart.setAttribute('role', 'img');
+      chart.setAttribute('aria-label', title);
+      parent.append(chart);
+      if (typeof Plotly === 'undefined' || typeof Plotly.newPlot !== 'function') {
+        chart.append(portalElement(root, 'p', 'resilience-portal__hint', 'Plotly 不可用；请使用下方数据表查看后端结果。'));
+        return chart;
+      }
+      const style = root.ownerDocument.defaultView?.getComputedStyle(root);
+      const ink = style?.getPropertyValue('--rp-ink').trim() || '#172033';
+      const grid = style?.getPropertyValue('--rp-chart-grid').trim() || '#e1e0d9';
+      Plotly.newPlot(chart, traces, {
+        title: { text: title, x: 0.02, xanchor: 'left' },
+        font: { color: ink },
+        paper_bgcolor: 'rgba(0,0,0,0)',
+        plot_bgcolor: 'rgba(0,0,0,0)',
+        margin: { l: 66, r: 24, t: 58, b: 58 },
+        hovermode: 'x unified',
+        showlegend: traces.length > 1,
+        legend: traces.length > 1 ? { orientation: 'h', x: 0, y: 1.12 } : undefined,
+        xaxis: { title: options.xTitle || '时间 (h)', gridcolor: grid, zeroline: false },
+        yaxis: { title: yTitle, gridcolor: grid, zeroline: false, rangemode: options.rangeMode },
+      }, { responsive: true, displaylogo: false });
+      return chart;
+    }
+
+    function portalLineTrace(root, name, x, y, colorIndex, options = {}) {
+      const colors = portalChartColors(root);
+      return {
+        x,
+        y,
+        name,
+        mode: options.mode || 'lines+markers',
+        type: 'scatter',
+        connectgaps: false,
+        line: { color: colors[colorIndex], width: 2, dash: options.dash },
+        marker: { color: colors[colorIndex], size: 7, symbol: options.symbol },
+        hovertemplate: `%{x} h<br>${name}: %{y}<extra></extra>`,
+      };
+    }
+
+    function portalScenarioRows(data) {
+      return (Array.isArray(data?.resilience?.intensities) ? data.resilience.intensities : [])
+        .flatMap(group => (Array.isArray(group?.clusters) ? group.clusters : []).flatMap(cluster => {
+          const representative = cluster?.representative;
+          if (!representative || !cluster?.representative_id) return [];
+          const event = representative.resilience_event || {};
+          const timeSeries = representative.standard_time_series || representative.time_series || null;
+          const faults = [event.faults, event.generated_faults, event.manual_faults]
+            .find(candidateRows => Array.isArray(candidateRows) && candidateRows.length) || [];
+          return [{
+            intensity: group?.intensity ?? event.selected_intensity ?? event.requested_intensity ?? null,
+            clusterId: cluster?.cluster_id ?? null,
+            representativeId: cluster?.representative_id ?? representative.id ?? null,
+            probability: cluster?.probability ?? representative.probability ?? null,
+            memberCount: cluster?.member_count ?? null,
+            representative,
+            event,
+            timeSeries,
+            faults,
+          }];
+        }));
+    }
+
+    function portalProfileTime(profile, timeSeries) {
+      const values = Array.isArray(profile?.values) ? profile.values : [];
+      const explicit = [profile?.time_hr, profile?.hours, profile?.time_axis]
+        .find(axis => Array.isArray(axis) && axis.length === values.length);
+      if (explicit) return explicit.map(portalFiniteNumber);
+      const shared = [timeSeries?.time_hr, timeSeries?.hours, timeSeries?.time_axis]
+        .find(axis => Array.isArray(axis) && axis.length === values.length);
+      if (shared) return shared.map(portalFiniteNumber);
+      const step = portalFiniteNumber(timeSeries?.time_step_hr ?? timeSeries?.step_duration_hr);
+      return step === null ? [] : values.map((_, index) => index * step);
+    }
+
+    function renderPortalScenarioGeneration(root, data, options = {}) {
+      requirePortalPresentationRoot(root);
+      disposePortalPresentation(root);
+      root.replaceChildren();
+      const rows = portalScenarioRows(data);
+      if (!rows.length) {
+        root.append(portalElement(root, 'p', 'resilience-portal__callout resilience-portal__callout--warning', '后端未返回 resilience.intensities[].clusters[].representative。'));
+        return;
+      }
+
+
+      const selectedRef = options.selectedScenarioRef == null ? null : String(options.selectedScenarioRef);
+      const selected = rows.find(row => String(row.representativeId) === selectedRef) || rows[0];
+      const weather = selected.event?.hazard_evidence;
+      const isWeather = weather && ['rainstorm', 'lightning'].includes(weather.hazard_type);
+      const overview = portalSection(root, '代表场景概览', '概率、成员数和事件数据均直接展示后端返回值；“—”表示后端未提供。');
+      portalTable(overview,
+        ['灾种/强度', '簇', '代表场景', '条件概率', '成员数', isWeather ? `${weather.intensity_label} (${weather.intensity_unit})` : '最大风速 (m/s)', isWeather ? '故障支路数' : '故障数', '时序来源'],
+        rows.map(row => [
+          row.intensity, row.clusterId, row.representativeId,
+          row.probability, row.memberCount,
+          row.event?.hazard_evidence?.peak_intensity ?? row.event?.selected_track_max_vmax_ms ?? row.representative?.features?.selected_track_max_vmax_ms,
+          row.faults.length,
+          row.representative.standard_time_series ? 'standard_time_series' : row.representative.time_series ? 'time_series' : null,
+        ]));
+      const coverageRows = rows.map(row => ({
+        ref: row.representativeId,
+        wind: portalFiniteNumber(row.event?.selected_track_max_vmax_ms ?? row.representative?.features?.selected_track_max_vmax_ms),
+        faultCount: row.faults.length,
+      })).filter(row => row.wind !== null);
+      if (coverageRows.length) {
+        const chartGrid = portalElement(root, 'div', 'resilience-portal__chart-grid');
+        overview.append(chartGrid);
+        portalPlot(root, chartGrid, '最大风速 × 故障数覆盖', [{
+          x: coverageRows.map(row => row.wind),
+          y: coverageRows.map(row => row.faultCount),
+          text: coverageRows.map(row => row.ref),
+          name: '代表场景',
+          type: 'scatter',
+          mode: 'markers+text',
+          textposition: 'top center',
+          marker: { color: portalChartColors(root)[0], size: 10 },
+          hovertemplate: '%{text}<br>最大风速 %{x} m/s<br>故障 %{y}<extra></extra>',
+        }], '故障数', { wide: true, xTitle: '最大风速 (m/s)' });
+      }
+
+      const details = portalSection(root, `场景证据：${portalValueText(selected.representativeId)}`, '显示所选代表场景；尚未选择时显示后端列表中的首个代表场景。');
+      if (isWeather) {
+        details.dataset.portalHazardEvidence = weather.hazard_type;
+        const equipment = weather.affected_equipment || {};
+        const assetRisks = Array.isArray(weather.asset_risks) ? weather.asset_risks : [];
+        const participating = type => assetRisks.filter(risk => risk.line_type === type && risk.modelled === true).length;
+        const lightningOnly = weather.hazard_type === 'lightning';
+        details.append(portalElement(root, 'p', 'resilience-portal__callout',
+          lightningOnly
+            ? '雷击只抽样架空线路；电缆和变压器不进入雷击故障计算。故障数是退出供电计算的支路数。'
+            : '暴雨只计算明确标注易受淹入口的电缆附件、湿闪耐受值的架空线绝缘子和易受潮变压器。故障数是退出供电计算的支路数。'));
+        portalTable(details, ['设备域', '算例在役支路数', '故障支路数'], [
+          ['AC 交流支路', equipment.exposed_ac_branches, equipment.failed_ac_branches],
+          ['DC 直流支路', equipment.exposed_dc_branches, equipment.failed_dc_branches],
+          ['合计', (equipment.exposed_ac_branches ?? 0) + (equipment.exposed_dc_branches ?? 0), equipment.fault_count],
+        ]);
+        const physicalRows = lightningOnly
+          ? [['架空线路（雷击）', participating('overhead'), (equipment.temporary_trip_branches ?? 0) + (equipment.permanent_failure_branches ?? 0)]]
+          : [
+            ['架空线绝缘子（雨闪）', participating('overhead'), equipment.insulator_flashover_trips],
+            ['电缆附件（受淹）', participating('cable'), equipment.cable_accessory_shutdowns],
+            ['支路关联变压器（受潮）', equipment.exposed_transformers, equipment.transformer_moisture_shutdowns],
+          ];
+        portalTable(details, ['参与本灾种的设备', '已建模设备数', '引起停运数'], physicalRows);
+        if (equipment.assumed_line_types) details.append(portalElement(root, 'p', 'resilience-portal__hint',
+          `${equipment.assumed_line_types} 条线路类型由模型假设归类，详情见计算摘要。`));
+        portalTable(details, ['故障类型', '支路数'], [
+          ['暂时跳闸', equipment.temporary_trip_branches],
+          ['保护停运', equipment.protective_shutdown_branches],
+          ['永久损坏', equipment.permanent_failure_branches],
+        ]);
+        const chartGrid = portalElement(root, 'div', 'resilience-portal__chart-grid'); details.append(chartGrid);
+        (weather.profiles || []).forEach((profile, index) => {
+          portalPlot(root, chartGrid, profile.label, [portalLineTrace(root, profile.label, profile.time_hr, profile.values, index)], profile.unit);
+          const values = profile.values || [];
+          portalTable(details, ['过程', '单位', '样本数', '最大值'], [[profile.label, profile.unit, values.length, portalValueText(values.length ? Math.max(...values) : null, 4)]]);
+        });
+        const modes = { permanent: '永久损坏', protective_shutdown: '保护停运', temporary_trip: '暂时跳闸' };
+        portalTable(details, ['受灾设备', '设备 ID', '停运支路', '原因', '模式', '发生 (h)', '安全开工 (h)', '恢复 (h)', '作业时长 (h)'],
+          (weather.fault_effects || []).map(effect => [effect.equipment_type, effect.equipment_index,
+            `${effect.branch_type} ${effect.branch_index}`, effect.failure_cause,
+            modes[effect.failure_mode] || effect.failure_mode,
+            portalValueText(effect.physical_onset_hr, 3), portalValueText(effect.safe_access_hr, 3), effect.restoration_time_hr, effect.hands_on_repair_hr]));
+        details.append(portalElement(root, 'p', 'resilience-portal__hint', '停运窗口按小时保守取整；永久故障包含等待退水或雷暴结束的时间。暂时跳闸采用小时等效停运，不解析秒级重合闸。'));
+      }
+      const faultRows = selected.faults.map((fault, index) => [
+        index + 1,
+        fault?.branch_type ?? fault?.branch_kind ?? fault?.type,
+        fault?.branch_id ?? fault?.branch_index ?? fault?.branch,
+        fault?.equipment_type && fault?.equipment_index ? `${fault.equipment_type} ${fault.equipment_index}` : '—',
+        fault?.failure_cause || '—',
+        fault?.label ?? fault?.name,
+        fault?.start_hr ?? fault?.outage_start_hr,
+        fault?.repair_hr ?? fault?.repair_duration_hr ?? fault?.repair_time_hr,
+      ]);
+      if (faultRows.length) {
+        portalTable(details, ['#', '域', '支路', '受灾设备', '原因', '标签', '开始 (h)', isWeather ? '含等待的停运时长 (h)' : '修复时长 (h)'], faultRows);
+      } else {
+        details.append(portalElement(root, 'p', 'resilience-portal__hint', '该代表场景未返回 faults、generated_faults 或 manual_faults。'));
+      }
+
+      const profiles = Array.isArray(selected.timeSeries?.profiles) ? selected.timeSeries.profiles : [];
+      const profileTraces = [];
+      const profileEvidence = [];
+      profiles.slice(0, 3).forEach((profile, profileIndex) => {
+        const values = Array.isArray(profile?.values) ? profile.values.map(portalFiniteNumber) : [];
+        const xValues = portalProfileTime(profile, selected.timeSeries);
+        const x = [];
+        const y = [];
+        values.forEach((value, index) => {
+          if (value !== null && xValues[index] !== null && xValues[index] !== undefined) {
+            x.push(xValues[index]);
+            y.push(value);
+          }
+        });
+        profileEvidence.push([
+          profile?.id, profile?.name, values.length,
+          x.length ? x[0] : null, x.length ? x[x.length - 1] : null,
+          values.filter(value => value !== null).length,
+        ]);
+        if (x.length) profileTraces.push(portalLineTrace(root,profile?.name || String(profile?.id ?? `profile ${profileIndex + 1}`), x, y, profileIndex));
+      });
+      if (profileTraces.length) {
+        const chartGrid = portalElement(root, 'div', 'resilience-portal__chart-grid');
+        details.append(chartGrid);
+        portalPlot(root, chartGrid, '代表场景时序（最多显示前三条 profile）', profileTraces, '后端 profile 值', { wide: true });
+      }
+      if (profiles.length) {
+        portalTable(details, ['Profile ID', '名称', '样本数', '首时刻 (h)', '末时刻 (h)', '有效数值'], profileEvidence);
+        if (profiles.length > 3) details.append(portalElement(root, 'p', 'resilience-portal__hint', `为保证可读性，图表仅显示固定顺序的前 3/${profiles.length} 条 profile；列表保留返回总数。`));
+      } else {
+        details.append(portalElement(root, 'p', 'resilience-portal__hint', '该代表场景未返回 standard_time_series/time_series profiles。'));
+      }
+      const metadata = [
+        ['generation_ms', data?.generation_ms ?? data?._performance?.generation_ms],
+        ['resilience_cluster_total', data?.summary?.resilience_cluster_total],
+        ['selected_intensity', selected.event?.selected_intensity],
+        ['requested_intensity', selected.event?.requested_intensity],
+        ['horizon_hours', selected.timeSeries?.horizon_hours],
+        ['time_step_hr', selected.timeSeries?.time_step_hr ?? selected.timeSeries?.step_duration_hr],
+      ];
+      portalTable(details, ['证据字段', '后端值'], metadata);
+      const footer = portalElement(root, 'details', 'resilience-portal__calculation-summary');
+      footer.dataset.portalCalculationSummary = 'scenario-generation';
+      footer.append(portalElement(root, 'summary', '', '计算摘要与生成依据'));
+      root.append(footer);
+      const summary = portalSection(footer, '生成摘要', '摘要、warning 与 audit 均直接来自后端场景生成响应。');
+      if (isWeather) {
+        portalTable(summary, ['模型字段', '后端值'], [
+          ['模型', weather.model_scope], ['有效参数', weather.parameters], ['随机种子', weather.seed],
+          ['候选强度系数', weather.severity_scale], ['假设线路长度数量', weather.fallback_length_count],
+          ['模型限制', weather.model_limitations], ['支路事件故障概率', weather.asset_risks],
+        ]);
+      }
+      portalTable(summary, ['字段', '后端值'], [
+        ['generation_ms', data?.generation_ms ?? data?._performance?.generation_ms],
+        ['resilience_cluster_total', data?.summary?.resilience_cluster_total],
+        ['warning_count', Array.isArray(data?.warnings) ? data.warnings.length : null],
+        ['audit', data?.resilience?.audit],
+      ]);
+      if (Array.isArray(data?.warnings) && data.warnings.length) {
+        const warning = portalElement(root, 'div', 'resilience-portal__callout resilience-portal__callout--warning');
+        warning.append(portalElement(root, 'strong', '', '生成 warning'));
+        const list = portalElement(root, 'ul');
+        data.warnings.forEach(item => list.append(portalElement(root, 'li', '', portalValueText(item))));
+        warning.append(list);
+        summary.append(warning);
+      }
+
+    }
+
+    function portalRecoveryTimeAxis(data) {
+      if (Array.isArray(data?.time_axis)) return data.time_axis;
+      if (Array.isArray(data?.time_axis?.hours)) return data.time_axis.hours;
+      if (Array.isArray(data?.hours)) return data.hours;
+      return [];
+    }
+
+    function portalRecoveryRows(data) {
+      const timeAxis = portalRecoveryTimeAxis(data);
+      const sourceRows = Array.isArray(data?.steps) && data.steps.length
+        ? data.steps
+        : Array.isArray(data?.hourly) && data.hourly.length ? data.hourly : null;
+      if (sourceRows) {
+        return sourceRows.map((row, index) => ({
+          ...(row && typeof row === 'object' ? row : {}),
+          _time: portalFiniteNumber(row?.time_hr ?? row?.hour ?? timeAxis[index]),
+          _source: Array.isArray(data?.steps) && data.steps.length ? 'steps' : 'hourly',
+        }));
+      }
+      const fields = [
+        'demand_mw', 'served_mw', 'shed_mw', 'restoration_ratio', 'active_faults',
+        'repaired_faults_arr', 'switch_actions', 'island_counts', 'res_mw',
+      ];
+      return timeAxis.map((time, index) => {
+        const row = { _time: portalFiniteNumber(time), _source: 'flattened' };
+        fields.forEach(field => {
+          if (Array.isArray(data?.[field]) && index < data[field].length) row[field] = data[field][index];
+        });
+        return row;
+      });
+    }
+
+    function portalRowSeries(rows, keys) {
+      const x = [];
+      const y = [];
+      rows.forEach(row => {
+        const value = keys.reduce((found, key) => found ?? portalFiniteNumber(row?.[key]), null);
+        if (row?._time !== null && value !== null) {
+          x.push(row._time);
+          y.push(value);
+        }
+      });
+      return { x, y };
+    }
+
+    function renderPortalRapidRecovery(root, data) {
+      requirePortalPresentationRoot(root);
+      disposePortalPresentation(root);
+      root.replaceChildren();
+      const faultSequence = Array.isArray(data?.fault_sequence) ? data.fault_sequence : [];
+      if (faultSequence.length) {
+        const acCount = faultSequence.filter(fault => String(fault.branch_type ?? fault.branch_kind ?? fault.domain).toUpperCase() === 'AC').length;
+        const dcCount = faultSequence.length - acCount;
+        root.append(portalElement(root, 'p', 'resilience-portal__callout',
+          `本次故障数 ${faultSequence.length}：AC 支路 ${acCount}、DC 支路 ${dcCount}。每条故障记录对应一个支路停运；活动故障和已修复故障曲线也按支路统计。`));
+      }
+      const rows = portalRecoveryRows(data);
+      const timedRows = rows.filter(row => row._time !== null);
+      if (!timedRows.length) {
+        root.append(portalElement(root, 'p', 'resilience-portal__callout resilience-portal__callout--warning', '后端未返回可用的 time_hr、hour、time_axis 或 hours；未绘制恢复曲线。'));
+      } else {
+        const charts = portalSection(root, '快速恢复时序', '横轴严格使用后端 time_hr/hour（缺失时使用同索引 time_axis/hours），保留非均匀时刻；未返回值不会补零。');
+        const grid = portalElement(root, 'div', 'resilience-portal__chart-grid');
+        charts.append(grid);
+        const powerSpecs = [
+          ['需求', ['demand_mw'], 0],
+          ['供电', ['served_mw'], 1],
+          ['切负荷', ['shed_mw'], 2],
+        ];
+        const powerTraces = powerSpecs.map(([name, keys, color]) => {
+          const series = portalRowSeries(timedRows, keys);
+          return series.x.length ? portalLineTrace(root,name, series.x, series.y, color) : null;
+        }).filter(Boolean);
+        portalPlot(root, grid, '需求、供电与切负荷', powerTraces, '功率 (MW)', { wide: true });
+
+        const ratio = portalRowSeries(timedRows, ['restoration_ratio']);
+        if (ratio.x.length) portalPlot(root, grid, '后端恢复比例', [portalLineTrace(root,'恢复比例', ratio.x, ratio.y, 0)], '比例', { rangeMode: 'tozero' });
+        const active = portalRowSeries(timedRows.map(row => ({
+          ...row,
+          active_fault_count: Array.isArray(row.active_faults)
+            ? row.active_faults.length
+            : row.active_faults,
+        })), ['active_fault_count']);
+        const repaired = portalRowSeries(timedRows, ['repaired_faults', 'repaired_faults_arr']);
+        const countTraces = [
+          active.x.length ? portalLineTrace(root,'活动故障支路', active.x, active.y, 0, { dash: 'solid' }) : null,
+          repaired.x.length ? portalLineTrace(root,'已恢复故障支路', repaired.x, repaired.y, 1, { dash: 'dash', symbol: 'diamond' }) : null,
+        ].filter(Boolean);
+        if (countTraces.length) portalPlot(root, grid, '故障状态', countTraces, '数量', { rangeMode: 'tozero' });
+
+        const switchCounts = portalRowSeries(timedRows.map(row => ({
+          ...row,
+          switch_action_count: Array.isArray(row.switch_actions)
+            ? row.switch_actions.length
+            : row.switch_actions,
+        })), ['switch_action_count']);
+        if (switchCounts.x.length) portalPlot(root, grid, '开关动作', [portalLineTrace(root, '开关动作', switchCounts.x, switchCounts.y, 2, { symbol: 'square' })], '动作数', { rangeMode: 'tozero' });
+
+        const evidenceFields = [
+          ['时间 (h)', row => row._time],
+          ['需求 (MW)', row => row.demand_mw],
+          ['供电 (MW)', row => row.served_mw],
+          ['切负荷 (MW)', row => row.shed_mw],
+          ['恢复比例', row => row.restoration_ratio],
+          ['活动故障支路', row => row.active_faults],
+          ['已恢复故障支路', row => row.repaired_faults ?? row.repaired_faults_arr],
+          ['开关动作', row => row.switch_actions],
+          ['灾害阶段', row => row.disaster_stage],
+          ['来源', row => row._source],
+        ];
+        portalTable(charts, evidenceFields.map(([label]) => label), timedRows.map(row => evidenceFields.map(([, get]) => get(row))), { limit: 200 });
+      }
+
+      const faults = Array.isArray(data?.fault_sequence) ? data.fault_sequence : Array.isArray(data?.faults) ? data.faults : [];
+      if (faults.length) {
+        const faultEvidence = portalSection(root, '故障生命周期', 'repair_completion_hr 视为绝对完成时刻；repair_duration_hr / repair_hr / repair_time_hr 视为持续时长。');
+        portalTable(faultEvidence, ['域', '支路', '受灾设备', '原因', '开始 (h)', '停运时长 (h)', '完成 (h)'], faults.map(fault => {
+          const start = portalFiniteNumber(fault?.start_hr ?? fault?.outage_start_hr);
+          const completion = portalFiniteNumber(fault?.repair_completion_hr);
+          const duration = portalFiniteNumber(fault?.repair_duration_hr ?? fault?.repair_hr ?? fault?.repair_time_hr);
+          return [
+            fault?.branch_type ?? fault?.domain,
+            fault?.branch_id ?? fault?.branch_index,
+            fault?.equipment_type && fault?.equipment_index ? `${fault.equipment_type} ${fault.equipment_index}` : '—',
+            fault?.failure_cause || '—',
+            start,
+            duration ?? (start !== null && completion !== null ? completion - start : null),
+            completion ?? (start !== null && duration !== null ? start + duration : null),
+          ];
+        }));
+      }
+
+      const messTraces = Array.isArray(data?.mess_traces) ? data.mess_traces : [];
+      if (messTraces.length) {
+        const messEvidence = portalSection(root, 'MESS 轨迹', '功率、剩余能量和位置均直接来自后端 mess_traces。');
+        const grid = portalElement(root, 'div', 'resilience-portal__chart-grid');
+        messEvidence.append(grid);
+        const power = [];
+        const energy = [];
+        const rows = [];
+        messTraces.forEach((trace, index) => {
+          const hours = Array.isArray(trace?.hours) ? trace.hours.map(portalFiniteNumber) : [];
+          const powerValues = Array.isArray(trace?.power_mw) ? trace.power_mw.map(portalFiniteNumber) : [];
+          const energyValues = Array.isArray(trace?.energy_mwh) ? trace.energy_mwh.map(portalFiniteNumber) : [];
+          const buses = Array.isArray(trace?.bus_ids) ? trace.bus_ids : [];
+          const label = `MESS ${trace?.unit_id ?? index + 1}`;
+          const powerSeries = hours.map((hour, sample) => ({ hour, value: powerValues[sample] })).filter(sample => sample.hour !== null && sample.value !== null);
+          const energySeries = hours.map((hour, sample) => ({ hour, value: energyValues[sample] })).filter(sample => sample.hour !== null && sample.value !== null);
+          if (powerSeries.length) power.push(portalLineTrace(root, label, powerSeries.map(sample => sample.hour), powerSeries.map(sample => sample.value), index % 3));
+          if (energySeries.length) energy.push(portalLineTrace(root, label, energySeries.map(sample => sample.hour), energySeries.map(sample => sample.value), index % 3));
+          hours.forEach((hour, sample) => rows.push([trace?.unit_id ?? index + 1, hour, powerValues[sample], energyValues[sample], buses[sample]]));
+        });
+        portalPlot(root, grid, 'MESS 功率', power, '功率 (MW)', { wide: power.length > 1 });
+        portalPlot(root, grid, 'MESS 剩余能量', energy, '能量 (MWh)', { wide: energy.length > 1 });
+        portalTable(messEvidence, ['MESS', '时间 (h)', '功率 (MW)', '剩余能量 (MWh)', '位置/母线'], rows);
+      }
+
+      const evidence = portalSection(root, '后端运行证据', '以下标量直接来自恢复响应；浏览器不积分、不归一化，也不推导 Chapter 3 指标。');
+      evidence.dataset.portalRunEvidence = '';
+      const evidenceRows = [
+        ['run_id', data?.run_id], ['run_revision', data?.run_revision],
+        ['model_revision', data?.model_revision], ['scenario_ref', data?.scenario_ref],
+        ['scenario_revision', data?.scenario_revision], ['scenario_digest', data?.scenario_digest],
+        ['result_outcome', data?.result_outcome ?? data?.outcome],
+        ['scientific_usability', data?.scientific_usability ?? data?.usability],
+        ['stale', data?.stale], ['status', data?.status], ['feasible', data?.feasible],
+        ['effective_model', data?.effective_model ?? data?.model],
+        ['effective_solver', data?.effective_solver ?? data?.model_stats?.solver_name],
+        ['total_demand_mwh', data?.total_demand_mwh], ['total_served_mwh', data?.total_served_mwh],
+        ['total_shed_mwh', data?.total_shed_mwh], ['weighted_unserved_mwh', data?.weighted_unserved_mwh],
+        ['resilience_index', data?.resilience_index], ['avg_restoration_ratio', data?.avg_restoration_ratio],
+        ['final_restoration_ratio', data?.final_restoration_ratio], ['peak_shed_mw', data?.peak_shed_mw],
+        ['restoration_time_hr', data?.restoration_time_hr], ['mess_energy_delivered_mwh', data?.mess_energy_delivered_mwh],
+      ];
+      portalTable(evidence, ['字段', '后端值'], evidenceRows);
+      const limitations = Array.isArray(data?.limitations) ? data.limitations : [];
+      const limitation = portalElement(root, 'div', 'resilience-portal__callout resilience-portal__callout--warning');
+      limitation.append(portalElement(root, 'strong', '', '科学边界'));
+      const list = portalElement(root, 'ul');
+      const statements = limitations.length ? limitations : ['后端未返回 limitations；普通 restoration feasibility 不能据此解释为 certified dynamic safety。'];
+      statements.forEach(statement => list.append(portalElement(root, 'li', '', statement)));
+      limitation.append(list);
+      evidence.append(limitation);
+    }
+
+    function ensurePortalOperations() {
+      if (_portalOperations) return _portalOperations;
+      _portalOperations = {
+        readScenarioConfig: readScenarioPortalConfig,
+        generateScenarios: generateScenarioOperation,
+        selectScenario: selectPortalScenario,
+        applySelectedScenario,
+        clearSelectedScenario: clearSelectedPortalScenario,
+        readRecoveryConfig: readRecoveryPortalConfig,
+        runRecovery: context => runResilience({ portal: true, context, params: context?.params || {} }),
+        renderScenarioGeneration: renderPortalScenarioGeneration,
+        renderRapidRecovery: renderPortalRapidRecovery,
+        disposePresentation: disposePortalPresentation,
+        mountArchitecture: mountPortalArchitecture,
+        setArchitectureActive: setPortalArchitectureActive,
+      };
+      return _portalOperations;
+    }
+
+    ensurePortalOperations();
 
     function firstProfileSummary(cluster, profileName) {
       const profiles = cluster?.representative?.time_series?.profiles || [];
@@ -24965,12 +26055,15 @@ const App = (() => {
       return extractGeneratedScenarioProfileValues(ts, profileIdOrName);
     }
 
-    function getResilienceScenarioProfiles() {
-      const ts = getImportedGeneratedScenarioTimeSeries('resilience');
+    function resolveResilienceScenarioProfiles(ts) {
       if (!ts) return {};
-      const finiteProfile = (values) => Array.isArray(values)
-        ? values.map(Number).filter(Number.isFinite).map(v => Math.max(0, v))
-        : [];
+      const numSteps = Number(ts.num_steps ?? ts.profiles?.[0]?.values?.length ?? 0);
+      const stepDurationHr = Number(ts.step_duration_hr ?? ts.time_step_hr ?? 1);
+      const finiteProfile = (values) => {
+        if (!Array.isArray(values) || !Number.isInteger(numSteps) || numSteps <= 0 || values.length !== numSteps) return [];
+        const converted = values.map(Number);
+        return converted.every(Number.isFinite) ? converted.map(value => Math.max(0, value)) : [];
+      };
       const loadProfileMap = Array.isArray(ts.binding?.load_profile_map) ? ts.binding.load_profile_map : [];
       let loadProfile = finiteProfile(extractScenarioProfileValues(ts, ts.binding?.resilience_load_profile_id));
       if (!loadProfile.length) loadProfile = finiteProfile(extractScenarioProfileValues(ts, 'scenario_load_scale'));
@@ -24982,7 +26075,20 @@ const App = (() => {
       let windProfile = finiteProfile(extractScenarioProfileValues(ts, ts.binding?.resilience_wind_profile_id));
       if (!windProfile.length) windProfile = finiteProfile(extractScenarioProfileValues(ts, 'scenario_wind_scale'));
       if (!windProfile.length) windProfile = renewableProfile;
-      return { loadProfile, renewableProfile, pvProfile, windProfile, loadProfileMap, tsProfiles: ts.profiles || [] };
+      const profilesValid = Number.isInteger(numSteps) && numSteps > 0 &&
+        Number.isFinite(stepDurationHr) && stepDurationHr > 0 &&
+        (ts.profiles || []).every(profile => finiteProfile(profile?.values).length === numSteps);
+      return {
+        loadProfile, renewableProfile, pvProfile, windProfile, loadProfileMap,
+        tsProfiles: profilesValid ? ts.profiles || [] : [],
+        numSteps,
+        stepDurationHr,
+        valid: profilesValid,
+      };
+    }
+
+    function getResilienceScenarioProfiles() {
+      return resolveResilienceScenarioProfiles(getImportedGeneratedScenarioTimeSeries('resilience'));
     }
 
     function buildGeneratedScenarioCase(baseSystem, family, cluster, groupContext = null) {
@@ -25183,34 +26289,17 @@ const App = (() => {
     }
 
     function fillResilienceInputsFromScenario(caseJson) {
-      const setVal = (id, value) => { const el = document.getElementById(id); if (el) el.value = value; };
-      const faults = generatedScenarioCaseFaults(caseJson);
-      if (!faults.length) {
-        setVal('resFaultCount', '0');
-        setVal('resAcFaultLocations', '');
-        setVal('resDcFaultLocations', '');
-        setVal('resAcFaultStartHour', '');
-        setVal('resDcFaultStartHour', '');
-        setVal('resAcRepairDuration', '');
-        setVal('resDcRepairDuration', '');
-        return;
-      }
-      const ac = [], dc = [];
-      faults.forEach(f => {
-        const type = String(f.branch_type || f.branch_kind || f.type || 'AC').toUpperCase();
-        const id = f.branch_index ?? f.branch_id ?? f.branch;
-        if (!Number.isFinite(Number(id))) return;
-        const entry = { id, start: Number(f.start_hr ?? f.outage_start_hr ?? 0), repair: Number(f.repair_hr ?? f.repair_duration_hr ?? f.repair_time_hr ?? 6) };
-        if (type === 'DC') dc.push(entry); else ac.push(entry);
-      });
-      setVal('resFaultCount', String(ac.length + dc.length));
-      setVal('resAcFaultLocations', ac.map(f => f.id).join(','));
-      setVal('resDcFaultLocations', dc.map(f => f.id).join(','));
-      setVal('resAcFaultStartHour', ac.map(f => Number.isFinite(f.start) ? f.start : 0).join(','));
-      setVal('resDcFaultStartHour', dc.map(f => Number.isFinite(f.start) ? f.start : 0).join(','));
-      setVal('resAcRepairDuration', ac.map(f => Number.isFinite(f.repair) ? f.repair : 6).join(','));
-      setVal('resDcRepairDuration', dc.map(f => Number.isFinite(f.repair) ? f.repair : 8).join(','));
-      markResilienceFaultBranches();
+      const metadata = generatedScenarioCaseMetadata(caseJson);
+      const candidate = {
+        id: metadata.representative_id || metadata.scenario_id || 'imported_resilience_scenario',
+        intensity: metadata.intensity || null,
+        cluster_id: metadata.cluster_id ?? null,
+        raw: { representative: {
+          resilience_event: metadata.resilience_event || caseJson?.resilience_event || null,
+          standard_time_series: generatedScenarioCaseTimeSeries(caseJson),
+        } },
+      };
+      applyScenarioRecoveryFieldsToLegacy(scenarioRecoveryContext(candidate).fields);
     }
 
     async function importGeneratedScenarioForModule(file, targetFamily) {
@@ -25617,52 +26706,11 @@ const App = (() => {
     document.getElementById('btnGenerateScenarios')?.addEventListener('click', async event => {
       const button = event.currentTarget;
       if (button?.disabled) return;
-      let payload;
       try {
-        payload = collectScenarioGenerationOptions();
-      } catch (err) {
-        log(`场景参数错误：${describeError(err)}`, 'warn');
-        setStatus('场景参数错误', 'error');
-        return;
-      }
-      if (button) button.disabled = true;
-      const startedAt = performance.now();
-      try {
-        setStatus('场景生成中...', 'busy');
-        await new Promise(resolve =>
-          typeof requestAnimationFrame === 'function'
-            ? requestAnimationFrame(() => resolve())
-            : setTimeout(resolve, 0));
-        _lastScenarioBaseSystemJson = Canvas.buildSystemJson();
-        if (!await syncToBackend()) { setStatus('同步失败', 'error'); return; }
-        const requestStartedAt = performance.now();
-        const data = await apiPost('/api/session/generate_scenarios', payload);
-        const requestElapsedMs = performance.now() - requestStartedAt;
-        if (!data) { setStatus('场景生成失败', 'error'); return; }
-        _lastScenarioGenerationData = data;
-        setActiveResultGroup('scenarioGeneration');
-        document.getElementById('resultsEmpty').style.display = 'none';
-        document.getElementById('resultsContent').style.display = 'block';
-        switchTab('results');
-        renderScenarioGenerationResults(data);
-        setTimeout(() => {
-          ['scenarioChartRegular', 'scenarioChartReliability', 'scenarioChartResilience', 'scenarioChartRegularCurves', 'scenarioChartReliabilityBars', 'scenarioChartResilienceCurves', 'scenarioChartFaultSequence'].forEach(id => {
-            const el = document.getElementById(id);
-            if (el && window.Plotly) Plotly.Plots.resize(el);
-          });
-        }, 200);
-        const totalElapsedMs = performance.now() - startedAt;
-        const backendMs = Number(data._performance?.generation_ms);
-        const generationText = _editionProfile?.edition === 'resilience'
-          ? `弹性${data.summary?.resilience_cluster_total ?? 0}簇`
-          : `常规${data.summary?.regular_cluster_count ?? 0}簇，可靠性${data.summary?.reliability_contingency_count ?? 0}个N-1，弹性${data.summary?.resilience_cluster_total ?? 0}簇`;
-        log(`场景生成完成：${generationText}；请求${requestElapsedMs.toFixed(0)}ms${Number.isFinite(backendMs) ? `，后端${backendMs.toFixed(0)}ms` : ''}，总计${totalElapsedMs.toFixed(0)}ms`, 'success');
-        setStatus('场景生成完成');
+        await _portalOperations.generateScenarios();
       } catch (err) {
         log(`场景生成失败：${describeError(err)}`, 'error');
         setStatus('场景生成失败', 'error');
-      } finally {
-        if (button) button.disabled = false;
       }
     });
 

@@ -61,6 +61,20 @@ TEST_CASE("Edition profile matches the build mode", "[edition]") {
   CHECK(v1_executor_supports_analysis("optimal_power_flow"));
   CHECK_FALSE(v1_executor_supports_analysis("harmonics"));
   CHECK(profile.at("analysis_catalog") == edition_analysis_catalog_json());
+#ifdef HACDCPF_RESILIENCE_EDITION
+  const auto& metric_catalog = profile.at("resilience_metric_catalog");
+  CHECK(metric_catalog.at("schema") == "resilience_metric_catalog_v1");
+  CHECK(metric_catalog.at("definition_version") == "book_ch3_2026.2");
+  REQUIRE(metric_catalog.at("entries").size() == 42);
+  CHECK(profile.at("workflow") ==
+        nlohmann::json::array({
+            {{"id", "metric_selection"}, {"label", "指标选择"}},
+            {{"id", "scenario_selection"}, {"label", "场景生成与选择"}},
+            {{"id", "proactive_defense"}, {"label", "主动防御"}},
+            {{"id", "rapid_recovery"}, {"label", "快速恢复"}},
+            {{"id", "metric_output"}, {"label", "指标输出"}},
+        }));
+#endif
 }
 
 TEST_CASE("Edition route manifest is unique and strictly structured",
@@ -195,6 +209,21 @@ TEST_CASE("Edition route policy uses method and path and fails closed",
         EditionRouteAccess::Retained);
   CHECK(classify_edition_route("POST", "/api/session/run_reliability_fmea").access ==
         EditionRouteAccess::Retained);
+  if (current_edition() == Edition::Resilience) {
+    CHECK(classify_edition_route(
+              "GET", "/api/session/resilience/metric_catalog")
+              .access == EditionRouteAccess::Retained);
+    CHECK(classify_edition_route("POST", "/api/session/resilience/metrics")
+              .access == EditionRouteAccess::Retained);
+    CHECK(classify_v1_analysis("resilience_metrics").access ==
+          V1AnalysisAccess::Unknown);
+  } else if (current_edition() == Edition::Trial) {
+    CHECK(classify_edition_route(
+              "GET", "/api/session/resilience/metric_catalog")
+              .access == EditionRouteAccess::Disabled);
+    CHECK(classify_edition_route("POST", "/api/session/resilience/metrics")
+              .access == EditionRouteAccess::Disabled);
+  }
   CHECK(classify_edition_route("POST", "/api/session/opf_parity").access ==
         EditionRouteAccess::Retained);
   CHECK(classify_edition_route("POST", "/api/opf/ac").access ==
@@ -277,11 +306,12 @@ TEST_CASE("Edition analysis plan is backend ordered", "[edition]") {
   REQUIRE(plan.at("automatic_execution") == false);
   const auto& steps = plan.at("steps");
 #ifdef HACDCPF_RESILIENCE_EDITION
-  REQUIRE(steps.size() == 4);
-  CHECK(steps.at(0).at("module") == "opf");
-  CHECK(steps.at(1).at("module") == "scenarioGeneration");
-  CHECK(steps.at(2).at("module") == "reliability");
-  CHECK(steps.at(3).at("module") == "shortCircuit");
+  REQUIRE(steps.size() == 5);
+  CHECK(steps.at(0).at("id") == "metric_selection");
+  CHECK(steps.at(1).at("id") == "scenario_selection");
+  CHECK(steps.at(2).at("id") == "proactive_defense");
+  CHECK(steps.at(3).at("id") == "rapid_recovery");
+  CHECK(steps.at(4).at("id") == "metric_output");
 #else
   REQUIRE(steps.size() == 8);
   CHECK(steps.at(0).at("module") == "powerFlow");

@@ -1,6 +1,14 @@
 # HySim-XJTU-HRPES 文档中心
 
-最后核实：2026-09-19
+[Web 弹性指标扩展：42 项目录与计算口径](modules/resilience/metrics.md)
+
+[暴雨内涝与雷击场景实现契约](modules/resilience/weather_scenarios.md)：2026-09-27 更新混合架空/电缆算例、附件受淹、绝缘子雨闪、变压器受潮、时间窗恢复与 Web 验证入口。
+
+[多灾害场景调研与接入设计](modules/resilience/multi_hazard_sources.md)：参考书灾种对照、开源候选、许可证及后续接口规划。
+
+[弹性 Web 工作区使用说明](guides/resilience_workspace.zh.md)：首页、演示、版本保存、任务记录、指标对比和存储边界。
+
+最后核实：2026-09-27
 
 新能源样本工厂已补充可执行的 PyTorch 多任务 surrogate（CAS 标签、早停训练、
 固定承诺 LP 可行性投影与 checkpoint 验证），入口见

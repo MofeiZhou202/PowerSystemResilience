@@ -6,6 +6,18 @@ The GUI server is implemented in `tests/run_gui_server.cpp`. Session endpoints
 operate on one loaded `HybridPowerSystem`; a model-changing request clears
 cached analysis results.
 
+## Rainstorm and lightning scenarios
+
+`POST /api/session/generate_scenarios` accepts `resilience.hazard_type` with
+`typhoon` (default), `rainstorm` or `lightning`, and a same-named parameter object.
+The Resilience edition `GET /api/edition` includes the `scenario_hazards` form
+schema. Results retain `resilience.intensities[].clusters[]` and add generic
+hazard evidence to each event. Web weather recovery passes
+`respect_fault_windows: true` to `POST /api/session/run_distribution_resilience`
+so the RA stage solver respects supplied outage windows, including access waits.
+Parameters, equations, identity, probability and model limits are specified in
+[weather scenarios](../modules/resilience/weather_scenarios.md).
+
 ## Static documentation mount
 
 `GET /xjtu/docs/<relative path>` serves markdown files from the repository
@@ -370,6 +382,26 @@ canonical entries in `/api/edition.analysis_catalog`. Availability is the
 entry's edition-specific `enabled` value; `/api/v1.analyses` is not a complete
 legacy-route list. Legacy embedded-UI routes are not part of this contract.
 
+In Resilience Edition, the metric-specific session routes are:
+
+- `GET /api/session/resilience/metric_catalog` returns
+  `resilience_metric_catalog_v1` with the 18 Chapter 3 time-dimension metric
+  definitions and definition version `book_ch3_2026.1`.
+- `POST /api/session/resilience/metrics` evaluates selected metrics against an
+  existing `run_id` artifact. The request schema is
+  `resilience_metric_request_v1`; it does not rerun the recovery solver. Values
+  can be JSON `null`, and each result carries status, formula, source fields,
+  assumptions, limitations, missing dependencies, approximation, and censoring
+  metadata.
+- `POST /api/session/run_distribution_resilience` remains the only recovery
+  execution route. Its response supplies the run artifact consumed by the
+  metric route. Optional finite, non-negative `disaster_end_hr` and
+  `recovery_start_hr` metadata can establish the strict metric window;
+  `recovery_start_hr` must not precede `disaster_end_hr`. If omitted, the
+  evaluator does not substitute repair completion or a solver-stage boundary
+  for the disaster end. Artifacts are bounded in process memory and are not
+  restored across a server restart.
+
 ## Reliability and protection configuration
 
 The process-global GUI session exposes a model-bound reliability configuration:
@@ -579,3 +611,11 @@ The v1 isolation and concurrency contract is covered independently:
 python3 tools/runtime_api_v1_e2e.py \
   --server build/macos-release/tests/run_gui_server --data-dir data
 ```
+
+## Resilience metric extension
+
+The metric catalog/evaluator uses `book_ch3_2026.2` (18 book + 24 operational entries).
+Recovery steps expose `duration_hr` and `weighted_shed_mw`. Disaster end defaults to
+the last fault onset; explicit input takes precedence, with `disaster_end_source`
+and a separate `last_repair_completion_hr`. Metric-only `parameters.event_window`
+can override event times. See [formulas and field mapping](../modules/resilience/metrics.md).

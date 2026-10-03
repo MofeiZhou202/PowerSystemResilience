@@ -2633,6 +2633,9 @@ const Canvas = (() => {
 
   function onKeyDown(e) {
     if (document.body.classList.contains('market-canvas-active')) return;
+    const architectureSurface = document.getElementById('resiliencePortalArchitectureSurface');
+    if (document.body.dataset.edition === 'resilience' &&
+        architectureSurface && (architectureSurface.hidden || architectureSurface.inert)) return;
     // Never hijack keys while the user is typing in a form field / editable area.
     const t = e.target;
     if (t.tagName === 'INPUT' || t.tagName === 'SELECT' || t.tagName === 'TEXTAREA' || t.isContentEditable) return;
@@ -4367,6 +4370,8 @@ const Canvas = (() => {
             cross_section_mm2: numOr(p.cross_section_mm2, 0),
             cross_section_inferred: p.cross_section_inferred === true || p.cross_section_inferred === 'true',
             line_type: p.line_type || '',
+            weather_cable_entry_height_m: numOr(p.weather_cable_entry_height_m, -1),
+            weather_insulator_wet_ref_kv: numOr(p.weather_insulator_wet_ref_kv, 0),
             parameter_source: p.parameter_source || '',
             parameters_inferred: p.parameters_inferred === true || p.parameters_inferred === 'true',
             tap: numOr(p.tap, 1.0),
@@ -4448,6 +4453,7 @@ const Canvas = (() => {
                 tap_neutral: numOr(p.tap_neutral, 0),
                 tap_step_percent: numOr(p.tap_step_percent, 0),
                 source_branch_idx: sourceBranchIndex,
+                weather_moisture_vulnerable: p.weather_moisture_vulnerable === true,
                 in_service: p.in_service !== false,
               });
               trafoIdx++;
@@ -4481,6 +4487,7 @@ const Canvas = (() => {
               cap_registered_dr_mw: numOr(p.cap_registered_dr_mw, 0),
               cap_expected_new_storage_min_mw: numOr(p.cap_expected_new_storage_min_mw, 0),
               cap_expected_new_storage_max_mw: numOr(p.cap_expected_new_storage_max_mw, 0),
+              weather_moisture_vulnerable: p.weather_moisture_vulnerable === true,
               in_service: p.in_service !== false,
             };
             if (Number(p.source_branch_idx) > 0) {
@@ -4847,6 +4854,8 @@ const Canvas = (() => {
             r_pu: numOr(p.r_pu, 0.01),
             rate_a_mva: numOr(p.rate_a_mva, 200),
             length_km: numOr(p.length_km, 100),
+            line_type: p.line_type || '',
+            weather_cable_entry_height_m: numOr(p.weather_cable_entry_height_m, -1),
             base_kv: numOr(p.base_kv, 0),
             r_ohm_per_km: numOr(p.r_ohm_per_km, 0),
             in_service: p.in_service !== false,
@@ -5767,9 +5776,9 @@ const Canvas = (() => {
         (Math.abs(tapVal - 1.0) > 1e-6) || (Math.abs(shiftVal) > 1e-6);
       // New JSON carries the authored equipment kind. Only legacy JSON without
       // a valid kind uses the tap/name/nameplate inference above.
-      const isTrafo = hasExplicitBranchKind
+      const isTrafo = Boolean(linked) || (hasExplicitBranchKind
         ? explicitBranchKind === 'transformer'
-        : inferredTransformer;
+        : inferredTransformer);
 
       if (isTrafo) {
         const linkedTapRatio = Math.max(1e-6, 1 +
@@ -5791,6 +5800,7 @@ const Canvas = (() => {
           _transformer_index: linked?.index,
           _tap_base_ratio: tapVal / linkedTapRatio,
           source_branch_idx: br.index,
+          weather_moisture_vulnerable: linked?.weather_moisture_vulnerable === true,
           r_pu: br.r_pu, x_pu: br.x_pu, b_pu: br.b_pu,
           rate_a_mva: br.rate_a_mva,
           rate_b_mva: br.rate_b_mva,
@@ -5833,6 +5843,8 @@ const Canvas = (() => {
           cross_section_mm2: br.cross_section_mm2,
           cross_section_inferred: br.cross_section_inferred === true,
           line_type: br.line_type || '',
+          weather_cable_entry_height_m: br.weather_cable_entry_height_m ?? -1,
+          weather_insulator_wet_ref_kv: br.weather_insulator_wet_ref_kv ?? 0,
           parameter_source: br.parameter_source || '',
           parameters_inferred: br.parameters_inferred === true,
           tap: tapVal, shift_deg: shiftVal,
@@ -5885,6 +5897,7 @@ const Canvas = (() => {
         cap_expected_new_storage_min_mw: tr.cap_expected_new_storage_min_mw ?? 0,
         cap_expected_new_storage_max_mw: tr.cap_expected_new_storage_max_mw ?? 0,
         source_branch_idx: tr.source_branch_idx,
+        weather_moisture_vulnerable: tr.weather_moisture_vulnerable === true,
         in_service: tr.in_service !== false,
       });
       addConnection(comp.id, 'hv', hvCompId, 'bottom');
@@ -6023,6 +6036,8 @@ const Canvas = (() => {
         to_bus: br.to_bus,
         r_pu: br.r_pu, rate_a_mva: br.rate_a_mva,
         length_km: br.length_km,
+        line_type: br.line_type || '',
+        weather_cable_entry_height_m: br.weather_cable_entry_height_m ?? -1,
         base_kv: br.base_kv,
         r_ohm_per_km: br.r_ohm_per_km,
         r_total_ohm: numOr(br.r_ohm_per_km, 0) * numOr(br.length_km, 0),
@@ -9208,6 +9223,20 @@ const Canvas = (() => {
     };
   }
 
+  function refreshHostViewport() {
+    if (!svg) return false;
+    updateConnectHandleScale();
+    updateMinimapViewport();
+    updateZoomIndicator();
+    renderBreadcrumb();
+    scheduleViewportCulling();
+    renderFrame();
+    if (typeof NetworkOverview !== 'undefined' && NetworkOverview.refreshViewport) {
+      NetworkOverview.refreshViewport();
+    }
+    return true;
+  }
+
   // ========== Public API ==========
   return {
     init,
@@ -9279,6 +9308,7 @@ const Canvas = (() => {
     forceRenderCurrentSystem,
     panToComponent,
     panToBusId,
+    refreshHostViewport,
     getPerformanceStats,
     getCompBusMap,
     get state() { return state; },

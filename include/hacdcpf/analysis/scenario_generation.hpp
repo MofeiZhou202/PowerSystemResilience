@@ -10,6 +10,7 @@
 
 #include "hacdcpf/time_series/time_series_pf.hpp"
 #include "hacdcpf/analysis/typhoon_resilience.hpp"
+#include "hacdcpf/analysis/weather_hazards.hpp"
 #include "hacdcpf/model/system.hpp"
 
 namespace hacdcpf::analysis {
@@ -75,6 +76,7 @@ struct ReliabilityScenarioOptions {
 };
 
 struct ResilienceScenarioOptions {
+  WeatherHazardOptions weather;
   bool enabled{true};
   std::vector<TyphoonIntensityCategory> intensity_levels{TyphoonIntensityCategory::TY};
   int candidates_per_intensity{30};
@@ -161,6 +163,8 @@ struct ContingencyDefinition {
 };
 
 struct ResilienceEventDefinition {
+  std::string hazard_type{"typhoon"};
+  nlohmann::json hazard_evidence;
   std::string id;
   TyphoonIntensityCategory requested_intensity{TyphoonIntensityCategory::Unknown};
   TyphoonIntensityCategory selected_intensity{TyphoonIntensityCategory::Unknown};
@@ -237,6 +241,7 @@ struct ReliabilityScenarioResult {
 };
 
 struct ResilienceIntensityScenarioGroup {
+  std::string hazard_type{"typhoon"};
   TyphoonIntensityCategory intensity{TyphoonIntensityCategory::Unknown};
   int candidate_count{0};
   int cluster_count{0};

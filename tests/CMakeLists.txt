@@ -533,10 +533,12 @@ endif()
 # MESS dispatch, demo data, summary(), progress callback, custom profiles,
 # resilience index bounds, fault sequence, legacy field sync, step count, MIP stub.
 hacdcpf_add_test(test_resilience_assessment test_resilience_assessment.cpp)
+hacdcpf_add_test(test_resilience_metrics test_resilience_metrics.cpp)
 hacdcpf_add_test(test_hosting_capacity test_hosting_capacity.cpp)
 hacdcpf_add_test(test_multidimensional_weak_link test_multidimensional_weak_link.cpp)
 hacdcpf_add_test(test_counterfactual_planning test_counterfactual_planning.cpp)
 hacdcpf_add_test(test_scenario_generation test_scenario_generation.cpp)
+hacdcpf_add_test(test_weather_hazards test_weather_hazards.cpp)
 hacdcpf_add_test(test_typhoon_traffic_impact test_typhoon_traffic_impact.cpp)
 hacdcpf_add_test(test_scenario_bundle_schema test_scenario_bundle_schema.cpp)
 
@@ -703,9 +705,10 @@ add_executable(test_edition_profile
   test_edition_profile.cpp
   "${CMAKE_SOURCE_DIR}/src/server/edition_profile.cpp")
 target_include_directories(test_edition_profile PRIVATE
+  "${CMAKE_SOURCE_DIR}/include"
   "${CMAKE_SOURCE_DIR}/src/server")
 target_link_libraries(test_edition_profile PRIVATE
-  Catch2::Catch2WithMain nlohmann_json::nlohmann_json)
+  hacdcpf Catch2::Catch2WithMain nlohmann_json::nlohmann_json)
 if(HACDCPF_TRIAL_EDITION)
   target_compile_definitions(test_edition_profile PRIVATE HACDCPF_TRIAL_EDITION=1)
 elseif(HACDCPF_RESILIENCE_EDITION)
@@ -984,6 +987,12 @@ if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/run_gui_server.cpp")
                 --server "$<TARGET_FILE:run_gui_server>")
       set_tests_properties(resilience_edition_gui_e2e PROPERTIES
         LABELS "edition-resilience-gui-e2e-browser" TIMEOUT 180)
+      add_test(NAME weather_scenario_gui_e2e
+        COMMAND "${HACDCPF_NODE_EXECUTABLE}"
+                "${CMAKE_SOURCE_DIR}/tests/e2e/weather_scenario_gui_e2e.mjs"
+                --server "$<TARGET_FILE:run_gui_server>")
+      set_tests_properties(weather_scenario_gui_e2e PROPERTIES
+        LABELS "edition-resilience-gui-e2e-browser;weather" TIMEOUT 420 SKIP_RETURN_CODE 77)
     else()
       add_test(NAME market_gui_e2e
         COMMAND "${HACDCPF_NODE_EXECUTABLE}"

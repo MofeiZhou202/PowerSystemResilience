@@ -528,6 +528,7 @@ set(HACDCPF_SOURCES
   src/harmonics_power_flow/harmonics_power_flow.cpp
   # ── scenario generation ───────────────────────────────────────────────────────
   src/scenario_generation/scenario_generation.cpp
+  src/scenario_generation/weather_hazards.cpp
   # ── hosting-capacity assessment (DL/T 2041-2025) ─────────────────────────
   src/analysis/hosting_capacity.cpp
   src/analysis/counterfactual_planning.cpp
@@ -549,6 +550,7 @@ set(HACDCPF_SOURCES
   src/reliability/intelligent_cyber_physical.cpp
   src/reliability/online_protection.cpp
   src/resilience/resilience_assessment.cpp
+  src/resilience/resilience_metrics.cpp
   src/resilience/resilience_stage_milp.cpp
   src/resilience/resilience_restoration_mip.cpp
   src/resilience/certified_restoration.cpp

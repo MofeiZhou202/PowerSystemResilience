@@ -32,6 +32,7 @@ HybridPowerSystem build_case2000_acdc();
 HybridPowerSystem build_case2000_acdc_vsc_limit_ncp();
 HybridPowerSystem build_case2000_acdc_gfm_limit_ncp();
 HybridPowerSystem build_dist33_microgrid_der();
+HybridPowerSystem build_dist33_weather_mixed();
 HybridPowerSystem build_comprehensive_hybrid_acdc();
 HybridPowerSystem build_multiscale_comprehensive_acdc();
 HybridPowerSystem build_hybrid_acdc_microgrid_island();

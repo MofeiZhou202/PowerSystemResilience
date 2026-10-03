@@ -1,5 +1,11 @@
 # resilience 模块技术手册
 
+[Web 指标与参考书映射、公式及数值证据](metrics.md)
+
+[暴雨内涝与雷击场景](weather_scenarios.md)：小时尺度场景生成、AC/DC 支路故障和遵守时间窗的恢复模式。
+
+[多灾害场景调研与接入设计](multi_hazard_sources.md)：书中灾种、开源模型、接口扩展和后续覆盖计划。
+
 本目录是 `src/resilience/` 的唯一模块文档目录。
 
 本目录对应源码 `src/resilience/`，主手册按“理论—实现—接口—数值—审计”闭环组织，覆盖：

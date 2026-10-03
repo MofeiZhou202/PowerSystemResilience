@@ -1,5 +1,27 @@
 # Canvas Runtime and Result Playback
 
+## Weather asset fields across Canvas synchronization
+
+The resilience guided demo now loads `dist33_weather_mixed`. Loading the
+backend model into Canvas and building `Canvas System` for scenario generation
+must preserve AC/DC branch `line_type`, `weather_cable_entry_height_m`, AC
+`weather_insulator_wet_ref_kv`, and the branch-backed transformer's
+`weather_moisture_vulnerable` flag and `source_branch_idx`. A linked transformer
+is drawn as one transformer glyph even when its source branch JSON says
+`branch_kind=line`; exporting it returns the source AC edge and transformer
+equipment record, without adding a parallel electrical edge. The real weather
+browser test checks asset counts after this sync, then verifies recovery and
+metrics. Field values remain synthetic demonstration inputs; see
+[weather scenario contract](../modules/resilience/weather_scenarios.md).
+
+## Resilience portal Canvas host
+
+Resilience Edition has a product-level **工作流 / 配电系统架构** switch above its five-step workflow. It does not create a second diagram. During validated Resilience portal mount, `app.js` moves the complete existing `#canvasContainer` (including `#canvas`, NetworkOverview/WebGL canvas, overlays, minimap, legend, and controls) into the stable `#resiliencePortalArchitectureHost`. A comment anchor records the original owner; Full and Trial never invoke this reparenting and retain the original DOM lifecycle. Duplicate Canvas IDs or cloned drawing state are forbidden.
+
+The workflow surface starts active, so the reparented container is `inert` and `aria-hidden`. Architecture activation changes only presentation/interaction attributes and schedules `Canvas.refreshHostViewport()`. That hook refreshes scale-dependent handles, minimap viewport, zoom indicator, breadcrumb, culling, and one render frame. If the large-model overview is already active, `NetworkOverview.refreshViewport()` only executes its local resize/draw path. Neither hook calls model load/sync, `NetworkOverview.show()`/`hide()`/`fit()`, graph reconstruction, or request-sequence reset. Switching back disables interaction without destroying the WebGL context. Document-level Canvas edit shortcuts return immediately while the Resilience architecture surface is inactive.
+
+Consequently, presentation switching must preserve the authored model and `_canvas.viewBox`, SVG/WebGL selection, zoom/pan, layout, undo/redo history, frontend model revision, scenario/run identity, NetworkOverview center/scale/LOD/result state, and domain-qualified `{domain,index}` identities (including equal numeric AC/DC IDs). Large systems retain the existing WebGL overview/headless policy; switching views is not a model reload and must not create topology/result-window or analysis requests. Portal-scoped CSS gives the host a bounded local overflow context and explicitly overrides legacy mobile result-group hiding only for the reparented container, preventing page-level horizontal overflow.
+
 ## Time-series solver threads
 
 After this update, restart the server executable and reload the page: rebuilding

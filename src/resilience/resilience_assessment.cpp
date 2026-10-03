@@ -337,6 +337,9 @@ std::vector<int> compute_components(const HybridPowerSystem& sys,
   // Two-winding transformers also tie HV and LV buses together.
   for (const auto& t : sys.ac.transformers_2w) {
     if (!t.in_service) continue;
+    // A branch-backed transformer is already represented by that authored
+    // electrical edge. Adding the metadata object again would bypass outages.
+    if (t.source_branch_idx > 0) continue;
     const auto it_f = bus_pos.find(t.hv_bus);
     const auto it_t = bus_pos.find(t.lv_bus);
     if (it_f == bus_pos.end() || it_t == bus_pos.end()) continue;

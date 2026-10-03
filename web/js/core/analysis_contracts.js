@@ -27,6 +27,7 @@
     ['/api/session/run_hosting_capacity', 'hosting_capacity'],
     ['/api/session/run_reliability', 'reliability'],
     ['/api/session/run_distribution_resilience', 'resilience'],
+    ['/api/session/resilience/metrics', 'resilience_metrics'],
     ['/api/session/run_carbon', 'carbon_flow'],
     ['/api/session/run_dynamic_carbon', 'dynamic_carbon_flow'],
     ['/api/session/run_campus_ies', 'integrated_energy'],

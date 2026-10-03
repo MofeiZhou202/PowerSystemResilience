@@ -104,6 +104,8 @@ struct DCBranch {
 
   double rate_a_mva{0.0};
   double length_km{0.0};
+  std::string line_type;
+  double weather_cable_entry_height_m{-1.0};
   double base_kv{0.0};
   double s_max_mva{0.0};
   int n_parallel{1};

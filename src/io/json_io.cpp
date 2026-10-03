@@ -352,6 +352,8 @@ static json ac_branch_to_json(const ACBranch& br) {
   j["cross_section_mm2"] = br.cross_section_mm2;
   j["cross_section_inferred"] = br.cross_section_inferred;
   j["line_type"] = br.line_type;
+  j["weather_cable_entry_height_m"] = br.weather_cable_entry_height_m;
+  j["weather_insulator_wet_ref_kv"] = br.weather_insulator_wet_ref_kv;
   j["parameter_source"] = br.parameter_source;
   j["parameters_inferred"] = br.parameters_inferred;
   j["r0_pu"] = br.r0_pu;
@@ -395,6 +397,8 @@ static ACBranch ac_branch_from_json(const json& j) {
   br.cross_section_mm2 = jget(j, "cross_section_mm2", 0.0);
   br.cross_section_inferred = jget(j, "cross_section_inferred", false);
   br.line_type = jget<std::string>(j, "line_type", "");
+  br.weather_cable_entry_height_m = jget(j, "weather_cable_entry_height_m", -1.0);
+  br.weather_insulator_wet_ref_kv = jget(j, "weather_insulator_wet_ref_kv", 0.0);
   br.parameter_source = jget<std::string>(j, "parameter_source", "");
   br.parameters_inferred = jget(j, "parameters_inferred", false);
   br.r0_pu = jget(j, "r0_pu", 0.0);
@@ -526,6 +530,8 @@ static json dc_branch_to_json(const DCBranch& br) {
   j["in_service"] = br.in_service;
   j["name"] = br.name;
   j["length_km"] = br.length_km;
+  j["line_type"] = br.line_type;
+  j["weather_cable_entry_height_m"] = br.weather_cable_entry_height_m;
   j["base_kv"] = br.base_kv;
   j["r_ohm_per_km"] = br.r_ohm_per_km;
   j["inductance_mh"] = br.inductance_mh;
@@ -544,6 +550,8 @@ static DCBranch dc_branch_from_json(const json& j) {
   br.in_service = jget(j, "in_service", true);
   br.name = jget<std::string>(j, "name", "");
   br.length_km = jget(j, "length_km", 0.0);
+  br.line_type = jget<std::string>(j, "line_type", "");
+  br.weather_cable_entry_height_m = jget(j, "weather_cable_entry_height_m", -1.0);
   br.base_kv = jget(j, "base_kv", 0.0);
   br.r_ohm_per_km = jget(j, "r_ohm_per_km", 0.0);
   br.inductance_mh = jget(j, "inductance_mh", 0.0);
@@ -1820,6 +1828,7 @@ static json transformer2w_to_json(const Transformer2W& t) {
   j["mttr_hours"] = t.mttr_hours;
   j["n_parallel"] = t.n_parallel;
   j["source_branch_idx"] = t.source_branch_idx;
+  j["weather_moisture_vulnerable"] = t.weather_moisture_vulnerable;
   j["cap_power_factor"] = t.cap_power_factor;
   j["cap_max_reverse_load_rate"] = t.cap_max_reverse_load_rate;
   j["cap_dr_max_output_coeff"] = t.cap_dr_max_output_coeff;
@@ -1867,6 +1876,7 @@ static Transformer2W transformer2w_from_json(const json& j) {
   t.mttr_hours = jget_alias(j, "mttr_hours", "mttr_hours", 0.0);
   t.n_parallel = jget(j, "n_parallel", 1);
   t.source_branch_idx = jget(j, "source_branch_idx", 0);
+  t.weather_moisture_vulnerable = jget(j, "weather_moisture_vulnerable", false);
   t.cap_power_factor = jget(j, "cap_power_factor", 0.95);
   t.cap_max_reverse_load_rate = jget(j, "cap_max_reverse_load_rate", 0.0);
   t.cap_dr_max_output_coeff = jget(j, "cap_dr_max_output_coeff", 1.0);

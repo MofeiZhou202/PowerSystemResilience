@@ -1953,6 +1953,10 @@ DistributionResilienceResult run_distribution_resilience_stage_milp_assessment(
   result.model_stats.validity.mip_gap_within_tolerance = true;
   result.model_stats.formulation_notes =
       "RA-Validation-style two-stage topology MILP: stage 1 fault isolation and stage 2 post-fault reconfiguration; AC/DC branches and VSC edges are included, DC branches are fixed unless faulted or protected by DC breakers.";
+  if (opts.respect_fault_windows) {
+    result.model_stats.model_scope += ":authored-fault-windows";
+    result.model_stats.formulation_notes += " Authored outage windows are enforced at each step, including safe-access waiting and temporary-trip release; repairs are externally scheduled, not optimized by crews.";
+  }
 
   StageSolution prev_sol;
   bool have_prev = false;
@@ -1991,7 +1995,19 @@ DistributionResilienceResult run_distribution_resilience_stage_milp_assessment(
     sort_unique(forced);
 
     StageSolution sol;
-    if (stage == DistributionDisasterStage::Normal) {
+    if (opts.respect_fault_windows) {
+      forced = occurred_fault_edges(faults, hour, false);
+      // A temporary trip can clear during the storm without releasing other faults.
+      if (forced.empty()) {
+        // The preceding outage topology is no longer binding once every authored
+        // window has ended. Return to the same intact topology used at baseline.
+        sol = make_initial_topology_solution(data, "All authored outage windows ended; restored initial topology");
+        effective_stage = DistributionDisasterStage::Normal;
+      } else {
+        sol = solve_stage_milp(data, opts, forced,
+            have_prev ? &prev_sol.beta : nullptr, nullptr, true);
+      }
+    } else if (stage == DistributionDisasterStage::Normal) {
       sol.feasible = true;
       sol.status = "Baseline";
       sol.beta.assign(data.edges.size(), 0);
@@ -2108,11 +2124,11 @@ DistributionResilienceResult run_distribution_resilience_stage_milp_assessment(
       result.model_stats.solver_status = sol.stats.solver_status;
     }
     fill_step_from_solution(sr, data, sol, have_prev ? &prev_sol : nullptr, faults, effective_stage, hour, opts.time_step_hr);
-    if (stage == DistributionDisasterStage::PostDisasterRepair) {
+    if (!opts.respect_fault_windows && stage == DistributionDisasterStage::PostDisasterRepair) {
       sr.active_faults = static_cast<int>(forced.size());
       sr.repaired_faults = static_cast<int>(repaired_fault_edges.size());
-    } else if (stage == DistributionDisasterStage::DisasterIsolation ||
-               stage == DistributionDisasterStage::DisasterPostFaultReconfig) {
+    } else if (!opts.respect_fault_windows && (stage == DistributionDisasterStage::DisasterIsolation ||
+               stage == DistributionDisasterStage::DisasterPostFaultReconfig)) {
       sr.active_faults = static_cast<int>(forced.size());
       sr.repaired_faults = static_cast<int>(repaired_fault_edges.size());
     }

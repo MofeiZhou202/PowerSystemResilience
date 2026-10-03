@@ -8,6 +8,7 @@
 #include <complex>
 #include <cstdint>
 #include <cstdlib>
+#include <deque>
 #include <exception>
 #include <typeinfo>
 #include <filesystem>
@@ -87,6 +88,7 @@
 #include "hacdcpf/reliability/failure_mode.hpp"
 #include "hacdcpf/analysis/three_stage_reliability.hpp"
 #include "hacdcpf/resilience/resilience_assessment.hpp"
+#include "hacdcpf/resilience/resilience_metrics.hpp"
 #include "hacdcpf/analysis/typhoon_resilience.hpp"
 #include "hacdcpf/analysis/scenario_generation.hpp"
 #include "hacdcpf/analysis/hosting_capacity.hpp"
@@ -3059,6 +3061,10 @@ struct Session {
   // cached power flow was solved against; result_window compares the two to
   // declare whether the cached result may lag behind current edits.
   std::uint64_t system_revision{0};
+  std::deque<json> resilience_run_artifacts;
+  std::optional<json> last_resilience_run;
+  std::uint64_t resilience_run_revision{0};
+  std::string last_resilience_run_id;
   std::uint64_t last_pf_revision{0};
   std::optional<hacdcpf::TimeSeriesPFResult> last_tspf_result;
   hacdcpf::TimeSeriesData last_tspf_data;
@@ -10610,6 +10616,8 @@ const std::vector<CaseInfo>& case_catalog() {
        "并网 GFM 内部电势/角度 + 虚拟阻抗 + 电流限值 NCP；可直接用于稳态、OPF 后验与暂态初始化"},
       {"dist33_microgrid_der", "Dist33 DER 可靠性·弹性旗舰", "配电网与 DER", "33 AC + 2 DC",
        "3 微网多类 DER + 需求响应 + 自动化开关：可靠性 SAIDI/SAIFI 与弹性恢复演示"},
+      {"dist33_weather_mixed", "Dist33 架空线·电缆灾害算例", "配电网与 DER", "33 AC + 2 DC",
+       "逐条声明架空线和电缆、易受淹接头、绝缘子及支路关联变压器；全部暴露参数为演示假设"},
       {"dist33_tie_demo", "Dist33 联络重构专用", "配电网与 DER", "33 AC 纯交流",
        "5 条标准联络线全部断开：ONR 自动重选更低损耗的径向树"},
       {"urban_lvn_primary_secondary", "城市低压三相 338 节点", "配电网与 DER", "338 AC + 3 DC",
@@ -10674,6 +10682,7 @@ hacdcpf::HybridPowerSystem build_case(const std::string& name) {
   }
   if (name == "demo_multizone_acdc") return build_demo_multizone_acdc();
   if (name == "dist33_microgrid_der") return build_dist33_microgrid_der();
+  if (name == "dist33_weather_mixed") return build_dist33_weather_mixed();
   if (name == "urban_lvn_primary_secondary") {
     return build_urban_lvn_primary_secondary();
   }
@@ -11173,12 +11182,262 @@ int main(int argc, char** argv) {
     }
   });
 
+  svr.Get("/api/session/resilience/metric_catalog",
+          [](const httplib::Request&, httplib::Response& res) {
+    if (hacdcpf::server::current_edition() != hacdcpf::server::Edition::Resilience) {
+      res.status = 403;
+      res.set_content(json{{"error", {{"code", "FEATURE_DISABLED"},
+                                      {"feature", "resilience_metrics"}}}}.dump(),
+                      "application/json");
+      return;
+    }
+    json entries = json::array();
+    for (const auto& definition :
+         hacdcpf::analysis::resilience_metric_catalog()) {
+      entries.push_back({{"id", definition.id},
+                         {"name_zh", definition.name_zh},
+                         {"name_en", definition.name_en},
+                         {"symbol", definition.symbol},
+                         {"phase", definition.phase},
+                         {"topic", definition.topic},
+                         {"formula_ref", definition.formula_ref},
+                         {"unit", definition.unit},
+                         {"direction", definition.direction},
+                         {"calculation_scope", definition.calculation_scope},
+                         {"availability", definition.availability},
+                         {"required_inputs", definition.required_inputs},
+                         {"source_notes", definition.source_notes},
+                         {"limitations", definition.limitations}});
+    }
+    res.set_header("Cache-Control", "no-store");
+    res.set_content(json{{"schema", "resilience_metric_catalog_v1"},
+                         {"definition_version", hacdcpf::analysis::resilience_metric_definition_version},
+                         {"entries", std::move(entries)}}.dump(),
+                    "application/json");
+  });
+
+  svr.Post("/api/session/resilience/metrics",
+           [](const httplib::Request& req, httplib::Response& res) {
+    if (hacdcpf::server::current_edition() !=
+        hacdcpf::server::Edition::Resilience) {
+      res.status = 403;
+      res.set_content(json{{"error", {{"code", "FEATURE_DISABLED"},
+                                      {"feature", "resilience_metrics"}}}}.dump(),
+                      "application/json");
+      return;
+    }
+    try {
+      const json request = json::parse(req.body.empty() ? "{}" : req.body);
+      if (!request.is_object()) {
+        throw std::invalid_argument("metric request must be an object");
+      }
+      if (request.value("schema", std::string{"resilience_metric_request_v1"}) !=
+          "resilience_metric_request_v1") {
+        throw std::invalid_argument("unsupported metric request schema");
+      }
+      const std::string run_id = request.value("run_id", std::string{});
+      if (run_id.empty()) throw std::invalid_argument("run_id is required");
+      if (!request.contains("selected_metric_ids") ||
+          !request["selected_metric_ids"].is_array() ||
+          request["selected_metric_ids"].empty()) {
+        throw std::invalid_argument(
+            "selected_metric_ids must be a non-empty array");
+      }
+
+      json artifact;
+      std::uint64_t current_model_revision = 0;
+      {
+        std::lock_guard<std::mutex> lk(g_session.mu);
+        const auto it = std::find_if(
+            g_session.resilience_run_artifacts.begin(),
+            g_session.resilience_run_artifacts.end(),
+            [&](const json& candidate) {
+              return candidate.value("run_id", std::string{}) == run_id;
+            });
+        if (it == g_session.resilience_run_artifacts.end()) {
+          res.status = 404;
+          res.set_content(
+              json{{"error", {{"code", "UNKNOWN_RESILIENCE_RUN"},
+                               {"message", "run artifact is unavailable or was evicted"},
+                               {"run_id", run_id}}}}.dump(),
+              "application/json");
+          return;
+        }
+        artifact = *it;
+        current_model_revision = g_session.system_revision;
+      }
+
+      const auto run_model_revision = artifact.value("model_revision", 0ULL);
+      if (run_model_revision != current_model_revision) {
+        res.status = 409;
+        res.set_content(
+            json{{"error", {{"code", "STALE_RESILIENCE_RUN"},
+                             {"message", "run model revision does not match the current model"},
+                             {"run_id", run_id},
+                             {"run_model_revision", run_model_revision},
+                             {"current_model_revision", current_model_revision}}}}.dump(),
+            "application/json");
+        return;
+      }
+      if (request.contains("current_model_revision")) {
+        if (!request["current_model_revision"].is_number_unsigned() &&
+            !request["current_model_revision"].is_number_integer()) {
+          throw std::invalid_argument("current_model_revision must be an integer");
+        }
+        const auto requested_revision =
+            request["current_model_revision"].get<std::uint64_t>();
+        if (requested_revision != current_model_revision) {
+          res.status = 409;
+          res.set_content(
+              json{{"error", {{"code", "MODEL_REVISION_CONFLICT"},
+                               {"message", "requested model revision is not current"},
+                               {"requested_model_revision", requested_revision},
+                               {"current_model_revision", current_model_revision}}}}.dump(),
+              "application/json");
+          return;
+        }
+      }
+
+      hacdcpf::analysis::ResilienceMetricEvaluationOptions options;
+      std::set<std::string> unique_ids;
+      for (const auto& value : request["selected_metric_ids"]) {
+        if (!value.is_string()) {
+          throw std::invalid_argument("selected_metric_ids entries must be strings");
+        }
+        const auto id = value.get<std::string>();
+        if (!unique_ids.insert(id).second) {
+          throw std::invalid_argument("duplicate metric id: " + id);
+        }
+        options.selected_metric_ids.push_back(id);
+      }
+      const json parameters = request.value("parameters", json::object());
+      if (!parameters.is_object()) {
+        throw std::invalid_argument("parameters must be an object");
+      }
+      if (parameters.contains("ch3.t_sp")) {
+        const auto& t_sp = parameters["ch3.t_sp"];
+        if (!t_sp.is_object() || !t_sp.contains("target_ratio") ||
+            !t_sp["target_ratio"].is_number()) {
+          throw std::invalid_argument(
+              "parameters.ch3.t_sp.target_ratio must be numeric");
+        }
+        options.target_ratio = t_sp["target_ratio"].get<double>();
+      }
+      options.allow_apda_system_gap_approximation =
+          request.value("allow_apda_system_gap_approximation", false);
+      options.allow_res_approximation =
+          request.value("allow_res_approximation", false);
+
+      hacdcpf::analysis::ResilienceMetricRun run;
+      if (!artifact.contains("steps") || !artifact["steps"].is_array()) {
+        throw std::runtime_error("run artifact has no metric-compatible steps");
+      }
+      for (const auto& step : artifact["steps"]) {
+        if (!step.is_object()) {
+          throw std::runtime_error("run artifact contains an invalid step");
+        }
+        run.steps.push_back({step.at("hour").get<double>(),
+                             step.at("demand_mw").get<double>(),
+                             step.at("served_mw").get<double>(),
+                             step.at("shed_mw").get<double>(),
+                             step.at("restoration_ratio").get<double>(),
+                             step.value("active_faults", 0),
+                             step.value("repaired_faults", 0)});
+        auto& normalized = run.steps.back();
+        if (step.contains("duration_hr")) normalized.duration_hr = step.at("duration_hr").get<double>();
+        if (step.contains("weighted_shed_mw")) normalized.weighted_shed_mw = step.at("weighted_shed_mw").get<double>();
+        if (step.contains("shed_by_priority")) normalized.shed_by_priority = step.at("shed_by_priority").get<std::vector<double>>();
+        if (step.contains("island_count")) normalized.island_count = step.at("island_count").get<int>();
+        if (step.contains("switch_actions")) normalized.switch_actions = step.at("switch_actions").get<int>();
+      }
+      if (artifact.contains("disaster_end_hr") &&
+          artifact["disaster_end_hr"].is_number()) {
+        run.disaster_end_hr = artifact["disaster_end_hr"].get<double>();
+      }
+      if (artifact.contains("recovery_start_hr") &&
+          artifact["recovery_start_hr"].is_number()) {
+        run.recovery_start_hr = artifact["recovery_start_hr"].get<double>();
+      }
+      run.usable = artifact.value("feasible", false) && artifact.value("completed", false);
+      for (const char* field : {"limitations", "model_limitations"}) {
+        if (artifact.contains(field) && artifact[field].is_array())
+          for (const auto& limitation : artifact[field])
+            if (limitation.is_string()) run.limitations.push_back(limitation.get<std::string>());
+      }
+      if (artifact.contains("mess_energy_delivered_mwh")) run.mess_energy_delivered_mwh = artifact.at("mess_energy_delivered_mwh").get<double>();
+      if (artifact.contains("mess_travel_distance_km")) run.mess_travel_distance_km = artifact.at("mess_travel_distance_km").get<double>();
+      if (parameters.contains("event_window")) {
+        const auto& window = parameters.at("event_window");
+        if (!window.is_object()) throw std::invalid_argument("event_window must be an object");
+        for (const char* key : {"disaster_end_hr", "recovery_start_hr"}) {
+          if (!window.contains(key)) continue;
+          if (!window[key].is_number()) throw std::invalid_argument(std::string(key) + " must be numeric");
+          const double hour = window[key].get<double>();
+          if (!std::isfinite(hour) || hour < 0.0 || hour > run.steps.back().hour)
+            throw std::invalid_argument(std::string(key) + " must be within the observed time axis");
+          if (std::string(key) == "disaster_end_hr") run.disaster_end_hr = hour;
+          else run.recovery_start_hr = hour;
+        }
+        if (run.disaster_end_hr && run.recovery_start_hr && *run.recovery_start_hr < *run.disaster_end_hr)
+          throw std::invalid_argument("recovery_start_hr must not precede disaster_end_hr");
+        run.limitations.push_back("Event window supplied explicitly by metric request; it does not alter the recovery simulation.");
+      }
+      run.has_traceable_importance_mapping =
+          artifact.contains("canonical_mapping_audit") &&
+          artifact["canonical_mapping_audit"].is_object() &&
+          artifact["canonical_mapping_audit"].value("rich_load_count", 0) > 0;
+
+      const auto evaluated =
+          hacdcpf::analysis::evaluate_resilience_metrics(run, options);
+      json results = json::array();
+      for (const auto& metric : evaluated) {
+        json row{{"id", metric.id},
+                 {"status", hacdcpf::analysis::to_string(metric.status)},
+                 {"value", metric.value ? json(*metric.value) : json(nullptr)},
+                 {"unit", metric.unit},
+                 {"formula_ref", metric.formula_ref},
+                 {"direction", metric.direction},
+                 {"scope", metric.scope},
+                 {"source_fields", metric.source_fields},
+                 {"source_notes", metric.source_notes},
+                 {"assumptions", metric.assumptions},
+                 {"limitations", metric.limitations},
+                 {"missing_dependencies", metric.missing_dependencies},
+                 {"reason_code", metric.reason_code},
+                 {"approximate", metric.approximate},
+                 {"censored", metric.censored}};
+        if (metric.id == "ch3.t_sp") {
+          row["parameters"] = {{"target_ratio", options.target_ratio}};
+        } else {
+          row["parameters"] = json::object();
+        }
+        row["quality"] = {{"approximate", metric.approximate},
+                           {"censored", metric.censored}};
+        results.push_back(std::move(row));
+      }
+
+      res.set_header("Cache-Control", "no-store");
+      res.set_content(
+          json{{"schema", "resilience_metric_result_v1"},
+               {"run_id", run_id},
+               {"run_revision", artifact.value("run_revision", 0ULL)},
+               {"model_revision", run_model_revision},
+               {"selection_revision", request.value("selection_revision", 0ULL)},
+               {"definition_version", hacdcpf::analysis::resilience_metric_definition_version},
+               {"stale", false},
+               {"results", std::move(results)}}.dump(),
+          "application/json");
+    } catch (const std::exception& error) {
+      res.status = 400;
+      res.set_content(
+          json{{"error", {{"code", "INVALID_RESILIENCE_METRIC_REQUEST"},
+                           {"message", error.what()}}}}.dump(),
+          "application/json");
+    }
+  });
+
   svr.Get("/api/cases", [](const httplib::Request&, httplib::Response& res) {
     json out;
-    // Structured catalog (name/label/group/scale/blurb) for the grouped GUI
-    // selector; `case_names` keeps the legacy plain-string list for older
-    // clients and e2e scripts.
-    out["cases"] = json::array();
     for (const auto& c : case_catalog()) {
       out["cases"].push_back({{"name", c.name},
                               {"label", c.label},
@@ -26286,10 +26545,12 @@ int main(int argc, char** argv) {
       try {
         std::shared_ptr<const hacdcpf::HybridPowerSystem> sys_snap;
         hacdcpf::HybridPowerSystem sys;
+        std::uint64_t run_model_revision = 0;
         {
           std::lock_guard<std::mutex> lk(g_session.mu);
           if (!g_session.current_system) throw std::runtime_error("No system loaded");
           sys_snap = g_session.current_system;
+          run_model_revision = g_session.system_revision;
         }
         sys = *sys_snap;  // request-local mutable copy, made after releasing the session lock
         if (!analysis_lease.try_acquire()) {
@@ -26299,8 +26560,27 @@ int main(int argc, char** argv) {
         }
         g_session.cancel.store(false);
         const auto j = json::parse(req.body.empty() ? "{}" : req.body);
+        auto optional_nonnegative_hour = [&](const char* key) -> std::optional<double> {
+          if (!j.contains(key) || j[key].is_null()) return std::nullopt;
+          if (!j[key].is_number()) {
+            throw std::invalid_argument(std::string(key) + " must be numeric or null");
+          }
+          const double value = j[key].get<double>();
+          if (!std::isfinite(value) || value < 0.0) {
+            throw std::invalid_argument(std::string(key) +
+                                        " must be finite and non-negative");
+          }
+          return value;
+        };
+        const auto disaster_end_hr = optional_nonnegative_hour("disaster_end_hr");
+        const auto recovery_start_hr = optional_nonnegative_hour("recovery_start_hr");
+        if (disaster_end_hr && recovery_start_hr &&
+            *recovery_start_hr < *disaster_end_hr) {
+          throw std::invalid_argument(
+              "recovery_start_hr must not precede disaster_end_hr");
+        }
 
-        if (j.value("apply_demo_data", true)) {
+        if (j.value("apply_demo_data", false)) {
           hacdcpf::analysis::apply_distribution_resilience_demo_data(sys);
         }
 
@@ -26370,6 +26650,7 @@ int main(int argc, char** argv) {
         const std::string requested_model = string_value_any({"model", "resilience_model"}, "RAStyleStageMILP");
         const std::string requested_solver = string_value_any({"mip_solver", "resilience_solver", "solver"}, "Gurobi");
         opts.model = parse_resilience_model(requested_model);
+        opts.respect_fault_windows = j.value("respect_fault_windows", false);
         opts.mip.solver = parse_resilience_solver(requested_solver);
         opts.use_strict_mip_for_mess = j.value("use_strict_mip_for_mess", true);
         opts.fallback_to_stage_mess_dispatch = j.value("fallback_to_stage_mess_dispatch", true);
@@ -26619,6 +26900,7 @@ int main(int argc, char** argv) {
           f.outage_start_hr = start_hr;
           f.repair_duration_hr = repair_hr;
           f.name = std::move(label);
+          // The selected generated event supplies the physical origin below.
           opts.faults.push_back(std::move(f));
         };
 
@@ -26626,12 +26908,17 @@ int main(int argc, char** argv) {
         if (j.contains("manual_faults") && j["manual_faults"].is_array() && !j["manual_faults"].empty()) {
           for (const auto& mf : j["manual_faults"]) {
             const int bid = value_int_any(mf, {"branch_id", "branch_index", "branch"}, -1);
+            if (bid < 0) throw std::invalid_argument("manual_faults requires a nonnegative stable branch ID");
             const auto kind = hacdcpf::analysis::resilience_branch_kind_from_string(
                 value_string_any(mf, {"branch_type", "branch_kind", "type"}, "AC"));
             add_fault(kind, bid,
                       value_double_any(mf, {"start_hr", "outage_start_hr"}, 0.0),
                       value_double_any(mf, {"repair_hr", "repair_duration_hr", "repair_time_hr"}, opts.default_repair_time_hr),
                       value_string_any(mf, {"label", "name"}, std::string{}));
+            auto& added=opts.faults.back();
+            added.equipment_type=value_string_any(mf,{"equipment_type"},std::string{});
+            added.equipment_index=value_int_any(mf,{"equipment_index"},0);
+            added.failure_cause=value_string_any(mf,{"failure_cause"},std::string{});
           }
         } else {
           const double ac_start = j.value("ac_fault_start_hr", j.value("auto_fault_start_hr", 0.0));
@@ -26729,6 +27016,24 @@ int main(int argc, char** argv) {
         }
 
         json out;
+        const auto run_revision = [&]() {
+          std::lock_guard<std::mutex> lk(g_session.mu);
+          const auto revision = ++g_session.resilience_run_revision;
+          g_session.last_resilience_run_id = "rrun-" + std::to_string(revision);
+          return std::pair<std::string, std::uint64_t>{g_session.last_resilience_run_id,
+                                                        revision};
+        }();
+        out["run_id"] = run_revision.first;
+        out["run_revision"] = run_revision.second;
+        out["scenario_revision"] = j.value("scenario_revision", 0ULL);
+        out["scenario_ref"] = j.value("scenario_ref", json(nullptr));
+        out["scenario_digest"] = j.value("scenario_digest", json(nullptr));
+        out["execution_mode"] = "legacy_full_distribution_resilience";
+        out["scientific_usability"] = "valid_with_limitations";
+        out["limitations"] = json::array({
+            "Ordinary restoration feasibility is not certified dynamic safety.",
+            "Metric results must be requested through the backend evaluator."});
+
         out["feasible"] = result.feasible;
         out["status"] = result.status;
         out["total_demand_mwh"] = result.total_demand_mwh;
@@ -26768,19 +27073,46 @@ int main(int argc, char** argv) {
         out["rich_load_served_mw"] = rich_load_served_mw;
         out["rich_load_shed_mw"] = rich_load_shed_mw;
 
-        // Fault sequence used (auto-generated or user-specified).
         {
           json fs_arr = json::array();
+          std::optional<double> last_repair_completion_hr;
+          std::optional<double> last_fault_start_hr;
           for (const auto& f : result.fault_sequence) {
+            const auto origin = std::find_if(opts.faults.begin(), opts.faults.end(),
+                [&](const auto& authored) {
+                  return authored.branch_kind == f.branch_kind &&
+                      authored.branch_index == f.branch_index &&
+                      std::abs(authored.outage_start_hr - f.start_hr) < 1e-9;
+                });
+            last_fault_start_hr = last_fault_start_hr ? std::max(*last_fault_start_hr, f.start_hr) : f.start_hr;
+            const double repair_duration_hr = f.repair_hr;
+            const double repair_completion_hr = f.start_hr + repair_duration_hr;
+            last_repair_completion_hr = last_repair_completion_hr
+                                  ? std::max(*last_repair_completion_hr, repair_completion_hr)
+                                  : repair_completion_hr;
             fs_arr.push_back(json{{"branch_type", hacdcpf::analysis::to_string(f.branch_kind)},
                                   {"branch_kind", hacdcpf::analysis::to_string(f.branch_kind)},
                                   {"branch_index", f.branch_index},
                                   {"branch_id", f.branch_index},
+                                  {"equipment_type", origin == opts.faults.end() ? "" : origin->equipment_type},
+                                  {"equipment_index", origin == opts.faults.end() ? 0 : origin->equipment_index},
+                                  {"failure_cause", origin == opts.faults.end() ? "" : origin->failure_cause},
                                   {"start_hr", f.start_hr},
-                                  {"repair_hr", f.repair_hr},
+                                  {"outage_start_hr", f.start_hr},
+                                  {"repair_hr", repair_duration_hr},
+                                  {"repair_duration_hr", repair_duration_hr},
+                                  {"repair_completion_hr", repair_completion_hr},
                                   {"name", f.name}});
           }
           out["fault_sequence"] = fs_arr;
+          out["last_repair_completion_hr"] = last_repair_completion_hr ? json(*last_repair_completion_hr) : json(nullptr);
+          out["disaster_end_hr"] =
+              disaster_end_hr ? json(*disaster_end_hr) : last_fault_start_hr ? json(*last_fault_start_hr) : json(nullptr);
+          out["disaster_end_source"] = disaster_end_hr ? "explicit_request" : last_fault_start_hr ? "last_fault_start_default" : "unavailable_no_faults";
+          if (!disaster_end_hr && last_fault_start_hr)
+            out["limitations"].push_back("Disaster end defaults to the last fault onset; this is a platform convention, not a measured end of the weather event.");
+          out["recovery_start_hr"] =
+              recovery_start_hr ? json(*recovery_start_hr) : json(nullptr);
         }
 
         json hours = json::array();
@@ -26854,6 +27186,8 @@ int main(int argc, char** argv) {
           hourly.push_back(json{{"step_index", step.step_index},
                                 {"hour", step.hour},
                                 {"disaster_stage", step.disaster_stage},
+                                {"duration_hr", opts.time_step_hr},
+                                {"weighted_shed_mw", step.weighted_shed_mw},
                                 {"demand_mw", step.total_demand_mw},
                                 {"served_mw", step.served_mw},
                                 {"shed_mw", step.shed_mw},
@@ -26958,7 +27292,22 @@ int main(int argc, char** argv) {
         out["closed_switch_ids"] = closed_switch_ids;
         out["switched_open_ids"] = switched_open_ids;
         out["switched_closed_ids"] = switched_closed_ids;
+        out["time_axis"] = json{{"hours", hours},
+                                {"time_step_hr", opts.time_step_hr},
+                                {"integration", "interval_energy_and_linear_recovery_samples"}};
+        out["steps"] = hourly;
+        out["result_outcome"] = result.feasible ? "feasible" : "infeasible";
+        out["validity"] = json{{"physical_validation_performed", opts.run_power_flow},
+                                {"ordinary_feasibility_is_dynamic_safety", false}};
+
         out["hourly"] = hourly;
+        out["time_axis"] = json{{"hours", hours},
+                                {"time_step_hr", opts.time_step_hr},
+                                {"integration", "interval_energy_and_linear_recovery_samples"}};
+        out["steps"] = hourly;
+        out["result_outcome"] = result.feasible ? "feasible" : "infeasible";
+        out["validity"] = json{{"physical_validation_performed", opts.run_power_flow},
+                                {"ordinary_feasibility_is_dynamic_safety", false}};
         const std::string effective_model = resilience_model_to_string(result.model);
         const std::string normalized_requested_model = resilience_model_to_string(opts.model);
         const std::string normalized_requested_solver = resilience_solver_to_string(opts.mip.solver);
@@ -27018,6 +27367,28 @@ int main(int argc, char** argv) {
         json bf_arr = json::array();
         for (auto& [br_idx, trace] : branch_flow_traces) bf_arr.push_back(trace);
         out["branch_flow_traces"] = bf_arr;
+
+        {
+          std::lock_guard<std::mutex> lk(g_session.mu);
+          out["model_revision"] = run_model_revision;
+          if (g_session.system_revision != run_model_revision) {
+            out["stale"] = true;
+            out["current_model_revision"] = g_session.system_revision;
+            out["scientific_usability"] = "stale";
+            out["limitations"].push_back(
+                "The session model changed while this recovery run was executing.");
+          } else {
+            out["stale"] = false;
+            out["current_model_revision"] = run_model_revision;
+          }
+          g_session.last_resilience_run = out;
+          g_session.resilience_run_artifacts.push_back(out);
+          constexpr std::size_t kMaxResilienceRunArtifacts = 16;
+          while (g_session.resilience_run_artifacts.size() >
+                 kMaxResilienceRunArtifacts) {
+            g_session.resilience_run_artifacts.pop_front();
+          }
+        }
 
         res.set_content(out.dump(), "application/json");
         analysis_lease.release();

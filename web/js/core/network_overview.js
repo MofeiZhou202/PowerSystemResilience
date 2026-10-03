@@ -1361,6 +1361,12 @@ const NetworkOverview = (() => {
     return true;
   }
 
+  function refreshViewport() {
+    if (!state.active || !canvas || !state.gl) return false;
+    resize();
+    return true;
+  }
+
   function stats() {
     const edgeKinds = {};
     (state.full?.edges || []).forEach(edge => {
@@ -1385,5 +1391,5 @@ const NetworkOverview = (() => {
     };
   }
 
-  return { init, show, hide, fit, setLod, selectRef, refreshResults, stats, get active() { return state.active; } };
+  return { init, show, hide, fit, setLod, selectRef, refreshResults, refreshViewport, stats, get active() { return state.active; } };
 })();

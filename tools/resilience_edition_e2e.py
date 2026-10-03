@@ -685,6 +685,111 @@ def expect_flat_v1_analysis_error(
     return require_flat_error(response, expected_status, expected_code, label)
 
 
+def verify_recovery_metrics(base_url: str) -> None:
+    """Compare the evaluator against independently integrated real solver steps."""
+    require_status(request(base_url, "POST", "/api/session/load_builtin", {"case": "dist33_microgrid_der"}), 200, "load metric case")
+    payload = {"model": "HeuristicSequential", "horizon_hours": 4, "time_step_hr": 0.5,
+               "default_fault_count": 1, "auto_fault_start_hr": 0.5, "repair_time_hr": 1.0,
+               "allow_mess_dispatch": False, "run_power_flow": False}
+    artifact = require_status(request(base_url, "POST", "/api/session/run_distribution_resilience", payload), 200, "metric recovery")
+    require(artifact.get("feasible") and artifact.get("completed"), f"metric run infeasible: {artifact.get('status')}")
+    faults = artifact["fault_sequence"]
+    require(faults, "expected automatic fault")
+    require(artifact["disaster_end_hr"] == max(row["start_hr"] for row in faults), "last fault onset default mismatch")
+    require(artifact["disaster_end_source"] == "last_fault_start_default", "default provenance missing")
+    require(artifact["last_repair_completion_hr"] > artifact["disaster_end_hr"], "repair end was confused with disaster end")
+    catalog = require_status(request(base_url, "GET", "/api/session/resilience/metric_catalog"), 200, "metric catalog")
+    query = {"run_id": artifact["run_id"], "selection_revision": 7,
+             "selected_metric_ids": [row["id"] for row in catalog["entries"]]}
+    output = require_status(request(base_url, "POST", "/api/session/resilience/metrics", query), 200, "evaluate real metrics")
+    rows = {row["id"]: row for row in output["results"]}
+    require(len(rows) == 42, "incomplete evaluator result")
+    for key, source in [("ens", "shed_mw"), ("served_energy", "served_mw"), ("demand_energy", "demand_mw"), ("weighted_ens", "weighted_shed_mw")]:
+        expected = sum(step[source] * step["duration_hr"] for step in artifact["steps"])
+        row = rows["run." + key]
+        require(row["status"] == "computed" and math.isclose(row["value"], expected, abs_tol=1e-7), f"integration mismatch: {key}: {row}, expected={expected}")
+    require(math.isclose(rows["run.ens"]["value"], artifact["total_shed_mwh"], abs_tol=1e-7), "ENS differs from solver")
+    for key in ["critical_ens", "high_ens", "medium_ens", "low_ens"]:
+        require(rows["run." + key]["status"] == "computed", f"priority metric unavailable: {key}")
+    require(math.isclose(sum(rows["run." + key]["value"] for key in ["critical_ens", "high_ens", "medium_ens", "low_ens"]), rows["run.ens"]["value"], abs_tol=1e-6), "priority energy does not sum to total")
+    require(rows["ch3.lolp"]["value"] is None, "single run fabricated probability")
+    require(rows["ch3.apda"]["value"] is None, "proxy lacks consent")
+    query["allow_apda_system_gap_approximation"] = True
+    proxy = require_status(request(base_url, "POST", "/api/session/resilience/metrics", query), 200, "explicit APDA proxy")
+    require(next(r for r in proxy["results"] if r["id"] == "ch3.apda")["status"] == "approximate", "proxy consent ineffective")
+    query["parameters"] = {"event_window": {"disaster_end_hr": 2, "recovery_start_hr": 1}}
+    require_status(request(base_url, "POST", "/api/session/resilience/metrics", query), 400, "invalid event order")
+    payload["disaster_end_hr"] = 0.75
+    explicit = require_status(request(base_url, "POST", "/api/session/run_distribution_resilience", payload), 200, "explicit disaster end")
+    require(explicit["disaster_end_hr"] == 0.75 and explicit["disaster_end_source"] == "explicit_request", "explicit disaster end did not take precedence")
+    print("Real recovery metrics: 42 rows; energy, priority balance, event defaults and explicit override passed")
+
+
+def verify_weather_scenarios(base_url: str) -> None:
+    """Exercise real generated faults, profiles, recovery and metric evaluation."""
+    require_status(request(base_url, "POST", "/api/session/load_builtin", {"case": "dist33_weather_mixed"}), 200, "weather case")
+    profile = require_status(request(base_url, "GET", "/api/edition"), 200, "weather schema")
+    schemas = {row["id"]: row for row in profile["scenario_hazards"]}
+    require(set(schemas) == {"typhoon", "rainstorm", "lightning"}, "hazard catalog mismatch")
+    for hazard in ["rainstorm", "lightning"]:
+        parameters = ({"total_mm": 500, "severity_variation": 0}
+                      if hazard == "rainstorm" else
+                      {"density_km2_hr": 1000, "permanent_fraction": 0.5, "severity_variation": 0})
+        payload = {"regular": {"enabled": False}, "reliability": {"enabled": False},
+                   "resilience": {"hazard_type": hazard, hazard: parameters,
+                                  "candidates_per_intensity": 4, "default_cluster_count": 2}}
+        data = require_status(request(base_url, "POST", "/api/session/generate_scenarios", payload), 200, "generate " + hazard)
+        group = data["resilience"]["intensities"][0]
+        require(group["hazard_type"] == hazard and group["intensity"] == hazard, "hazard identity lost")
+        require(math.isclose(sum(c["probability"] for c in group["clusters"]), 1), "conditional weights invalid")
+        representative = max(group["clusters"], key=lambda c: len(c["representative"]["resilience_event"]["faults"]))["representative"]
+        event = representative["resilience_event"]
+        require(event["faults"], "severe weather test must generate faults")
+        evidence = event["hazard_evidence"]
+        affected = evidence["affected_equipment"]
+        require(affected["fault_count"] == len(event["faults"]), "weather fault count differs from modeled outages")
+        if hazard == "lightning":
+            require(all(f["equipment_type"] == "overhead_line" and f["branch_type"] == "AC"
+                        for f in event["faults"]), "lightning reached cable or non-overhead asset")
+        else:
+            require(all(f["equipment_type"] in {"cable_accessory", "insulator", "transformer_2w"}
+                        for f in event["faults"]), "rainstorm used an unmodeled asset class")
+        require(set(evidence["parameters"]) == {f["key"] for f in schemas[hazard]["fields"]}, "effective parameter schema incomplete")
+        for key, value in parameters.items():
+            require(evidence["parameters"][key] == value, "weather override ignored: " + key)
+        require(event["selected_track_max_vmax_ms"] is None and not event["track"], "weather fabricated typhoon track")
+        require(evidence["model_limitations"], "weather coverage missing")
+        ts = representative["standard_time_series"]
+        profiles = {str(p["id"]): p["values"] for p in ts["profiles"]}
+        recovery = {"model": "RAStyleStageMILP", "mip_solver": "HiGHS", "mip_time_limit_s": 10,
+                    "respect_fault_windows": True,
+                    "horizon_hours": 48, "time_step_hr": 1,
+                    "default_fault_count": 0, "manual_faults": event["faults"],
+                    "allow_mess_dispatch": False, "run_power_flow": False}
+        for name in ["load", "pv", "wind", "renewable"]:
+            key = ts["binding"].get("resilience_" + name + "_profile_id")
+            if key is not None:
+                recovery[name + "_profile"] = profiles[str(key)]
+        artifact = require_status(request(base_url, "POST", "/api/session/run_distribution_resilience", recovery), 200, "recover " + hazard)
+        require(artifact["completed"] and artifact["feasible"], "weather recovery not feasible")
+        require(len(artifact["fault_sequence"]) == len(event["faults"]), "generated faults not consumed")
+        require(artifact["disaster_end_hr"] == max(f["start_hr"] for f in event["faults"]), "weather changed disaster end convention")
+        by_branch = {(f["branch_type"], f["branch_index"]): f for f in artifact["fault_sequence"]}
+        for fault in event["faults"]:
+            actual = by_branch[(fault["branch_type"], fault["branch_index"])]
+            require(actual["start_hr"] == fault["start_hr"] and actual["repair_duration_hr"] == fault["repair_duration_hr"], f"weather outage window changed: generated={fault}, recovered={actual}")
+            require(actual["equipment_type"] == fault["equipment_type"] and actual["equipment_index"] == fault["equipment_index"], "weather asset attribution lost in recovery")
+        metrics = require_status(request(base_url, "POST", "/api/session/resilience/metrics", {
+            "run_id": artifact["run_id"], "selection_revision": 1, "selected_metric_ids": ["run.ens", "run.served_energy"]}), 200, "weather metrics")
+        ens = next(row for row in metrics["results"] if row["id"] == "run.ens")
+        require(ens["status"] == "computed" and math.isclose(ens["value"], artifact["total_shed_mwh"], abs_tol=1e-6), "weather ENS mismatch")
+        invalid = {**payload, "resilience": {**payload["resilience"], hazard: {"unknown": 1}}}
+        require_status(request(base_url, "POST", "/api/session/generate_scenarios", invalid), 400, "unknown hazard parameter")
+        invalid["resilience"][hazard] = {"duration_hr": 48, "start_hr": 1}
+        require_status(request(base_url, "POST", "/api/session/generate_scenarios", invalid), 400, "event outside observation window")
+        print(f"Weather {hazard}: {len(event['faults'])} faults -> real recovery -> ENS {ens['value']:.6f} MWh")
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(
         description="Exercise the Resilience edition HTTP and runtime v1 contracts."
@@ -774,8 +879,30 @@ def main() -> int:
                 "powerFlow",
                 "opf",
                 "resilience",
+                "proactiveDefense",
+                "rapidRecovery",
+                "resilienceMetrics",
             ],
             f"unexpected Resilience frontend modules: {profile.get('frontend_modules')}",
+        )
+        require(
+            [step.get("id") for step in profile.get("workflow", [])]
+            == [
+                "metric_selection",
+                "scenario_selection",
+                "proactive_defense",
+                "rapid_recovery",
+                "metric_output",
+            ],
+            f"unexpected Resilience workflow: {profile.get('workflow')}",
+        )
+        metric_catalog = profile.get("resilience_metric_catalog")
+        require(
+            isinstance(metric_catalog, dict)
+            and metric_catalog.get("schema") == "resilience_metric_catalog_v1"
+            and metric_catalog.get("definition_version") == "book_ch3_2026.2"
+            and len(metric_catalog.get("entries", [])) == 42,
+            f"unexpected Resilience metric catalog: {metric_catalog}",
         )
         require(
             profile.get("disabled_features")
@@ -929,12 +1056,61 @@ def main() -> int:
         )
         plan = require_status(plan_response, 200, "valid analysis plan")
         require_json_headers(plan_response, "valid analysis plan", cache_control="no-store")
-        modules = [step.get("module") for step in plan.get("steps", [])]
+        modules = [step.get("id") for step in plan.get("steps", [])]
         require(
-            modules == ["opf", "scenarioGeneration", "reliability", "resilience", "shortCircuit"],
+            modules
+            == [
+                "metric_selection",
+                "scenario_selection",
+                "proactive_defense",
+                "rapid_recovery",
+                "metric_output",
+            ],
             f"unexpected Resilience analysis plan: {plan}",
         )
         require(plan.get("automatic_execution") is False, f"bad plan execution mode: {plan}")
+
+        catalog_response = request(
+            base_url, "GET", "/api/session/resilience/metric_catalog"
+        )
+        catalog = require_status(catalog_response, 200, "resilience metric catalog")
+        require_json_headers(
+            catalog_response, "resilience metric catalog", cache_control="no-store"
+        )
+        require(
+            catalog.get("schema") == "resilience_metric_catalog_v1"
+            and catalog.get("definition_version") == "book_ch3_2026.2"
+            and len(catalog.get("entries", [])) == 42,
+            f"malformed resilience metric catalog: {catalog}",
+        )
+        catalog_ids = [entry.get("id") for entry in catalog["entries"]]
+        require(
+            len(catalog_ids) == len(set(catalog_ids)) == 42,
+            f"metric catalog IDs are not unique: {catalog_ids}",
+        )
+
+        unknown_run_response = request(
+            base_url,
+            "POST",
+            "/api/session/resilience/metrics",
+            {
+                "schema": "resilience_metric_request_v1",
+                "run_id": "rrun-not-present",
+                "selection_revision": 1,
+                "selected_metric_ids": ["ch3.cllp"],
+            },
+        )
+        unknown_run = require_status(
+            unknown_run_response, 404, "unknown resilience run"
+        )
+        require(
+            isinstance(unknown_run.get("error"), dict)
+            and unknown_run["error"].get("code") == "UNKNOWN_RESILIENCE_RUN",
+            f"unexpected unknown-run error: {unknown_run}",
+        )
+
+        verify_recovery_metrics(base_url)
+        verify_weather_scenarios(base_url)
 
         carbon_plan_response = request(
             base_url,

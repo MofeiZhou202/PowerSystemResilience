@@ -2311,6 +2311,52 @@ HybridPowerSystem build_dist33_microgrid_der() {
   return sys;
 }
 
+HybridPowerSystem build_dist33_weather_mixed() {
+  HybridPowerSystem sys = build_dist33_microgrid_der();
+  sys.name = "Dist33 mixed overhead/cable weather demonstration";
+  for (auto& br : sys.ac.branches) {
+    // Synthetic asset inventory: roughly one third of line records are cables.
+    // Branch 1 is retained as the electrical equivalent of the transformer below.
+    if (br.index == 1) {
+      br.line_type = "transformer_equivalent";
+    } else if (br.index % 3 == 0) {
+      br.line_type = "cable";
+      br.weather_cable_entry_height_m = br.index % 2 == 0 ? 0.05 : 0.10;
+    } else {
+      br.line_type = "overhead";
+      // Two explicitly weak/contaminated demonstration strings. Other strings
+      // retain a larger wet withstand margin at the 12.66 kV feeder voltage.
+      br.weather_insulator_wet_ref_kv =
+          (br.index == 5 || br.index == 17) ? 5.5 : 18.0;
+    }
+    br.parameter_source = "synthetic-weather-inventory";
+  }
+  for (auto& br : sys.dc.branches) {
+    br.line_type = "cable";
+    br.weather_cable_entry_height_m = 0.05;
+  }
+  const auto source = std::find_if(sys.ac.branches.begin(), sys.ac.branches.end(),
+      [](const ACBranch& br) { return br.index == 1; });
+  if (source == sys.ac.branches.end())
+    throw std::logic_error("Dist33 weather case requires AC branch 1 for its transformer equivalent");
+  {
+    Transformer2W tr;
+    tr.index = 9001;
+    tr.name = "Weather-demo feeder regulating transformer";
+    tr.hv_bus = source->from_bus;
+    tr.lv_bus = source->to_bus;
+    tr.vn_hv_kv = 12.66;
+    tr.vn_lv_kv = 12.66;
+    tr.sn_mva = std::max(5.0, source->rate_a_mva);
+    tr.vk_percent = 5.0;
+    tr.vkr_percent = 1.0;
+    tr.source_branch_idx = source->index;
+    tr.weather_moisture_vulnerable = true;
+    sys.ac.transformers_2w.push_back(std::move(tr));
+  }
+  return sys;
+}
+
 // ════════════════════════════════════════════════════════════════════════════════
 // Comprehensive Hybrid AC/DC Test Case
 // ════════════════════════════════════════════════════════════════════════════════

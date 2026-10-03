@@ -94,6 +94,12 @@ struct ACBranch {
   double cross_section_mm2{0.0};
   bool cross_section_inferred{false};
   std::string line_type;
+  // Weather exposure of the physical line. Negative entry height means that
+  // no flood-vulnerable cable accessory has been identified for this branch.
+  double weather_cable_entry_height_m{-1.0};
+  // 50% wet flashover voltage at 1 mm/min rain and standard pressure (kV).
+  // Zero means no equipment-specific wet withstand has been supplied.
+  double weather_insulator_wet_ref_kv{0.0};
   std::string parameter_source;
   bool parameters_inferred{false};
 
@@ -182,6 +188,9 @@ struct Transformer2W {
 
   int n_parallel{1};
   int source_branch_idx{0};
+  // Demonstration vulnerability of this branch-backed transformer to moisture
+  // ingress. A true value is an authored case assumption, not a field diagnosis.
+  bool weather_moisture_vulnerable{false};
 
   // Hosting-capacity assessment (DL/T 2041-2025, equipment-level)
   double cap_power_factor{0.95};             // cosθ used in β·S·cosθ

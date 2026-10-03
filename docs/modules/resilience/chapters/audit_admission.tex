@@ -1,5 +1,12 @@
 \section{系统审计、准入门与已知边界}\label{sec:res-audit}
 
+\paragraph{暴雨内涝与雷击准入范围}
+新增生成器限于同一范围内的 AC/DC 支路暴露代理：归一化雨型加零维积水、
+泊松地闪加电流阈值，未集成 SWMM 或 OpenETran，也未进行当地灾害数据校准。
+质量守恒、解析跳闸概率、稳定身份、停运时间窗和真实 API/浏览器闭环已验证；
+不可将此结论扩展为二维洪水、电磁暂态、变电站设备损伤或年度风险的验证。
+逐项证据和未覆盖范围见 \srcpath{weather\_scenarios.md} 与开发状态。
+
 \subsection{理论—实现—证据矩阵}
 \begin{center}\small
 \begin{tabular}{@{}L{3.2cm}L{4.4cm}L{3.4cm}L{3.2cm}@{}}
@@ -49,3 +56,9 @@ topology/service 割并重求解；微电网构网语义在 canonical 投影和 
 暂态稳定定理。外部软件对照只认证共同覆盖的平衡正序冻结 AC 稳态，不认证 DC、换流器内部、保护、
 控制或 DAE。风险结果是固定灾害生成器下的事件条件经验分布，不是年概率校准。把这些边界显式列出，
 是模型契约的一部分，不是可省略的 roadmap。
+
+\subsection{Web 指标审计}
+独立指标层保留单次确定性运行边界，修正 CLLP 时刻口径、ARSS 初始失供基准、
+RES 加权序列及灾害/修复结束时刻混用。REI 的书中公式疑点与 RSE 成本缺口仍未闭合，
+不输出伪数值。评价目录、公式和可复现证据统一记录在
+\srcpath{docs/modules/resilience/metrics.md}；执行状态见开发状态文档。

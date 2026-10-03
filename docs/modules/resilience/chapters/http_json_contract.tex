@@ -1,5 +1,14 @@
 \section{C++、HTTP 与 JSON 契约}\label{sec:res-http}
 
+\paragraph{暴雨与雷击场景扩展}
+场景生成路由接受 \fld{resilience.hazard\_type} 为 \texttt{rainstorm} 或
+\texttt{lightning}，同名对象提供参数；弹性版能力接口通过
+\fld{scenario\_hazards} 返回默认值、单位及范围。结果包含
+\fld{hazard\_evidence} 的强度过程、支路故障概率、故障类型、等待与修复时间及模型限制。
+对应 Web 恢复请求设置 \fld{respect\_fault\_windows=true}，RA 模型逐时遵守给定停运窗口，
+不使用原贪心修复规则提前释放支路。此模式的维修计划由场景给定，不代表抢修队优化。
+公式、字段与数值证据见本模块 \srcpath{weather\_scenarios.md}。
+
 \subsection{C++ 入口}
 \begin{center}\small
 \begin{tabular}{@{}L{5.0cm}L{8.2cm}@{}}
@@ -58,3 +67,11 @@ HTTP 层接受模型与求解器别名，裁剪时域和数值范围，并解析
 无系统、JSON 解析失败和非法参数返回 HTTP 400；session 忙返回 409。后端不可用、time limit、MIP
 无有效 incumbent 或 RA MESS 回退必须反映在状态和模型字段中。调用方不得用空 solver status 推断
 最优，也不得把启发式结果标为 MIP。
+
+\subsection{Web 指标计算扩展}
+目录与独立评价接口提供书中第三章 18 项及工程运行 24 项，定义版本为
+\texttt{book\_ch3\_2026.2}。默认灾害结束时刻为最后一次故障发生时刻；
+显式输入优先，修复完成时刻独立保留。运行电量按完整时段积分，最后时段不丢弃；
+概率指标缺少多场景后果时返回空值。公式、字段映射及非等间隔数值证据见
+\srcpath{docs/modules/resilience/metrics.md}，实现为
+\srcpath{src/resilience/resilience\_metrics.cpp}。

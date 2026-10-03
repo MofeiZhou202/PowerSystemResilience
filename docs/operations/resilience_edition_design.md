@@ -2,6 +2,12 @@
 
 Status: living implementation contract for the shared source tree.
 
+The Resilience edition profile additionally provides `scenario_hazards`, the
+backend-owned parameter schema for typhoon, rainstorm and lightning. See
+[weather scenarios](../modules/resilience/weather_scenarios.md) for the model,
+JSON contract and authored-outage-window restoration mode. The Full/Trial
+profile key sets are unchanged.
+
 Resilience Edition is a build, runtime-capability, GUI, Python, and Windows
 packaging profile. It is distinct from the `resilience/` analysis module and
 does not fork the Full implementation. `HACDCPF_RESILIENCE_EDITION` and
@@ -54,6 +60,54 @@ additional server IDs.
 `POST /api/edition/analysis_plan` maps selected indicator IDs to a
 backend-ordered, user-confirmable workflow. It does not execute solvers or
 manufacture a result. Resilience Edition omits carbon indicators.
+
+For Resilience Edition the returned workflow is exactly:
+
+```json
+[
+  {"id": "metric_selection", "label": "指标选择"},
+  {"id": "scenario_selection", "label": "场景生成与选择"},
+  {"id": "proactive_defense", "label": "主动防御"},
+  {"id": "rapid_recovery", "label": "快速恢复"},
+  {"id": "metric_output", "label": "指标输出"}
+]
+```
+
+The proactive-defense step is currently a non-blocking `skipped_unavailable`
+product step; it does not create a solver request or canonical analysis. The
+existing `distribution_resilience` endpoint is the sole recovery execution
+entry and is presented as rapid recovery with its legacy execution mode
+explicitly disclosed. Metric definitions and values are served by the backend
+catalog/evaluator, not derived in the browser.
+
+The Resilience GUI uses a separate product surface, `#resiliencePortalRoot`, rather than renaming the legacy workflow/module bar. It contains a fixed product header, a five-step vertical navigator, a central task panel, and a conclusion/evidence panel. Its selectors are scoped under `.resilience-portal`; the hidden legacy `#appShell` remains an inert compatibility host for Canvas, synchronization, existing scenario generation, and parameter collection. Full and Trial continue to mount and operate the legacy shell.
+
+The portal state keeps `selectionRevision`, `scenarioRevision`, `modelRevision`, `runRevision`, and a local request revision distinct. Recovery input is layered as `baseRecoveryConfig` + atomic `scenarioDerived` + current-scenario `scenarioOverrides` + persistent non-scenario `userOverrides`; own-property semantics preserve explicit `0`, `false`, and empty strings. Selecting another representative replaces faults/profiles/identity together, clears only scenario fault overrides, preserves solver/MIP/switch/MESS/horizon overrides, and invalidates prior recovery/metric artifacts. It accepts only catalog data and backend result contracts through the narrow adapter in `web/js/app.js`; it does not fetch directly, duplicate recovery payload construction, or calculate scientific values in the browser. A scenario must be explicitly selected before recovery. Scenario identity is surfaced as `scenario_ref`, `scenario_revision`, and `scenario_digest`; these are provenance metadata and do not turn the existing recovery solver into a scenario identity validator.
+
+Only clusters carrying both a backend `representative_id` and representative object are selectable. There is no synthetic family-level `generated_resilience` fallback. The scenario projector preserves domain-qualified AC/DC fault identities and validates profile metadata/samples without compressing invalid time positions. Invalid profile length, step, or non-finite samples block recovery explicitly. The visible recovery form shows profile source/bindings and both requested and repair-aware effective horizon provenance; the final payload is still produced by the single `collectResilienceParams()` collector in `web/js/app.js`.
+
+The scenario step also owns the model entry point needed by a fresh session: it lists and loads the resilience default built-in case (`dist33_microgrid_der`), lists and loads MATPOWER files, and imports a system JSON file through the adapter. It displays the original resilience controls rather than hiding them in the compatibility shell: per-typhoon-level cluster count, reduction method, baseline comparison, intensity-level selection, derived candidate counts, and the fixed 48-hour time-domain boundary. The recovery step exposes the semantic recovery configuration (model/solver, AC/DC fault IDs and timing, horizon/load scale, switch/reconfiguration, MESS, and MIP settings) and maps it to the one canonical recovery request. Structured model, scenario, and recovery errors remain visible in the portal; a fresh session must not attempt scenario generation before a model has been loaded.
+
+The proactive-defense page is deliberately informational: it shows `skipped_unavailable`, `blocking=false`, and `execution_created=false`, with no run button, task, HTTP request, or recovery-derived result. Rapid recovery calls only the existing `POST /api/session/run_distribution_resilience` path. Metric output calls only `POST /api/session/resilience/metrics`, carries the selected IDs, selection revision, current model revision, `t_sp` target ratio, and explicit APDA/RES approximation consent, and renders nullable backend results with status, provenance, limitations, missing dependencies, approximation, and censoring. It never substitutes zero for an unavailable value or presents one deterministic run as a probability or expectation.
+
+The portal owns scoped scenario-generation and recovery evidence renderers. They accept an actual portal `HTMLElement`, purge prior local Plotly instances before replacement, pass elements rather than document-global string IDs to Plotly, and never write legacy result panels or trigger legacy navigation. Scenario evidence includes backend summary/warnings/audit, representative-cluster and fault tables, maximum-wind/fault-count coverage, and representative profiles. Recovery evidence normalizes flattened arrays and bounded `time_axis` + `steps/hourly` artifacts while preserving backend nonuniform times; it shows demand/served/shed, restoration, fault/repair/switch counts, fault lifecycle, MESS power/energy/position, backend KPIs and limitations with readable tables. Missing values remain unavailable. These plots are presentation evidence only and never calculate authoritative Chapter 3 metrics or imply that active defense ran.
+
+The Resilience portal also provides top-level **工作流 / 配电系统架构** tabs. It reparents the complete existing `#canvasContainer` once into `#resiliencePortalArchitectureHost`; no Canvas, SVG, WebGL overview, minimap, legend, or ID is cloned. Switching only changes tab/surface ARIA, `hidden`/`inert`, and interaction state, then calls the presentation-only `Canvas.refreshHostViewport()` / `NetworkOverview.refreshViewport()` resize path. It does not reload/synchronize the model, rebuild the overview graph, fit the camera, or change model/scenario/run identity, selection, zoom, pan, authored layout, or AC/DC stable references. Full and Trial retain the original Canvas owner and lifecycle.
+
+The registered GUI contract verifies the isolated portal and Full/Trial compatibility with mocked desktop/mobile Chromium. Its executable workflow fixture also verifies fresh-state prerequisite locking, default built-in/MATPOWER/JSON model entry, the Resilience-only scenario payload and user-edited generation controls, duplicate-submit suppression, stable scenario identity, proactive-defense zero-request behavior, selected faults plus 48-hour profiles entering exactly one recovery request, semantic recovery settings, scenario A/B atomic reselection and override layering, exactly one backend metric request without rerunning recovery, scoped element-target Plotly rendering, nonuniform recovery time coordinates, plot purging on step revisit, backend MESS evidence, backend artifact revision use, explicit nullable unavailable output, and immediate structured generation errors. A separate live headless-Chromium smoke against the already-running Resilience server completed model load, reduced scenario generation, explicit selection, proactive-defense no-request, one recovery request, and one metric-evaluator request. That running executable predates the current scenario-identity response echo, so the portal accepts only its distinguishable legacy `0`/null omission and records `portal_provenance_compatibility`; any nonzero mismatched identity still fails closed. The current source server echoes the request identity directly. The GUI server source compiled and linked after the earlier portal contract changes, but copying that executable over the currently running server is intentionally not performed while the process holds the target file. Current scoped-renderer and architecture-switch changes have mocked-browser/static validation only unless separately noted in the development status.
+
+`GET /api/session/resilience/metric_catalog` is available only in Resilience
+Edition and returns 42 entries: 18 Chapter 3 metrics (8 pre-disaster,
+3 during-disaster, 7 post-disaster) and 24 operational metrics, with definition version
+`book_ch3_2026.2`. Formulas, event-time defaults, nullable behavior and evidence are
+maintained in [Web resilience metrics](../modules/resilience/metrics.md). `POST /api/session/resilience/metrics` accepts a
+`resilience_metric_request_v1` that references an existing in-process run
+artifact by `run_id`; it does not rerun recovery. Unknown or evicted artifacts
+return `UNKNOWN_RESILIENCE_RUN`, and a model revision mismatch returns
+`STALE_RESILIENCE_RUN` or `MODEL_REVISION_CONFLICT`. The first implementation
+keeps at most 16 artifacts in memory and does not promise recovery across a
+server restart. Results preserve nullable values and explicit metric status,
+assumptions, limitations, approximation, censoring, and missing dependencies.
 
 ## Fail-closed capability boundary
 
@@ -147,9 +201,18 @@ as not exposed in the first release. Standalone transient and small-signal
 research endpoints are disabled. A result may claim dynamic safety only when a
 separate explicit certification contract and evidence say so.
 
-## GUI navigation framework
+The Resilience GUI now presents the product workflow as five steps:
 
-Resilience Edition reshapes the shared GUI navigation at runtime through
+- **指标选择**: catalog-driven selection from the Chapter 3 metric definitions;
+- **场景生成与选择**: resilience/typhoon scenario creation and explicit selection;
+- **主动防御**: `skipped_unavailable`, non-blocking, with no solver request;
+- **快速恢复**: the existing full distribution-resilience execution kernel;
+- **指标输出**: backend evaluator results for the selected metrics only.
+
+The legacy navigation still contains the retained frontend module IDs for
+compatibility, but those IDs are presentation capabilities rather than new
+canonical analysis routes.
+
 `applyResilienceNavigation()` in `web/js/app.js` (gated on
 `edition === 'resilience'`; Full and Trial markup and labels are untouched):
 
@@ -200,6 +263,64 @@ containers are exempt from the generic `.topo-table-wrap` 200px max-height
 cap (like `#resilienceResults` itself), and the resilience result groups
 stretch the full results-area height through a flex chain down to the chart
 grid.
+
+## Calculation summaries and home navigation
+
+The scenario-generation, rapid-recovery, and metric-output pages place their
+calculation summaries at the end of the result content in collapsed native
+`details` elements. Scenario generation keeps its generation timing, audit and
+summary warnings there; recovery keeps run metadata and backend execution
+evidence there; metric output keeps raw results and calculation assumptions
+there. Actionable request errors remain visible beside the workflow controls.
+Result charts remain outside the collapsed summaries. This changes presentation
+only, with no solver, metric definition, or API change.
+
+The CoPlanning `mac` branch was inspected at commit
+`966947339444d585a3db0aef26d4211bd3d3852a`. Its
+`planning/web/mv_network/app.js` defaults to the projects view; `index.html` and
+`projects-view.js` implement the welcome page, demonstration walkthrough, project
+journey and state-dependent next action. The calculation workbench, comparison
+view, help center and project backend also provide source evidence for task
+records, result comparison, contextual help and persistent project versions.
+This is source inspection, not a runtime validation of CoPlanning.
+
+Implemented navigation now defaults to home, with workflow, architecture, local
+projects, task history, comparison and help tabs. Safe `#resilience/` routes
+survive refresh and browser history. The five-step calculation contract remains
+inside the workflow. New analysis and the demonstration select backend-catalog
+`available` metrics; the demonstration loads the existing 33-node case and
+prepares one TD cluster without automatically generating or solving.
+
+`web/js/core/resilience_workspace.js` owns an IndexedDB store for immutable saved
+versions and task records. Each version includes Canvas rich-model JSON, explicit
+configuration fields, scenario evidence, catalog and returned results. Metric
+success saves a version automatically; explicit saves create additional versions.
+Saving does not replace the backend model. Opening imports the saved model and
+restores configuration but clears active recovery and metric handles. Historical
+results remain read-only. Transfer is schema-validated JSON, bounded to 32 MiB.
+Storage is browser/origin local, survives backend restart, and is not a shared
+server project database. Export is necessary for cross-device transfer or backup.
+
+Tasks show request state, elapsed wall time and errors, and connect recovery
+cancellation to the existing task manager. A cancel request is not a confirmed
+solver stop. Reloaded unfinished records are marked interrupted. The synchronous
+backend does not supply internal solver progress or percentages; this change adds
+no progress stream and no HTTP routes.
+
+Basic mode collapses advanced controls, fault details and long profile provenance;
+expert mode expands them. Next-action guidance, help, result highlights and
+domain-qualified fault-to-Canvas links use existing capabilities. Editing recovery
+parameters marks old results stale. Comparison preserves backend values and
+curves for up to four saved versions. Model/scenario/time-axis/definition/parameter
+differences, imported provenance, stale results and missing evidence prevent
+delta calculation; only finite, non-censored `computed` values with equal units
+receive a baseline difference. No synthetic ranking is produced.
+
+The [user guide](../guides/resilience_workspace.zh.md) describes storage and
+workflow boundaries. Registered GUI coverage includes version round trips,
+recalculation, comparison, domain-qualified navigation and desktop/mobile layouts;
+the living status records actual backend/browser evidence. Enterprise project
+governance and server-wide shared storage remain outside this implementation.
 
 ## Build, dependency, and Windows package
 

@@ -1512,7 +1512,7 @@ std::string base_regime_label(const ScenarioCandidate& c) {
   if (c.family == ScenarioFamily::Resilience) {
     const double faults = feature_value(c, "fault_count");
     const std::string bin = faults < 0.5 ? "faults_0" : faults < 3.5 ? "faults_1_3" : "faults_ge4";
-    const std::string intensity = c.resilience_event ? std::string(to_string(c.resilience_event->selected_intensity)) : id_field(c.id, 1);
+    const std::string intensity = c.resilience_event ? (c.resilience_event->hazard_type == "typhoon" ? std::string(to_string(c.resilience_event->selected_intensity)) : c.resilience_event->hazard_type) : id_field(c.id, 1);
     return "resilience:" + intensity + ":" + bin;
   }
   return "unknown";
@@ -1810,6 +1810,9 @@ nlohmann::json resilience_event_to_json(const ResilienceEventDefinition& e) {
   for (const auto& f : e.faults) {
     faults.push_back({{"branch_type", to_string(f.branch_kind)},
                      {"branch_index", f.branch_index},
+                     {"equipment_type", f.equipment_type},
+                     {"equipment_index", f.equipment_index},
+                     {"failure_cause", f.failure_cause},
                      {"start_hr", f.outage_start_hr},
                      {"repair_hr", f.repair_duration_hr},
                      {"repair_duration_hr", f.repair_duration_hr},
@@ -1828,9 +1831,11 @@ nlohmann::json resilience_event_to_json(const ResilienceEventDefinition& e) {
                             {"peak_failure_probability", r.peak_failure_probability}});
   }
   return {{"id", e.id},
+          {"hazard_type", e.hazard_type},
+          {"hazard_evidence", e.hazard_evidence},
           {"requested_intensity", to_string(e.requested_intensity)},
           {"selected_intensity", to_string(e.selected_intensity)},
-          {"selected_track_max_vmax_ms", e.selected_track_max_vmax_ms},
+          {"selected_track_max_vmax_ms", e.hazard_type == "typhoon" ? nlohmann::json(e.selected_track_max_vmax_ms) : nlohmann::json(nullptr)},
           {"selected_sample_id", e.selected_sample_id},
           {"used_catalog_sample", e.used_catalog_sample},
           {"used_category_fallback", e.used_category_fallback},
@@ -1870,6 +1875,7 @@ nlohmann::json candidate_coverage_point(const ScenarioCandidate& c,
       const auto& event = *c.resilience_event;
       out["resilience_event"] = {
           {"id", event.id},
+          {"hazard_type", event.hazard_type},
           {"selected_intensity", to_string(event.selected_intensity)},
           {"selected_track_max_vmax_ms", event.selected_track_max_vmax_ms},
           {"selected_sample_id", event.selected_sample_id},
@@ -2386,6 +2392,69 @@ ReliabilityScenarioResult generate_reliability_scenarios(const HybridPowerSystem
   return result;
 }
 
+static ResilienceScenarioResult generate_weather_scenarios(
+    const HybridPowerSystem& sys, const ResilienceScenarioOptions& options,
+    const PerturbationOptions& perturbation, const ClusteringOptions& clustering,
+    std::vector<std::string>* warnings) {
+  validate_weather_hazard_options(options.weather, options.num_steps);
+  if (options.candidates_per_intensity < 1 || options.candidates_per_intensity > 200 ||
+      options.default_cluster_count < 1 || options.default_cluster_count > options.candidates_per_intensity)
+    throw std::invalid_argument("Weather scenarios require 1..200 candidates and no more clusters than candidates");
+  const int steps=options.num_steps;
+  const auto branch_count=static_cast<std::uint64_t>(sys.ac.branches.size()+sys.dc.branches.size());
+  if(branch_count*options.candidates_per_intensity>200000ULL ||
+      branch_count*options.candidates_per_intensity*static_cast<std::uint64_t>(steps)*12>100000000ULL)
+    throw std::invalid_argument("Weather scenario work budget exceeded; reduce candidate count or network size");
+  const auto load0=sum_load_sites(collect_load_sites(sys));
+  const auto renew=renewable_breakdown_mw(sys);
+  const auto load=synthesize_base_load(load0,steps);
+  const auto pv=synthesize_base_pv(renew.pv_mw,steps);
+  const auto wind=synthesize_base_wind(renew.wind_mw,steps);
+  const auto other=synthesize_base_other_renewable(renew.other_mw,steps);
+  const auto storage=storage_soc_baseline(sys);
+  std::map<std::pair<ResilienceBranchKind,int>,std::size_t> positions;
+  for(std::size_t i=0;i<sys.ac.branches.size();++i) positions[{ResilienceBranchKind::AC,sys.ac.branches[i].index}]=i;
+  for(std::size_t i=0;i<sys.dc.branches.size();++i) positions[{ResilienceBranchKind::DC,sys.dc.branches[i].index}]=sys.ac.branches.size()+i;
+  std::vector<ScenarioCandidate> candidates;
+  for(int i=0;i<options.candidates_per_intensity;++i) {
+    const unsigned seed=perturbation.seed+static_cast<unsigned>(i)*4099U+7001U;
+    std::mt19937 rng(seed);
+    auto c=make_candidate("resilience:"+options.weather.hazard_type+":"+std::to_string(i+1),
+        ScenarioFamily::Resilience,load,pv,wind,other,storage,perturbation,rng);
+    auto generated=generate_weather_hazard(sys,options.weather,steps,seed);
+    ResilienceEventDefinition event;
+    event.id=c.id+":event"; event.hazard_type=options.weather.hazard_type;
+    event.hazard_evidence=std::move(generated.evidence);
+    event.faults=std::move(generated.faults);
+    event.repair_fault_count=event.faults.size();
+    event.stage1_start_step=first_fault_step(event.faults);
+    event.stage1_end_step=last_new_fault_step(event.faults);
+    c.features["fault_count"]=static_cast<double>(event.faults.size());
+    c.features["peak_failure_probability"]=generated.peak_failure_probability;
+    c.features["hazard_peak_intensity"]=generated.peak_intensity;
+    c.outage_signature.assign(sys.ac.branches.size()+sys.dc.branches.size(),0);
+    for(const auto& f:event.faults) c.outage_signature.at(positions.at({f.branch_kind,f.branch_index}))=1;
+    c.resilience_event=std::move(event);
+    c.probability=1.0/options.candidates_per_intensity;
+    candidates.push_back(std::move(c));
+  }
+  ResilienceIntensityScenarioGroup group;
+  group.hazard_type=options.weather.hazard_type;
+  group.candidate_count=options.candidates_per_intensity;
+  group.audit={{"hazard_type",group.hazard_type},{"num_steps",steps},
+    {"load_processing_granularity","aggregate"},{"probability_scope","conditional-on-configured-hazard"},
+    {"model_scope",candidates.front().resilience_event->hazard_evidence.at("model_scope")},
+    {"model_limitations",candidates.front().resilience_event->hazard_evidence.at("model_limitations")}};
+  group.clusters=cluster_candidates(std::move(candidates),options.default_cluster_count,clustering,&group.audit);
+  for(auto& cluster:group.clusters) attach_standard_time_series(cluster.representative,renew,load0);
+  group.cluster_count=static_cast<int>(group.clusters.size());
+  ResilienceScenarioResult result;
+  result.cluster_total=group.cluster_count; result.intensity_count=1; result.audit=group.audit;
+  result.intensities.push_back(std::move(group));
+  if(warnings) warnings->push_back("Weather hazard uses a synthetic line inventory and uncalibrated equipment screening. Inspect hazard_evidence.model_limitations before interpreting results.");
+  return result;
+}
+
 ResilienceScenarioResult generate_resilience_scenarios(const HybridPowerSystem& sys,
                                                        const ResilienceScenarioOptions& options,
                                                        const PerturbationOptions& perturbation,
@@ -2394,6 +2463,8 @@ ResilienceScenarioResult generate_resilience_scenarios(const HybridPowerSystem& 
                                                        std::vector<std::string>* warnings) {
   ResilienceScenarioResult result;
   if (!options.enabled) return result;
+  if (options.weather.hazard_type != "typhoon")
+    return generate_weather_scenarios(sys,options,perturbation,clustering,warnings);
   const int steps = std::max(1, options.num_steps);
   const auto load_sites = collect_load_sites(sys);
   const double load0 = sum_load_sites(load_sites);
@@ -2870,6 +2941,7 @@ ScenarioGenerationOptions scenario_generation_options_from_json(const nlohmann::
   }
   if (j.contains("resilience")) {
     const auto& r = j.at("resilience");
+    opt.resilience.weather = weather_hazard_options_from_json(r);
     opt.resilience.enabled = r.value("enabled", opt.resilience.enabled);
     opt.resilience.candidates_per_intensity = r.value("candidates_per_intensity", opt.resilience.candidates_per_intensity);
     opt.resilience.default_cluster_count = r.value("default_cluster_count", r.value("cluster_count", opt.resilience.default_cluster_count));
@@ -2966,7 +3038,8 @@ nlohmann::json scenario_generation_result_to_json(const ScenarioGenerationResult
   for (const auto& group : result.resilience.intensities) {
     nlohmann::json clusters = nlohmann::json::array();
     for (const auto& c : group.clusters) clusters.push_back(cluster_to_json(c));
-    intensities.push_back({{"intensity", to_string(group.intensity)},
+    intensities.push_back({{"intensity", group.hazard_type == "typhoon" ? std::string(to_string(group.intensity)) : group.hazard_type},
+                           {"hazard_type", group.hazard_type},
                            {"candidate_count", group.candidate_count},
                            {"cluster_count", group.cluster_count},
                            {"clusters", clusters},
